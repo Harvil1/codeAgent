@@ -265,11 +265,21 @@ def compress_if_needed(
     c4 = False
     max_attempts = config.get("max_compress_attempts", 3)
     cooldown = config.get("llm_compact_cooldown_turns", 5)
+    conv_len = len(_split_system(messages)[1])
+    est_tokens = estimate_message_tokens(messages)
     over_threshold = (
-        estimate_message_tokens(messages) > config.get("llm_compact_token_threshold", 100000)
-        or len(_split_system(messages)[1]) > config.get("llm_compact_message_threshold", 100)
+        est_tokens > config.get("llm_compact_token_threshold", 100000)
+        or conv_len > config.get("llm_compact_message_threshold", 100)
     )
-    if over_threshold and attempt_count < max_attempts and session_state.cooldown_ok(cooldown):
+    cooldown_ok = session_state.cooldown_ok(cooldown)
+    logger.info(
+        "L4 trigger check: over_threshold=%s, est_tokens=%d, conv_msgs=%d, "
+        "attempt_count=%d/%d, cooldown_ok=%s",
+        over_threshold, est_tokens, conv_len,
+        attempt_count, max_attempts, cooldown_ok,
+    )
+    if over_threshold and attempt_count < max_attempts and cooldown_ok:
+        logger.info("L4 triggered")
         # L4 前落盘 transcript（force=True，因为 L4 是有损的）
         if config.get("transcript_enabled", True):
             try:
@@ -294,6 +304,14 @@ def compress_if_needed(
         )
         if c4:
             session_state.record_llm_compact()
+    elif over_threshold:
+        if attempt_count >= max_attempts:
+            logger.info("L4 skipped: max_attempts reached (%d/%d)", attempt_count, max_attempts)
+        else:
+            logger.info("L4 skipped: cooldown active (last=%d, current=%d, need=%d)",
+                        session_state.last_llm_compact_turn, session_state.current_turn, cooldown)
+    else:
+        logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
     changed = c1 or c2 or c4
     if changed:

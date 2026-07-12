@@ -306,7 +306,12 @@ def test_compress_respects_max_attempts(tmp_path):
 
 
 def test_compress_respects_cooldown(tmp_path):
-    """L4 触发后 cooldown 期内不再触发。"""
+    """L4 触发后 cooldown 期内不再触发——cooldown 是唯一拦截原因。
+
+    通过设 llm_compact_token_threshold=1 确保 over_threshold=True，
+    这样 cooldown 成为唯一阻止 L4 触发的门控。
+    """
+    cfg = {**_DEFAULT_CFG, "llm_compact_token_threshold": 1}
     msgs = _mk_msgs(80)
     state = CompressionSessionState()
     state.current_turn = 10
@@ -315,11 +320,12 @@ def test_compress_respects_cooldown(tmp_path):
 
     out, changed = compress_if_needed(
         msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
-        config=_DEFAULT_CFG, session_state=state,
+        config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
-    # L4 被 cooldown 拦下，但 L1+L2 仍可能跑（changed 可能仍 True）
-    assert state.llm_compact_count == 1  # 未增长
+    # L4 被 cooldown 拦下（over_threshold=True 但 cooldown 未过）
+    # L1+L2 仍可能跑（changed 可能仍 True）
+    assert state.llm_compact_count == 1  # 未增长——cooldown 拦下了 L4
 
 
 def test_compress_no_change_when_small(tmp_path):
@@ -346,3 +352,35 @@ def test_compress_writes_transcript_before_l4(tmp_path):
     )
     transcripts = list((tmp_path / ".transcripts").glob("transcript_*.jsonl"))
     assert len(transcripts) >= 1
+
+
+def _mk_big_msgs(n_turns, chars_per_msg=8000):
+    """构造 n_turns 轮对话，每条消息约 chars_per_msg 字符。
+
+    用于让 L1 snip 后的 conv 仍超 token_threshold（100000 est tokens = ~300000 chars）。
+    L1 后剩 system + 3 head + 1 placeholder + 47 tail = 52 条，
+    47 tail * 8000 chars ≈ 376000 chars ≈ 125000 tokens > 100000。
+    """
+    big_content = "x" * chars_per_msg
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(n_turns):
+        msgs.append({"role": "user", "content": big_content})
+        msgs.append({"role": "assistant", "content": big_content})
+    return msgs
+
+
+def test_compress_triggers_l4_with_default_config_after_l1(tmp_path):
+    """默认配置下，L1 snip 后仍超 token_threshold 时触发 L4。
+
+    用大内容消息让 L1 后的 conv token 估算 > 100000（默认阈值），
+    覆盖默认配置路径下 L4 的触发。
+    """
+    msgs = _mk_big_msgs(60, chars_per_msg=8000)  # 1 + 120 = 121 条
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=_DEFAULT_CFG, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    assert changed is True
+    assert state.llm_compact_count >= 1  # L4 触发
