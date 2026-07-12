@@ -1,6 +1,8 @@
 # tests/test_context_pipeline.py
 """分层压缩管线测试。"""
-from agent.context_pipeline import snip_compact, _split_system, micro_compact
+from unittest.mock import MagicMock
+
+from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact
 
 
 def _mk_msgs(n, with_system=True):
@@ -119,3 +121,70 @@ def test_micro_idempotent():
     out1, _ = micro_compact(msgs, keep_recent=3)
     out2, changed = micro_compact(out1, keep_recent=3)
     assert changed is False  # 第二次无事可做
+
+
+# ============ L4 llm_compact 测试 ============
+
+class _FakeLLM:
+    """模拟 OpenAI 兼容 client。"""
+    def chat_completions(self, msgs):
+        m = MagicMock()
+        m.choices = [MagicMock(message=MagicMock(content="这是对话总结"))]
+        return m
+
+
+def test_llm_below_threshold_noop():
+    msgs = _mk_msgs(20)
+    out, changed = llm_compact(
+        msgs, llm_client=_FakeLLM(), model="x",
+        token_threshold=100000, msg_threshold=100,
+    )
+    assert changed is False
+
+
+def test_llm_over_msg_threshold_compacts():
+    msgs = _mk_msgs(80)  # 1 + 160 = 161 条 > 100
+    out, changed = llm_compact(
+        msgs, llm_client=_FakeLLM(), model="x",
+        token_threshold=100000, msg_threshold=100, keep_recent=10,
+    )
+    assert changed is True
+    # 期望：system + summary placeholder + 10 keep_recent = 12
+    assert len(out) == 12
+    assert out[0]["role"] == "system"
+    assert "总结" in out[1]["content"]
+
+
+def test_llm_no_client_falls_back_to_rule_based():
+    """llm_client=None 时仍能工作（沿用现有 _rule_based_summary）。"""
+    msgs = _mk_msgs(80)
+    out, changed = llm_compact(
+        msgs, llm_client=None, model="x",
+        token_threshold=100000, msg_threshold=100, keep_recent=10,
+    )
+    assert changed is True
+    # 占位消息应含规则提取内容
+    assert "用户" in out[1]["content"] or "总结" in out[1]["content"]
+
+
+def test_llm_fixes_tool_call_pairs():
+    """压缩后 _fix_tool_call_pairs 应补漏（无配对 tool_result 的 tool_call）。"""
+    msgs = [{"role": "system", "content": "s"}]
+    msgs.append({"role": "user", "content": "u"})
+    msgs.append({
+        "role": "assistant",
+        "tool_calls": [{"id": "call_x", "function": {"name": "t", "arguments": "{}"}}],
+    })
+    # 故意不给 tool 消息（模拟压缩边界丢失）
+    for i in range(120):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+
+    out, _ = llm_compact(
+        msgs, llm_client=_FakeLLM(), model="x",
+        token_threshold=10**9, msg_threshold=100, keep_recent=10,
+    )
+    # 找回 tool_result 补漏（如果有未配对的 tool_call 留在 keep_recent 里）
+    # 这里 keep_recent 是最后 10 条，不含 assistant(tool_calls)，所以应该不补
+    # 主要验证不抛异常
+    assert isinstance(out, list)

@@ -8,6 +8,10 @@ import json
 import logging
 from typing import Optional, Tuple
 
+from agent.context_compressor import (
+    _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,3 +119,53 @@ def _already_micro_placeheld(msg: dict) -> bool:
         return bool(parsed.get("micro_compacted"))
     except (json.JSONDecodeError, TypeError):
         return False
+
+
+def llm_compact(
+    messages: list,
+    *,
+    llm_client,
+    model: Optional[str],
+    keep_recent: int = 10,
+    token_threshold: int = 100000,
+    msg_threshold: int = 100,
+) -> Tuple[list, bool]:
+    """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话。
+
+    有损：用 1 次 API 调用换上下文空间。调用方应先 transcript.snapshot_if_needed(force=True)。
+    沿用现有 _summarize_conversation（含 _rule_based_summary 降级）和 _fix_tool_call_pairs。
+    """
+    system, conv = _split_system(messages)
+    over_token = estimate_message_tokens(messages) > token_threshold
+    over_msg = len(conv) > msg_threshold
+    if not (over_token or over_msg):
+        return messages, False
+    if len(conv) <= keep_recent:
+        return messages, False
+
+    to_summarize = conv[:-keep_recent]
+    keep = conv[-keep_recent:]
+
+    summary = _summarize_conversation(to_summarize, llm_client, model=model)
+    if not summary:
+        return messages, False
+
+    placeholder = {
+        "role": "user",
+        "content": (
+            "[之前的对话已自动总结]\n\n"
+            f"{summary}\n\n"
+            "[以下是最近的对话，请继续]"
+        ),
+    }
+    new_conv = [placeholder] + keep
+    new_conv = _fix_tool_call_pairs(new_conv)
+    new_messages = _reassemble(system, new_conv)
+
+    logger.info(
+        "L4 llm_compact: %d msgs summarized, %d chars → %d chars summary",
+        len(to_summarize),
+        sum(len(str(m.get("content", ""))) for m in to_summarize),
+        len(summary),
+    )
+    return new_messages, True
