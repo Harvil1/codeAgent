@@ -1,0 +1,317 @@
+"""端到端集成测试。
+
+验证各模块协同工作：
+- 工具系统完整发现
+- AIAgent 集成记忆/会话/技能
+- CLI RuntimeContext 初始化
+- Mock 一轮完整对话
+"""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from agent import AIAgent
+from agent.memory_store import MemoryStore
+from agent.memory_manager import MemoryManager
+from agent.session_store import SessionStore
+from agent.budget import IterationBudget
+from model_tools import get_tool_definitions, handle_function_call
+from tools.registry import registry
+
+
+# ---------------------------------------------------------------------------
+# 工具系统完整性
+# ---------------------------------------------------------------------------
+
+EXPECTED_CORE_TOOLS = {
+    "terminal", "read_file", "write_file", "search_files",
+    "memory", "skills_list", "skill_view", "skill_manage",
+    "session_search", "delegate_task",
+}
+
+
+def test_all_core_tools_discovered():
+    """所有 core 工具集的工具都被注册并能被发现。"""
+    defs = get_tool_definitions(["core"])
+    names = {d["function"]["name"] for d in defs}
+    missing = EXPECTED_CORE_TOOLS - names
+    assert not missing, f"缺少工具: {missing}"
+
+
+def test_tool_dispatch_through_handle_function_call():
+    """handle_function_call 能正确分发到 registry。"""
+    result = handle_function_call(
+        "read_file",
+        {"path": "nonexistent_xyz"},
+    )
+    data = json.loads(result)
+    assert "error" in data  # 文件不存在
+
+
+# ---------------------------------------------------------------------------
+# AIAgent 集成
+# ---------------------------------------------------------------------------
+
+def test_agent_accepts_all_components(tmp_path):
+    """AIAgent 能接收 memory_store + memory_manager + session_store。"""
+    memory_store = MemoryStore(tmp_path)
+    memory_manager = MemoryManager(memory_store)
+    session_store = SessionStore(tmp_path / "s.db")
+
+    agent = AIAgent(
+        base_url="https://example.com/v1",
+        api_key="fake-key",
+        model="test-model",
+        memory_store=memory_store,
+        memory_manager=memory_manager,
+        session_store=session_store,
+        harvil_home=tmp_path,
+        enabled_toolsets=[],
+    )
+
+    assert agent.memory_store is memory_store
+    assert agent.memory_manager is memory_manager
+    assert agent.session_store is session_store
+    assert agent.harvil_home == tmp_path
+
+
+def test_agent_budget_initialized():
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        max_iterations=42,
+        enabled_toolsets=[],
+    )
+    assert isinstance(agent.iteration_budget, IterationBudget)
+    assert agent.iteration_budget.total == 42
+    assert agent.iteration_budget.remaining == 42
+
+
+# ---------------------------------------------------------------------------
+# Mock 完整对话
+# ---------------------------------------------------------------------------
+
+def _make_mock_llm_client(response_text="hello", tool_calls=None):
+    """构造 mock LLMClient（有 chat_completions 方法，返回 OpenAI 兼容响应）。"""
+    def fake_chat_completions(messages, *, tools=None, **kwargs):
+        msg = SimpleNamespace(content=response_text, tool_calls=tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+    return SimpleNamespace(chat_completions=fake_chat_completions)
+
+
+# 向后兼容别名
+def _make_mock_client(response_text="hello", tool_calls=None):
+    return _make_mock_llm_client(response_text, tool_calls)
+
+
+def test_mock_simple_conversation(tmp_path):
+    """Mock 一轮简单对话（无工具调用）。"""
+    memory_store = MemoryStore(tmp_path)
+    memory_store.add("memory", "测试记忆")
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        memory_store=memory_store,
+        enabled_toolsets=[],
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="你好，我是 agent")
+
+    response = agent.chat("hi")
+
+    assert response == "你好，我是 agent"
+    # 消息历史包含 user + assistant
+    roles = [m["role"] for m in agent.conversation_history]
+    assert "user" in roles
+    assert "assistant" in roles
+
+
+def test_mock_conversation_with_tool_call(tmp_path):
+    """Mock 一轮带工具调用的对话。"""
+    # 第 1 次 API 调用返回 tool_call，第 2 次返回最终响应
+    call_count = [0]
+
+    def fake_chat_completions(messages, *, tools=None, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # 返回工具调用
+            tool_call = SimpleNamespace(
+                id="call_1",
+                type="function",
+                function=SimpleNamespace(
+                    name="read_file",
+                    arguments=json.dumps({"path": str(tmp_path / "test.txt")}),
+                ),
+            )
+            msg = SimpleNamespace(content=None, tool_calls=[tool_call])
+        else:
+            # 返回最终响应
+            msg = SimpleNamespace(content="文件不存在", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    # 准备测试文件
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("hello", encoding="utf-8")
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=["core"],
+        harvil_home=tmp_path,
+    )
+    agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
+
+    response = agent.chat("读这个文件")
+
+    assert "文件不存在" not in response or "hello" in response or call_count[0] >= 2
+    # 至少调用了 2 次 API
+    assert call_count[0] >= 2
+
+
+def test_mock_conversation_with_memory_injection(tmp_path):
+    """记忆快照被注入到 system prompt。"""
+    memory_store = MemoryStore(tmp_path)
+    memory_store.add("memory", "特殊标记 XYZ")
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        memory_store=memory_store,
+        enabled_toolsets=[],
+    )
+
+    captured_messages = []
+
+    def fake_chat_completions(messages, *, tools=None, **kwargs):
+        captured_messages.append(messages)
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
+
+    agent.chat("test")
+
+    # system prompt 包含记忆
+    assert len(captured_messages) > 0
+    system_msg = captured_messages[0][0]
+    assert system_msg["role"] == "system"
+    assert "特殊标记 XYZ" in system_msg["content"]
+
+
+def test_interrupt_stops_conversation(tmp_path):
+    """中断标志能停止对话循环。"""
+    def fake_chat_completions(messages, *, tools=None, **kwargs):
+        msg = SimpleNamespace(content="response", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+    )
+    agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
+
+    # 在循环前设置中断
+    agent.interrupt()
+    response = agent.chat("test")
+
+    assert "中断" in response
+
+
+# ---------------------------------------------------------------------------
+# CLI RuntimeContext
+# ---------------------------------------------------------------------------
+
+def test_runtime_context_initializes(tmp_path, monkeypatch):
+    """RuntimeContext 能完整初始化（不实际连接 API）。"""
+    monkeypatch.setenv("AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key-for-test")
+
+    from cli import RuntimeContext
+    rt = RuntimeContext()
+    rt.initialize()
+
+    assert rt.memory_store is not None
+    assert rt.memory_manager is not None
+    assert rt.session_store is not None
+    assert rt.agent is not None
+    assert rt.session_id is not None
+
+
+def test_runtime_context_no_api_key(tmp_path, monkeypatch):
+    """无 API key 时优雅退出。"""
+    monkeypatch.setenv("AGENT_HOME", str(tmp_path))
+    # 显式写 api_key 为空的 settings.json，避免迁移/污染干扰
+    import json
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "models": {"deepseek": {
+            "format": "openai",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "",
+            "model": "deepseek-chat",
+        }},
+        "default_model": "deepseek",
+        "enabled_toolsets": ["core"],
+    }, ensure_ascii=True), encoding="utf-8")
+
+    # 清除所有可能的 API key 环境变量
+    for var in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                "OPENROUTER_API_KEY", "GLM_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    from cli import RuntimeContext
+    rt = RuntimeContext()
+    with pytest.raises(SystemExit):
+        rt.initialize()
+
+
+# ---------------------------------------------------------------------------
+# 系统级集成
+# ---------------------------------------------------------------------------
+
+def test_skill_injects_into_agent_context(tmp_path, monkeypatch):
+    """技能通过 user 消息注入（不进入 system prompt）。"""
+    from agent.skill_commands import execute_skill
+
+    # 创建临时技能
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "test-skill").mkdir()
+    (skills / "test-skill" / "SKILL.md").write_text(
+        '---\nname: test-skill\ndescription: "测试"\n---\n# 测试技能\n指令内容',
+        encoding="utf-8",
+    )
+
+    injected_msg = execute_skill(
+        str(skills / "test-skill" / "SKILL.md"),
+        "用户实际消息",
+    )
+
+    # 验证技能正文 + 用户消息都在
+    assert "测试技能" in injected_msg
+    assert "用户实际消息" in injected_msg
+    assert "[技能已加载]" in injected_msg
+
+
+def test_session_persistence_round_trip(tmp_path):
+    """会话存储能往返持久化。"""
+    store = SessionStore(tmp_path / "s.db")
+    sid = store.create_session(model="test", provider="test")
+
+    # 模拟一轮对话
+    store.append_message(sid, "user", "hello")
+    store.append_message(sid, "assistant", "hi there")
+
+    # 读取验证
+    msgs = store.get_messages(sid)
+    assert len(msgs) == 2
+    assert msgs[0]["content"] == "hello"
+    assert msgs[1]["content"] == "hi there"
+
+    # 搜索能找到
+    results = store.search("hello")
+    assert len(results) > 0

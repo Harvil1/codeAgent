@@ -1,0 +1,373 @@
+"""权限系统：命令黑名单 + 路径白名单 + 用户审批。
+
+设计参考 Claude Code 的三道闸门：
+  闸门 1：硬拒绝（危险命令、受保护路径）
+  闸门 2：规则匹配（破坏性命令模式、工作目录外写入）
+  闸门 3：用户审批（通过 callback 询问，带会话内缓存）
+
+L1（黑名单）是零成本防线，防止灾难性误操作。
+L2（路径白名单）保护用户文件和密钥。
+L3（审批）给用户最终决定权，但会话内缓存避免重复询问。
+"""
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# 结果类型
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PermissionResult:
+    allowed: bool
+    reason: str
+    gate: str = ""  # "deny" / "protected" / "approval" / "ok"
+
+
+# ---------------------------------------------------------------------------
+# 闸门 1：命令硬拒绝黑名单
+# ---------------------------------------------------------------------------
+
+# 每条 (正则, 说明)。正则用 IGNORECASE 匹配。
+_DENY_COMMAND_PATTERNS: List[Tuple[str, str]] = [
+    # 删除根目录/家目录
+    (r"\brm\s+-rf?\s+/(?:\s|$|\*)", "rm -rf 根目录"),
+    (r"\brm\s+-rf?\s+~(?:\s|$|\*)", "rm -rf home 目录"),
+    (r"\brm\s+-rf?\s+\*\s*$", "rm -rf 通配符"),
+    # 提权
+    (r"\bsudo\b", "sudo 提权"),
+    (r"\bsu\s+-\s*\w", "su 切换用户"),
+    # 磁盘破坏
+    (r"\bmkfs\b", "格式化文件系统"),
+    (r"\bdd\s+if=.*of=/dev/", "dd 写设备文件"),
+    (r">\s*/dev/sd[a-z]", "覆盖磁盘设备"),
+    # fork bomb
+    (r":\(\)\s*\{[^}]*\};", "fork bomb"),
+    # 系统控制
+    (r"\b(?:shutdown|reboot|halt|poweroff)\b", "关机/重启"),
+    (r"\bsystemctl\s+(?:stop|disable)", "停止/禁用系统服务"),
+    # Windows 破坏
+    (r"\bformat\s+[A-Z]:", "format 磁盘"),
+    (r"\bdel\s+/[A-Z]*[fs].*\\(?:Windows|Program Files|System32)", "删除 Windows 系统目录"),
+    (r"Remove-Item.*-Recurse.*-Force.*\\(?:Windows|Program)", "PowerShell 强删系统目录"),
+    (r"\brmdir\s+/s.*\\(?:Windows|Program)", "rmdir /s 删系统目录"),
+    # 权限乱改
+    (r"\bchmod\s+-R\s+[0-7]+\s+/\s*$", "全盘改权限"),
+    (r"\bchown\s+-R\s+.*\s+/\s*$", "全盘改属主"),
+    # 危险管道（远程脚本直接执行）
+    (r"\bcurl\s+[^|]*\|\s*(?:ba)?sh", "curl 管道执行远程脚本"),
+    (r"\bwget\s+[^|]*\|\s*(?:ba)?sh", "wget 管道执行远程脚本"),
+    # 覆盖关键系统文件
+    (r">\s*/etc/(?:passwd|shadow|sudoers)", "覆盖系统认证文件"),
+    # git 危险操作（强推主分支，两种参数顺序都匹配）
+    (r"\bgit\s+push\b.*(?:--force|-f)\b.*\b(?:main|master)\b", "强推主分支"),
+    (r"\bgit\s+push\b.*\b(?:main|master)\b.*(?:--force|-f)\b", "强推主分支"),
+]
+
+
+def check_command_deny(command: str) -> Optional[str]:
+    """闸门 1：检查命令是否命中硬拒绝黑名单。
+
+    返回匹配的说明（拒绝原因），未命中返回 None。
+    """
+    for pattern, desc in _DENY_COMMAND_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return desc
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 闸门 2：破坏性命令模式（需用户审批才能执行）
+# ---------------------------------------------------------------------------
+
+# 这些命令本身不是灾难性的（不在硬拒绝黑名单），但会造成文件删除/覆盖，
+# 应该让用户确认。审批 callback 在 cli.py 注入（用 console.input 问 y/n）。
+_DESTRUCTIVE_PATTERNS: List[Tuple[str, str]] = [
+    (r"\brm\s+(?!-rf?\s+/(?:\s|$|\*))(?!-rf?\s+~)", "rm 删除"),  # rm 但非根目录
+    (r"\bdel\s+", "del 删除"),
+    (r"\brmdir\s+", "rmdir 删目录"),
+    (r"\berase\s+", "erase 删除"),
+    (r"\bRemove-Item\b", "PowerShell Remove-Item"),
+    (r"\bshred\s+", "shred 安全删除"),
+    (r"\btruncate\s+-s\s*0", "truncate 清空文件"),
+    (r"\bgit\s+reset\s+--hard", "git reset --hard 丢弃改动"),
+    (r"\bgit\s+clean\s+-[fxd]", "git clean 删未跟踪文件"),
+]
+
+
+def check_destructive(command: str) -> Optional[str]:
+    """闸门 2：检查命令是否是破坏性操作（需要审批）。
+
+    返回匹配的说明，未命中返回 None。
+    """
+    for pattern, desc in _DESTRUCTIVE_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return desc
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 受保护路径（读写都拒绝）
+# ---------------------------------------------------------------------------
+
+_PROTECTED_PATHS = [
+    # SSH / AWS / GPG 密钥
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    # CLI 凭证
+    "~/.config/gh",        # GitHub CLI token
+    "~/.docker",           # docker credentials
+    "~/.kube",             # kubernetes 凭证
+    # Unix 系统目录
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/proc",
+    "/sys",
+    "/dev",
+    # Windows 系统目录
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+]
+
+
+def is_protected_path(path) -> Optional[str]:
+    """检查路径是否在受保护列表（读写都拒绝）。
+
+    返回匹配的保护项（拒绝原因），未命中返回 None。
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return None
+
+    for protected in _PROTECTED_PATHS:
+        try:
+            prot = Path(protected).expanduser().resolve()
+            if resolved == prot:
+                return protected
+            # path 在 protected 下
+            try:
+                resolved.relative_to(prot)
+                return protected
+            except ValueError:
+                continue
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 路径白名单（写操作检查）
+# ---------------------------------------------------------------------------
+
+def default_allowed_roots() -> List[Path]:
+    """默认允许写入的根目录：cwd + ~/.agent。"""
+    roots = [Path.cwd().resolve()]
+    try:
+        from constants import get_agent_home
+        roots.append(get_agent_home().resolve())
+    except Exception:
+        pass
+    return roots
+
+
+def safe_path(
+    path,
+    *,
+    write: bool = False,
+    allowed_roots: Optional[List] = None,
+) -> PermissionResult:
+    """检查路径是否安全可访问。
+
+    读：不在 _PROTECTED_PATHS 即可。
+    写：不在 _PROTECTED_PATHS 且在 allowed_roots 之一下。
+
+    返回 PermissionResult。
+    """
+    # 先检查受保护路径（读写都拒）
+    prot = is_protected_path(path)
+    if prot:
+        return PermissionResult(False, f"受保护路径: {prot}", "protected")
+
+    if not write:
+        return PermissionResult(True, "ok", "ok")
+
+    # 写操作检查白名单
+    if allowed_roots is None:
+        allowed_roots = default_allowed_roots()
+    allowed_roots = [Path(p).resolve() for p in allowed_roots]
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError) as e:
+        return PermissionResult(False, f"路径解析失败: {e}", "protected")
+
+    for root in allowed_roots:
+        try:
+            if resolved == root:
+                return PermissionResult(True, "白名单内", "ok")
+            resolved.relative_to(root)
+            return PermissionResult(True, "白名单内", "ok")
+        except ValueError:
+            continue
+        except (OSError, ValueError):
+            continue
+
+    return PermissionResult(
+        False,
+        f"写入路径不在白名单: {resolved}（允许: {allowed_roots}）",
+        "protected",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 完整命令权限检查器（带审批缓存）
+# ---------------------------------------------------------------------------
+
+class PermissionChecker:
+    """命令执行权限检查器。
+
+    三道闸门：
+      1. 硬拒绝（黑名单）
+      2. 破坏性命令（rm/del 等）需用户审批
+      3. 其他命令默认通过
+
+    持久化白名单：用户批准过的破坏性命令存 JSON，跨会话不再询问。
+    会话内缓存：本次会话批准过的命令不重复问（_approved）。
+    """
+
+    def __init__(
+        self,
+        approval_callback: Optional[Callable[[str], bool]] = None,
+        whitelist_file=None,
+    ):
+        """
+        参数：
+            approval_callback: fn(command: str) -> bool，破坏性命令审批。
+            whitelist_file: 持久化白名单 JSON 路径（如 ~/.agent/approved_commands.json）。
+        """
+        self.approval_callback = approval_callback
+        self._approved = set()  # 会话内缓存
+        self._whitelist_file = whitelist_file
+        self._persistent_whitelist = set()
+        if whitelist_file:
+            self._load_whitelist()
+
+    def _load_whitelist(self):
+        """加载持久化白名单。"""
+        if not self._whitelist_file:
+            return
+        try:
+            import json
+            from pathlib import Path
+            path = Path(self._whitelist_file)
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self._persistent_whitelist = set(data.get("commands", []))
+                logger.info("加载 %d 条已批准命令", len(self._persistent_whitelist))
+        except Exception as e:
+            logger.debug("加载白名单失败: %s", e)
+
+    def _save_whitelist(self):
+        """保存持久化白名单。"""
+        if not self._whitelist_file:
+            return
+        try:
+            import json
+            from pathlib import Path
+            path = Path(self._whitelist_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {"commands": sorted(self._persistent_whitelist)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.debug("保存白名单失败: %s", e)
+
+    def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
+        """检查命令是否允许执行。"""
+        # 闸门 1：硬拒绝
+        deny = check_command_deny(command)
+        if deny:
+            return PermissionResult(False, f"硬拒绝: {deny}", "deny")
+
+        # 闸门 2：破坏性命令（需要审批）
+        destructive = check_destructive(command)
+        if destructive:
+            cmd_key = command.strip()
+
+            # 先检查持久化白名单 + 会话缓存
+            if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
+                return PermissionResult(True, "已批准（白名单）", "approval")
+
+            if self.approval_callback is None:
+                return PermissionResult(
+                    False,
+                    f"破坏性命令需用户确认: {destructive}",
+                    "destructive",
+                )
+
+            try:
+                approved = bool(self.approval_callback(command))
+            except Exception:
+                approved = False
+
+            if not approved:
+                return PermissionResult(False, "用户拒绝", "approval")
+
+            # 批准：加入会话缓存 + 持久化白名单
+            self._approved.add(cmd_key)
+            self._persistent_whitelist.add(cmd_key)
+            self._save_whitelist()
+            return PermissionResult(True, "已批准", "approval")
+
+        # 闸门 3：默认通过
+        return PermissionResult(True, "ok", "ok")
+
+    def add_to_whitelist(self, command: str):
+        """手动加入持久化白名单。"""
+        self._persistent_whitelist.add(command.strip())
+        self._save_whitelist()
+
+    def remove_from_whitelist(self, command: str) -> bool:
+        """从持久化白名单移除。返回是否找到并移除。"""
+        before = len(self._persistent_whitelist)
+        self._persistent_whitelist.discard(command.strip())
+        if len(self._persistent_whitelist) < before:
+            self._save_whitelist()
+            return True
+        return False
+
+    def list_whitelist(self) -> list:
+        """列出持久化白名单（排序）。"""
+        return sorted(self._persistent_whitelist)
+
+    def reset_cache(self):
+        """清空会话内缓存（不影响持久化白名单）。"""
+        self._approved.clear()
+
+
+# 全局默认 checker（无审批，只走闸门 1/2）
+_default_checker = PermissionChecker()
+
+
+def get_default_checker() -> PermissionChecker:
+    return _default_checker
+
+
+def set_default_checker(checker: PermissionChecker) -> None:
+    """设置全局默认 checker（CLI 启动时调用，注入审批 callback）。"""
+    global _default_checker
+    _default_checker = checker

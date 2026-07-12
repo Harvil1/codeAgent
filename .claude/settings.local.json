@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(iconv -f GBK -t UTF-8 \"C:/Users/Administrator/Desktop/新建文本文档.txt\")",
+      "Bash(powershell -NoProfile -Command \"Get-Content -Path ''C:/Users/Administrator/Desktop/新建文本文档.txt'' -Encoding Default\")",
+      "Bash(uv add:*)",
+      "Bash(uv run:*)",
+      "Bash(uv pip:*)",
+      "Read(//c/Users/Administrator/.claude/plugins/**)",
+      "Read(//c/Users/Administrator/.claude/plugins/marketplaces/**)",
+      "Read(//c/Users/Administrator/.claude/plugins/data/**)",
+      "Bash(rm -rf \"C:/Users/Administrator/.claude/plugins/marketplaces/anthropics-claude-plugins-official\")",
+      "Bash(git ls-remote:*)",
+      "Bash(tasklist //FI 'IMAGENAME eq git.exe')",
+      "Bash(tasklist //FI 'IMAGENAME eq git-remote-ssh.exe')",
+      "Bash(tasklist //FI 'IMAGENAME eq ssh.exe')",
+      "Read(//d/project/learn-claude-code-main/docs/zh/**)"
+    ]
+  }
+}

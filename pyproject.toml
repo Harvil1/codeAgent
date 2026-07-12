@@ -1,0 +1,40 @@
+[project]
+name = "harvilagent"
+version = "0.1.0"
+description = "自学习 AI Agent（基于 Hermes Agent 复刻指南）"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "anthropic>=0.116.0",
+    "openai>=1.0.0,<2",
+    "prompt-toolkit==3.0.48",
+    "python-docx>=1.2.0",
+    "python-dotenv==1.0.1",
+    "pyyaml==6.0.2",
+    "rich==13.9.4",
+    "tenacity>=9.0.0,<10",
+]
+
+[project.scripts]
+harvilagent = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "config", "constants", "model_tools", "toolsets", "env_loader", "cli", "agent_profile", "curator_cli"]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "tools*", "plugins*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+preview = true
+
+[tool.ruff.lint]
+select = ["PLW1514"]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "ruff==0.8.4",
+]

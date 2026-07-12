@@ -1,0 +1,2 @@
+[console_scripts]
+harvilagent = main:main
