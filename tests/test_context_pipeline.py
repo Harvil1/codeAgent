@@ -1,6 +1,6 @@
 # tests/test_context_pipeline.py
 """分层压缩管线测试。"""
-from agent.context_pipeline import snip_compact, _split_system
+from agent.context_pipeline import snip_compact, _split_system, micro_compact
 
 
 def _mk_msgs(n, with_system=True):
@@ -63,3 +63,59 @@ def test_snip_idempotent_after_release():
     # 第二次不应再裁（已经是占位形态）—— 通过检测占位数量
     placeholders = [m for m in out2 if "snip_compact" in m.get("content", "")]
     assert len(placeholders) == 1
+
+
+# ============ L2 micro_compact 测试 ============
+
+def _mk_with_tools(n_tools, recent=3):
+    """构造 n_tools 条 tool 消息（夹在 user/assistant 之间）。"""
+    msgs = [{"role": "system", "content": "s"}]
+    for i in range(n_tools):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_{i}", "function": {"name": "t", "arguments": "{}"}}],
+        })
+        msgs.append({
+            "role": "tool", "tool_call_id": f"call_{i}", "name": "t",
+            "content": f"result_{i}" * 100,  # 长内容
+        })
+    return msgs
+
+
+def test_micro_below_threshold_noop():
+    msgs = _mk_with_tools(3)
+    out, changed = micro_compact(msgs, keep_recent=3)
+    assert changed is False
+    assert out == msgs
+
+
+def test_micro_replaces_old_tool_content():
+    msgs = _mk_with_tools(5)  # 5 个 tool 消息
+    out, changed = micro_compact(msgs, keep_recent=3)
+    assert changed is True
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert len(tool_msgs) == 5  # 数量不变
+    # 前 2 个被折叠，后 3 个保留原文
+    assert "micro_compacted" in tool_msgs[0]["content"]
+    assert "micro_compacted" in tool_msgs[1]["content"]
+    assert tool_msgs[2]["content"] == "result_2" * 100
+    assert tool_msgs[3]["content"] == "result_3" * 100
+    assert tool_msgs[4]["content"] == "result_4" * 100
+
+
+def test_micro_preserves_tool_call_id_and_name():
+    """折叠只换 content，role/tool_call_id/name 不变（保配对）。"""
+    msgs = _mk_with_tools(5)
+    out, _ = micro_compact(msgs, keep_recent=3)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert tool_msgs[0]["tool_call_id"] == "call_0"
+    assert tool_msgs[0]["name"] == "t"
+
+
+def test_micro_idempotent():
+    """已经是占位的不再二次折叠。"""
+    msgs = _mk_with_tools(5)
+    out1, _ = micro_compact(msgs, keep_recent=3)
+    out2, changed = micro_compact(out1, keep_recent=3)
+    assert changed is False  # 第二次无事可做

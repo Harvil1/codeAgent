@@ -4,6 +4,7 @@
 替代 context_compressor.maybe_compress 的单层 LLM 摘要。
 设计详见 docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3。
 """
+import json
 import logging
 from typing import Optional, Tuple
 
@@ -59,3 +60,58 @@ def snip_compact(
     logger.info("L1 snip_compact: conv %d → %d (omitted %d)",
                 len(conv), len(new_conv), omitted)
     return new_messages, True
+
+
+def micro_compact(
+    messages: list,
+    *,
+    keep_recent: int = 3,
+) -> Tuple[list, bool]:
+    """L2：把较旧的 tool 消息 content 替换为占位 JSON。
+
+    无损：占位提示去 .transcripts/latest.jsonl 或重跑工具。
+    安全：只换 content，保留 role/tool_call_id/name（不破 tool_call 配对）。
+    幂等：已是占位的不再动。
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_indices) <= keep_recent:
+        return messages, False
+
+    to_compact = set(tool_indices[:-keep_recent])  # 除最后 keep_recent 个外
+    folded = 0
+    out = []
+    for i, m in enumerate(messages):
+        if i in to_compact and not _already_micro_placeheld(m):
+            new_m = dict(m)
+            orig_len = len(str(m.get("content", "")))
+            new_m["content"] = json.dumps({
+                "micro_compacted": True,
+                "orig_chars": orig_len,
+                "hint": (
+                    f"Tool {m.get('name', '?')} 结果已折叠，"
+                    f"完整内容见 .transcripts/latest.jsonl 或重跑工具"
+                ),
+            }, ensure_ascii=False)
+            out.append(new_m)
+            folded += 1
+        else:
+            out.append(m)
+
+    if folded == 0:
+        return messages, False
+    logger.info("L2 micro_compact: folded %d old tool results", folded)
+    return out, True
+
+
+def _already_micro_placeheld(msg: dict) -> bool:
+    """检测 tool 消息 content 是否已是 micro_compacted 占位。"""
+    if msg.get("role") != "tool":
+        return False
+    content = msg.get("content", "")
+    if not isinstance(content, str):
+        return False
+    try:
+        parsed = json.loads(content)
+        return bool(parsed.get("micro_compacted"))
+    except (json.JSONDecodeError, TypeError):
+        return False
