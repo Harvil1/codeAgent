@@ -276,3 +276,32 @@ def test_estimate_tokens():
     msgs = [{"role": "user", "content": "a" * 30}]
     tokens = estimate_message_tokens(msgs)
     assert tokens == 10  # 30 / 3
+
+
+# ---------------------------------------------------------------------------
+# maybe_compress 废弃警告
+# ---------------------------------------------------------------------------
+
+def test_maybe_compress_emits_deprecation_warning():
+    """maybe_compress 调用时应发 DeprecationWarning。
+
+    双轨期保留旧路径，但每次调用都应提醒迁移到 compress_if_needed。
+    """
+    import warnings
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        msgs = [{"role": "system", "content": "s"}]
+        msgs += [{"role": "user", "content": f"u{i}"} for i in range(50)]
+        maybe_compress(msgs, attempt_count=0, llm_client=None)
+        assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
+
+
+def test_maybe_compress_no_warning_when_below_threshold():
+    """消息数不足时不压缩，但仍发 DeprecationWarning（每次调用都发）。"""
+    import warnings
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        msgs = _make_messages(5)
+        maybe_compress(msgs, attempt_count=0)
+        # 即使没触发压缩，调用本身就应发警告
+        assert any(issubclass(wi.category, DeprecationWarning) for wi in w)

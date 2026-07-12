@@ -315,3 +315,83 @@ def test_session_persistence_round_trip(tmp_path):
     # 搜索能找到
     results = store.search("hello")
     assert len(results) > 0
+
+
+# ---------------------------------------------------------------------------
+# 上下文管线开关分支
+# ---------------------------------------------------------------------------
+
+def test_compress_if_needed_signature_matches_integration():
+    """compress_if_needed 签名匹配 AIAgent 集成层的调用约定。
+
+    端到端验证在 Task 11 完成；此处只验证开关 True 时新管线能独立跑通。
+    """
+    from agent.context_pipeline import compress_if_needed, CompressionSessionState
+
+    msgs = [{"role": "system", "content": "s"}]
+    msgs += [{"role": "user", "content": f"u{i}"} for i in range(60)]
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs,
+        attempt_count=0,
+        llm_client=None,
+        model=None,
+        config={
+            "snip_message_threshold": 50,
+            "snip_keep_first": 3,
+            "snip_keep_last": 47,
+            "micro_keep_recent_results": 3,
+            "llm_compact_token_threshold": 100000,
+            "llm_compact_message_threshold": 100,
+            "llm_compact_keep_recent": 10,
+            "llm_compact_cooldown_turns": 5,
+            "max_compress_attempts": 3,
+            "transcript_enabled": False,
+            "transcript_retention": 20,
+        },
+        session_state=state,
+        agent_home=None,
+        session_id="t",
+    )
+    # 60 条消息 > snip 阈值 50，L1 应触发
+    assert changed is True
+    # 输出含 snip_compact 占位消息
+    assert any("snip_compact" in m.get("content", "") for m in out)
+
+
+def test_aiagent_old_pipeline_default_no_crash(tmp_path):
+    """use_new_pipeline 默认 False 时，AIAgent 走旧 maybe_compress 路径不抛。
+
+    这是一个回归保护测试：确认集成代码不会破坏默认路径。
+    """
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+        harvil_home=tmp_path,
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="好的")
+    # 默认配置不设 use_new_pipeline → False
+    assert agent.config.get("context", {}).get("use_new_pipeline", False) is False
+    # compression_enabled 默认 True，主循环会调用 maybe_compress（旧路径）
+    response = agent.chat("hi")
+    assert response == "好的"
+
+
+def test_aiagent_new_pipeline_flag_true(tmp_path):
+    """use_new_pipeline=True 时走新管线（不抛即可）。
+
+    端到端验证在 Task 11；此处只确认开关分支被正确命中。
+    """
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+        harvil_home=tmp_path,
+        config={"context": {"use_new_pipeline": True}},
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="ok")
+    assert agent.config.get("context", {}).get("use_new_pipeline") is True
+    # 短对话不会触发任何压缩，开关分支只是被命中
+    response = agent.chat("hi")
+    assert response == "ok"

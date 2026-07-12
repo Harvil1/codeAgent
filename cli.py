@@ -147,6 +147,7 @@ class RuntimeContext:
             session_store=self.session_store,
             harvil_home=self.home,
             on_tool_call=_on_tool_call,
+            config=self.config,
         )
 
     def _maybe_trigger_curator(self):

@@ -39,7 +39,18 @@ def maybe_compress(
 
     messages: 完整消息列表（含 system 在最前）
     llm_client: OpenAI 兼容客户端（用于调用轻量模型总结）
+
+    .. deprecated::
+        单层 LLM 摘要压缩。新代码请用 ``agent.context_pipeline.compress_if_needed``。
+        保留是为了双轨期回退（``config.context.use_new_pipeline=False`` 时仍调用）。
+        下个 minor 版本完全移除。
     """
+    import warnings
+    warnings.warn(
+        "maybe_compress 已废弃，请改用 agent.context_pipeline.compress_if_needed",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # 消息数不够，不压缩
     if len(messages) < MESSAGES_BEFORE_COMPRESS:
         return messages, False

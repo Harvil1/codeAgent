@@ -54,6 +54,7 @@ class AIAgent:
         harvil_home=None,
         on_tool_call=None,
         on_response=None,
+        config: dict = None,
     ):
         """
         参数：
@@ -128,6 +129,8 @@ class AIAgent:
         # 上下文压缩配置
         self.compression_enabled = True
         self._compression_attempts = 0
+        # 完整 config（用于 context.use_new_pipeline 等开关）
+        self.config: dict = config or {}
 
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
@@ -211,12 +214,34 @@ class AIAgent:
 
             # 上下文压缩（接近 token 上限时触发）
             if self.compression_enabled:
-                messages, compressed = maybe_compress(
-                    messages,
-                    attempt_count=self._compression_attempts,
-                    model=self.model,
-                    llm_client=self.llm_client,
+                use_new = self.config.get("context", {}).get(
+                    "use_new_pipeline", False,
                 )
+                if use_new:
+                    # 新管线：L1/L2/L4 + transcript 快照
+                    if not hasattr(self, "_compress_session_state"):
+                        from agent.context_pipeline import CompressionSessionState
+                        self._compress_session_state = CompressionSessionState()
+                    from agent.context_pipeline import compress_if_needed
+                    ctx_cfg = self.config.get("context", {})
+                    messages, compressed = compress_if_needed(
+                        messages,
+                        attempt_count=self._compression_attempts,
+                        llm_client=self.llm_client,
+                        model=self.model,
+                        config=ctx_cfg,
+                        session_state=self._compress_session_state,
+                        agent_home=self.harvil_home,
+                        session_id=self.session_id,
+                    )
+                else:
+                    # 旧路径（双轨期保留，已废弃）
+                    messages, compressed = maybe_compress(
+                        messages,
+                        attempt_count=self._compression_attempts,
+                        model=self.model,
+                        llm_client=self.llm_client,
+                    )
                 if compressed:
                     # 压缩会修改历史，需要同步并重建 system prompt
                     self.conversation_history = messages[1:]  # 跳过 system
@@ -234,6 +259,34 @@ class AIAgent:
                     fallback_llm_client=self.fallback_llm_client,
                 )
             except Exception as e:
+                # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
+                err_str = str(e).lower()
+                is_prompt_too_long = (
+                    "prompt_too_long" in err_str
+                    or "context_length" in err_str
+                    or "maximum context" in err_str
+                )
+                use_new = self.config.get("context", {}).get(
+                    "use_new_pipeline", False,
+                )
+                if (is_prompt_too_long and use_new
+                        and not getattr(self, "_reacted", False)):
+                    from agent.context_pipeline import reactive_compact
+                    if not hasattr(self, "_compress_session_state"):
+                        from agent.context_pipeline import CompressionSessionState
+                        self._compress_session_state = CompressionSessionState()
+                    messages, _ = reactive_compact(
+                        messages,
+                        session_state=self._compress_session_state,
+                        keep_recent=self.config.get("context", {}).get(
+                            "reactive_keep_recent", 5),
+                    )
+                    self._reacted = True
+                    self.conversation_history = messages[1:]  # 跳过 system
+                    self.invalidate_system_prompt()
+                    system_prompt = self._get_system_prompt()
+                    logger.warning("reactive_compact 后重试本轮")
+                    continue  # 重试本轮
                 logger.error("LLM API 调用失败（重试后）: %s", e)
                 # 错误也作为助手消息塞回，让模型有机会自我修正
                 self.conversation_history.append({
