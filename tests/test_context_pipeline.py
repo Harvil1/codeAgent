@@ -2,7 +2,7 @@
 """分层压缩管线测试。"""
 from unittest.mock import MagicMock
 
-from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact, CompressionSessionState, reactive_compact
+from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact, CompressionSessionState, reactive_compact, compress_if_needed
 
 
 def _mk_msgs(n, with_system=True):
@@ -245,3 +245,104 @@ def test_reactive_short_history_kept_as_is():
     assert len(out) == 4
     assert out[0]["role"] == "system"
     assert "紧急上下文压缩" in out[1]["content"]
+
+
+# ============ compress_if_needed 编排器测试 ============
+
+_DEFAULT_CFG = {
+    "snip_message_threshold": 50,
+    "snip_keep_first": 3,
+    "snip_keep_last": 47,
+    "micro_keep_recent_results": 3,
+    "llm_compact_token_threshold": 100000,
+    "llm_compact_message_threshold": 100,
+    "llm_compact_keep_recent": 10,
+    "llm_compact_cooldown_turns": 5,
+    "max_compress_attempts": 3,
+    "transcript_enabled": True,
+    "transcript_retention": 20,
+}
+
+
+def test_compress_runs_l1_only_for_medium_conv(tmp_path):
+    """50 < 消息数 < 100 时只跑 L1+L2，不触发 L4。"""
+    msgs = _mk_msgs(40)  # 81 条，触发 L1，不触发 L4
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=_DEFAULT_CFG, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    assert changed is True
+    assert state.llm_compact_count == 0  # L4 未触发
+
+
+def test_compress_runs_l4_for_huge_conv(tmp_path):
+    """消息数 > 100 且 token 超限时触发 L4。"""
+    # 降低 L4 阈值让测试能触发（L1 后剩 51 条，设置阈值为 45）
+    cfg = {**_DEFAULT_CFG, "llm_compact_message_threshold": 45}
+    msgs = _mk_msgs(80)  # 161 条
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=cfg, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    assert changed is True
+    assert state.llm_compact_count == 1
+
+
+def test_compress_respects_max_attempts(tmp_path):
+    """attempt_count >= max_compress_attempts 时不再 L4。"""
+    msgs = _mk_msgs(80)
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=3, llm_client=_FakeLLM(), model="x",
+        config={**_DEFAULT_CFG, "max_compress_attempts": 3}, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    # L1+L2 仍跑，L4 被跳过
+    assert state.llm_compact_count == 0
+
+
+def test_compress_respects_cooldown(tmp_path):
+    """L4 触发后 cooldown 期内不再触发。"""
+    msgs = _mk_msgs(80)
+    state = CompressionSessionState()
+    state.current_turn = 10
+    state.record_llm_compact()  # turn=10 触发
+    state.current_turn = 12      # 只过了 2 轮 < 5
+
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=_DEFAULT_CFG, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    # L4 被 cooldown 拦下，但 L1+L2 仍可能跑（changed 可能仍 True）
+    assert state.llm_compact_count == 1  # 未增长
+
+
+def test_compress_no_change_when_small(tmp_path):
+    msgs = _mk_msgs(10)
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=_DEFAULT_CFG, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    assert changed is False
+
+
+def test_compress_writes_transcript_before_l4(tmp_path):
+    """L4 触发前应落盘 transcript（force=True）。"""
+    # 降低 L4 阈值让测试能触发
+    cfg = {**_DEFAULT_CFG, "llm_compact_message_threshold": 45}
+    msgs = _mk_msgs(80)
+    state = CompressionSessionState()
+    compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=cfg, session_state=state,
+        agent_home=tmp_path, session_id="sess_t",
+    )
+    transcripts = list((tmp_path / ".transcripts").glob("transcript_*.jsonl"))
+    assert len(transcripts) >= 1

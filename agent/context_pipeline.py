@@ -12,6 +12,7 @@ from typing import Optional, Tuple
 from agent.context_compressor import (
     _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
 )
+from agent.transcript import snapshot_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -228,3 +229,75 @@ def reactive_compact(
     session_state.reacted = True
     logger.warning("reactive_compact triggered: kept last %d", len(keep))
     return new_messages, True
+
+
+def compress_if_needed(
+    messages: list,
+    *,
+    attempt_count: int,
+    llm_client,
+    model: Optional[str],
+    config: dict,
+    session_state: CompressionSessionState,
+    agent_home,
+    session_id: str,
+) -> Tuple[list, bool]:
+    """分层压缩编排器。返回 (新消息, 是否发生变化)。
+
+    顺序：L1 snip → L2 micro → (条件) transcript 快照 → L4 llm。
+    每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
+    """
+    # L1 snip
+    messages, c1 = snip_compact(
+        messages,
+        keep_first=config.get("snip_keep_first", 3),
+        keep_last=config.get("snip_keep_last", 47),
+        threshold=config.get("snip_message_threshold", 50),
+    )
+
+    # L2 micro
+    messages, c2 = micro_compact(
+        messages,
+        keep_recent=config.get("micro_keep_recent_results", 3),
+    )
+
+    # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
+    c4 = False
+    max_attempts = config.get("max_compress_attempts", 3)
+    cooldown = config.get("llm_compact_cooldown_turns", 5)
+    over_threshold = (
+        estimate_message_tokens(messages) > config.get("llm_compact_token_threshold", 100000)
+        or len(_split_system(messages)[1]) > config.get("llm_compact_message_threshold", 100)
+    )
+    if over_threshold and attempt_count < max_attempts and session_state.cooldown_ok(cooldown):
+        # L4 前落盘 transcript（force=True，因为 L4 是有损的）
+        if config.get("transcript_enabled", True):
+            try:
+                snapshot_if_needed(
+                    messages,
+                    agent_home=agent_home,
+                    session_id=session_id,
+                    force=True,
+                    enabled=True,
+                    retention=config.get("transcript_retention", 20),
+                )
+            except Exception as e:
+                logger.warning("transcript snapshot 失败（不阻塞 L4）: %s", e)
+
+        messages, c4 = llm_compact(
+            messages,
+            llm_client=llm_client,
+            model=model,
+            keep_recent=config.get("llm_compact_keep_recent", 10),
+            token_threshold=config.get("llm_compact_token_threshold", 100000),
+            msg_threshold=config.get("llm_compact_message_threshold", 100),
+        )
+        if c4:
+            session_state.record_llm_compact()
+
+    changed = c1 or c2 or c4
+    if changed:
+        # 终极保险：再过一遍 _fix_tool_call_pairs
+        system, conv = _split_system(messages)
+        messages = _reassemble(system, _fix_tool_call_pairs(conv))
+    return messages, changed
