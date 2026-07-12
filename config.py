@@ -50,6 +50,35 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "system_prompt": None,
     },
 
+    # 上下文压缩管线（Phase 1）
+    "context": {
+        # L3 offload
+        "output_offload_threshold": 30000,
+        "output_offload_preview": 2000,
+        # L1 snip
+        "snip_message_threshold": 50,
+        "snip_release_threshold": 30,
+        "snip_keep_first": 3,
+        "snip_keep_last": 47,
+        # L2 micro
+        "micro_keep_recent_results": 3,
+        # L4 llm
+        "llm_compact_token_threshold": 100000,
+        "llm_compact_message_threshold": 100,
+        "llm_compact_keep_recent": 10,
+        "llm_compact_cooldown_turns": 5,
+        "max_compress_attempts": 3,
+        # Reactive
+        "reactive_keep_recent": 5,
+        "reactive_once_per_session": True,
+        # Transcript
+        "transcript_enabled": True,
+        "transcript_trigger": "pre_llm_compact",
+        "transcript_retention": 20,
+        # 功能开关（双轨期；Commit 6 改 True）
+        "use_new_pipeline": False,
+    },
+
     # 终端
     "terminal": {
         "cwd": None,

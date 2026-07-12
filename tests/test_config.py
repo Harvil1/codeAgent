@@ -230,3 +230,46 @@ def test_get_current_profile_default(monkeypatch):
     """无 AGENT_HOME 时返回 default。"""
     monkeypatch.delenv("AGENT_HOME", raising=False)
     assert get_current_profile() == "default"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Task 8: context 配置块 + MemoryManager.on_pre_compress
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_has_context_block():
+    """config.py 的 DEFAULT_CONFIG 应含 context 块及所有 Phase 1 阈值。"""
+    from config import DEFAULT_CONFIG
+    ctx = DEFAULT_CONFIG["context"]
+    expected_keys = {
+        "output_offload_threshold", "output_offload_preview",
+        "snip_message_threshold", "snip_release_threshold",
+        "snip_keep_first", "snip_keep_last",
+        "micro_keep_recent_results",
+        "llm_compact_token_threshold", "llm_compact_message_threshold",
+        "llm_compact_keep_recent", "llm_compact_cooldown_turns",
+        "max_compress_attempts",
+        "reactive_keep_recent", "reactive_once_per_session",
+        "transcript_enabled", "transcript_trigger", "transcript_retention",
+        "use_new_pipeline",
+    }
+    assert expected_keys.issubset(set(ctx.keys())), f"缺: {expected_keys - set(ctx.keys())}"
+
+
+def test_default_config_use_new_pipeline_is_false():
+    """双轨期默认 False（Commit 6 才改 True）。"""
+    from config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["context"]["use_new_pipeline"] is False
+
+
+def test_memory_manager_on_pre_compress_is_noop():
+    """MemoryManager.on_pre_compress 默认 no-op（不抛即可）。"""
+    from agent.memory_manager import MemoryManager
+    from agent.memory_store import MemoryStore
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        store = MemoryStore(Path(td))
+        mm = MemoryManager(memory_store=store, external_provider=None)
+        mm.on_pre_compress(None, [])  # 不抛
