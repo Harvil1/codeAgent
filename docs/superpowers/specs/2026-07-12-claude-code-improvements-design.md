@@ -823,3 +823,23 @@ dream:       # Phase 5a
 | 用户意图优先于算法 | 所有阈值都可 config.yaml 覆盖；`use_new_pipeline` 允许完全关闭新管线 |
 | 发现 ≠ 可见 | Hooks 注册和触发分离；Cron 启用/禁用独立字段 |
 | 安全默认 > 事后补救 | offload/transcript 走 safe_path + agent_home 白名单；脚本 hook 走 PermissionChecker |
+
+---
+
+## 已知限制（Phase 2 待解决）
+
+### I1: 占位消息 `role:"user"` 可能违反严格交替
+
+**问题**：L1 snip_compact、L4 llm_compact、reactive_compact 三处占位消息都使用 `role:"user"`。当插入点前后也是 `role:"user"` 消息时（例如连续两条用户消息），会产生连续 user 消息。这在严格校验消息交替的 OpenAI 兼容 API（如 DeepSeek）上可能被拒绝。
+
+**当前缓解**：
+- `_fix_tool_call_pairs` 在每层压缩后统一跑一遍，能处理大部分 tool_call 配对问题
+- 实际场景中，占位消息通常插入在 user/assistant 之间（因 LLM 回复后才会触发下一轮压缩），所以连续 user 的情况较少
+- reactive_compact 和 llm_compact 都以占位 user 开头后接 keep_recent 消息，而 keep_recent 通常是 assistant+tool 交替
+
+**Phase 2 修复方向**：
+- 方案 A：把占位消息的 role 改为 `"system"`（部分 API 不支持 system 在非首位）
+- 方案 B：在占位消息前插入一条 `role:"assistant"` 空消息（多 1 条开销但保证交替）
+- 方案 C：在 `_fix_tool_call_pairs` 中增加连续 user 检测和修复逻辑
+- 建议 Phase 2 做实际压力测试后选择方案
+

@@ -5,7 +5,6 @@
 """
 import json
 import logging
-import os
 import tempfile
 import uuid
 from datetime import datetime
@@ -47,6 +46,11 @@ def snapshot_if_needed(
     target = transcripts_dir / f"transcript_{ts}_{short_uuid}.jsonl"
 
     try:
+        # I3: 写入前过 safe_path 权限检查
+        from agent.permission import safe_path
+        perm = safe_path(target, write=True, allowed_roots=[transcripts_dir.resolve()])
+        if not perm.allowed:
+            raise OSError(f"safe_path 拒绝: {perm.reason}")
         _write_jsonl(target, messages, session_id=session_id, reason="pre_llm_compact")
     except OSError as e:
         logger.warning("transcript 写入失败 (%s): %s", target, e)

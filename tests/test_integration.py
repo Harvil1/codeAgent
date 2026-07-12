@@ -333,7 +333,6 @@ def test_compress_if_needed_signature_matches_integration():
     state = CompressionSessionState()
     out, changed = compress_if_needed(
         msgs,
-        attempt_count=0,
         llm_client=None,
         model=None,
         config={
@@ -574,7 +573,6 @@ def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
         state.current_turn = turn
         messages, _ = compress_if_needed(
             messages,
-            attempt_count=turn,
             llm_client=llm,
             model="x",
             config=config,
@@ -609,3 +607,52 @@ def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
     assert reactive_changed is True
     assert len(reactive_out) <= 7  # system + placeholder + 5 recent
     assert reactive_state.reacted is True
+
+
+# ---------------------------------------------------------------------------
+# I2: AIAgent.chat() + 长对话 + 新管线端到端测试
+# ---------------------------------------------------------------------------
+
+def test_aiagent_chat_long_conversation_triggers_pipeline(tmp_path):
+    """I2: AIAgent.chat() 在长对话中触发新管线，验证 C1/C2 修复。
+
+    - 构造 AIAgent，启用 use_new_pipeline
+    - 注入 > 50 条历史消息
+    - 调用 chat("continue") 触发一轮 LLM
+    - 断言 _compress_session_state.current_turn > 0（C1: increment_turn 被调用）
+    - 断言压缩代码路径被执行（L1 snip 触发）
+    """
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+        harvil_home=tmp_path,
+        config={"context": {"use_new_pipeline": True}},
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="好的，继续")
+
+    # 注入 60 条历史消息（超过 snip_message_threshold=50，触发 L1）
+    for i in range(30):
+        agent.conversation_history.append({"role": "user", "content": f"历史消息 {i}"})
+        agent.conversation_history.append({"role": "assistant", "content": f"回复 {i}"})
+
+    # 调用 chat()，触发主循环
+    response = agent.chat("继续")
+
+    # C1 验证：increment_turn 被调用，current_turn > 0
+    assert hasattr(agent, "_compress_session_state"), "应已创建 _compress_session_state"
+    assert agent._compress_session_state.current_turn > 0, (
+        f"current_turn 应 > 0（C1: increment_turn 被调用），"
+        f"实际 {agent._compress_session_state.current_turn}"
+    )
+
+    # 响应正常返回
+    assert response == "好的，继续"
+
+    # L1 snip 应已触发：历史中有 snip_compact 占位消息
+    has_snip = any(
+        "snip_compact" in str(m.get("content", ""))
+        for m in agent.conversation_history
+    )
+    assert has_snip, "L1 snip_compact 应被触发（60 条消息 > 阈值 50）"
+

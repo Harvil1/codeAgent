@@ -234,7 +234,7 @@ def reactive_compact(
 def compress_if_needed(
     messages: list,
     *,
-    attempt_count: int,
+    attempt_count: Optional[int] = None,
     llm_client,
     model: Optional[str],
     config: dict,
@@ -246,6 +246,9 @@ def compress_if_needed(
 
     顺序：L1 snip → L2 micro → (条件) transcript 快照 → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
+
+    C2 修复：attempt_count 已废弃（仅向后兼容保留），L4 预算改用
+    session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
     """
     # L1 snip
     messages, c1 = snip_compact(
@@ -262,9 +265,11 @@ def compress_if_needed(
     )
 
     # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
+    # C2 修复：用 session_state.llm_compact_count 替代 attempt_count
     c4 = False
     max_attempts = config.get("max_compress_attempts", 3)
     cooldown = config.get("llm_compact_cooldown_turns", 5)
+    llm_compact_count = session_state.llm_compact_count
     conv_len = len(_split_system(messages)[1])
     est_tokens = estimate_message_tokens(messages)
     over_threshold = (
@@ -274,11 +279,11 @@ def compress_if_needed(
     cooldown_ok = session_state.cooldown_ok(cooldown)
     logger.info(
         "L4 trigger check: over_threshold=%s, est_tokens=%d, conv_msgs=%d, "
-        "attempt_count=%d/%d, cooldown_ok=%s",
+        "llm_compact_count=%d/%d, cooldown_ok=%s",
         over_threshold, est_tokens, conv_len,
-        attempt_count, max_attempts, cooldown_ok,
+        llm_compact_count, max_attempts, cooldown_ok,
     )
-    if over_threshold and attempt_count < max_attempts and cooldown_ok:
+    if over_threshold and llm_compact_count < max_attempts and cooldown_ok:
         logger.info("L4 triggered")
         # L4 前落盘 transcript（force=True，因为 L4 是有损的）
         if config.get("transcript_enabled", True):
@@ -305,8 +310,8 @@ def compress_if_needed(
         if c4:
             session_state.record_llm_compact()
     elif over_threshold:
-        if attempt_count >= max_attempts:
-            logger.info("L4 skipped: max_attempts reached (%d/%d)", attempt_count, max_attempts)
+        if llm_compact_count >= max_attempts:
+            logger.info("L4 skipped: max_attempts reached (%d/%d)", llm_compact_count, max_attempts)
         else:
             logger.info("L4 skipped: cooldown active (last=%d, current=%d, need=%d)",
                         session_state.last_llm_compact_turn, session_state.current_turn, cooldown)

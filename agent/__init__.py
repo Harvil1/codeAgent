@@ -100,7 +100,12 @@ class AIAgent:
         self.memory_store = memory_store
         self.memory_manager = memory_manager
         self.session_store = session_store
-        self.harvil_home = harvil_home
+        # C3 修复：harvil_home=None 时解析为默认 ~/.agent，避免下游 TypeError
+        if harvil_home is not None:
+            self.harvil_home = harvil_home
+        else:
+            from constants import get_agent_home
+            self.harvil_home = get_agent_home()
         # 任务清单（TodoWrite 机制，P1 借鉴 Claude Code）
         try:
             from agent.todo import get_todo_manager
@@ -226,7 +231,6 @@ class AIAgent:
                     ctx_cfg = self.config.get("context", {})
                     messages, compressed = compress_if_needed(
                         messages,
-                        attempt_count=self._compression_attempts,
                         llm_client=self.llm_client,
                         model=self.model,
                         config=ctx_cfg,
@@ -299,6 +303,11 @@ class AIAgent:
             # 每轮 LLM 调用后递增 todo 计数
             if self.todo_manager:
                 self.todo_manager.increment_round()
+            # C1 修复：同步递增压缩会话状态轮次，L4 cooldown 依赖此值
+            if not hasattr(self, "_compress_session_state"):
+                from agent.context_pipeline import CompressionSessionState
+                self._compress_session_state = CompressionSessionState()
+            self._compress_session_state.increment_turn()
             assistant_msg = response.choices[0].message
 
             # 处理工具调用

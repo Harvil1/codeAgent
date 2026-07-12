@@ -9,6 +9,7 @@
 """
 import json
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_THRESHOLD = 30000
 DEFAULT_PREVIEW_CHARS = 2000
+
+
+def _sanitize_tool_call_id(tool_call_id: str) -> str:
+    """清理 tool_call_id，只保留文件名安全字符（防路径穿越）。"""
+    return re.sub(r'[^a-zA-Z0-9_\-]', '_', tool_call_id)
 
 
 def maybe_offload(
@@ -44,12 +50,20 @@ def maybe_offload(
         return content
 
     offload_dir = agent_home / ".task_outputs" / "tool-results"
-    target_path = _resolve_unique_path(offload_dir, tool_call_id)
+    safe_id = _sanitize_tool_call_id(tool_call_id)
 
+    target_path = None
     try:
+        target_path = _resolve_unique_path(offload_dir, safe_id)
+        # I3: 写入前过 safe_path 权限检查
+        from agent.permission import safe_path
+        perm = safe_path(target_path, write=True, allowed_roots=[offload_dir.resolve()])
+        if not perm.allowed:
+            raise OSError(f"safe_path 拒绝: {perm.reason}")
         _write_atomically(target_path, content)
     except OSError as e:
-        logger.warning("offload 写入失败 (%s)，降级为截断: %s", target_path, e)
+        target_desc = str(target_path) if target_path else str(offload_dir / safe_id)
+        logger.warning("offload 写入失败 (%s)，降级为截断: %s", target_desc, e)
         return json.dumps({
             "error": f"offload failed: {e}",
             "error_type": "offload_io_error",
