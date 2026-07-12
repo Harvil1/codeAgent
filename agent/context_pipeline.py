@@ -6,6 +6,7 @@
 """
 import json
 import logging
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from agent.context_compressor import (
@@ -168,4 +169,62 @@ def llm_compact(
         sum(len(str(m.get("content", ""))) for m in to_summarize),
         len(summary),
     )
+    return new_messages, True
+
+
+@dataclass
+class CompressionSessionState:
+    """单会话的压缩状态。
+
+    - reacted: 本会话是否已触发过 reactive_compact（once-per-session）
+    - llm_compact_count: L4 触发次数
+    - last_llm_compact_turn: 上次 L4 触发时的 current_turn（用于 cooldown）
+    - current_turn: 当前 LLM 轮次（由 agent 主循环 increment）
+    """
+    reacted: bool = False
+    llm_compact_count: int = 0
+    last_llm_compact_turn: int = -10**6
+    current_turn: int = 0
+
+    def record_llm_compact(self) -> None:
+        self.llm_compact_count += 1
+        self.last_llm_compact_turn = self.current_turn
+
+    def cooldown_ok(self, cooldown_turns: int) -> bool:
+        return self.current_turn - self.last_llm_compact_turn >= cooldown_turns
+
+    def increment_turn(self) -> None:
+        self.current_turn += 1
+
+
+def reactive_compact(
+    messages: list,
+    *,
+    session_state: CompressionSessionState,
+    keep_recent: int = 5,
+) -> Tuple[list, bool]:
+    """紧急通道：API 报 prompt_too_long 时调用。
+
+    只留 system + 占位 + 最后 keep_recent 条。
+    会话级 once-per-session：session_state.reacted=True 后不再触发。
+    """
+    if session_state.reacted:
+        return messages, False
+
+    system, conv = _split_system(messages)
+    keep = conv[-keep_recent:] if len(conv) > keep_recent else conv[:]
+    placeholder = {
+        "role": "user",
+        "content": (
+            "[紧急上下文压缩：API 返回 prompt_too_long，"
+            f"已只保留最近 {len(keep)} 条消息。"
+            "完整历史见 .transcripts/latest.jsonl]"
+        ),
+    }
+    new_conv = [placeholder] + keep
+    new_conv = _fix_tool_call_pairs(new_conv)
+    new_messages = _reassemble(system, new_conv)
+
+    session_state.reacted = True
+    logger.warning("reactive_compact triggered: kept last %d", len(keep))
     return new_messages, True

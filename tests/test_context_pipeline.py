@@ -2,7 +2,7 @@
 """分层压缩管线测试。"""
 from unittest.mock import MagicMock
 
-from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact
+from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact, CompressionSessionState, reactive_compact
 
 
 def _mk_msgs(n, with_system=True):
@@ -188,3 +188,60 @@ def test_llm_fixes_tool_call_pairs():
     # 这里 keep_recent 是最后 10 条，不含 assistant(tool_calls)，所以应该不补
     # 主要验证不抛异常
     assert isinstance(out, list)
+
+
+# ============ reactive_compact 测试 ============
+
+def test_session_state_default():
+    s = CompressionSessionState()
+    assert s.reacted is False
+    assert s.llm_compact_count == 0
+    assert s.cooldown_ok(5) is True
+
+
+def test_session_state_record_and_cooldown():
+    s = CompressionSessionState()
+    s.current_turn = 10
+    s.record_llm_compact()
+    assert s.llm_compact_count == 1
+    assert s.last_llm_compact_turn == 10
+    s.current_turn = 12
+    assert s.cooldown_ok(5) is False  # 12-10=2 < 5
+    s.current_turn = 16
+    assert s.cooldown_ok(5) is True   # 16-10=6 >= 5
+
+
+def test_reactive_truncates_to_last_5():
+    msgs = _mk_msgs(40)  # 81 条
+    state = CompressionSessionState()
+    out, changed = reactive_compact(msgs, session_state=state)
+    assert changed is True
+    assert state.reacted is True
+    # system + placeholder + 5 条
+    assert len(out) == 7
+    assert out[0]["role"] == "system"
+    assert "紧急上下文压缩" in out[1]["content"]
+
+
+def test_reactive_once_per_session():
+    """session_state.reacted=True 时不再触发。"""
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState(reacted=True)
+    out, changed = reactive_compact(msgs, session_state=state)
+    assert changed is False
+    assert out == msgs
+
+
+def test_reactive_short_history_kept_as_is():
+    """消息少于 keep_recent 时全部保留（仍加占位标记已触发）。"""
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"}]
+    state = CompressionSessionState()
+    out, changed = reactive_compact(msgs, session_state=state, keep_recent=5)
+    assert changed is True
+    assert state.reacted is True
+    # system + placeholder + conv 2 条（u1 + a1）
+    assert len(out) == 4
+    assert out[0]["role"] == "system"
+    assert "紧急上下文压缩" in out[1]["content"]
