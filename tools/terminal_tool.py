@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Optional
 
 from agent.permission import get_default_checker
 from tools.registry import registry
@@ -14,6 +16,32 @@ from tools.registry import registry
 
 # 输出截断阈值（防止爆 context）
 MAX_OUTPUT_CHARS = 50000
+
+
+def _finalize_output(
+    result_content: str,
+    tool_call_id: Optional[str],
+    harvil_home,
+    config: Optional[dict],
+) -> str:
+    """根据 use_new_pipeline 开关决定是否走 offload。
+
+    开关关闭（默认）时原样返回；开关开启时超阈值内容走 maybe_offload。
+    """
+    use_new = (config or {}).get("context", {}).get("use_new_pipeline", False)
+    if not use_new:
+        return result_content
+    # offload 需要 tool_call_id 和 harvil_home
+    if not tool_call_id or not harvil_home:
+        return result_content
+    from agent.output_offload import maybe_offload
+    return maybe_offload(
+        result_content,
+        tool_call_id=tool_call_id,
+        agent_home=Path(harvil_home),
+        threshold=(config or {}).get("context", {}).get("output_offload_threshold", 30000),
+        preview_chars=(config or {}).get("context", {}).get("output_offload_preview", 2000),
+    )
 
 
 def check_terminal_requirements() -> bool:
@@ -99,14 +127,26 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             encoding="utf-8",
             errors="replace",
         )
+        # 截断（防止爆 context）
+        stdout_truncated_raw = _truncate_output(result.stdout)
+        stderr_truncated_raw = _truncate_output(result.stderr)
+
+        # 大输出 offload（由 use_new_pipeline 开关控制）
+        tool_call_id = kwargs.get("tool_call_id")
+        config = kwargs.get("config")
+        harvil_home = kwargs.get("harvil_home")
+        final_stdout = _finalize_output(stdout_truncated_raw, tool_call_id, harvil_home, config)
+        stdout_offloaded = final_stdout != stdout_truncated_raw
+
         return json.dumps({
-            "stdout": _truncate_output(result.stdout),
-            "stderr": _truncate_output(result.stderr),
+            "stdout": final_stdout,
+            "stderr": stderr_truncated_raw,
             "exit_code": result.returncode,
             "command": command,
             "cwd": cwd,
             "stdout_truncated": len(result.stdout or "") > MAX_OUTPUT_CHARS,
             "stderr_truncated": len(result.stderr or "") > MAX_OUTPUT_CHARS,
+            "stdout_offloaded": stdout_offloaded,
         }, ensure_ascii=False)
     except subprocess.TimeoutExpired:
         return json.dumps({

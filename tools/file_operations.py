@@ -8,9 +8,35 @@ search_files：在文件内容中搜索（类似 grep）
 import json
 import re
 from pathlib import Path
+from typing import Optional
 
 from agent.permission import safe_path
 from tools.registry import registry
+
+
+def _finalize_output(
+    result_content: str,
+    tool_call_id: Optional[str],
+    harvil_home,
+    config: Optional[dict],
+) -> str:
+    """根据 use_new_pipeline 开关决定是否走 offload。
+
+    开关关闭（默认）时原样返回；开关开启时超阈值内容走 maybe_offload。
+    """
+    use_new = (config or {}).get("context", {}).get("use_new_pipeline", False)
+    if not use_new:
+        return result_content
+    if not tool_call_id or not harvil_home:
+        return result_content
+    from agent.output_offload import maybe_offload
+    return maybe_offload(
+        result_content,
+        tool_call_id=tool_call_id,
+        agent_home=Path(harvil_home),
+        threshold=(config or {}).get("context", {}).get("output_offload_threshold", 30000),
+        preview_chars=(config or {}).get("context", {}).get("output_offload_preview", 2000),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -78,10 +104,19 @@ def _handle_read_file(args: dict, **kwargs) -> str:
             f"{i + offset + 1:6}\t{line}"
             for i, line in enumerate(selected)
         ]
+        raw_content = "\n".join(numbered)
+
+        # 大输出 offload（由 use_new_pipeline 开关控制）
+        tool_call_id = kwargs.get("tool_call_id")
+        config = kwargs.get("config")
+        harvil_home = kwargs.get("harvil_home")
+        final_content = _finalize_output(raw_content, tool_call_id, harvil_home, config)
+        content_offloaded = final_content != raw_content
 
         return json.dumps({
             "path": str(path),
-            "content": "\n".join(numbered),
+            "content": final_content,
+            "content_offloaded": content_offloaded,
             "total_lines": len(lines),
             "shown_lines": f"{offset + 1}-{offset + len(selected)}",
         }, ensure_ascii=False)

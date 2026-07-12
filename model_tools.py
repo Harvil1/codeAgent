@@ -80,6 +80,8 @@ def handle_function_call(
     memory_store=None,
     session_store=None,
     harvil_home=None,
+    tool_call_id: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """分发工具调用，返回 JSON 字符串结果。
 
@@ -100,6 +102,8 @@ def handle_function_call(
         memory_store=memory_store,
         session_store=session_store,
         harvil_home=harvil_home,
+        tool_call_id=tool_call_id,
+        config=config,
     )
 
 

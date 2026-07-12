@@ -395,3 +395,94 @@ def test_aiagent_new_pipeline_flag_true(tmp_path):
     # 短对话不会触发任何压缩，开关分支只是被命中
     response = agent.chat("hi")
     assert response == "ok"
+
+
+# ---------------------------------------------------------------------------
+# 工具层 offload 集成（Task 10）
+# ---------------------------------------------------------------------------
+
+def test_prompt_builder_includes_offload_guidance():
+    """system prompt 的 TOOL_USAGE_GUIDANCE 应含占位消息识别段。"""
+    from agent.prompt_builder import TOOL_USAGE_GUIDANCE
+    assert "snip_compact" in TOOL_USAGE_GUIDANCE
+    assert ".transcripts" in TOOL_USAGE_GUIDANCE
+
+
+def test_terminal_offload_not_triggered_when_flag_off(tmp_path):
+    """use_new_pipeline=False 时，terminal 大输出不触发 offload。"""
+    # 直接调 handler，模拟大 stdout
+    long_stdout = "x" * 50000
+    args = {"command": f"echo {long_stdout[:10]}"}
+    result = _handle_terminal_direct(args, harvil_home=tmp_path, config={})
+    # 开关 False，返回原样 JSON（不含 offload 标记）
+    # 注意：echo 命令真实执行，但输出远小于 50000（shell 截断）
+    # 这里主要验证 _finalize_output 不介入
+    data = json.loads(result)
+    assert "truncated" not in data  # 没有 offload 截断字段
+
+
+def test_terminal_offload_triggered_when_flag_on(tmp_path):
+    """use_new_pipeline=True 且 stdout 超阈值时，走 offload。"""
+    from tools.terminal_tool import _finalize_output as terminal_finalize
+    long_content = "x" * 50000
+    config = {"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}}
+    result = terminal_finalize(long_content, "call_test_offload", tmp_path, config)
+    parsed = json.loads(result)
+    assert parsed.get("truncated") is True
+    assert "full_at" in parsed
+    assert "preview" in parsed
+
+
+def test_terminal_offload_not_triggered_when_flag_off_explicit():
+    """use_new_pipeline=False 时 _finalize_output 原样返回。"""
+    from tools.terminal_tool import _finalize_output as terminal_finalize
+    content = "x" * 50000
+    result = terminal_finalize(content, "call_no_offload", None, {})
+    assert result == content  # 原样返回
+
+
+def test_file_read_offload_triggered_when_flag_on(tmp_path):
+    """use_new_pipeline=True 且文件内容超阈值时，read_file 走 offload。"""
+    from tools.file_operations import _finalize_output as file_finalize
+    long_content = "y" * 50000
+    config = {"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}}
+    result = file_finalize(long_content, "call_file_offload", tmp_path, config)
+    parsed = json.loads(result)
+    assert parsed.get("truncated") is True
+    assert "full_at" in parsed
+
+
+def test_file_read_offload_not_triggered_when_flag_off():
+    """use_new_pipeline=False 时 file _finalize_output 原样返回。"""
+    from tools.file_operations import _finalize_output as file_finalize
+    content = "y" * 50000
+    result = file_finalize(content, "call_no_file", None, {})
+    assert result == content
+
+
+def test_handle_function_call_passes_tool_call_id_and_config(tmp_path):
+    """handle_function_call 透传 tool_call_id 和 config 给 handler。"""
+    # 用一个能产生大输出的方式验证透传
+    # 创建大文件，用 read_file 读
+    big_file = tmp_path / "big.txt"
+    big_file.write_text("A" * 50000, encoding="utf-8")
+
+    result = handle_function_call(
+        "read_file",
+        {"path": str(big_file)},
+        harvil_home=tmp_path,
+        tool_call_id="call_integration_1",
+        config={"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}},
+    )
+    data = json.loads(result)
+    # 开关开启 + 文件大 → 应该走 offload（content 字段被替换）
+    assert data.get("content_offloaded") is True
+    # offload 信息可解析
+    offload_info = json.loads(data["content"])
+    assert offload_info.get("truncated") is True
+
+
+def _handle_terminal_direct(args, **kwargs):
+    """直接调用 terminal handler（helper for test）。"""
+    from tools.terminal_tool import _handle_terminal
+    return _handle_terminal(args, **kwargs)

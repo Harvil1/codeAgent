@@ -62,7 +62,12 @@ TOOL_USAGE_GUIDANCE = (
     "- 不要假设工具可用，check_fn 可能因环境不同而隐藏某些工具\n"
     "- **临时文件清理**：用 write_file 创建的临时脚本/中间文件，"
     "执行完成后必须立即用 terminal 删除，保持工作区干净。"
-    "不要在用户的工作目录留下垃圾文件。"
+    "不要在用户的工作目录留下垃圾文件。\n"
+    "- **上下文占位消息识别**：当你看到 [snip_compact] / "
+    "\"micro_compacted\" / [紧急上下文压缩] 这类占位消息，且需要更早的"
+    "上下文时，从占位消息里给的路径（通常是 .transcripts/latest.jsonl "
+    "或 .task_outputs/tool-results/ 下的文件）用 read_file 读回。"
+    "这些路径在 agent_home 下，默认安全。"
 )
 
 

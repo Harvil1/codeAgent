@@ -342,6 +342,8 @@ class AIAgent:
                         memory_store=self.memory_store,
                         session_store=self.session_store,
                         harvil_home=self.harvil_home,
+                        tool_call_id=tc.id,
+                        config=self.config,
                     )
 
                     # 工具结果追加到历史（必须配对 tool_call_id）
