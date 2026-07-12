@@ -256,10 +256,10 @@ def test_default_config_has_context_block():
     assert expected_keys.issubset(set(ctx.keys())), f"缺: {expected_keys - set(ctx.keys())}"
 
 
-def test_default_config_use_new_pipeline_is_false():
-    """双轨期默认 False（Commit 6 才改 True）。"""
+def test_default_config_use_new_pipeline_is_true():
+    """Commit 6 后默认 True（新管线正式启用）。"""
     from config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["context"]["use_new_pipeline"] is False
+    assert DEFAULT_CONFIG["context"]["use_new_pipeline"] is True
 
 
 def test_memory_manager_on_pre_compress_is_noop():

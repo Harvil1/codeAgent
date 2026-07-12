@@ -359,20 +359,21 @@ def test_compress_if_needed_signature_matches_integration():
     assert any("snip_compact" in m.get("content", "") for m in out)
 
 
-def test_aiagent_old_pipeline_default_no_crash(tmp_path):
-    """use_new_pipeline 默认 False 时，AIAgent 走旧 maybe_compress 路径不抛。
+def test_aiagent_old_pipeline_explicit_false_no_crash(tmp_path):
+    """use_new_pipeline=False（显式）时，AIAgent 走旧 maybe_compress 路径不抛。
 
-    这是一个回归保护测试：确认集成代码不会破坏默认路径。
+    默认开关已切为 True（Commit 6），本测试显式设 False 验证旧路径仍然可用。
     """
     agent = AIAgent(
         api_key="fake",
         model="test",
         enabled_toolsets=[],
         harvil_home=tmp_path,
+        config={"context": {"use_new_pipeline": False}},
     )
     agent.llm_client = _make_mock_llm_client(response_text="好的")
-    # 默认配置不设 use_new_pipeline → False
-    assert agent.config.get("context", {}).get("use_new_pipeline", False) is False
+    # 显式设 False
+    assert agent.config.get("context", {}).get("use_new_pipeline") is False
     # compression_enabled 默认 True，主循环会调用 maybe_compress（旧路径）
     response = agent.chat("hi")
     assert response == "好的"
@@ -486,3 +487,125 @@ def _handle_terminal_direct(args, **kwargs):
     """直接调用 terminal handler（helper for test）。"""
     from tools.terminal_tool import _handle_terminal
     return _handle_terminal(args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 端到端：200 轮对话 + 新管线（Task 11）
+# ---------------------------------------------------------------------------
+
+def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
+    """端到端：200 轮工具调用对话，验证新管线稳定。
+
+    - 构造 200 轮 user+assistant 对话历史
+    - 每 10 轮注入一个 50KB 工具结果（触发 output_offload）
+    - 跑 5 轮 compress_if_needed（模拟每轮 LLM 前调用）
+    - 断言：offload 文件 > 0，transcript ≥ 1，L4 触发 ≥ 1，全程无异常
+    - 最终 messages 长度应远小于起始（压缩生效）
+    - reactive_compact 也能无异常调用（紧急通道不崩溃）
+    """
+    from agent.context_pipeline import (
+        compress_if_needed, CompressionSessionState, reactive_compact,
+    )
+    from agent.output_offload import maybe_offload
+
+    config = {
+        "snip_message_threshold": 50,
+        "snip_keep_first": 3,
+        "snip_keep_last": 47,
+        "micro_keep_recent_results": 3,
+        # L4 阈值设低：L1 snip 后仍有 ~51 条 conv 消息，确保 L4 能触发
+        "llm_compact_token_threshold": 100000,
+        "llm_compact_message_threshold": 40,
+        "llm_compact_keep_recent": 10,
+        "llm_compact_cooldown_turns": 5,
+        "max_compress_attempts": 3,
+        "transcript_enabled": True,
+        "transcript_retention": 20,
+    }
+
+    class _FakeLLM:
+        """假 LLM client，chat_completions 返回固定摘要。"""
+
+        def __init__(self):
+            self.call_count = 0
+
+        def chat_completions(self, msgs, **kwargs):
+            self.call_count += 1
+            m = SimpleNamespace(
+                content="这是对话摘要：用户进行了多轮工具调用。",
+                tool_calls=None,
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=m)])
+
+    # 构造 200 轮对话历史
+    messages = [{"role": "system", "content": "sys"}]
+    for i in range(200):
+        messages.append({"role": "user", "content": f"turn {i}"})
+        messages.append({"role": "assistant", "content": f"a{i}"})
+        # 每 10 轮加一个大 tool 结果（触发 offload）
+        if i % 10 == 0:
+            messages.append({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": f"call_{i}",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": "{}"},
+                }],
+            })
+            big = "x" * 50000
+            offloaded = maybe_offload(
+                big, tool_call_id=f"call_{i}", agent_home=tmp_path,
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": f"call_{i}",
+                "name": "t",
+                "content": offloaded,
+            })
+
+    initial_len = len(messages)
+    assert initial_len > 400, f"初始历史应 >400 条，实际 {initial_len}"
+
+    state = CompressionSessionState()
+    llm = _FakeLLM()
+
+    # 跑 5 轮压缩（模拟每轮 LLM 前调用）
+    for turn in range(5):
+        state.current_turn = turn
+        messages, _ = compress_if_needed(
+            messages,
+            attempt_count=turn,
+            llm_client=llm,
+            model="x",
+            config=config,
+            session_state=state,
+            agent_home=tmp_path,
+            session_id="e2e",
+        )
+
+    # 断言：offload 文件 > 0
+    offload_files = list(
+        (tmp_path / ".task_outputs" / "tool-results").glob("*.txt")
+    )
+    assert len(offload_files) > 0, "应该有 offload 文件"
+
+    # 断言：transcript ≥ 1（L4 触发时 force=True 落盘）
+    transcripts = list((tmp_path / ".transcripts").glob("transcript_*.jsonl"))
+    assert len(transcripts) >= 1, "应该至少有一个 transcript 快照"
+
+    # 断言：L4 至少触发一次
+    assert state.llm_compact_count >= 1, "L4 应至少触发一次"
+
+    # 断言：最终 messages 长度应远小于起始（压缩生效）
+    assert len(messages) < 100, (
+        f"压缩后消息数应 <100，实际 {len(messages)}（起始 {initial_len}）"
+    )
+
+    # 断言：reactive_compact 也能无异常调用（紧急通道不崩溃）
+    reactive_state = CompressionSessionState()
+    reactive_out, reactive_changed = reactive_compact(
+        messages, session_state=reactive_state, keep_recent=5,
+    )
+    assert reactive_changed is True
+    assert len(reactive_out) <= 7  # system + placeholder + 5 recent
+    assert reactive_state.reacted is True

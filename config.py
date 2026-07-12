@@ -76,7 +76,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transcript_trigger": "pre_llm_compact",
         "transcript_retention": 20,
         # 功能开关（双轨期；Commit 6 改 True）
-        "use_new_pipeline": False,
+        "use_new_pipeline": True,
     },
 
     # 终端
