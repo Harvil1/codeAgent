@@ -112,8 +112,20 @@ class HookRegistry:
         return prompt
 
     def _invoke_declarative_user_prompt(self, hook, prompt, session_id):
-        """T3 实现。"""
-        return None  # 占位，T3 替换
+        """跑子进程，按 IPC 协议解析。返回新 prompt 或 None。"""
+        from agent.hook_exec import run_script_hook  # 懒加载避免循环
+        payload = {
+            "event": "user_prompt_submit",
+            "session_id": session_id,
+            "timestamp": _now_iso(),
+            "hook_name": hook.name,
+            "prompt": prompt,
+        }
+        result = run_script_hook(hook, payload)
+        if result is None:
+            return None
+        # IPC: {"prompt": "..."} → 替换；其他/空 → None
+        return result.get("prompt")
 
     # ---- 执行：PRE_TOOL_USE ----
     def run_pre_tool_use(self, tool_name: str, args: dict, *,
@@ -149,7 +161,24 @@ class HookRegistry:
         return deny_reason, modified_args
 
     def _invoke_declarative_pre_tool(self, hook, tool_name, args, session_id):
-        """T3 实现。"""
+        """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。"""
+        from agent.hook_exec import run_script_hook
+        payload = {
+            "event": "pre_tool_use",
+            "session_id": session_id,
+            "timestamp": _now_iso(),
+            "hook_name": hook.name,
+            "tool_name": tool_name,
+            "args": args,
+        }
+        result = run_script_hook(hook, payload)
+        if result is None:
+            return None
+        action = result.get("action", "allow")
+        if action == "deny":
+            return {"deny": result.get("reason", "unspecified")}
+        if action == "modify":
+            return {"modify_args": result.get("args", args)}
         return None
 
     # ---- 执行：POST_TOOL_USE ----
@@ -170,8 +199,21 @@ class HookRegistry:
         return result
 
     def _invoke_declarative_post_tool(self, hook, tool_name, args, result, session_id):
-        """T3 实现。"""
-        return None
+        """跑子进程，按 IPC 协议解析。返回新 result 或 None。"""
+        from agent.hook_exec import run_script_hook
+        payload = {
+            "event": "post_tool_use",
+            "session_id": session_id,
+            "timestamp": _now_iso(),
+            "hook_name": hook.name,
+            "tool_name": tool_name,
+            "args": args,
+            "result": result,
+        }
+        proc_result = run_script_hook(hook, payload)
+        if proc_result is None:
+            return None
+        return proc_result.get("result")
 
     # ---- 执行：STOP ----
     def run_stop(self, *, session_id: str, max_fires: int = 3) -> Optional[str]:
@@ -194,5 +236,15 @@ class HookRegistry:
         return None
 
     def _invoke_declarative_stop(self, hook, session_id):
-        """T3 实现。"""
-        return None
+        """跑子进程，按 IPC 协议解析。返回 continue 消息或 None。"""
+        from agent.hook_exec import run_script_hook
+        payload = {
+            "event": "stop",
+            "session_id": session_id,
+            "timestamp": _now_iso(),
+            "hook_name": hook.name,
+        }
+        result = run_script_hook(hook, payload)
+        if result is None:
+            return None
+        return result.get("continue")

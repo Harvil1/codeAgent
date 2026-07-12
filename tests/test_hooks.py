@@ -232,3 +232,100 @@ def test_clear_single_event():
     reg.clear(HookEvent.USER_PROMPT_SUBMIT)
     assert len(reg._hooks[HookEvent.USER_PROMPT_SUBMIT]) == 0
     assert len(reg._hooks[HookEvent.PRE_TOOL_USE]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Declarative 集成（T3）
+# ---------------------------------------------------------------------------
+
+import sys
+from agent.hook_exec import run_script_hook  # 验证 import 可达
+
+
+def _make_declarative_hook(event, stdout_json_str, name="decl"):
+    """构造一个声明式 hook：子进程 echo 一段 JSON。"""
+    # 用 python -c "print('...')" 模拟
+    cmd = [sys.executable, "-c", f"print('{stdout_json_str}')"]
+    return Hook(
+        name=name, event=event, kind="declarative",
+        script=HookScriptConfig(command=cmd, timeout=5.0),
+    )
+
+
+def test_user_prompt_submit_declarative_modifies():
+    """声明式 hook 通过 stdout {prompt: ...} 修改。"""
+    hook = _make_declarative_hook(
+        HookEvent.USER_PROMPT_SUBMIT, '{"prompt": "DECL"}',
+    )
+    reg = HookRegistry()
+    reg.register_declarative(hook)
+    assert reg.run_user_prompt_submit("hello", session_id="s") == "DECL"
+
+
+def test_pre_tool_use_declarative_deny():
+    hook = _make_declarative_hook(
+        HookEvent.PRE_TOOL_USE, '{"action": "deny", "reason": "blocked"}',
+    )
+    reg = HookRegistry()
+    reg.register_declarative(hook)
+    deny, _ = reg.run_pre_tool_use("t", {}, session_id="s")
+    assert deny == "blocked"
+
+
+def test_pre_tool_use_declarative_modify():
+    hook = _make_declarative_hook(
+        HookEvent.PRE_TOOL_USE, '{"action": "modify", "args": {"x": 1}}',
+    )
+    reg = HookRegistry()
+    reg.register_declarative(hook)
+    _, modified = reg.run_pre_tool_use("t", {}, session_id="s")
+    assert modified == {"x": 1}
+
+
+def test_post_tool_use_declarative_modifies():
+    hook = _make_declarative_hook(
+        HookEvent.POST_TOOL_USE, '{"result": "NEW"}',
+    )
+    reg = HookRegistry()
+    reg.register_declarative(hook)
+    assert reg.run_post_tool_use("t", {}, "old", session_id="s") == "NEW"
+
+
+def test_stop_declarative_continue():
+    hook = _make_declarative_hook(
+        HookEvent.STOP, '{"continue": "go on"}',
+    )
+    reg = HookRegistry()
+    reg.register_declarative(hook)
+    assert reg.run_stop(session_id="s", max_fires=3) == "go on"
+
+
+def test_programmatic_runs_before_declarative():
+    """同 event 内程序式先于声明式执行。"""
+    order = []
+    # 程序式 hook 记录顺序
+    reg = HookRegistry()
+    reg.register_user_prompt_submit(
+        lambda p: order.append("prog") or p + "_p", name="prog"
+    )
+    # 声明式 hook 也记录（通过修改 prompt 标识）
+    hook = _make_declarative_hook(
+        HookEvent.USER_PROMPT_SUBMIT, '{"prompt": "FROM_DECL"}',
+    )
+    reg.register_declarative(hook)
+    result = reg.run_user_prompt_submit("start", session_id="s")
+    # 程序式先跑（把 start → start_p），声明式后跑（覆盖为 FROM_DECL）
+    assert order == ["prog"]
+    assert result == "FROM_DECL"
+
+
+def test_declarative_failure_isolated():
+    """声明式 hook 子进程失败时视为 None。"""
+    # 用不存在的可执行文件
+    bad_hook = Hook(
+        name="bad", event=HookEvent.USER_PROMPT_SUBMIT, kind="declarative",
+        script=HookScriptConfig(command=["./nonexistent-xyz"], timeout=1.0),
+    )
+    reg = HookRegistry()
+    reg.register_declarative(bad_hook)
+    assert reg.run_user_prompt_submit("hello", session_id="s") == "hello"
