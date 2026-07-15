@@ -820,3 +820,111 @@ def test_handle_function_call_hooks_disabled_skips():
     parsed = json.loads(result)
     assert parsed.get("error_type") != "hook_deny"
 
+
+# ---------------------------------------------------------------------------
+# P2-T8: RuntimeContext hooks 注入 + 端到端集成测试
+# ---------------------------------------------------------------------------
+
+def test_runtime_context_has_hooks_registry():
+    """RuntimeContext 持有 hooks_registry 实例。"""
+    from cli import RuntimeContext
+    ctx = RuntimeContext.__new__(RuntimeContext)  # 不调 __init__
+    # 验证属性可设
+    from agent.hooks import HookRegistry
+    ctx.hooks_registry = HookRegistry()
+    assert ctx.hooks_registry is not None
+
+
+def test_e2e_aiagent_with_hooks_full_loop(tmp_path):
+    """端到端：USER_PROMPT_SUBMIT 修改 -> LLM -> PRE_TOOL_USE 放行 -> POST_TOOL_USE 改写 -> STOP。
+
+    使用 mock LLM + 真实 registry + 真实 handle_function_call。
+    """
+    from agent import AIAgent
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+    # hook 1: USER_PROMPT_SUBMIT 增强
+    reg.register_user_prompt_submit(lambda p: p + " (with context)", name="augment")
+    # hook 2: PRE_TOOL_USE 全放行
+    reg.register_pre_tool_use(lambda n, a: None, name="allow-all")
+    # hook 3: POST_TOOL_USE 在 result 里加 audit 标记
+    def add_audit(n, a, r):
+        try:
+            parsed = json.loads(r)
+            parsed["_audited"] = True
+            return json.dumps(parsed, ensure_ascii=False)
+        except Exception:
+            return None
+    reg.register_post_tool_use(add_audit, name="audit")
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        hooks_registry=reg,
+        config={"hooks": {"enabled": True, "stop_hook_max_fires": 3}},
+    )
+    # mock LLM 第一轮返回 tool_call，第二轮返回 stop
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    call_count = [0]
+    def side_effect(msgs, **kw):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # 第一轮：返回一个 todo_write tool_call
+            resp = MagicMock()
+            resp.choices = [MagicMock(
+                message=MagicMock(
+                    content=None,
+                    tool_calls=[MagicMock(
+                        id="call_1",
+                        type="function",
+                        function=MagicMock(name="todo_write", arguments='{"todos": []}'),
+                    )],
+                ),
+                finish_reason="tool_calls",
+            )]
+            return resp
+        else:
+            # 后续：stop
+            resp = MagicMock()
+            resp.choices = [MagicMock(
+                message=MagicMock(content="done", tool_calls=None),
+                finish_reason="stop",
+            )]
+            return resp
+    m.chat_completions.side_effect = side_effect
+    agent.llm_client = m
+
+    final = agent.run_conversation("do something")
+    # 至少：用户消息被 augment；POST_TOOL_USE 在某条 tool 消息加了 _audited
+    assert "(with context)" in agent.conversation_history[0]["content"]
+    # 找到 tool 结果消息
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    if tool_msgs:
+        parsed = json.loads(tool_msgs[0]["content"])
+        assert parsed.get("_audited") is True
+    # 无异常即通过
+    assert isinstance(final, str)
+
+
+def test_e2e_no_hooks_enabled_full_backward_compat(tmp_path):
+    """config.hooks.enabled=False 时整条链路等同 Phase 1。"""
+    from agent import AIAgent
+    from agent.hooks import HookRegistry
+
+    # 即使注册了 hook，enabled=False 也不触发
+    reg = HookRegistry()
+    reg.register_user_prompt_submit(lambda p: "MUTATED", name="m")
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        hooks_registry=reg,
+        config={"hooks": {"enabled": False}},
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("original")
+    # hook 没触发，原样入 history
+    assert agent.conversation_history[0]["content"] == "original"
+

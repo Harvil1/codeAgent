@@ -59,6 +59,9 @@ class RuntimeContext:
         self.agent = None
         self.session_id = None
         self.skill_commands = {}
+        # === P2-T8 NEW: Hooks 系统 ===
+        from agent.hooks import HookRegistry
+        self.hooks_registry = HookRegistry()
 
     def initialize(self):
         """初始化所有组件。"""
@@ -72,6 +75,21 @@ class RuntimeContext:
             ))
         except Exception as e:
             logger.debug("权限检查器初始化失败（用默认）: %s", e)
+
+        # 0.5 加载声明式 hooks（如果启用）
+        if self.config.get("hooks", {}).get("enabled", True):
+            from agent.hook_loader import load_declarative_hooks
+            settings_path = self.config.get("hooks", {}).get("settings_path")
+            if settings_path is None:
+                settings_path = Path(self.home) / ".hooks" / "settings.json"
+            else:
+                settings_path = Path(settings_path)
+            try:
+                n = load_declarative_hooks(self.hooks_registry, settings_path)
+                if n > 0:
+                    logger.info("加载了 %d 个声明式 hooks 自 %s", n, settings_path)
+            except Exception as e:
+                logger.error("加载声明式 hooks 失败: %s", e)
 
         # 1. 记忆系统
         if self.config.get("memory", {}).get("enabled", True):
@@ -148,6 +166,7 @@ class RuntimeContext:
             harvil_home=self.home,
             on_tool_call=_on_tool_call,
             config=self.config,
+            hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
         )
 
     def _maybe_trigger_curator(self):
