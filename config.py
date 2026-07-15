@@ -79,6 +79,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "use_new_pipeline": True,
     },
 
+    # Hooks 系统（Phase 2a）
+    "hooks": {
+        "enabled": True,                            # 全局开关；False 时跳过所有 hook 调用
+        "settings_path": None,                      # None → 默认 ~/.agent/.hooks/settings.json
+        "script_timeout_default": 10.0,            # 声明式 hook 默认超时（秒）
+        "stop_hook_max_fires": 3,                  # Stop hook 每会话最多触发次数（防失控）
+        "fail_closed_default": False,              # 声明式 hook 默认 fail_closed
+    },
+
     # 终端
     "terminal": {
         "cwd": None,

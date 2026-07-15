@@ -273,3 +273,32 @@ def test_memory_manager_on_pre_compress_is_noop():
         store = MemoryStore(Path(td))
         mm = MemoryManager(memory_store=store, external_provider=None)
         mm.on_pre_compress(None, [])  # 不抛
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a Task 5: hooks 配置块
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_has_hooks_block():
+    """config.py 的 DEFAULT_CONFIG 应含 hooks 块及所有必需键。"""
+    from config import DEFAULT_CONFIG
+    h = DEFAULT_CONFIG["hooks"]
+    required_keys = (
+        "enabled", "settings_path", "script_timeout_default",
+        "stop_hook_max_fires", "fail_closed_default"
+    )
+    for key in required_keys:
+        assert key in h, f"缺 {key}"
+
+
+def test_default_config_hooks_enabled_default_true():
+    """hooks.enabled 默认值应为 True。"""
+    from config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["hooks"]["enabled"] is True
+
+
+def test_default_config_hooks_settings_path_default_none():
+    """hooks.settings_path 默认值应为 None。"""
+    from config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["hooks"]["settings_path"] is None
