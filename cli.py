@@ -63,6 +63,16 @@ class RuntimeContext:
         from agent.hooks import HookRegistry
         self.hooks_registry = HookRegistry()
 
+        # === P2b-T6 NEW: 后台任务管理器 ===
+        from agent.background import BackgroundManager
+        bg_cfg = self.config.get("bg_task", {})
+        self.bg_manager = BackgroundManager(
+            max_concurrent=bg_cfg.get("max_concurrent", 5),
+            notification_stdout_cap=bg_cfg.get("notification_stdout_cap", 500),
+            result_stdout_cap=bg_cfg.get("result_stdout_cap", 5000),
+            default_timeout=bg_cfg.get("default_timeout", 600),
+        )
+
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
@@ -167,6 +177,7 @@ class RuntimeContext:
             on_tool_call=_on_tool_call,
             config=self.config,
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
+            bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
         )
 
     def _maybe_trigger_curator(self):
@@ -239,6 +250,14 @@ class RuntimeContext:
             console.print()
 
         return True
+
+    def shutdown(self):
+        """清理资源：终止后台任务等（P2b-T6）。"""
+        if hasattr(self, "bg_manager") and self.bg_manager:
+            try:
+                self.bg_manager.shutdown()
+            except Exception as e:
+                logger.warning("bg_manager shutdown 失败: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +845,9 @@ def run_interactive(resume_last: bool = False):
             console.print(f"[red]错误: {e}[/red]")
             logger.exception("agent 运行错误")
 
+    # === P2b-T6 NEW: 退出前清理后台任务 ===
+    rt.shutdown()
+
 
 def run_one_shot(message: str):
     """非交互模式：发一条消息，打印响应。"""
@@ -847,3 +869,6 @@ def run_one_shot(message: str):
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         logger.exception("one-shot 运行错误")
+    finally:
+        # === P2b-T6 NEW: 退出前清理后台任务 ===
+        rt.shutdown()

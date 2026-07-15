@@ -974,3 +974,38 @@ def test_aiagent_no_bg_manager_backward_compat(tmp_path):
     agent.run_conversation("hello")
     assert agent.conversation_history[0]["content"] == "hello"
 
+
+def test_runtime_context_has_bg_manager(tmp_path):
+    """RuntimeContext 实例化时应该有 bg_manager 属性（P2b-T6）。"""
+    from cli import RuntimeContext
+    from agent.background import BackgroundManager
+    from unittest.mock import patch
+
+    # Mock load_config 返回含 bg_task 的配置
+    mock_config = {
+        "bg_task": {
+            "max_concurrent": 5,
+            "notification_stdout_cap": 500,
+            "result_stdout_cap": 5000,
+            "default_timeout": 600,
+        },
+        "hooks": {"enabled": False},  # 避免 HookRegistry 初始化
+        "memory": {"enabled": False},
+        "sessions": {"auto_save": False},
+        "model": {
+            "provider": "deepseek",
+            "name": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "test_key",
+        },
+        "agent": {"max_iterations": 90},
+        "enabled_toolsets": ["core"],
+        "curator": {"enabled": False},
+    }
+
+    with patch("cli.load_config", return_value=mock_config):
+        ctx = RuntimeContext()
+        # 实例化后应该有 bg_manager 属性
+        assert hasattr(ctx, "bg_manager")
+        assert isinstance(ctx.bg_manager, BackgroundManager)
+
