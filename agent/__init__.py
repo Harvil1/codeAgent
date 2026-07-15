@@ -397,6 +397,7 @@ class AIAgent:
                         tool_call_id=tc.id,
                         config=self.config,
                         hooks_registry=self.hooks_registry,  # === P2-T7 NEW ===
+                        bg_manager=self.bg_manager,          # === P2b-T7 NEW ===
                     )
 
                     # 工具结果追加到历史（必须配对 tool_call_id）

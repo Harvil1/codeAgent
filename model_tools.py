@@ -83,6 +83,7 @@ def handle_function_call(
     tool_call_id: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     hooks_registry=None,  # === P2-T7 NEW ===
+    bg_manager=None,      # === P2b-T7 NEW ===
 ) -> str:
     """分发工具调用，返回 JSON 字符串结果。
 
@@ -126,6 +127,7 @@ def handle_function_call(
         harvil_home=harvil_home,
         tool_call_id=tool_call_id,
         config=config,
+        bg_manager=bg_manager,  # === P2b-T7 NEW ===
     )
 
     # === P2-T7 NEW: POST_TOOL_USE hook ===

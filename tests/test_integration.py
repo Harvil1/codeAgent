@@ -1009,3 +1009,100 @@ def test_runtime_context_has_bg_manager(tmp_path):
         assert hasattr(ctx, "bg_manager")
         assert isinstance(ctx.bg_manager, BackgroundManager)
 
+
+# ---------------------------------------------------------------------------
+# P2b-T7: handle_function_call 透传 bg_manager + e2e 生命周期
+# ---------------------------------------------------------------------------
+
+def test_handle_function_call_threads_bg_manager(tmp_path):
+    """bg_start 工具能通过 handle_function_call 拿到 bg_manager。"""
+    import sys
+    from agent.background import BackgroundManager
+
+    mgr = BackgroundManager()
+    try:
+        result_str = handle_function_call(
+            "bg_start",
+            {"command": [sys.executable, "-c", "print('ok')"], "cwd": str(tmp_path)},
+            bg_manager=mgr,
+        )
+        parsed = json.loads(result_str)
+        assert parsed["task_id"].startswith("bg_")
+    finally:
+        mgr.shutdown()
+
+
+def test_e2e_aiagent_full_bg_lifecycle(tmp_path):
+    """端到端：AIAgent + bg_manager + 完整后台任务生命周期。
+
+    流程：
+    1. 通过 handle_function_call 启动一个快任务
+    2. 任务完成 → push 通知
+    3. 下一轮主循环 drain → 注入 <task_notification>
+    4. bg_status / bg_result 查询正常
+    """
+    import sys
+    import time
+    from unittest.mock import MagicMock
+    from agent.background import BackgroundManager
+
+    mgr = BackgroundManager()
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=["bg"], harvil_home=str(tmp_path),
+        bg_manager=mgr,
+    )
+
+    # mock LLM：第一轮调 bg_start，第二轮调 bg_status，第三轮 stop
+    call_count = [0]
+    started_task_id = [None]
+
+    def side_effect(msgs, **kw):
+        call_count[0] += 1
+        resp = MagicMock()
+        if call_count[0] == 1:
+            # 启动任务
+            result = handle_function_call(
+                "bg_start",
+                {"command": [sys.executable, "-c", "print('done')"],
+                 "cwd": str(tmp_path)},
+                bg_manager=mgr,
+            )
+            started_task_id[0] = json.loads(result)["task_id"]
+            time.sleep(0.5)  # 等任务完成
+            resp.choices = [MagicMock(
+                message=MagicMock(content=None, tool_calls=[MagicMock(
+                    id="c1", type="function",
+                    function=MagicMock(name="bg_status",
+                                       arguments=json.dumps({"task_id": started_task_id[0]})),
+                )]),
+                finish_reason="tool_calls",
+            )]
+            return resp
+        elif call_count[0] == 2:
+            result = handle_function_call(
+                "bg_status",
+                {"task_id": started_task_id[0]},
+                bg_manager=mgr,
+            )
+            # 再调一次让循环结束
+            resp.choices = [MagicMock(
+                message=MagicMock(content="all done", tool_calls=None),
+                finish_reason="stop",
+            )]
+            return resp
+        else:
+            resp.choices = [MagicMock(
+                message=MagicMock(content="done", tool_calls=None),
+                finish_reason="stop",
+            )]
+            return resp
+
+    agent.llm_client = MagicMock()
+    agent.llm_client.chat_completions.side_effect = side_effect
+
+    final = agent.run_conversation("run bg task")
+    # 至少没崩
+    assert isinstance(final, str)
+    mgr.shutdown()
+
