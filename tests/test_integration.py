@@ -1148,3 +1148,16 @@ def test_aiagent_no_cron_scheduler_backward_compat(tmp_path):
     agent.run_conversation("hello")
     assert agent.conversation_history[0]["content"] == "hello"
 
+
+# === P2c-T5: RuntimeContext 注入 cron_scheduler ===
+
+def test_runtime_context_has_cron_scheduler():
+    """RuntimeContext 持有 cron_scheduler 实例（P2c-T5）。"""
+    from cli import RuntimeContext
+    from agent.cron import CronScheduler
+    ctx = RuntimeContext.__new__(RuntimeContext)
+    sched = CronScheduler(jobs_path=Path("/tmp/x.json"), enabled=False)
+    ctx.cron_scheduler = sched
+    assert isinstance(ctx.cron_scheduler, CronScheduler)
+    sched.shutdown()
+

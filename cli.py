@@ -73,6 +73,26 @@ class RuntimeContext:
             default_timeout=bg_cfg.get("default_timeout", 600),
         )
 
+        # === P2c-T5 NEW: Cron 调度器 ===
+        from agent.cron import CronScheduler
+        cron_cfg = self.config.get("cron", {})
+        if cron_cfg.get("enabled", True):
+            cron_path = cron_cfg.get("jobs_path")
+            if cron_path is None:
+                cron_path = Path(self.home) / ".cron" / "jobs.json"
+            try:
+                self.cron_scheduler = CronScheduler(
+                    jobs_path=Path(cron_path),
+                    poll_interval_seconds=cron_cfg.get("poll_interval_seconds", 30.0),
+                    enabled=True,
+                )
+                self.cron_scheduler.start()
+            except Exception as e:
+                logger.error("CronScheduler 启动失败: %s", e)
+                self.cron_scheduler = None
+        else:
+            self.cron_scheduler = None
+
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
@@ -178,6 +198,7 @@ class RuntimeContext:
             config=self.config,
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
             bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
+            cron_scheduler=self.cron_scheduler,  # === P2c-T5 NEW ===
         )
 
     def _maybe_trigger_curator(self):
@@ -252,12 +273,18 @@ class RuntimeContext:
         return True
 
     def shutdown(self):
-        """清理资源：终止后台任务等（P2b-T6）。"""
+        """清理资源：终止后台任务等（P2b-T6 + P2c-T5）。"""
         if hasattr(self, "bg_manager") and self.bg_manager:
             try:
                 self.bg_manager.shutdown()
             except Exception as e:
                 logger.warning("bg_manager shutdown 失败: %s", e)
+
+        if hasattr(self, "cron_scheduler") and self.cron_scheduler:
+            try:
+                self.cron_scheduler.shutdown()
+            except Exception as e:
+                logger.warning("cron_scheduler shutdown 失败: %s", e)
 
 
 # ---------------------------------------------------------------------------
