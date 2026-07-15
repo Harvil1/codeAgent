@@ -368,6 +368,7 @@ class AIAgent:
                         harvil_home=self.harvil_home,
                         tool_call_id=tc.id,
                         config=self.config,
+                        hooks_registry=self.hooks_registry,  # === P2-T7 NEW ===
                     )
 
                     # 工具结果追加到历史（必须配对 tool_call_id）

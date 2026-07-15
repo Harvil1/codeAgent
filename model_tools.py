@@ -82,19 +82,41 @@ def handle_function_call(
     harvil_home=None,
     tool_call_id: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    hooks_registry=None,  # === P2-T7 NEW ===
 ) -> str:
     """分发工具调用，返回 JSON 字符串结果。
 
     这是 agent 调用工具的入口。
     context 参数会被透传给工具 handler（按需取用）。
+
+    PRE_TOOL_USE hook 在 dispatch 前执行：deny 短路返回 hook_deny，
+    modify_args 替换入参。
+    POST_TOOL_USE hook 在 dispatch 后执行：可改写 result 字符串。
+    hooks_registry=None 或 config.hooks.enabled=False 时跳过所有 hook
+    （完全向后兼容）。
     """
     ensure_tools_discovered()
 
     # 参数类型强制转换（LLM 有时会传错类型）
     function_args = _coerce_tool_args(function_name, function_args)
 
+    # === P2-T7 NEW: PRE_TOOL_USE hook ===
+    hooks_enabled = (config or {}).get("hooks", {}).get("enabled", True)
+    if hooks_registry and hooks_enabled:
+        deny_reason, modified_args = hooks_registry.run_pre_tool_use(
+            function_name, function_args,
+            session_id=session_id or "",
+        )
+        if deny_reason is not None:
+            return json.dumps({
+                "error": f"hook denied: {deny_reason}",
+                "error_type": "hook_deny",
+            }, ensure_ascii=False)
+        if modified_args is not None:
+            function_args = modified_args
+
     # 分发到 registry（传递上下文给 handler）
-    return registry.dispatch(
+    result = registry.dispatch(
         function_name,
         function_args,
         task_id=task_id,
@@ -105,6 +127,15 @@ def handle_function_call(
         tool_call_id=tool_call_id,
         config=config,
     )
+
+    # === P2-T7 NEW: POST_TOOL_USE hook ===
+    if hooks_registry and hooks_enabled:
+        result = hooks_registry.run_post_tool_use(
+            function_name, function_args, result,
+            session_id=session_id or "",
+        )
+
+    return result
 
 
 def _coerce_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:

@@ -739,3 +739,84 @@ def _mock_llm_simple_response(text: str):
     ]
     return m
 
+
+# === P2-T7: handle_function_call + PRE/POST_TOOL_USE 集成测试 ===
+
+def test_handle_function_call_pre_tool_use_deny():
+    """PreToolUse hook 返回 deny 时，handler 不调，返回 hook_deny error。"""
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register_pre_tool_use(lambda n, a: {"deny": "blocked"}, name="b")
+    result = handle_function_call(
+        "todo_write", {"todos": []},
+        hooks_registry=reg, session_id="s",
+        config={"hooks": {"enabled": True}},
+    )
+    parsed = json.loads(result)
+    assert parsed["error_type"] == "hook_deny"
+    assert "blocked" in parsed["error"]
+
+
+def test_handle_function_call_pre_tool_use_modify_args():
+    """PreToolUse hook 修改 args 后，handler 看到的是修改后的。"""
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register_pre_tool_use(
+        lambda n, a: {"modify_args": {"todos": [{"id": 1, "text": "modified"}]}},
+        name="m"
+    )
+    result = handle_function_call(
+        "todo_write", {"todos": []},
+        hooks_registry=reg, session_id="s",
+        config={"hooks": {"enabled": True}},
+    )
+    parsed = json.loads(result)
+    assert "error" not in parsed or parsed.get("error_type") != "hook_deny"
+
+
+def test_handle_function_call_post_tool_use_modifies_result():
+    """PostToolUse hook 修改 result 后，最终返回的是修改后的。"""
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register_post_tool_use(
+        lambda n, a, r: json.dumps({"overridden": True}, ensure_ascii=False),
+        name="override"
+    )
+    result = handle_function_call(
+        "todo_write", {"todos": []},
+        hooks_registry=reg, session_id="s",
+        config={"hooks": {"enabled": True}},
+    )
+    parsed = json.loads(result)
+    assert parsed.get("overridden") is True
+
+
+def test_handle_function_call_no_registry_unchanged():
+    """hooks_registry=None 时行为完全等同于 Phase 1。"""
+    result1 = handle_function_call(
+        "todo_write", {"todos": []}, session_id="s",
+    )
+    result2 = handle_function_call(
+        "todo_write", {"todos": []},
+        hooks_registry=None, session_id="s",
+    )
+    assert json.loads(result1).get("error_type") == json.loads(result2).get("error_type")
+
+
+def test_handle_function_call_hooks_disabled_skips():
+    """config.hooks.enabled=False 时跳过所有 hook。"""
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+    reg.register_pre_tool_use(lambda n, a: {"deny": "blocked"}, name="b")
+    result = handle_function_call(
+        "todo_write", {"todos": []},
+        hooks_registry=reg, session_id="s",
+        config={"hooks": {"enabled": False}},
+    )
+    parsed = json.loads(result)
+    assert parsed.get("error_type") != "hook_deny"
+
