@@ -934,3 +934,43 @@ def test_e2e_no_hooks_enabled_full_backward_compat(tmp_path):
     # hook 没触发，原样入 history
     assert agent.conversation_history[0]["content"] == "original"
 
+
+# === P2b-T5: AIAgent 集成 bg_manager ===
+
+def test_aiagent_accepts_bg_manager_kwarg():
+    agent = _make_test_agent()
+    assert agent.bg_manager is None
+
+
+def test_aiagent_drains_notifications_into_temporary_user_msg(tmp_path):
+    """完成的后台任务在下一轮主循环注入 <task_notification> 临时 user 消息。"""
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.background import BackgroundManager
+    import sys
+    import time
+
+    mgr = BackgroundManager()
+    mgr.start([sys.executable, "-c", "print('done')"], cwd=tmp_path)
+    time.sleep(0.5)  # 等任务完成 + push notification
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        bg_manager=mgr,
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("check")
+    # conversation_history 不该含 task_notification（是临时消息）
+    for msg in agent.conversation_history:
+        assert "<task_notification>" not in msg.get("content", "")
+    mgr.shutdown()
+
+
+def test_aiagent_no_bg_manager_backward_compat(tmp_path):
+    """bg_manager=None 时主循环不抛，行为同 Phase 2a。"""
+    agent = _make_test_agent()
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hello")
+    assert agent.conversation_history[0]["content"] == "hello"
+

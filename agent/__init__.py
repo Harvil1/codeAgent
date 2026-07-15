@@ -56,6 +56,7 @@ class AIAgent:
         on_response=None,
         config: dict = None,
         hooks_registry=None,   # === P2-T6 NEW ===
+        bg_manager=None,       # === P2b-T5 NEW ===
     ):
         """
         参数：
@@ -142,6 +143,9 @@ class AIAgent:
         self.hooks_registry = hooks_registry
         self._stop_fire_count = 0
 
+        # === P2b-T5 NEW: 后台任务管理器 ===
+        self.bg_manager = bg_manager
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -187,6 +191,15 @@ class AIAgent:
             except Exception as e:
                 logger.warning("USER_PROMPT_SUBMIT 编排异常: %s", e)
 
+        # === P2b-T5 NEW: drain 后台任务通知（临时，不进 history）===
+        bg_notifications = []
+        if self.bg_manager:
+            try:
+                bg_notifications = self.bg_manager.drain_notifications()
+            except Exception as e:
+                logger.warning("drain_notifications 异常: %s", e)
+                bg_notifications = []
+
         # 1. 追加用户消息到历史
         self.conversation_history.append({
             "role": "user",
@@ -225,6 +238,21 @@ class AIAgent:
                 {"role": "system", "content": system_prompt},
                 *self.conversation_history,
             ]
+
+            # === P2b-T5 NEW: 注入后台任务通知（临时，不进 history）===
+            if bg_notifications:
+                notif_text = "\n".join(
+                    f"[task {n['task_id']} {n['status']}] "
+                    f"exit={n.get('exit_code')} "
+                    f"stdout_tail={(n.get('stdout') or '')[-200:]}"
+                    for n in bg_notifications
+                )
+                messages.append({
+                    "role": "user",
+                    "content": f"<task_notification>\n{notif_text}\n</task_notification>",
+                })
+                # 本轮通知已注入，清空避免后续轮次重复
+                bg_notifications = []
 
             # TodoWrite 提醒：3 轮未更新时注入 reminder（临时，不进 history）
             if self.todo_manager and self.todo_manager.should_remind():
