@@ -1161,3 +1161,69 @@ def test_runtime_context_has_cron_scheduler():
     assert isinstance(ctx.cron_scheduler, CronScheduler)
     sched.shutdown()
 
+
+# ---------------------------------------------------------------------------
+# P2c-T6: 端到端 cron 全生命周期（FINAL Phase 2c）
+# ---------------------------------------------------------------------------
+
+def test_e2e_cron_full_lifecycle(tmp_path):
+    """端到端：jobs.json 配置 → scheduler tick → drain_due → 主循环注入 <scheduled_message>。
+
+    流程：
+    1. 写一个匹配当前时间的 jobs.json
+    2. 构造 AIAgent + cron_scheduler
+    3. 手动调 _tick(now) 触发
+    4. agent.run_conversation() drain_due → 验证 LLM 看到 <scheduled_message>
+    """
+    import json
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.cron import CronScheduler
+
+    jobs_path = tmp_path / ".cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True)
+    jobs_path.write_text(json.dumps({
+        "jobs": [
+            {"id": "test_job", "cron": "* * * * *", "message": "cron test message"},
+        ]
+    }, ensure_ascii=False), encoding="utf-8")
+
+    sched = CronScheduler(jobs_path=jobs_path, enabled=True, poll_interval_seconds=999)
+    # 手动触发一次 tick（避免依赖 30s 轮询）
+    sched._tick(datetime.now())
+
+    captured_messages = []
+
+    def capture_llm_call(msgs, **kw):
+        # 快照：列表浅拷贝，避免后续 mutate 影响断言
+        captured_messages.append(list(msgs))
+        resp = MagicMock()
+        resp.choices = [MagicMock(
+            message=MagicMock(content="ok", tool_calls=None),
+            finish_reason="stop",
+        )]
+        return resp
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        cron_scheduler=sched,
+    )
+    agent.llm_client = MagicMock()
+    agent.llm_client.chat_completions.side_effect = capture_llm_call
+
+    agent.run_conversation("check")
+    sched.shutdown()
+
+    # 第 1 次 LLM 调用的 messages 应含 <scheduled_message>
+    assert len(captured_messages) >= 1, "应至少调用 LLM 一次"
+    first_msgs = captured_messages[0]
+    contents = [m.get("content", "") or "" for m in first_msgs]
+    assert any("<scheduled_message>" in c for c in contents), (
+        f"应当含 <scheduled_message>，实际: {contents}"
+    )
+    assert any("cron test message" in c for c in contents), (
+        f"应当含 job message 'cron test message'，实际: {contents}"
+    )
+
