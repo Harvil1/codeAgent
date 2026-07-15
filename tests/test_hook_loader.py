@@ -80,7 +80,25 @@ def test_load_missing_hooks_field_raises(tmp_path):
     settings = tmp_path / "settings.json"
     _write(settings, {"wrong_field": {}})
     reg = HookRegistry()
-    with pytest.raises(ValueError, match="missing.*hooks"):
+    with pytest.raises(ValueError, match="缺少.*hooks"):
+        load_declarative_hooks(reg, settings)
+
+
+def test_load_event_value_not_list_raises(tmp_path):
+    """event 的值不是 list（如 string / null）时 raise ValueError。"""
+    settings = tmp_path / "settings.json"
+    _write(settings, {"hooks": {"pre_tool_use": "not_a_list"}})
+    reg = HookRegistry()
+    with pytest.raises(ValueError, match="必须是 list"):
+        load_declarative_hooks(reg, settings)
+
+
+def test_load_event_value_null_raises(tmp_path):
+    """event 的值是 null 时 raise ValueError。"""
+    settings = tmp_path / "settings.json"
+    _write(settings, {"hooks": {"pre_tool_use": None}})
+    reg = HookRegistry()
+    with pytest.raises(ValueError, match="必须是 list"):
         load_declarative_hooks(reg, settings)
 
 

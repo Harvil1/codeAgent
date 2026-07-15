@@ -55,6 +55,11 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
                 f"settings.json 包含未知 event 名: '{event_str}'，"
                 f"合法值: {[e.value for e in HookEvent]}"
             )
+        if not isinstance(hook_list, list):
+            raise ValueError(
+                f"settings.json event '{event_str}' 必须是 list，"
+                f"实际是 {type(hook_list).__name__}"
+            )
         for h_cfg in hook_list:
             hook = _parse_hook(h_cfg, event)
             if hook is not None:

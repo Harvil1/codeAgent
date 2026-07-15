@@ -698,14 +698,17 @@ def test_aiagent_stop_hook_force_continue():
     agent = _make_test_agent_with_hooks()
     # 第一次 stop hook 让循环继续；第二次（max_fires 触发后）才真停
     calls = []
-    agent.hooks_registry.register_stop(
-        lambda: "again" if len(calls) == 0 else None, name="loop"
-    )
+    def stop_fn():
+        calls.append(1)
+        return "again" if len(calls) == 1 else None
+    agent.hooks_registry.register_stop(stop_fn, name="loop")
     agent.llm_client = _mock_llm_simple_response("resp")
-    # mock 中追踪调用次数
     agent.run_conversation("go")
-    # 至少调用了 1 次 stop hook
-    # 详细断言放 hook 测试，这里只验证不抛 + 不死循环
+    # 验证 STOP hook 至少触发一次
+    assert len(calls) >= 1, "STOP hook should have fired at least once"
+    # 验证 [stop_hook] 消息出现在 history 中
+    stop_msgs = [m for m in agent.conversation_history if "[stop_hook]" in m.get("content", "")]
+    assert len(stop_msgs) >= 1, "Should have [stop_hook] message in history"
 
 
 # ---- helpers ----
@@ -744,18 +747,21 @@ def _mock_llm_simple_response(text: str):
 
 def test_handle_function_call_pre_tool_use_deny():
     """PreToolUse hook 返回 deny 时，handler 不调，返回 hook_deny error。"""
+    from unittest.mock import patch
     from agent.hooks import HookRegistry
 
     reg = HookRegistry()
     reg.register_pre_tool_use(lambda n, a: {"deny": "blocked"}, name="b")
-    result = handle_function_call(
-        "todo_write", {"todos": []},
-        hooks_registry=reg, session_id="s",
-        config={"hooks": {"enabled": True}},
-    )
-    parsed = json.loads(result)
-    assert parsed["error_type"] == "hook_deny"
-    assert "blocked" in parsed["error"]
+    with patch("model_tools.registry.dispatch") as mock_dispatch:
+        result = handle_function_call(
+            "todo_write", {"todos": []},
+            hooks_registry=reg, session_id="s",
+            config={"hooks": {"enabled": True}},
+        )
+        parsed = json.loads(result)
+        assert parsed["error_type"] == "hook_deny"
+        assert "blocked" in parsed["error"]
+        assert mock_dispatch.call_count == 0  # 关键：dispatch 未被调
 
 
 def test_handle_function_call_pre_tool_use_modify_args():
@@ -901,9 +907,9 @@ def test_e2e_aiagent_with_hooks_full_loop(tmp_path):
     assert "(with context)" in agent.conversation_history[0]["content"]
     # 找到 tool 结果消息
     tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
-    if tool_msgs:
-        parsed = json.loads(tool_msgs[0]["content"])
-        assert parsed.get("_audited") is True
+    assert tool_msgs, "Expected at least one tool message from the e2e flow"
+    parsed = json.loads(tool_msgs[0]["content"])
+    assert parsed.get("_audited") is True
     # 无异常即通过
     assert isinstance(final, str)
 

@@ -1,5 +1,4 @@
 """Hooks 系统测试。"""
-import pytest
 from agent.hooks import (
     HookEvent, Hook, HookScriptConfig, HookRegistry,
 )

@@ -83,7 +83,7 @@ class HookRegistry:
         )
 
     def register_declarative(self, hook: Hook):
-        """T3 实现：把已构造好的 Hook 加到 registry。"""
+        """注册一个声明式 hook（已构造好的 Hook 对象）。"""
         self._hooks[hook.event].append(hook)
 
     def clear(self, event=None):
