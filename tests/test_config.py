@@ -345,3 +345,26 @@ def test_bg_toolset_exists():
     required_tools = ("bg_start", "bg_status", "bg_result", "bg_list", "bg_stop")
     for name in required_tools:
         assert name in tools, f"缺 {name}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c Task 3: cron 配置块
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_has_cron_block():
+    """config.py 的 DEFAULT_CONFIG 应含 cron 块及所有必需键。"""
+    from config import DEFAULT_CONFIG
+    c = DEFAULT_CONFIG["cron"]
+    required_keys = ("enabled", "jobs_path", "poll_interval_seconds")
+    for key in required_keys:
+        assert key in c, f"缺 {key}"
+
+
+def test_default_config_cron_defaults():
+    """cron 块的默认值应符合规范。"""
+    from config import DEFAULT_CONFIG
+    c = DEFAULT_CONFIG["cron"]
+    assert c["enabled"] is True
+    assert c["jobs_path"] is None
+    assert c["poll_interval_seconds"] == 30.0
