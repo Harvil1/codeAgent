@@ -10,6 +10,7 @@
 
 跨平台：subprocess 必须 text=True, encoding="utf-8"（CLAUDE.md 强制）。
 """
+import copy
 import logging
 import secrets
 import subprocess
@@ -147,7 +148,8 @@ class BackgroundManager:
             exit_code = proc.returncode
             with self._lock:
                 task = self._tasks.get(task_id)
-                if task is None:
+                # I-3 修复：如果 stop() 已改状态（非 running），不覆盖，不重复 push 通知
+                if task is None or task.status != "running":
                     return
                 task.stdout = (stdout or "")[: self._result_stdout_cap]
                 task.stderr = (stderr or "")[: self._result_stdout_cap]
@@ -163,7 +165,7 @@ class BackgroundManager:
                 stdout, stderr = "", ""
             with self._lock:
                 task = self._tasks.get(task_id)
-                if task is None:
+                if task is None or task.status != "running":
                     return
                 task.stdout = (stdout or "")[: self._result_stdout_cap]
                 task.stderr = (stderr or "")[: self._result_stdout_cap]
@@ -175,7 +177,7 @@ class BackgroundManager:
             logger.warning("bg task %s watcher 异常: %s", task_id, e)
             with self._lock:
                 task = self._tasks.get(task_id)
-                if task is None:
+                if task is None or task.status != "running":
                     return
                 task.status = "failed"
                 task.ended_at = datetime.now()
@@ -197,16 +199,19 @@ class BackgroundManager:
 
     # ---- 查询 ----
     def status(self, task_id: str) -> Optional[BackgroundTask]:
+        """返回任务的浅拷贝（I-4 修复：防止调用方读到部分更新）。"""
         with self._lock:
-            return self._tasks.get(task_id)
+            task = self._tasks.get(task_id)
+            return copy.copy(task) if task else None
 
     def result(self, task_id: str) -> Optional[BackgroundTask]:
         # 同 status，工具层会用 task.stdout（cap result_stdout_cap）
         return self.status(task_id)
 
     def list_tasks(self) -> list:
+        """返回所有任务的浅拷贝列表（I-4 修复）。"""
         with self._lock:
-            return list(self._tasks.values())
+            return [copy.copy(t) for t in self._tasks.values()]
 
     # ---- 控制 ----
     def stop(self, task_id: str) -> bool:
@@ -217,6 +222,9 @@ class BackgroundManager:
                 return False
             if task.status in ("completed", "failed", "stopped"):
                 return True
+            # I-3 修复：先标记 "stopping"，让 _watch() 的 communicate() 返回后
+            # 检测到 status != "running" 而跳过覆盖
+            task.status = "stopping"
             proc = task._proc
         if proc is not None:
             try:
@@ -234,11 +242,11 @@ class BackgroundManager:
             task = self._tasks.get(task_id)
             if task is None:
                 return True
-            if task.status == "running":
-                task.status = "stopped"
-                task.ended_at = datetime.now()
-                task.exit_code = task.exit_code if task.exit_code is not None else -1
-                self._push_notification_locked(task)
+            # 无论 _watch 是否介入，stop 都设最终状态 "stopped"
+            task.status = "stopped"
+            task.ended_at = datetime.now()
+            task.exit_code = task.exit_code if task.exit_code is not None else -1
+            self._push_notification_locked(task)
         return True
 
     # ---- 通知 ----

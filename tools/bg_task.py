@@ -13,9 +13,22 @@ import json
 import logging
 from pathlib import Path
 
+from config import load_config
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# check_fn：config.bg_task.enabled 控制 bg_* 工具可见性
+# ---------------------------------------------------------------------------
+
+def _check_bg_enabled() -> bool:
+    """读取 config.bg_task.enabled，默认 True。"""
+    try:
+        return bool(load_config().get("bg_task", {}).get("enabled", True))
+    except Exception:
+        return True  # 配置读取失败时默认可用
 
 
 # ---------------------------------------------------------------------------
@@ -234,22 +247,27 @@ def _handle_bg_stop(args: dict, **kwargs) -> str:
 # ---------------------------------------------------------------------------
 
 registry.register(
-    name="bg_start", toolset="core",
+    name="bg_start", toolset="bg",
     schema=BG_START_SCHEMA, handler=_handle_bg_start, emoji="🚀",
+    check_fn=_check_bg_enabled,
 )
 registry.register(
-    name="bg_status", toolset="core",
+    name="bg_status", toolset="bg",
     schema=BG_STATUS_SCHEMA, handler=_handle_bg_status, emoji="📊",
+    check_fn=_check_bg_enabled,
 )
 registry.register(
-    name="bg_result", toolset="core",
+    name="bg_result", toolset="bg",
     schema=BG_RESULT_SCHEMA, handler=_handle_bg_result, emoji="📄",
+    check_fn=_check_bg_enabled,
 )
 registry.register(
-    name="bg_list", toolset="core",
+    name="bg_list", toolset="bg",
     schema=BG_LIST_SCHEMA, handler=_handle_bg_list, emoji="📋",
+    check_fn=_check_bg_enabled,
 )
 registry.register(
-    name="bg_stop", toolset="core",
+    name="bg_stop", toolset="bg",
     schema=BG_STOP_SCHEMA, handler=_handle_bg_stop, emoji="🛑",
+    check_fn=_check_bg_enabled,
 )

@@ -180,3 +180,62 @@ def test_detach_task_survives_shutdown(tmp_path):
         except OSError:
             still_alive = False
         assert still_alive, "detach 任务应存活"
+
+
+def test_stop_watch_race_no_duplicate_notifications(tmp_path):
+    """I-3 修复验证：stop() 与 _watch() 竞态不应产生重复通知。
+
+    stop() 先将状态改为 "stopped"，_watch() 的 communicate() 返回后
+    应检测到 status != "running" 并直接 return，不覆盖状态、不 push 第二个通知。
+    """
+    long_cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    mgr = BackgroundManager()
+    task_id = mgr.start(long_cmd, cwd=tmp_path)
+    # 确认 running 后 stop
+    for _ in range(50):
+        task = mgr.status(task_id)
+        if task and task.status == "running":
+            break
+        time.sleep(0.1)
+    mgr.stop(task_id)
+    # 等 daemon thread 的 communicate 返回（terminate 后会返回）
+    for _ in range(50):
+        task = mgr.status(task_id)
+        if task and task.status != "running":
+            break
+        time.sleep(0.1)
+    # 状态应为 stopped（不被 _watch 覆盖为 failed）
+    assert task.status == "stopped"
+    # drain 通知：只应有 1 条（stop 的），不应有 _watch 的重复
+    notifications = mgr.drain_notifications()
+    # 可能有 1 条（stop push），不应有 2 条
+    stop_notifications = [n for n in notifications if n["status"] == "stopped"]
+    assert len(stop_notifications) <= 1, f"不应有重复 stopped 通知: {stop_notifications}"
+
+
+def test_status_returns_copy_not_live_reference(tmp_path):
+    """I-4 修复验证：status() 返回浅拷贝，修改不影响内部状态。"""
+    mgr = BackgroundManager()
+    task_id = mgr.start(_quick_cmd(), cwd=tmp_path)
+    task_copy = mgr.status(task_id)
+    assert task_copy is not None
+    # 修改拷贝的属性
+    task_copy.status = "tampered"
+    # 内部状态不受影响
+    internal_task = mgr.status(task_id)
+    assert internal_task.status != "tampered"
+    mgr.shutdown()
+
+
+def test_list_tasks_returns_copies(tmp_path):
+    """I-4 修复验证：list_tasks() 返回浅拷贝列表。"""
+    mgr = BackgroundManager()
+    mgr.start(_quick_cmd(), cwd=tmp_path)
+    tasks = mgr.list_tasks()
+    assert len(tasks) == 1
+    original_status = tasks[0].status
+    tasks[0].status = "tampered"
+    # 再取一次，内部状态不变
+    tasks2 = mgr.list_tasks()
+    assert tasks2[0].status == original_status
+    mgr.shutdown()

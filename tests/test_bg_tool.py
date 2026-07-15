@@ -123,13 +123,18 @@ def test_bg_stop_terminates_and_returns_stopped(tmp_path):
         bg_manager=mgr,
     )
     task_id = json.loads(start_str)["task_id"]
-    time.sleep(0.3)
+    # 等到任务确认 running 后再 stop（避免子进程未起的时序竞态）
+    for _ in range(50):
+        task = mgr.status(task_id)
+        if task and task.status == "running":
+            break
+        time.sleep(0.1)
     result_str = registry.dispatch(
         "bg_stop", {"task_id": task_id}, bg_manager=mgr,
     )
     parsed = json.loads(result_str)
     assert parsed["task_id"] == task_id
-    assert parsed["status"] in ("stopped", "running")  # 状态可能还在过渡
+    assert parsed["status"] in ("stopped", "running", "stopping")  # stop 可能刚完成或正在过渡
     mgr.shutdown()
 
 
