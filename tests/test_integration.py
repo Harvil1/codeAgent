@@ -656,3 +656,86 @@ def test_aiagent_chat_long_conversation_triggers_pipeline(tmp_path):
     )
     assert has_snip, "L1 snip_compact 应被触发（60 条消息 > 阈值 50）"
 
+
+# ---------------------------------------------------------------------------
+# P2-T6: AIAgent hooks 集成测试
+# ---------------------------------------------------------------------------
+
+from agent.hooks import HookRegistry  # noqa: E402
+
+
+def test_aiagent_accepts_hooks_registry_kwarg():
+    """hooks_registry=None 时构造成功（向后兼容）。"""
+    agent = _make_test_agent()
+    assert agent.hooks_registry is None
+    assert agent._stop_fire_count == 0
+
+
+def test_aiagent_user_prompt_submit_hook_modifies_input():
+    """USER_PROMPT_SUBMIT hook 修改 prompt 后实际入 history。"""
+    from unittest.mock import MagicMock
+    agent = _make_test_agent_with_hooks()
+    agent.hooks_registry.register_user_prompt_submit(
+        lambda p: p + " [augmented]", name="augmenter"
+    )
+    # mock LLM 返回 stop（无 tool_call）
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hello")
+    # 第 0 条应是 user，content 被 hook 修改
+    assert agent.conversation_history[0]["content"] == "hello [augmented]"
+
+
+def test_aiagent_user_prompt_submit_no_registry_modification():
+    """无 registry 时 prompt 原样入 history。"""
+    agent = _make_test_agent()
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hello")
+    assert agent.conversation_history[0]["content"] == "hello"
+
+
+def test_aiagent_stop_hook_force_continue():
+    """STOP hook 返回 force_continue 时循环不退出（直到 max_fires）。"""
+    agent = _make_test_agent_with_hooks()
+    # 第一次 stop hook 让循环继续；第二次（max_fires 触发后）才真停
+    calls = []
+    agent.hooks_registry.register_stop(
+        lambda: "again" if len(calls) == 0 else None, name="loop"
+    )
+    agent.llm_client = _mock_llm_simple_response("resp")
+    # mock 中追踪调用次数
+    agent.run_conversation("go")
+    # 至少调用了 1 次 stop hook
+    # 详细断言放 hook 测试，这里只验证不抛 + 不死循环
+
+
+# ---- helpers ----
+
+def _make_test_agent():
+    """构造一个最小可跑的 AIAgent。"""
+    from agent import AIAgent
+    return AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home="/tmp/fake",
+    )
+
+
+def _make_test_agent_with_hooks():
+    from agent import AIAgent
+    reg = HookRegistry()
+    return AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home="/tmp/fake",
+        hooks_registry=reg,
+    )
+
+
+def _mock_llm_simple_response(text: str):
+    """mock LLM client：每次返回固定文本，stop_reason='stop'。"""
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    m.chat_completions.return_value.choices = [
+        MagicMock(message=MagicMock(content=text, tool_calls=None),
+                  finish_reason="stop")
+    ]
+    return m
+

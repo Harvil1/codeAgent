@@ -55,6 +55,7 @@ class AIAgent:
         on_tool_call=None,
         on_response=None,
         config: dict = None,
+        hooks_registry=None,   # === P2-T6 NEW ===
     ):
         """
         参数：
@@ -137,6 +138,10 @@ class AIAgent:
         # 完整 config（用于 context.use_new_pipeline 等开关）
         self.config: dict = config or {}
 
+        # === P2-T6 NEW: hooks 系统 ===
+        self.hooks_registry = hooks_registry
+        self._stop_fire_count = 0
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -172,6 +177,16 @@ class AIAgent:
 
         这是整个系统的核心循环。同步执行，不异步。
         """
+        # === P2-T6 NEW: USER_PROMPT_SUBMIT hook ===
+        if (self.hooks_registry
+                and self.config.get("hooks", {}).get("enabled", True)):
+            try:
+                user_message = self.hooks_registry.run_user_prompt_submit(
+                    user_message, session_id=self.session_id or "",
+                )
+            except Exception as e:
+                logger.warning("USER_PROMPT_SUBMIT 编排异常: %s", e)
+
         # 1. 追加用户消息到历史
         self.conversation_history.append({
             "role": "user",
@@ -382,6 +397,29 @@ class AIAgent:
 
                 # 异步写入外部记忆 provider（不阻塞）
                 self._sync_memory(user_message, final_content)
+
+                # === P2-T6 NEW: STOP hook ===
+                if (self.hooks_registry
+                        and self.config.get("hooks", {}).get("enabled", True)
+                        and self._stop_fire_count < self.config.get(
+                            "hooks", {}).get("stop_hook_max_fires", 3)):
+                    try:
+                        force_msg = self.hooks_registry.run_stop(
+                            session_id=self.session_id or "",
+                            max_fires=self.config.get("hooks", {}).get(
+                                "stop_hook_max_fires", 3),
+                        )
+                    except Exception as e:
+                        logger.warning("STOP hook 编排异常: %s", e)
+                        force_msg = None
+
+                    if force_msg:
+                        self._stop_fire_count += 1
+                        self.conversation_history.append({
+                            "role": "user",
+                            "content": f"[stop_hook]: {force_msg}",
+                        })
+                        continue  # 跳回 while，不 return
 
                 return final_content
 
