@@ -110,3 +110,23 @@ def test_cron_match_too_few_fields_raises():
 def test_cron_match_invalid_expr_raises():
     with pytest.raises(ValueError):
         cron_match("60 * * * *", datetime.now())  # 60 越界
+
+
+def test_cron_match_step_1_treated_as_wildcard():
+    """*/1 在 dom/dow 字段应被视为通配（不触发 OR 语义）。
+
+    0 0 15 * */1 应该只在每月 15 号触发（dow */1 = wildcard，不触发 OR）。
+    """
+    # 2026-07-15 是周三
+    assert cron_match("0 0 15 * */1", datetime(2026, 7, 15, 0, 0)) is True  # dom=15
+    # 2026-07-16 dom!=15, dow 是通配不应触发 OR → 不匹配
+    assert cron_match("0 0 15 * */1", datetime(2026, 7, 16, 0, 0)) is False
+
+
+def test_cron_match_step_1_dom_treated_as_wildcard():
+    """*/1 在 dom 字段也应被视为通配。"""
+    # 0 0 */1 * 0 → dom */1 = wildcard，dow=0（周日）
+    # 2026-07-12 是周日（dow=0 匹配），dom wildcard → 整体匹配
+    assert cron_match("0 0 */1 * 0", datetime(2026, 7, 12, 0, 0)) is True
+    # 2026-07-13 是周一（dow!=0），dom wildcard 不触发 OR → 不匹配
+    assert cron_match("0 0 */1 * 0", datetime(2026, 7, 13, 0, 0)) is False

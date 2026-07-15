@@ -107,9 +107,12 @@ def cron_match(cron_expr: str, dt: datetime) -> bool:
         return False
 
     # day_of_month 和 day_of_week 的特殊 OR 语义：
-    # 当两者都不是 '*' 时，匹配任一即触发
-    dom_is_star = fields[2] == "*"
-    dow_is_star = fields[4] == "*"
+    # 当两者都不是通配（即解析后集合不等于完整范围）时，匹配任一即触发
+    # 注意：不能仅做字符串 fields[i] == "*" 比较，因为 */1 等也等同于通配
+    full_dom = set(range(FIELD_RANGES["day_of_month"][0], FIELD_RANGES["day_of_month"][1] + 1))
+    full_dow = set(range(FIELD_RANGES["day_of_week"][0], FIELD_RANGES["day_of_week"][1] + 1))
+    dom_is_star = dom_set == full_dom
+    dow_is_star = dow_set == full_dow
 
     # Python weekday(): Monday=0 ... Sunday=6
     # cron day_of_week: Sunday=0 ... Saturday=6
