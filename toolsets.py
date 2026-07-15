@@ -56,6 +56,11 @@ TOOLSETS: Dict[str, dict] = {
         "tools": [],  # 动态注册，工具名以 mcp__ 前缀
         "includes": [],
     },
+    "bg": {
+        "description": "后台任务管理（Phase 2b）",
+        "tools": ["bg_start", "bg_status", "bg_result", "bg_list", "bg_stop"],
+        "includes": [],
+    },
 }
 
 

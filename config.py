@@ -88,6 +88,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fail_closed_default": False,              # 声明式 hook 默认 fail_closed
     },
 
+    # 后台任务（Phase 2b）
+    "bg_task": {
+        "enabled": True,                        # False 时 bg_* 工具隐藏
+        "max_concurrent": 5,
+        "default_timeout": 600,                 # bg_start 默认超时（秒）
+        "notification_stdout_cap": 500,         # 通知里 stdout 字符上限
+        "result_stdout_cap": 5000,              # bg_result 返回的 stdout 字符上限
+        "default_detach": False,                # bg_start 默认 detach
+    },
+
     # 终端
     "terminal": {
         "cwd": None,

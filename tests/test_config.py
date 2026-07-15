@@ -302,3 +302,46 @@ def test_default_config_hooks_settings_path_default_none():
     """hooks.settings_path 默认值应为 None。"""
     from config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["hooks"]["settings_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b Task 3: bg_task 配置块
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_has_bg_task_block():
+    """config.py 的 DEFAULT_CONFIG 应含 bg_task 块及所有必需键。"""
+    from config import DEFAULT_CONFIG
+    bg = DEFAULT_CONFIG["bg_task"]
+    required_keys = (
+        "enabled", "max_concurrent", "default_timeout",
+        "notification_stdout_cap", "result_stdout_cap",
+        "default_detach"
+    )
+    for key in required_keys:
+        assert key in bg, f"缺 {key}"
+
+
+def test_default_config_bg_task_defaults():
+    """bg_task 块的默认值应符合规范。"""
+    from config import DEFAULT_CONFIG
+    bg = DEFAULT_CONFIG["bg_task"]
+    assert bg["enabled"] is True
+    assert bg["max_concurrent"] == 5
+    assert bg["default_timeout"] == 600
+    assert bg["default_detach"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b Task 4: bg toolset
+# ---------------------------------------------------------------------------
+
+
+def test_bg_toolset_exists():
+    """toolsets.py 应含 bg 工具集，含 5 个后台任务工具。"""
+    from toolsets import TOOLSETS, resolve_toolset
+    assert "bg" in TOOLSETS
+    tools = resolve_toolset("bg")
+    required_tools = ("bg_start", "bg_status", "bg_result", "bg_list", "bg_stop")
+    for name in required_tools:
+        assert name in tools, f"缺 {name}"
