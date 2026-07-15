@@ -1106,3 +1106,45 @@ def test_e2e_aiagent_full_bg_lifecycle(tmp_path):
     assert isinstance(final, str)
     mgr.shutdown()
 
+
+# === P2c-T4: AIAgent 集成 cron_scheduler ===
+
+def test_aiagent_accepts_cron_scheduler_kwarg():
+    agent = _make_test_agent()
+    assert agent.cron_scheduler is None
+
+
+def test_aiagent_drains_cron_into_temporary_user_msg(tmp_path):
+    """cron drain_due 返回的消息作为 <scheduled_message> 临时 user 消息注入。"""
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.cron import CronScheduler
+
+    sched = CronScheduler(jobs_path=tmp_path / "jobs.json", enabled=False)
+    # 手动 push 一条通知
+    sched._notifications.append({
+        "job_id": "j1",
+        "message": "time to check backups",
+        "fired_at": "2026-07-12T15:30:00",
+    })
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        cron_scheduler=sched,
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hi")
+    # conversation_history 不该含 scheduled_message
+    for msg in agent.conversation_history:
+        assert "<scheduled_message>" not in msg.get("content", "")
+    sched.shutdown()
+
+
+def test_aiagent_no_cron_scheduler_backward_compat(tmp_path):
+    """cron_scheduler=None 时主循环不抛。"""
+    agent = _make_test_agent()
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hello")
+    assert agent.conversation_history[0]["content"] == "hello"
+

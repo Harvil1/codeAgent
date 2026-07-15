@@ -57,6 +57,7 @@ class AIAgent:
         config: dict = None,
         hooks_registry=None,   # === P2-T6 NEW ===
         bg_manager=None,       # === P2b-T5 NEW ===
+        cron_scheduler=None,   # === P2c-T4 NEW ===
     ):
         """
         参数：
@@ -146,6 +147,9 @@ class AIAgent:
         # === P2b-T5 NEW: 后台任务管理器 ===
         self.bg_manager = bg_manager
 
+        # === P2c-T4 NEW: cron 调度器 ===
+        self.cron_scheduler = cron_scheduler
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -200,6 +204,15 @@ class AIAgent:
                 logger.warning("drain_notifications 异常: %s", e)
                 bg_notifications = []
 
+        # === P2c-T4 NEW: drain cron 定时消息（临时，不进 history）===
+        cron_messages = []
+        if self.cron_scheduler:
+            try:
+                cron_messages = self.cron_scheduler.drain_due()
+            except Exception as e:
+                logger.warning("cron drain_due 异常: %s", e)
+                cron_messages = []
+
         # 1. 追加用户消息到历史
         self.conversation_history.append({
             "role": "user",
@@ -253,6 +266,19 @@ class AIAgent:
                 })
                 # 本轮通知已注入，清空避免后续轮次重复
                 bg_notifications = []
+
+            # === P2c-T4 NEW: 注入 cron 定时消息（临时，不进 history）===
+            if cron_messages:
+                sched_text = "\n".join(
+                    f"[Scheduled: {m['job_id']}] {m['message']}"
+                    for m in cron_messages
+                )
+                messages.append({
+                    "role": "user",
+                    "content": f"<scheduled_message>\n{sched_text}\n</scheduled_message>",
+                })
+                # 本轮注入后清空，避免后续轮次重复
+                cron_messages = []
 
             # TodoWrite 提醒：3 轮未更新时注入 reminder（临时，不进 history）
             if self.todo_manager and self.todo_manager.should_remind():
