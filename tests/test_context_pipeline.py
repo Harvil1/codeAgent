@@ -293,16 +293,20 @@ def test_compress_runs_l4_for_huge_conv(tmp_path):
 
 
 def test_compress_respects_max_attempts(tmp_path):
-    """attempt_count >= max_compress_attempts 时不再 L4。"""
+    """llm_compact_count >= max_compress_attempts 时不再 L4。
+
+    C2 修复后，L4 预算用 session_state.llm_compact_count 而非 attempt_count。
+    """
     msgs = _mk_msgs(80)
     state = CompressionSessionState()
+    state.llm_compact_count = 3  # 已达上限
     out, changed = compress_if_needed(
-        msgs, attempt_count=3, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config={**_DEFAULT_CFG, "max_compress_attempts": 3}, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
     # L1+L2 仍跑，L4 被跳过
-    assert state.llm_compact_count == 0
+    assert state.llm_compact_count == 3  # 未增长
 
 
 def test_compress_respects_cooldown(tmp_path):
