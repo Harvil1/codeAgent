@@ -1,161 +1,170 @@
-"""记忆系统测试。"""
-
-import json
-import tempfile
+"""多文件记忆系统测试。"""
+import time
 from pathlib import Path
 
 import pytest
 
-from agent.memory_store import MemoryStore
-from agent.memory_manager import MemoryManager
-from agent.memory_provider import MemoryProvider
-from plugins.memory.simple_provider import SimpleProvider
+from agent.memory_store import MemoryStore, MemoryEntry
 
 
-# ---------------------------------------------------------------------------
-# MemoryStore
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def tmp_store(tmp_path):
-    """提供临时目录的 MemoryStore。"""
-    return MemoryStore(tmp_path)
-
-
-def test_memory_store_add(tmp_store):
-    assert tmp_store.add("memory", "用户偏好简洁回复")
-    assert "用户偏好简洁回复" in tmp_store.memory_entries
-
-
-def test_memory_store_add_idempotent(tmp_store):
-    """重复 add 同一条记忆是幂等的。"""
-    tmp_store.add("memory", "相同内容")
-    tmp_store.add("memory", "相同内容")
-    assert tmp_store.memory_entries.count("相同内容") == 1
-
-
-def test_memory_store_add_user(tmp_store):
-    assert tmp_store.add("user", "资深后端工程师")
-    assert "资深后端工程师" in tmp_store.user_entries
-
-
-def test_memory_store_add_invalid_target(tmp_store):
-    assert tmp_store.add("invalid", "xxx") is False
-
-
-def test_memory_store_char_limit(tmp_path):
-    """超出字数限制时拒绝写入。"""
-    store = MemoryStore(tmp_path, memory_char_limit=10)
-    assert store.add("memory", "12345")  # 5 字符，OK
-    assert store.add("memory", "1234567890") is False  # 超限
-
-
-def test_memory_store_replace(tmp_store):
-    tmp_store.add("memory", "旧内容")
-    assert tmp_store.replace("memory", "旧内容", "新内容")
-    assert "新内容" in tmp_store.memory_entries
-    assert "旧内容" not in tmp_store.memory_entries
-
-
-def test_memory_store_remove(tmp_store):
-    tmp_store.add("memory", "要删除的")
-    assert tmp_store.remove("memory", "要删除的")
-    assert "要删除的" not in tmp_store.memory_entries
-
-
-def test_memory_store_modify_dispatch(tmp_store):
-    """modify() 统一入口能分发到 add/replace/remove。"""
-    assert tmp_store.modify("add", "memory", "条目A")
-    assert tmp_store.modify("replace", "memory", "条目B", old_content="条目A")
-    assert "条目B" in tmp_store.memory_entries
-    assert tmp_store.modify("remove", "memory", "条目B")
-    assert "条目B" not in tmp_store.memory_entries
-
-
-def test_memory_store_persist(tmp_path):
-    """写入后落盘，重新加载能读到。"""
-    store1 = MemoryStore(tmp_path)
-    store1.add("memory", "持久化测试")
-
-    store2 = MemoryStore(tmp_path)
-    assert "持久化测试" in store2.memory_entries
-
-
-def test_memory_store_snapshot(tmp_store):
-    tmp_store.add("memory", "记忆条目")
-    tmp_store.add("user", "用户条目")
-    snapshot = tmp_store.snapshot_for_prompt()
-    assert "记忆条目" in snapshot
-    assert "用户条目" in snapshot
-
-
-def test_memory_store_empty_snapshot(tmp_store):
-    """空记忆的 snapshot 是空字符串。"""
-    assert tmp_store.snapshot_for_prompt() == ""
-
-
-# ---------------------------------------------------------------------------
-# MemoryManager
-# ---------------------------------------------------------------------------
-
-def test_memory_manager_no_provider():
-    """没有外部 provider 时，所有方法都是安全的 no-op。"""
-    store = MemoryStore(tempfile.mkdtemp())
-    mgr = MemoryManager(store)
-    mgr.initialize("session-1")
-    assert mgr.build_system_prompt() == ""  # 空记忆
-    assert mgr.prefetch_all("query") == ""
-    mgr.sync_all("u", "a")  # 不应该报错
-    mgr.shutdown()
-
-
-def test_memory_manager_with_simple_provider(tmp_path):
-    """带 SimpleProvider 的 manager 能 sync_turn。"""
-    store = MemoryStore(tmp_path)
-    provider = SimpleProvider(tmp_path)
-    mgr = MemoryManager(store, external_provider=provider)
-
-    mgr.initialize("session-1")
-    mgr.sync_all("用户问题", "助手回答")
-
-    # 等待后台线程完成
-    mgr._sync_executor.shutdown(wait=True)
-
-    # 验证 provider 持久化了
-    assert provider._store_path.exists()
-    turns = json.loads(provider._store_path.read_text(encoding="utf-8"))
-    assert len(turns) == 1
-    assert turns[0]["user"] == "用户问题"
-    assert turns[0]["assistant"] == "助手回答"
-
-
-# ---------------------------------------------------------------------------
-# memory 工具集成（通过 registry）
-# ---------------------------------------------------------------------------
-
-def test_memory_tool_with_store(tmp_path):
-    """memory 工具能通过 kwargs 接收 memory_store 并调用 modify。"""
-    from tools.registry import registry
-
-    store = MemoryStore(tmp_path)
-    result = registry.dispatch(
-        "memory",
-        {"action": "add", "target": "memory", "content": "通过工具写入"},
-        memory_store=store,
+def test_save_creates_file_and_updates_index(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="用户偏好简洁回复",
+        description="用尽量少的字数回答",
+        type="user",
+        body="用户多次要求简短直接回复",
     )
-    data = json.loads(result)
-    assert data["success"] is True
-    assert "通过工具写入" in store.memory_entries
+    assert mid  # non-empty string
+    # 文件应存在
+    mem_file = tmp_path / ".memory" / f"{mid}.md"
+    assert mem_file.exists()
+    # 索引文件 MEMORY.md 也应被更新
+    index_text = tmp_path / "MEMORY.md"
+    assert index_text.exists()
+    assert mid in index_text.read_text(encoding="utf-8")
 
 
-def test_memory_tool_without_store():
-    """没有 memory_store 时返回明确错误。"""
-    from tools.registry import registry
-    result = registry.dispatch(
-        "memory",
-        {"action": "add", "target": "memory", "content": "xxx"},
-        # 不传 memory_store
+def test_save_minimal_fields(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="x", description="y", type="other",
+    )  # 无 body
+    entry = store.get(mid)
+    assert entry.body == ""
+
+
+def test_save_invalid_type_raises(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    with pytest.raises(ValueError):
+        store.save(name="x", description="y", type="invalid_kind", body="")
+
+
+def test_get_returns_entry(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t1", description="d", type="user", body="b")
+    entry = store.get(mid)
+    assert entry.id == mid
+    assert entry.name == "t1"
+    assert entry.type == "user"
+
+
+def test_get_unknown_returns_none(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    assert store.get("nonexistent") is None
+
+
+def test_list_all_returns_entries(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    store.save(name="t1", description="d", type="user", body="")
+    store.save(name="t2", description="d", type="project", body="")
+    all_entries = store.list_all()
+    assert len(all_entries) == 2
+
+
+def test_update_modifies_fields(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t1", description="d", type="user", body="b1")
+    store.update(mid, name="t1-new", body="b2")
+    entry = store.get(mid)
+    assert entry.name == "t1-new"
+    assert entry.body == "b2"
+    assert entry.description == "d"  # 未改
+
+
+def test_update_unknown_raises(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    with pytest.raises(KeyError):
+        store.update("nonexistent", body="x")
+
+
+def test_delete_moves_to_archive(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t1", description="d", type="user", body="b")
+    ok = store.delete(mid)
+    assert ok is True
+    # 主目录文件不存在
+    assert not (tmp_path / ".memory" / f"{mid}.md").exists()
+    # archive 下能找到
+    archives = list((tmp_path / ".archive").glob("memory-*/" + f"{mid}.md"))
+    assert len(archives) >= 1
+
+
+def test_delete_unknown_returns_false(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    assert store.delete("nonexistent") is False
+
+
+def test_load_body_returns_content(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t", description="d", type="user", body="完整内容")
+    assert store.load_body(mid) == "完整内容"
+
+
+def test_load_body_unknown_returns_none(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    assert store.load_body("nonexistent") is None
+
+
+def test_snapshot_for_prompt_returns_index_text(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    store.save(name="t1", description="描述1", type="user", body="")
+    store.save(name="t2", description="描述2", type="project", body="")
+    snap = store.snapshot_for_prompt()
+    assert "t1" in snap
+    assert "描述1" in snap
+    assert "t2" in snap
+
+
+def test_index_rebuilt_on_startup(tmp_path: Path):
+    """新建 store 时扫描 .memory/ 重建索引。"""
+    # 先用 store1 写两个 memory
+    store1 = MemoryStore(harvil_home=tmp_path)
+    mid1 = store1.save(name="t1", description="d", type="user", body="")
+    mid2 = store1.save(name="t2", description="d", type="project", body="")
+    # 再开一个 store（模拟下次会话），应能看到两条
+    store2 = MemoryStore(harvil_home=tmp_path)
+    all_entries = store2.list_all()
+    assert len(all_entries) == 2
+    assert {e.id for e in all_entries} == {mid1, mid2}
+
+
+def test_migrate_legacy_archives_old_files(tmp_path: Path):
+    """启动时检测旧 MEMORY.md / USER.md 格式（无 frontmatter），备份到 .archive/。"""
+    # 写一个旧格式 MEMORY.md
+    (tmp_path / "MEMORY.md").write_text(
+        "# Agent Memory\n\n- 老记忆 1\n- 老记忆 2\n",
+        encoding="utf-8",
     )
-    data = json.loads(result)
-    assert data["success"] is False
-    assert "未初始化" in data["error"]
+    (tmp_path / "USER.md").write_text(
+        "# User Profile\n\n- 老用户画像\n",
+        encoding="utf-8",
+    )
+
+    # 启动 store 应备份老文件 + 新建空索引
+    store = MemoryStore(harvil_home=tmp_path)
+    # 老文件已被新（空）索引覆盖
+    new_index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "老记忆" not in new_index
+    # archive 里有备份
+    archives = list((tmp_path / ".archive").glob("legacy-memory-*/MEMORY.md"))
+    assert len(archives) >= 1
+    assert "老记忆" in archives[0].read_text(encoding="utf-8")
+
+
+def test_malformed_frontmatter_skipped(tmp_path: Path, caplog):
+    """frontmatter 解析失败的文件跳过 + log warning。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    # 写一个合法的
+    good_mid = store.save(name="good", description="d", type="user", body="")
+    # 直接写一个坏文件到 .memory/
+    bad_file = tmp_path / ".memory" / "bad_mid.md"
+    bad_file.write_text(
+        "---\ninvalid: yaml: content\n---\nbody",
+        encoding="utf-8",
+    )
+    # 重新加载（模拟下次会话）
+    store2 = MemoryStore(harvil_home=tmp_path)
+    all_ids = {e.id for e in store2.list_all()}
+    assert good_mid in all_ids
+    assert "bad_mid" not in all_ids  # 被跳过
