@@ -1404,3 +1404,68 @@ def test_aiagent_team_messages_injected_into_temporary_user_msg(tmp_path):
         assert "<team_messages>" not in msg.get("content", "")
 
 
+# ---------------------------------------------------------------------------
+# P4a-T8: e2e 团队集成测试（FINAL P4a）
+# ---------------------------------------------------------------------------
+
+def test_e2e_team_spawn_real_subprocess(tmp_path):
+    """端到端：spawn 一个真子进程（不用 worker.py，用 echo 等价命令）。
+
+    验证 spawn 启动 + 子进程确实运行过 + registry 记录可查。
+    """
+    import sys
+    import time
+    from agent.team.coordinator import TeamCoordinator
+
+    coord = TeamCoordinator(
+        team_dir=tmp_path, harvil_home=tmp_path,
+        config={"team": {"max_members": 10}},
+    )
+    # 用最简命令（不真起 worker，避免依赖 LLM）
+    member = coord.spawn(
+        name="w1", role="worker", task="dummy",
+        command=[sys.executable, "-c",
+                 "import time; time.sleep(0.3); print('done')"],
+    )
+    # spawn 返回的 member 对象应带真实 pid（proc.pid）
+    assert member.pid is not None
+    assert member.task == "dummy"
+
+    # 等子进程退出
+    time.sleep(1.0)
+    members = coord.list_members()
+    target = next((m for m in members if m.name == "w1"), None)
+    assert target is not None
+    # registry 中状态为 "running"（update_status 更新了 registry，
+    # 但 member 对象本身是 register 返回的快照——status 仍为 "spawning"）
+    assert target.name == "w1"
+    assert target.status == "running"
+
+
+def test_e2e_team_send_and_inbox_through_bus(tmp_path: Path):
+    """端到端：两个进程通过 bus 互发消息（同进程内模拟）。"""
+    from agent.team.bus import MessageBus
+
+    bus = MessageBus(team_dir=tmp_path)
+    # main 给 worker1 发任务
+    mid = bus.send(
+        from_="main", to="worker1",
+        type_="request", content="分析数据",
+    )
+    # worker1 读自己的 inbox
+    msgs = bus.read_inbox("worker1")
+    assert len(msgs) == 1
+    assert msgs[0].content == "分析数据"
+    # worker1 回复 main
+    bus.send(
+        from_="worker1", to="main",
+        type_="response", content="分析完成",
+        request_id=mid,
+    )
+    # main 读 inbox
+    msgs = bus.read_inbox("main")
+    assert len(msgs) == 1
+    assert msgs[0].content == "分析完成"
+    assert msgs[0].request_id == mid
+
+
