@@ -1519,3 +1519,80 @@ def test_team_spawn_max_depth_blocks(tmp_path):
     assert parsed["error_type"] == "team_max_depth"
 
 
+# ---------------------------------------------------------------------------
+# Phase 4b Task 5: autonomous lifecycle e2e（mock）
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_autonomous_lifecycle_with_mock_agent(tmp_path):
+    """端到端：用 mock agent 跑 AutonomousLifecycle，验证状态转换。
+
+    避免 spawn 真子进程（依赖 LLM）。直接在测试进程内跑 lifecycle。
+    """
+    from agent.team.bus import MessageBus
+    from agent.team.lifecycle import (
+        AutonomousLifecycle, STATE_WORK, STATE_SHUTDOWN,
+    )
+
+    bus = MessageBus(team_dir=tmp_path)
+
+    work_count = {"n": 0}
+    def work_fn(task):
+        work_count["n"] += 1
+        return f"done-{task}"
+
+    lifecycle = AutonomousLifecycle(
+        work_fn=work_fn,
+        poll_inbox_fn=lambda: bus.read_inbox("w1"),
+        poll_tasks_fn=lambda: [],
+        claim_task_fn=lambda tid: False,
+        on_shutdown_fn=lambda: None,
+        idle_timeout=0.2,
+        poll_interval=0.05,
+    )
+    lifecycle.run(initial_task="initial task")
+    assert work_count["n"] == 1  # 只跑了 initial，IDLE 无消息超时
+    assert lifecycle.state == STATE_SHUTDOWN
+
+
+def test_e2e_autonomous_lifecycle_picks_up_message_mid_idle(tmp_path):
+    """IDLE 中 inbox 来消息 → 回 WORK。"""
+    import threading
+    import time as _time
+    from agent.team.bus import MessageBus
+    from agent.team.lifecycle import AutonomousLifecycle, STATE_SHUTDOWN
+
+    bus = MessageBus(team_dir=tmp_path)
+
+    work_log = []
+    def work_fn(task):
+        work_log.append(task)
+        return "ok"
+
+    # 后台线程在 100ms 后给 w1 发消息
+    def delayed_msg():
+        _time.sleep(0.1)
+        bus.send(from_="main", to="w1",
+                 type_="message", content="late task")
+
+    t = threading.Thread(target=delayed_msg)
+    t.start()
+
+    lifecycle = AutonomousLifecycle(
+        work_fn=work_fn,
+        poll_inbox_fn=lambda: bus.read_inbox("w1"),
+        poll_tasks_fn=lambda: [],
+        claim_task_fn=lambda tid: False,
+        idle_timeout=0.5,  # 长一点，等消息到
+        poll_interval=0.05,
+    )
+    lifecycle.run(initial_task="initial")
+    t.join()
+
+    # 应跑了 2 次（initial + late task）
+    assert len(work_log) == 2
+    assert work_log[0] == "initial"
+    assert work_log[1] == "late task"
+    assert lifecycle.state == STATE_SHUTDOWN
+
+

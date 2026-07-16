@@ -112,6 +112,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "default_role": "worker",               # 新成员默认角色
         "spawn_timeout": 600,                   # 子 agent 启动超时（秒）
         "max_members": 10,                      # 单队最大成员数
+        # === P4b-T4: autonomous 模式配置 ===
+        "autonomous_idle_timeout": 60.0,        # IDLE 状态超时秒数
+        "autonomous_poll_interval": 5.0,        # IDLE 轮询间隔
+        "max_depth": 2,                         # spawn 递归深度上限
     },
 
     # 终端

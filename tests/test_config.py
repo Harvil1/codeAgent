@@ -426,6 +426,20 @@ def test_default_config_team_defaults():
     assert t["max_members"] == 10
 
 
+# ---------------------------------------------------------------------------
+# Phase 4b Task 4: team autonomous 字段
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_team_autonomous_fields():
+    """config.py 的 DEFAULT_CONFIG['team'] 应含 autonomous 模式所需的 3 个新字段。"""
+    from config import DEFAULT_CONFIG
+    t = DEFAULT_CONFIG["team"]
+    assert t["autonomous_idle_timeout"] == 60.0
+    assert t["autonomous_poll_interval"] == 5.0
+    assert t["max_depth"] == 2
+
+
 def test_team_toolset_exists():
     """toolsets.py 应含 team 工具集，含 5 个协作工具名。
 
