@@ -396,3 +396,48 @@ def test_default_config_memory_multifile_defaults():
     assert m["retrieval_enabled"] is True
     assert m["retrieval_max_results"] == 5
     assert m["retrieval_model"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4a Task 5: team 配置块 + toolset
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_has_team_block():
+    """config.py 的 DEFAULT_CONFIG 应含 team 块及所有必需键。"""
+    from config import DEFAULT_CONFIG
+    t = DEFAULT_CONFIG["team"]
+    required_keys = (
+        "enabled", "team_dir", "default_role",
+        "spawn_timeout", "max_members",
+    )
+    for key in required_keys:
+        assert key in t, f"缺 {key}"
+
+
+def test_default_config_team_defaults():
+    """team 块的默认值应符合规范。"""
+    from config import DEFAULT_CONFIG
+    t = DEFAULT_CONFIG["team"]
+    assert t["enabled"] is True
+    assert t["team_dir"] is None
+    assert t["default_role"] == "worker"
+    assert t["spawn_timeout"] == 600
+    assert t["max_members"] == 10
+
+
+def test_team_toolset_exists():
+    """toolsets.py 应含 team 工具集，含 5 个协作工具名。
+
+    注：只校验 TOOLSETS dict 里存在 team key 和工具名列表，
+    不实际 import tools.team_tool（T4 才做）。
+    """
+    from toolsets import TOOLSETS
+    assert "team" in TOOLSETS
+    tools = TOOLSETS["team"]["tools"]
+    required_tools = (
+        "team_spawn", "team_send", "team_status",
+        "team_broadcast", "team_members",
+    )
+    for name in required_tools:
+        assert name in tools, f"缺 {name}"

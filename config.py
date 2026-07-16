@@ -105,6 +105,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "poll_interval_seconds": 30.0,          # 后台线程 tick 间隔
     },
 
+    # Team 多 agent 协作（Phase 4a）
+    "team": {
+        "enabled": True,                        # False 时 team_* 工具隐藏
+        "team_dir": None,                       # None → 默认 ~/.agent/.team/
+        "default_role": "worker",               # 新成员默认角色
+        "spawn_timeout": 600,                   # 子 agent 启动超时（秒）
+        "max_members": 10,                      # 单队最大成员数
+    },
+
     # 终端
     "terminal": {
         "cwd": None,

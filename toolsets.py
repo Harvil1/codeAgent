@@ -61,6 +61,12 @@ TOOLSETS: Dict[str, dict] = {
         "tools": ["bg_start", "bg_status", "bg_result", "bg_list", "bg_stop"],
         "includes": [],
     },
+    "team": {
+        "description": "Team 多 agent 协作（Phase 4a）",
+        "tools": ["team_spawn", "team_send", "team_status", "team_broadcast",
+                  "team_members"],
+        "includes": [],
+    },
 }
 
 
