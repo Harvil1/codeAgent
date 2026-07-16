@@ -1,97 +1,141 @@
-"""记忆工具：让 agent 主动保存/修改持久化记忆。
+"""记忆工具：管理持久化多文件记忆。
 
-target：
-  - 'memory': agent 的笔记（环境事实、项目约定）
-  - 'user': 用户画像（偏好、沟通风格）
-
-action：
-  - 'add': 添加一条新记忆
-  - 'replace': 替换已有记忆（按旧内容匹配）
-  - 'remove': 删除一条记忆
-
-注意：写入立即落盘，但下次会话才注入到 system prompt（保护 prompt cache）。
-
-当前实现：占位版本，handler 通过 kwargs 接收 memory_store。
-完整实现在 04-memory.md 中完善（让 handler 真正调用 memory_store.modify）。
+action:
+  - save: 创建新记忆（必需 name/description/type）
+  - update: 更新已有记忆字段
+  - delete: 软删除（移到 .archive/）
+  - load: 读 body
+  - list: 列出所有记忆
 """
-
 import json
+import logging
+
 from tools.registry import registry
+
+logger = logging.getLogger(__name__)
 
 
 MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
-        "管理持久化记忆（跨会话保存）。用于保存用户偏好、"
-        "环境细节、工具怪癖等稳定事实。\n"
-        "写入会立即落盘，但下次会话才注入到 system prompt"
-        "（保护 prompt cache）。\n\n"
-        "target:\n"
-        "  - 'memory': agent 的笔记（环境事实、项目约定）\n"
-        "  - 'user': 用户画像（偏好、沟通风格）\n\n"
+        "管理持久化记忆（跨会话保存）。每条记忆是一个独立文件，含 frontmatter + body。\n"
+        "写入立即落盘，但索引下次会话才注入到 system prompt（保护 prompt cache）。\n\n"
         "action:\n"
-        "  - 'add': 添加一条新记忆\n"
-        "  - 'replace': 替换已有记忆（按旧内容匹配）\n"
-        "  - 'remove': 删除一条记忆"
+        "  - save: 创建新记忆（必需 name/description/type）\n"
+        "  - update: 更新字段（必需 id）\n"
+        "  - delete: 软删除（必需 id）\n"
+        "  - load: 读完整 body（必需 id）\n"
+        "  - list: 列出所有记忆\n\n"
+        "type 可选值: user / feedback / project / reference / other"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
+                "enum": ["save", "update", "delete", "load", "list"],
             },
-            "target": {
+            "id": {"type": "string", "description": "update/delete/load 时必需"},
+            "name": {"type": "string", "description": "save 时必需；update 可选"},
+            "description": {"type": "string", "description": "save 时必需；update 可选"},
+            "type": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "default": "memory",
+                "enum": ["user", "feedback", "project", "reference", "other"],
+                "description": "save 时必需；update 可选",
             },
-            "content": {
-                "type": "string",
-                "description": "记忆内容（声明式事实，不是指令）",
-            },
-            "old_content": {
-                "type": "string",
-                "description": "replace 时的旧内容",
-            },
+            "body": {"type": "string", "description": "save/update 时可选"},
         },
-        "required": ["action", "content"],
+        "required": ["action"],
     },
 }
 
 
 def _handle_memory(args: dict, **kwargs) -> str:
-    """处理记忆操作。
-
-    通过 kwargs 接收 memory_store（由 agent 在 dispatch 时注入）。
-    04 阶段会完善：真正调用 memory_store.modify()。
-    """
     action = args.get("action")
-    target = args.get("target", "memory")
-    content = args.get("content", "")
-    old_content = args.get("old_content", "")
+    store = kwargs.get("memory_store")
 
-    memory_store = kwargs.get("memory_store")
-
-    if memory_store is None:
-        # 记忆系统未初始化（例如子代理无记忆场景）
+    if store is None:
         return json.dumps({
-            "success": False,
-            "error": "记忆系统未初始化",
+            "success": False, "error": "记忆系统未初始化",
         }, ensure_ascii=False)
 
     try:
-        memory_store.modify(action, target, content, old_content)
+        if action == "save":
+            mid = store.save(
+                name=args.get("name", ""),
+                description=args.get("description", ""),
+                type=args.get("type", "other"),
+                body=args.get("body", ""),
+            )
+            return json.dumps({
+                "success": True, "action": "save", "id": mid,
+                "message": "已保存（索引下次会话生效）",
+            }, ensure_ascii=False)
+
+        if action == "update":
+            mid = args.get("id", "")
+            entry = store.update(
+                mid,
+                name=args.get("name"),
+                description=args.get("description"),
+                type=args.get("type"),
+                body=args.get("body"),
+            )
+            return json.dumps({
+                "success": True, "action": "update", "id": mid,
+                "entry": {
+                    "name": entry.name, "description": entry.description,
+                    "type": entry.type,
+                },
+            }, ensure_ascii=False)
+
+        if action == "delete":
+            mid = args.get("id", "")
+            ok = store.delete(mid)
+            if not ok:
+                return json.dumps({
+                    "success": False, "error": f"未找到: {mid}",
+                }, ensure_ascii=False)
+            return json.dumps({
+                "success": True, "action": "delete", "id": mid,
+                "message": "已软删除到 .archive/",
+            }, ensure_ascii=False)
+
+        if action == "load":
+            mid = args.get("id", "")
+            entry = store.get(mid)
+            if entry is None:
+                return json.dumps({
+                    "success": False, "error": f"未找到: {mid}",
+                }, ensure_ascii=False)
+            return json.dumps({
+                "success": True, "id": mid,
+                "name": entry.name, "description": entry.description,
+                "type": entry.type, "body": entry.body,
+                "created_at": entry.created_at.isoformat(timespec="seconds"),
+                "updated_at": entry.updated_at.isoformat(timespec="seconds"),
+            }, ensure_ascii=False)
+
+        if action == "list":
+            entries = store.list_all()
+            summaries = [
+                {"id": e.id, "name": e.name, "description": e.description, "type": e.type}
+                for e in entries
+            ]
+            return json.dumps({
+                "success": True, "count": len(entries), "memories": summaries,
+            }, ensure_ascii=False)
+
         return json.dumps({
-            "success": True,
-            "action": action,
-            "target": target,
-            "message": f"已{action}到 {target} 记忆（下次会话生效）",
+            "success": False, "error": f"未知 action: {action}",
         }, ensure_ascii=False)
+
+    except (ValueError, KeyError) as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
     except Exception as e:
+        logger.exception("memory 工具异常")
         return json.dumps({
-            "success": False,
-            "error": str(e),
+            "success": False, "error": f"内部错误: {e}",
         }, ensure_ascii=False)
 
 

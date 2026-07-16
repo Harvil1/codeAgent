@@ -168,3 +168,70 @@ def test_malformed_frontmatter_skipped(tmp_path: Path, caplog):
     all_ids = {e.id for e in store2.list_all()}
     assert good_mid in all_ids
     assert "bad_mid" not in all_ids  # 被跳过
+
+
+# ---------------------------------------------------------------------------
+# T3: memory 工具 5-action 测试（_handle_memory 接口）
+# ---------------------------------------------------------------------------
+import json
+
+from tools.memory_tool import _handle_memory
+
+
+def _run(action, store, **kwargs):
+    args = {"action": action, **kwargs}
+    result_str = _handle_memory(args, memory_store=store)
+    return json.loads(result_str)
+
+
+def test_memory_tool_save(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    parsed = _run("save", store, name="t1", description="d",
+                  type="user", body="b")
+    assert parsed["success"] is True
+    assert "id" in parsed
+
+
+def test_memory_tool_list(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    store.save(name="t1", description="d", type="user", body="")
+    parsed = _run("list", store)
+    assert parsed["success"] is True
+    assert parsed["count"] == 1
+
+
+def test_memory_tool_load(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t", description="d", type="user", body="full body")
+    parsed = _run("load", store, id=mid)
+    assert parsed["success"] is True
+    assert parsed["body"] == "full body"
+
+
+def test_memory_tool_update(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t", description="d", type="user", body="b1")
+    parsed = _run("update", store, id=mid, body="b2")
+    assert parsed["success"] is True
+    assert store.get(mid).body == "b2"
+
+
+def test_memory_tool_delete(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="t", description="d", type="user", body="")
+    parsed = _run("delete", store, id=mid)
+    assert parsed["success"] is True
+
+
+def test_memory_tool_load_unknown(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    parsed = _run("load", store, id="nonexistent")
+    assert parsed["success"] is False
+    assert "error" in parsed
+
+
+def test_memory_tool_save_invalid_type(tmp_path: Path):
+    store = MemoryStore(harvil_home=tmp_path)
+    parsed = _run("save", store, name="t", description="d",
+                  type="invalid_kind", body="")
+    assert parsed["success"] is False
