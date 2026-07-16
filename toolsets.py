@@ -28,6 +28,8 @@ _CORE_TOOLS = [
     "todo_write",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）
     "task_create", "task_update", "task_complete", "task_list",
+    # Python 代码沙箱（让 LLM 直接写代码执行）
+    "execute_code",
 ]
 
 TOOLSETS: Dict[str, dict] = {

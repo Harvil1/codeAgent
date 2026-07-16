@@ -127,6 +127,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "shell": None,
     },
 
+    # execute_code 沙箱（让 LLM 直接写 Python 代码执行）
+    "execute_code": {
+        "enabled": True,             # False 时 execute_code 工具隐藏
+        "default_timeout": 30,       # 默认超时秒数
+        "require_approval": True,    # 首次执行审批，会话内缓存
+        "cwd": None,                 # None → 继承 terminal 的 cwd
+    },
+
     # 记忆
     "memory": {
         "enabled": True,
