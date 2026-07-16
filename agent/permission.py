@@ -9,7 +9,7 @@ L1（黑名单）是零成本防线，防止灾难性误操作。
 L2（路径白名单）保护用户文件和密钥。
 L3（审批）给用户最终决定权，但会话内缓存避免重复询问。
 """
-
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +19,7 @@ from typing import Callable, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # 结果类型
 # ---------------------------------------------------------------------------
-
+logger = logging.getLogger(__name__)
 @dataclass
 class PermissionResult:
     allowed: bool
