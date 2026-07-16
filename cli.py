@@ -93,6 +93,37 @@ class RuntimeContext:
         else:
             self.cron_scheduler = None
 
+        # === P4a-T7 NEW: Agent Teams ===
+        self.team_bus = None
+        self.team_coordinator = None
+        team_cfg = self.config.get("team", {})
+        if team_cfg.get("enabled", True):
+            team_path = team_cfg.get("team_dir") or (
+                Path(self.home) / ".team"
+            )
+            try:
+                from agent.team.bus import MessageBus
+                from agent.team.coordinator import TeamCoordinator
+                self.team_bus = MessageBus(team_dir=Path(team_path))
+                self.team_coordinator = TeamCoordinator(
+                    team_dir=Path(team_path),
+                    harvil_home=Path(self.home),
+                    config=self.config,
+                )
+                # 主 agent 自注册为 lead（仅当 registry 还没有 main running）
+                members = self.team_coordinator.list_members()
+                if not any(m.name == "main" and m.status == "running" for m in members):
+                    try:
+                        self.team_coordinator.register(
+                            name="main", role="lead", status="running",
+                        )
+                    except ValueError:
+                        pass  # 已存在，跳过
+            except Exception as e:
+                logger.error("Team 系统初始化失败: %s", e)
+                self.team_bus = None
+                self.team_coordinator = None
+
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
@@ -202,6 +233,9 @@ class RuntimeContext:
             bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
             cron_scheduler=self.cron_scheduler,  # === P2c-T5 NEW ===
             memory_retriever=self.memory_retriever,  # === Mem-T7 NEW ===
+            team_bus=self.team_bus,  # === P4a-T7 NEW ===
+            team_coordinator=self.team_coordinator,  # === P4a-T7 NEW ===
+            team_name="main",  # === P4a-T7 NEW ===
         )
 
     def _maybe_trigger_curator(self):
@@ -288,6 +322,13 @@ class RuntimeContext:
                 self.cron_scheduler.shutdown()
             except Exception as e:
                 logger.warning("cron_scheduler shutdown 失败: %s", e)
+
+        # === P4a-T7 NEW: 主 agent 标记 stopped ===
+        if hasattr(self, "team_coordinator") and self.team_coordinator:
+            try:
+                self.team_coordinator.update_status("main", "completed")
+            except Exception as e:
+                logger.warning("team_coordinator shutdown 失败: %s", e)
 
 
 # ---------------------------------------------------------------------------
