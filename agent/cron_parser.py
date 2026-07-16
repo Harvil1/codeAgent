@@ -4,11 +4,8 @@
 每字段语法：* | N | */N | N-M | N,M,K | N-M/S
 """
 
-import logging
 from datetime import datetime
 from typing import Set
-
-logger = logging.getLogger(__name__)
 
 FIELD_RANGES = {
     "minute": (0, 59),
@@ -62,8 +59,8 @@ def _parse_part(part: str, min_val: int, max_val: int) -> Set[int]:
             v = int(part)
         except ValueError:
             raise ValueError(f"invalid value '{part}'")
-        if "/" in part or step > 1:
-            # '5/N' 形式：从 5 到 max_val，步进 N
+        if step > 1:
+            # 'N/S' 形式：从 N 到 max_val，步进 S
             start, end = v, max_val
         else:
             _check_range(v, min_val, max_val, part)

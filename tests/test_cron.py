@@ -1,6 +1,5 @@
 """CronScheduler 测试。"""
 import json
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from agent.cron import CronScheduler, CronJob
-from agent.cron_parser import cron_match
 
 
 def _write_jobs(path: Path, jobs: list):

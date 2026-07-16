@@ -6,7 +6,6 @@ import json
 import logging
 import subprocess
 import sys
-import threading
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path

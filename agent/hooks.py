@@ -1,7 +1,7 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
 4 种 event：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
-2 种注册：programmatic（Python 函数）/ declarative（子进程脚本，T3 实现）
+2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
 失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
 """
 import logging
@@ -103,7 +103,7 @@ class HookRegistry:
                 if hook.kind == "programmatic":
                     new_prompt = hook.fn(prompt)
                 else:
-                    # T3 接入 declarative
+                    # declarative hook
                     new_prompt = self._invoke_declarative_user_prompt(hook, prompt, session_id)
                 if new_prompt is not None:
                     prompt = new_prompt
@@ -143,7 +143,7 @@ class HookRegistry:
                 if hook.kind == "programmatic":
                     result = hook.fn(tool_name, current_args)
                 else:
-                    # T3 接入 declarative
+                    # declarative hook
                     result = self._invoke_declarative_pre_tool(hook, tool_name, current_args, session_id)
                 if result is None:
                     continue

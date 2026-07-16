@@ -1,5 +1,4 @@
 """多文件记忆系统测试。"""
-import time
 from pathlib import Path
 
 import pytest
@@ -152,7 +151,7 @@ def test_migrate_legacy_archives_old_files(tmp_path: Path):
     assert "老记忆" in archives[0].read_text(encoding="utf-8")
 
 
-def test_malformed_frontmatter_skipped(tmp_path: Path, caplog):
+def test_malformed_frontmatter_skipped(tmp_path: Path):
     """frontmatter 解析失败的文件跳过 + log warning。"""
     store = MemoryStore(harvil_home=tmp_path)
     # 写一个合法的

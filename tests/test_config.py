@@ -434,7 +434,7 @@ def test_default_config_team_autonomous_fields():
 
 
 def test_team_toolset_exists():
-    """toolsets.py 应含 team 工具集，含 5 个协作工具名。
+    """toolsets.py 应含 team 工具集，含 6 个（含 idle）协作工具名。
 
     注：只校验 TOOLSETS dict 里存在 team key 和工具名列表，
     不实际 import tools.team_tool（T4 才做）。
@@ -444,7 +444,7 @@ def test_team_toolset_exists():
     tools = TOOLSETS["team"]["tools"]
     required_tools = (
         "team_send", "team_inbox", "team_members",
-        "team_spawn", "team_shutdown",
+        "team_spawn", "team_shutdown", "idle",
     )
     for name in required_tools:
         assert name in tools, f"缺 {name}"
