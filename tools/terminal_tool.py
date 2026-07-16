@@ -24,13 +24,11 @@ def _finalize_output(
     harvil_home,
     config: Optional[dict],
 ) -> str:
-    """根据 use_new_pipeline 开关决定是否走 offload。
+    """超阈值内容走 offload（落盘 + 预览）。
 
-    开关关闭（默认）时原样返回；开关开启时超阈值内容走 maybe_offload。
+    Phase 1 Commit 7 后：原 ``use_new_pipeline`` 开关已移除，offload 始终启用。
+    若调用方需要关闭 offload，直接不传 ``tool_call_id`` 或 ``harvil_home`` 即可。
     """
-    use_new = (config or {}).get("context", {}).get("use_new_pipeline", False)
-    if not use_new:
-        return result_content
     # offload 需要 tool_call_id 和 harvil_home
     if not tool_call_id or not harvil_home:
         return result_content
@@ -131,7 +129,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         stdout_truncated_raw = _truncate_output(result.stdout)
         stderr_truncated_raw = _truncate_output(result.stderr)
 
-        # 大输出 offload（由 use_new_pipeline 开关控制）
+        # 大输出 offload（Phase 1 后始终启用）
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
         harvil_home = kwargs.get("harvil_home")

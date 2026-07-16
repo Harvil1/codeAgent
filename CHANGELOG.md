@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [Unreleased]
+
+### Removed
+- `agent.context_compressor.maybe_compress` 函数（Phase 1 双轨期结束；新管线 `compress_if_needed` 默认）
+- `MESSAGES_BEFORE_COMPRESS`、`KEEP_RECENT_MESSAGES` 常量
+- `config.context.use_new_pipeline` 字段（不再需要开关）
+- `tests/test_context.py::test_maybe_compress_emits_deprecation_warning`
+- `tests/test_integration.py::test_aiagent_old_pipeline_explicit_false_no_crash`
+
+### Migration
+若你之前在 config.yaml 配了 `context.use_new_pipeline: false`，删除此行即可。
+新管线已经是默认且唯一路径。
+
 ## v0.11.0 - 2026-07-12
 
 ### 新增

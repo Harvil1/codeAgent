@@ -28,7 +28,6 @@ from openai import OpenAI
 
 from agent.budget import IterationBudget
 from agent.prompt_builder import build_system_prompt
-from agent.context_compressor import maybe_compress
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +141,7 @@ class AIAgent:
         # 上下文压缩配置
         self.compression_enabled = True
         self._compression_attempts = 0
-        # 完整 config（用于 context.use_new_pipeline 等开关）
+        # 完整 config（用于 context 阈值、hooks 等开关）
         self.config: dict = config or {}
 
         # === P2-T6 NEW: hooks 系统 ===
@@ -375,34 +374,22 @@ class AIAgent:
                     messages.append({"role": "user", "content": reminder})
 
             # 上下文压缩（接近 token 上限时触发）
+            # Phase 1 Commit 7：双轨期结束，直接走新管线
             if self.compression_enabled:
-                use_new = self.config.get("context", {}).get(
-                    "use_new_pipeline", False,
+                if not hasattr(self, "_compress_session_state"):
+                    from agent.context_pipeline import CompressionSessionState
+                    self._compress_session_state = CompressionSessionState()
+                from agent.context_pipeline import compress_if_needed
+                ctx_cfg = self.config.get("context", {})
+                messages, compressed = compress_if_needed(
+                    messages,
+                    llm_client=self.llm_client,
+                    model=self.model,
+                    config=ctx_cfg,
+                    session_state=self._compress_session_state,
+                    agent_home=self.harvil_home,
+                    session_id=self.session_id,
                 )
-                if use_new:
-                    # 新管线：L1/L2/L4 + transcript 快照
-                    if not hasattr(self, "_compress_session_state"):
-                        from agent.context_pipeline import CompressionSessionState
-                        self._compress_session_state = CompressionSessionState()
-                    from agent.context_pipeline import compress_if_needed
-                    ctx_cfg = self.config.get("context", {})
-                    messages, compressed = compress_if_needed(
-                        messages,
-                        llm_client=self.llm_client,
-                        model=self.model,
-                        config=ctx_cfg,
-                        session_state=self._compress_session_state,
-                        agent_home=self.harvil_home,
-                        session_id=self.session_id,
-                    )
-                else:
-                    # 旧路径（双轨期保留，已废弃）
-                    messages, compressed = maybe_compress(
-                        messages,
-                        attempt_count=self._compression_attempts,
-                        model=self.model,
-                        llm_client=self.llm_client,
-                    )
                 if compressed:
                     # 压缩会修改历史，需要同步并重建 system prompt
                     self.conversation_history = messages[1:]  # 跳过 system
@@ -427,10 +414,7 @@ class AIAgent:
                     or "context_length" in err_str
                     or "maximum context" in err_str
                 )
-                use_new = self.config.get("context", {}).get(
-                    "use_new_pipeline", False,
-                )
-                if (is_prompt_too_long and use_new
+                if (is_prompt_too_long
                         and not getattr(self, "_reacted", False)):
                     from agent.context_pipeline import reactive_compact
                     if not hasattr(self, "_compress_session_state"):

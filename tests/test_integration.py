@@ -358,41 +358,19 @@ def test_compress_if_needed_signature_matches_integration():
     assert any("snip_compact" in m.get("content", "") for m in out)
 
 
-def test_aiagent_old_pipeline_explicit_false_no_crash(tmp_path):
-    """use_new_pipeline=False（显式）时，AIAgent 走旧 maybe_compress 路径不抛。
-
-    默认开关已切为 True（Commit 6），本测试显式设 False 验证旧路径仍然可用。
-    """
-    agent = AIAgent(
-        api_key="fake",
-        model="test",
-        enabled_toolsets=[],
-        harvil_home=tmp_path,
-        config={"context": {"use_new_pipeline": False}},
-    )
-    agent.llm_client = _make_mock_llm_client(response_text="好的")
-    # 显式设 False
-    assert agent.config.get("context", {}).get("use_new_pipeline") is False
-    # compression_enabled 默认 True，主循环会调用 maybe_compress（旧路径）
-    response = agent.chat("hi")
-    assert response == "好的"
-
-
 def test_aiagent_new_pipeline_flag_true(tmp_path):
-    """use_new_pipeline=True 时走新管线（不抛即可）。
+    """新管线是唯一路径（Commit 7 后双轨期结束）。
 
-    端到端验证在 Task 11；此处只确认开关分支被正确命中。
+    端到端验证在 Task 11；此处只确认短对话不抛。
     """
     agent = AIAgent(
         api_key="fake",
         model="test",
         enabled_toolsets=[],
         harvil_home=tmp_path,
-        config={"context": {"use_new_pipeline": True}},
     )
     agent.llm_client = _make_mock_llm_client(response_text="ok")
-    assert agent.config.get("context", {}).get("use_new_pipeline") is True
-    # 短对话不会触发任何压缩，开关分支只是被命中
+    # 短对话不会触发任何压缩
     response = agent.chat("hi")
     assert response == "ok"
 
@@ -408,24 +386,23 @@ def test_prompt_builder_includes_offload_guidance():
     assert ".transcripts" in TOOL_USAGE_GUIDANCE
 
 
-def test_terminal_offload_not_triggered_when_flag_off(tmp_path):
-    """use_new_pipeline=False 时，terminal 大输出不触发 offload。"""
+def test_terminal_offload_not_triggered_when_no_tool_call_id(tmp_path):
+    """无 tool_call_id 时，terminal 大输出不触发 offload。"""
     # 直接调 handler，模拟大 stdout
     long_stdout = "x" * 50000
     args = {"command": f"echo {long_stdout[:10]}"}
     result = _handle_terminal_direct(args, harvil_home=tmp_path, config={})
-    # 开关 False，返回原样 JSON（不含 offload 标记）
+    # 无 tool_call_id，返回原样 JSON（不含 offload 标记）
     # 注意：echo 命令真实执行，但输出远小于 50000（shell 截断）
-    # 这里主要验证 _finalize_output 不介入
     data = json.loads(result)
     assert "truncated" not in data  # 没有 offload 截断字段
 
 
-def test_terminal_offload_triggered_when_flag_on(tmp_path):
-    """use_new_pipeline=True 且 stdout 超阈值时，走 offload。"""
+def test_terminal_offload_triggered_when_above_threshold(tmp_path):
+    """stdout 超阈值时，走 offload（Phase 1 后始终启用）。"""
     from tools.terminal_tool import _finalize_output as terminal_finalize
     long_content = "x" * 50000
-    config = {"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}}
+    config = {"context": {"output_offload_threshold": 30000}}
     result = terminal_finalize(long_content, "call_test_offload", tmp_path, config)
     parsed = json.loads(result)
     assert parsed.get("truncated") is True
@@ -433,27 +410,27 @@ def test_terminal_offload_triggered_when_flag_on(tmp_path):
     assert "preview" in parsed
 
 
-def test_terminal_offload_not_triggered_when_flag_off_explicit():
-    """use_new_pipeline=False 时 _finalize_output 原样返回。"""
+def test_terminal_offload_not_triggered_without_harvil_home():
+    """无 harvil_home 时 _finalize_output 原样返回。"""
     from tools.terminal_tool import _finalize_output as terminal_finalize
     content = "x" * 50000
     result = terminal_finalize(content, "call_no_offload", None, {})
     assert result == content  # 原样返回
 
 
-def test_file_read_offload_triggered_when_flag_on(tmp_path):
-    """use_new_pipeline=True 且文件内容超阈值时，read_file 走 offload。"""
+def test_file_read_offload_triggered_when_above_threshold(tmp_path):
+    """文件内容超阈值时，read_file 走 offload（Phase 1 后始终启用）。"""
     from tools.file_operations import _finalize_output as file_finalize
     long_content = "y" * 50000
-    config = {"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}}
+    config = {"context": {"output_offload_threshold": 30000}}
     result = file_finalize(long_content, "call_file_offload", tmp_path, config)
     parsed = json.loads(result)
     assert parsed.get("truncated") is True
     assert "full_at" in parsed
 
 
-def test_file_read_offload_not_triggered_when_flag_off():
-    """use_new_pipeline=False 时 file _finalize_output 原样返回。"""
+def test_file_read_offload_not_triggered_without_harvil_home():
+    """无 harvil_home 时 file _finalize_output 原样返回。"""
     from tools.file_operations import _finalize_output as file_finalize
     content = "y" * 50000
     result = file_finalize(content, "call_no_file", None, {})
@@ -472,7 +449,7 @@ def test_handle_function_call_passes_tool_call_id_and_config(tmp_path):
         {"path": str(big_file)},
         harvil_home=tmp_path,
         tool_call_id="call_integration_1",
-        config={"context": {"use_new_pipeline": True, "output_offload_threshold": 30000}},
+        config={"context": {"output_offload_threshold": 30000}},
     )
     data = json.loads(result)
     # 开关开启 + 文件大 → 应该走 offload（content 字段被替换）
@@ -616,7 +593,7 @@ def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
 def test_aiagent_chat_long_conversation_triggers_pipeline(tmp_path):
     """I2: AIAgent.chat() 在长对话中触发新管线，验证 C1/C2 修复。
 
-    - 构造 AIAgent，启用 use_new_pipeline
+    - 构造 AIAgent（新管线是唯一路径）
     - 注入 > 50 条历史消息
     - 调用 chat("continue") 触发一轮 LLM
     - 断言 _compress_session_state.current_turn > 0（C1: increment_turn 被调用）
@@ -627,7 +604,6 @@ def test_aiagent_chat_long_conversation_triggers_pipeline(tmp_path):
         model="test",
         enabled_toolsets=[],
         harvil_home=tmp_path,
-        config={"context": {"use_new_pipeline": True}},
     )
     agent.llm_client = _make_mock_llm_client(response_text="好的，继续")
 

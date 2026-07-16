@@ -9,9 +9,8 @@ from agent.prompt_builder import (
     _build_skill_index, _extract_description,
 )
 from agent.context_compressor import (
-    maybe_compress, _fix_tool_call_pairs, _summarize_conversation,
+    _fix_tool_call_pairs, _summarize_conversation,
     _rule_based_summary, estimate_message_tokens,
-    MESSAGES_BEFORE_COMPRESS, KEEP_RECENT_MESSAGES,
 )
 
 
@@ -151,74 +150,7 @@ def test_extract_description_single_quotes():
 
 
 # ---------------------------------------------------------------------------
-# maybe_compress
-# ---------------------------------------------------------------------------
-
-def _make_messages(count, include_system=True):
-    """生成测试消息列表。"""
-    msgs = []
-    if include_system:
-        msgs.append({"role": "system", "content": "system prompt"})
-    for i in range(count):
-        msgs.append({"role": "user", "content": f"消息 {i}"})
-        msgs.append({"role": "assistant", "content": f"回复 {i}"})
-    return msgs
-
-
-def test_maybe_compress_not_enough_messages():
-    """消息数不足时不压缩。"""
-    msgs = _make_messages(5)
-    result, compressed = maybe_compress(msgs, attempt_count=0)
-    assert compressed is False
-    assert result == msgs
-
-
-def test_maybe_compress_max_attempts():
-    """压缩次数用完时不压缩。"""
-    msgs = _make_messages(30)
-    result, compressed = maybe_compress(msgs, attempt_count=3)
-    assert compressed is False
-
-
-def test_maybe_compress_triggers_with_llm():
-    """达到阈值 + 有 LLM 客户端时压缩。"""
-    from types import SimpleNamespace
-
-    # 构造足够的消息
-    msgs = _make_messages(25)
-
-    # SimpleNamespace 构造 mock 客户端
-    def fake_create(**kw):
-        return SimpleNamespace(
-            choices=[SimpleNamespace(
-                message=SimpleNamespace(content="这是总结")
-            )]
-        )
-
-    client = SimpleNamespace(chat_completions=fake_create)
-
-    result, compressed = maybe_compress(
-        msgs, attempt_count=0, llm_client=client,
-    )
-    assert compressed is True
-    assert len(result) < len(msgs)
-    # system 保留
-    assert result[0]["role"] == "system"
-    # 包含总结消息
-    assert any("总结" in m.get("content", "") for m in result)
-
-
-def test_maybe_compress_fallback_rule_based():
-    """无 LLM 客户端时降级到规则提取。"""
-    msgs = _make_messages(25)
-    result, compressed = maybe_compress(msgs, attempt_count=0, llm_client=None)
-    assert compressed is True
-    # 规则提取保留 user 消息
-    assert any("规则提取" in m.get("content", "") for m in result)
-
-
-# ---------------------------------------------------------------------------
-# _fix_tool_call_pairs
+# _fix_tool_call_pairs（pipeline 复用）
 # ---------------------------------------------------------------------------
 
 def test_fix_pairs_no_issues():
@@ -285,32 +217,3 @@ def test_estimate_tokens():
     msgs = [{"role": "user", "content": "a" * 30}]
     tokens = estimate_message_tokens(msgs)
     assert tokens == 10  # 30 / 3
-
-
-# ---------------------------------------------------------------------------
-# maybe_compress 废弃警告
-# ---------------------------------------------------------------------------
-
-def test_maybe_compress_emits_deprecation_warning():
-    """maybe_compress 调用时应发 DeprecationWarning。
-
-    双轨期保留旧路径，但每次调用都应提醒迁移到 compress_if_needed。
-    """
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        msgs = [{"role": "system", "content": "s"}]
-        msgs += [{"role": "user", "content": f"u{i}"} for i in range(50)]
-        maybe_compress(msgs, attempt_count=0, llm_client=None)
-        assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
-
-
-def test_maybe_compress_no_warning_when_below_threshold():
-    """消息数不足时不压缩，但仍发 DeprecationWarning（每次调用都发）。"""
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        msgs = _make_messages(5)
-        maybe_compress(msgs, attempt_count=0)
-        # 即使没触发压缩，调用本身就应发警告
-        assert any(issubclass(wi.category, DeprecationWarning) for wi in w)

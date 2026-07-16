@@ -75,8 +75,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",
         "transcript_retention": 20,
-        # 功能开关（双轨期；Commit 6 改 True）
-        "use_new_pipeline": True,
     },
 
     # Hooks 系统（Phase 2a）

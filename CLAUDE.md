@@ -173,13 +173,14 @@ uv sync                                 # 同步已声明依赖
 - **agent home**：默认 `~/.agent`，可用 `AGENT_HOME` 环境变量覆盖（profile 隔离机制）。
 - **工具结果契约**：所有 handler 返回 JSON 字符串，错误用 `{"error": "...", "error_type": "..."}`。
 
+
 ## 关键代码位置
 
 | 想修改什么 | 看这里 |
 |---|---|
 | 对话主循环 / 中断 / grace call | `agent/__init__.py:run_conversation` |
 | system prompt 构建（记忆/技能索引/GUIDANCE） | `agent/prompt_builder.py:build_system_prompt` |
-| 上下文压缩（唯一可改 system prompt 的场景） | `agent/context_compressor.py:maybe_compress` |
+| 上下文压缩（唯一可改 system prompt 的场景） | `agent/context_pipeline.py:compress_if_needed` |
 | 命令权限闸门 | `agent/permission.py:PermissionChecker.check` |
 | 路径白名单 | `agent/permission.py:safe_path` |
 | LLM 重试/备用模型 | `agent/llm_retry.py:call_with_retry` |

@@ -25,9 +25,6 @@ include = ["agent*", "tools*", "plugins*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = [
-    "ignore:.*maybe_compress.*:DeprecationWarning",
-]
 
 [tool.ruff]
 preview = true

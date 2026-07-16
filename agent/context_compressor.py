@@ -1,105 +1,19 @@
-"""上下文压缩：当历史接近 token 上限时，总结早期对话。
+"""上下文压缩工具函数。
 
-这是唯一允许调用 agent.invalidate_system_prompt() 的场景。
+原 ``maybe_compress`` 单层 LLM 摘要路径已在 Phase 1 Commit 7 移除，
+由 ``agent.context_pipeline.compress_if_needed``（4 层管线）取代。
 
-策略：
-1. 监控请求的 token 数（消息数作为近似）
-2. 超过阈值时触发
-3. 把早期消息用轻量 LLM 总结成一条
-4. 保留最近几轮完整对话
-5. 修复可能被压缩边界破坏的 tool_call 配对
-6. 重建 system prompt
+本模块保留下列被 pipeline 复用的工具函数：
+    - ``_summarize_conversation``：调用 LLM 总结对话
+    - ``_rule_based_summary``：无 LLM 时的降级规则提取
+    - ``_fix_tool_call_pairs``：修复压缩边界破坏的 tool_call 配对
+    - ``estimate_message_tokens``：粗略估算 token 数
 """
 
 import json
 import logging
-from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
-
-
-# 压缩配置
-MAX_COMPRESS_ATTEMPTS = 3          # 一个会话最多压缩 3 次
-COMPRESS_COOLDOWN_TURNS = 5         # 压缩后 5 轮内不再压缩（未使用，预留）
-MESSAGES_BEFORE_COMPRESS = 40       # 消息数阈值
-KEEP_RECENT_MESSAGES = 10           # 保留最近 10 条消息（约 5 轮）
-
-
-def maybe_compress(
-    messages: list,
-    *,
-    attempt_count: int = 0,
-    model: str = None,
-    llm_client=None,
-    context_window_tokens: int = 128000,
-) -> Tuple[list, bool]:
-    """检查并执行压缩。
-
-    返回 (新消息列表, 是否压缩了)。
-
-    messages: 完整消息列表（含 system 在最前）
-    llm_client: OpenAI 兼容客户端（用于调用轻量模型总结）
-
-    .. deprecated::
-        单层 LLM 摘要压缩。新代码请用 ``agent.context_pipeline.compress_if_needed``。
-        保留是为了双轨期回退（``config.context.use_new_pipeline=False`` 时仍调用）。
-        下个 minor 版本完全移除。
-    """
-    import warnings
-    warnings.warn(
-        "maybe_compress 已废弃，请改用 agent.context_pipeline.compress_if_needed",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    # 消息数不够，不压缩
-    if len(messages) < MESSAGES_BEFORE_COMPRESS:
-        return messages, False
-
-    # 压缩次数用完
-    if attempt_count >= MAX_COMPRESS_ATTEMPTS:
-        return messages, False
-
-    # 分离 system prompt
-    system_msg = messages[0] if messages[0].get("role") == "system" else None
-    conversation = messages[1:] if system_msg else messages
-
-    # 要压缩的部分（跳过最近几条）
-    if len(conversation) <= KEEP_RECENT_MESSAGES:
-        return messages, False
-
-    to_compress = conversation[:-KEEP_RECENT_MESSAGES]
-    keep_recent = conversation[-KEEP_RECENT_MESSAGES:]
-
-    # 调用 LLM 总结
-    summary = _summarize_conversation(to_compress, llm_client, model=model)
-
-    if not summary:
-        return messages, False  # 总结失败
-
-    # 重组
-    new_messages = []
-    if system_msg:
-        new_messages.append(system_msg)
-
-    # 总结作为 user 消息注入
-    new_messages.append({
-        "role": "user",
-        "content": (
-            "[之前的对话已自动总结]\n\n"
-            f"{summary}\n\n"
-            "[以下是最近的对话，请继续]"
-        ),
-    })
-
-    # 最近的消息保留（修复可能被压缩边界破坏的 tool_call 配对）
-    new_messages.extend(_fix_tool_call_pairs(keep_recent))
-
-    logger.info(
-        "上下文已压缩: %d 条消息 → %d 条（总结: %d 字符）",
-        len(messages), len(new_messages), len(summary),
-    )
-
-    return new_messages, True
 
 
 def _summarize_conversation(

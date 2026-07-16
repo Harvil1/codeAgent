@@ -338,8 +338,9 @@ def check_delegate_batch(tmp):
 # ---------------------------------------------------------------------------
 
 def check_context_compress():
-    """长对话触发压缩（mock LLM）。"""
-    from agent.context_compressor import maybe_compress
+    """长对话触发压缩（新管线，mock LLM）。"""
+    from agent.context_pipeline import compress_if_needed, CompressionSessionState
+    from config import DEFAULT_CONFIG
 
     def fake_create(**kw):
         return SimpleNamespace(
@@ -357,7 +358,19 @@ def check_context_compress():
         msgs.append({"role": "user", "content": f"消息 {i}"})
         msgs.append({"role": "assistant", "content": f"回复 {i}"})
 
-    new_msgs, compressed = maybe_compress(msgs, attempt_count=0, llm_client=client)
+    ctx_cfg = dict(DEFAULT_CONFIG.get("context", {}))
+    # 降低阈值确保 snip 触发
+    ctx_cfg["snip_message_threshold"] = 50
+    state = CompressionSessionState()
+    new_msgs, compressed = compress_if_needed(
+        msgs,
+        llm_client=client,
+        model="deepseek-chat",
+        config=ctx_cfg,
+        session_state=state,
+        agent_home=None,
+        session_id="verify",
+    )
     if compressed and len(new_msgs) < len(msgs):
         return _ok(f"{len(msgs)} → {len(new_msgs)} 条")
     return _fail("未压缩")
