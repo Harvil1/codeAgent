@@ -323,8 +323,12 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("cron_scheduler shutdown 失败: %s", e)
 
-        # === P4a-T7 NEW: 主 agent 标记 stopped ===
+        # === P4a-T7 NEW: 主 agent 标记 stopped + 清理子进程 ===
         if hasattr(self, "team_coordinator") and self.team_coordinator:
+            try:
+                self.team_coordinator.shutdown_all()
+            except Exception as e:
+                logger.warning("team_coordinator shutdown_all 失败: %s", e)
             try:
                 self.team_coordinator.update_status("main", "completed")
             except Exception as e:

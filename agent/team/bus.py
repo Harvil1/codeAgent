@@ -34,8 +34,9 @@ class TeamMessage:
 # 跨平台文件锁
 # ---------------------------------------------------------------------------
 
-def _acquire_lock(fileobj):
-    """获取独占锁。"""
+def _acquire_lock(fileobj, timeout: float = 30.0):
+    """获取独占锁。超时抛 TimeoutError。"""
+    deadline = time.time() + timeout
     if sys.platform == "win32":
         import msvcrt
         while True:
@@ -43,10 +44,19 @@ def _acquire_lock(fileobj):
                 msvcrt.locking(fileobj.fileno(), msvcrt.LK_LOCK, 1)
                 return
             except OSError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"file lock timeout after {timeout}s")
                 time.sleep(0.01)
     else:
         import fcntl
-        fcntl.flock(fileobj.fileno(), fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(fileobj.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"file lock timeout after {timeout}s")
+                time.sleep(0.01)
 
 
 def _release_lock(fileobj):
@@ -63,14 +73,24 @@ def _release_lock(fileobj):
 
 
 def _with_lock(lock_path: Path, fn):
-    """获取 lock_path 的独占锁后执行 fn。"""
+    """获取 lock_path 的独占锁后执行 fn。
+
+    锁超时时 fail-open（log warning + 执行 fn 不持锁），
+    避免单进程死锁拖垮整个 agent。
+    """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as lf:
-        _acquire_lock(lf)
+        locked = False
+        try:
+            _acquire_lock(lf)
+            locked = True
+        except TimeoutError:
+            logger.warning("file lock 超时，fail-open: %s", lock_path)
         try:
             return fn()
         finally:
-            _release_lock(lf)
+            if locked:
+                _release_lock(lf)
 
 
 # ---------------------------------------------------------------------------

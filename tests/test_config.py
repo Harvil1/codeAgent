@@ -436,8 +436,8 @@ def test_team_toolset_exists():
     assert "team" in TOOLSETS
     tools = TOOLSETS["team"]["tools"]
     required_tools = (
-        "team_spawn", "team_send", "team_status",
-        "team_broadcast", "team_members",
+        "team_send", "team_inbox", "team_members",
+        "team_spawn", "team_shutdown",
     )
     for name in required_tools:
         assert name in tools, f"缺 {name}"

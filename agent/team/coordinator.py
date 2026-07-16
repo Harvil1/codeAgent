@@ -40,6 +40,8 @@ class TeamCoordinator:
         self._registry_lock = self._team_dir / "registry.lock"
         self._team_dir.mkdir(parents=True, exist_ok=True)
         self._bus = MessageBus(team_dir=self._team_dir)
+        # P4a-final: 缓存 Popen 对象，shutdown_all 用它清理子进程
+        self._processes: dict = {}
 
     def _load_registry(self) -> dict:
         if not self._registry_path.exists():
@@ -50,11 +52,24 @@ class TeamCoordinator:
             return {"members": []}
 
     def _save_registry(self, registry: dict) -> None:
-        """写入 registry（不加锁——调用者负责持锁）。"""
-        self._registry_path.write_text(
-            json.dumps(registry, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        """写入 registry（不加锁——调用者负责持锁）。原子写。"""
+        import os
+        import tempfile
+        content = json.dumps(registry, ensure_ascii=False, indent=2)
+        # 写临时文件 + os.replace 原子替换
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self._registry_path.parent), suffix=".tmp",
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, str(self._registry_path))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _max_members(self) -> int:
         return self._config.get("team", {}).get("max_members", 10)
@@ -102,7 +117,8 @@ class TeamCoordinator:
                 stderr=subprocess.DEVNULL,
             )
             member.pid = proc.pid
-            self.update_status(name, "running")
+            self._processes[name] = proc
+            self.update_status(name, "running", pid=proc.pid)
             logger.info("spawned team member %s (pid=%d)", name, proc.pid)
         except OSError as e:
             logger.error("spawn 失败 %s: %s", name, e)
@@ -126,8 +142,10 @@ class TeamCoordinator:
         _with_lock(self._registry_lock, _update)
 
     def list_members(self) -> List[TeamMember]:
-        reg = self._load_registry()
-        return [TeamMember(**m) for m in reg["members"]]
+        def _read():
+            reg = self._load_registry()
+            return [TeamMember(**m) for m in reg["members"]]
+        return _with_lock(self._registry_lock, _read)
 
     def shutdown(self, name: str, timeout: float = 10.0) -> bool:
         """发 shutdown 消息 + 等 pid 退出。"""
@@ -158,6 +176,39 @@ class TeamCoordinator:
             except Exception as e:
                 logger.warning("shutdown wait 失败: %s", e)
         return False
+
+    def shutdown_all(self, timeout: float = 5.0) -> None:
+        """清理所有 spawn 的子进程。主 agent 退出时调。
+
+        遍历 self._processes，对仍存活的 Popen 发 terminate，
+        等 timeout 后 kill。最后 update_status 为 completed。
+        """
+        for name, proc in list(self._processes.items()):
+            if proc.poll() is not None:
+                # 已退出
+                try:
+                    self.update_status(name, "completed")
+                except Exception:
+                    pass
+                continue
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("shutdown_all: %s kill 后仍未退出", name)
+                logger.info("shutdown_all: 已终止 %s", name)
+            except Exception as e:
+                logger.warning("shutdown_all: 终止 %s 失败: %s", name, e)
+            finally:
+                try:
+                    self.update_status(name, "completed")
+                except Exception:
+                    pass
 
 
 def _pid_alive(pid: int) -> bool:
