@@ -229,12 +229,15 @@ class AIAgent:
         if (self.memory_retriever and self.memory_store
                 and self._cached_memory_index):
             try:
+                mem_cfg = (self.config or {}).get("memory", {})
+                retrieval_model = mem_cfg.get("retrieval_model") or self.model
+                max_results = mem_cfg.get("retrieval_max_results", 5)
                 relevant_ids = self.memory_retriever(
                     query=user_message,
                     index_text=self._cached_memory_index,
                     llm_client=self.llm_client,
-                    model=self.model,
-                    max_results=5,
+                    model=retrieval_model,
+                    max_results=max_results,
                 )
                 if relevant_ids:
                     bodies = []
