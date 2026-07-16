@@ -1252,8 +1252,7 @@ def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
     )
 
     # mock retriever 返回 [mid]
-    fake_retriever = MagicMock()
-    fake_retriever.retrieve_relevant.return_value = [mid]
+    fake_retriever = MagicMock(return_value=[mid])
 
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
@@ -1286,8 +1285,7 @@ def test_retrieval_failure_does_not_break_main_loop(tmp_path):
     from agent.memory_store import MemoryStore
 
     store = MemoryStore(harvil_home=tmp_path)
-    bad_retriever = MagicMock()
-    bad_retriever.retrieve_relevant.side_effect = RuntimeError("boom")
+    bad_retriever = MagicMock(side_effect=RuntimeError("boom"))
 
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
@@ -1298,4 +1296,71 @@ def test_retrieval_failure_does_not_break_main_loop(tmp_path):
     agent.run_conversation("hi")
     # 不抛 + user_message 原样入 history
     assert agent.conversation_history[0]["content"] == "hi"
+
+
+# ---------------------------------------------------------------------------
+# Mem-T8: 端到端 memory save → retrieve → 注入（跨会话）
+# ---------------------------------------------------------------------------
+
+def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
+    """端到端：会话 1 save → 会话 2 检索 + 注入。
+
+    模拟两个会话（两次 AIAgent 实例化）。
+    - 会话 1：MemoryStore.save 落盘一条记忆
+    - 会话 2：新建 MemoryStore（重建索引），真实 retrieve_relevant 用 mock LLM 选到 mid
+    - 主 LLM 也是 mock：第 1 次调用是 retriever，第 2 次是主 LLM 返回 stop
+    - 验证 conversation_history[0] 含 <relevant_memories> + memory body + 原始 user message
+    """
+    from unittest.mock import MagicMock
+    from agent.memory_retriever import retrieve_relevant
+
+    # === 会话 1：保存记忆 ===
+    store1 = MemoryStore(harvil_home=tmp_path)
+    mid = store1.save(
+        name="pytest 命令",
+        description="项目用 pytest 跑测试",
+        type="project",
+        body="uv run pytest tests/ -v",
+    )
+
+    # === 会话 2：索引应能看到，retriever 应能选到 ===
+    store2 = MemoryStore(harvil_home=tmp_path)  # 重建索引
+
+    # mock LLM：第 1 次调用是 retriever（返回 [mid]），第 2 次是主 LLM（返回 stop）
+    call_count = [0]
+
+    def side_effect(msgs, **kw):
+        call_count[0] += 1
+        resp = MagicMock()
+        if call_count[0] == 1:
+            # retriever 调用：返回 JSON 数组 [mid]
+            resp.choices = [MagicMock(message=MagicMock(content=f'["{mid}"]'))]
+            return resp
+        # 主 LLM 调用：返回 stop
+        resp.choices = [MagicMock(
+            message=MagicMock(content="ok", tool_calls=None),
+            finish_reason="stop",
+        )]
+        return resp
+
+    main_llm = MagicMock()
+    main_llm.chat_completions.side_effect = side_effect
+
+    # 直接用 retrieve_relevant 函数（AIAgent 把 memory_retriever 当 callable 调）
+    retriever_obj = retrieve_relevant
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        memory_store=store2, memory_retriever=retriever_obj,
+    )
+    agent.llm_client = main_llm
+    agent.run_conversation("怎么跑测试")
+
+    # 第一次入 history 的 user 消息应含 <relevant_memories> + memory body + 原始 message
+    first_user = agent.conversation_history[0]["content"]
+    assert "<relevant_memories>" in first_user
+    assert "uv run pytest" in first_user
+    assert "怎么跑测试" in first_user
+
 

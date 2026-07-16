@@ -229,7 +229,7 @@ class AIAgent:
         if (self.memory_retriever and self.memory_store
                 and self._cached_memory_index):
             try:
-                relevant_ids = self.memory_retriever.retrieve_relevant(
+                relevant_ids = self.memory_retriever(
                     query=user_message,
                     index_text=self._cached_memory_index,
                     llm_client=self.llm_client,
