@@ -77,6 +77,7 @@ IDLE_SCHEMA = {
     "description": (
         "声明当前没有更多工作要做，进入 IDLE 状态等新任务。"
         "仅在 autonomous worker 模式下有意义；主 agent 调用是 no-op。"
+        "注意：idle 只对 team_name 不是 main 的 worker agent 生效。"
     ),
     "parameters": {"type": "object", "properties": {}},
 }
@@ -201,12 +202,20 @@ def _handle_team_shutdown(args: dict, **kwargs) -> str:
 def _handle_idle(args: dict, **kwargs) -> str:
     """idle 工具：设置 agent._idle_requested = True。
 
-    无 agent_ref 时（主 agent 调）返回 ok 但无副作用。
+    主 agent（team_name 为 "main" 或 None）调用时是 no-op，
+    避免主 agent 误中断自己的 run_conversation。
+    无 agent_ref 时同样 no-op。
     """
     agent = kwargs.get("agent_ref")
     if agent is None:
         return json.dumps({
-            "success": True, "message": "idle requested (no agent ref)",
+            "success": True, "message": "idle (no-op, no agent ref)",
+        }, ensure_ascii=False)
+    # 主 agent (team_name == "main" or None) 调 idle 是 no-op
+    team_name = getattr(agent, "team_name", None)
+    if team_name is None or team_name == "main":
+        return json.dumps({
+            "success": True, "message": "idle (no-op for main agent)",
         }, ensure_ascii=False)
     agent._idle_requested = True
     return json.dumps({

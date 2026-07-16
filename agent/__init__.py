@@ -209,6 +209,11 @@ class AIAgent:
 
         这是整个系统的核心循环。同步执行，不异步。
         """
+        # === P4b final-fix C1: 每个 run_conversation 调用重置 idle 标志 ===
+        # 同一 agent 实例在 autonomous lifecycle 多个 WORK 周期复用时，
+        # 上一次 idle 请求不应泄漏到下一次调用。
+        self._idle_requested = False
+
         # === P2-T6 NEW: USER_PROMPT_SUBMIT hook ===
         if (self.hooks_registry
                 and self.config.get("hooks", {}).get("enabled", True)):

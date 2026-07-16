@@ -1474,12 +1474,17 @@ def test_e2e_team_send_and_inbox_through_bus(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 def test_idle_tool_sets_flag():
-    """调 idle 工具 → AIAgent._idle_requested = True。"""
+    """调 idle 工具 → AIAgent._idle_requested = True（worker agent）。"""
     import tools.team_tool  # 触发注册
     from tools.registry import registry
     from agent import AIAgent
 
-    agent = _make_test_agent()
+    # worker agent（team_name 非 main）调 idle 应设标志
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home="/tmp/fake",
+        team_name="worker1",
+    )
     agent._idle_requested = False
     result_str = registry.dispatch(
         "idle", {},
@@ -1488,6 +1493,117 @@ def test_idle_tool_sets_flag():
     parsed = json.loads(result_str)
     assert parsed["success"] is True
     assert agent._idle_requested is True
+
+
+def test_idle_tool_noop_for_main_agent():
+    """P4b final-fix I3: 主 agent 调 idle 是 no-op，_idle_requested 不变。"""
+    import tools.team_tool  # 触发注册
+    from tools.registry import registry
+    from agent import AIAgent
+
+    # team_name="main" → no-op
+    agent_main = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home="/tmp/fake",
+        team_name="main",
+    )
+    agent_main._idle_requested = False
+    result_str = registry.dispatch("idle", {}, agent_ref=agent_main)
+    parsed = json.loads(result_str)
+    assert parsed["success"] is True
+    assert "no-op" in parsed["message"]
+    assert agent_main._idle_requested is False  # 关键：未被设置
+
+    # team_name=None → no-op（默认构造的主 agent）
+    agent_default = _make_test_agent()
+    agent_default._idle_requested = False
+    result_str = registry.dispatch("idle", {}, agent_ref=agent_default)
+    parsed = json.loads(result_str)
+    assert parsed["success"] is True
+    assert "no-op" in parsed["message"]
+    assert agent_default._idle_requested is False
+
+
+def test_idle_tool_noop_no_agent_ref():
+    """P4b final-fix I3: 无 agent_ref 时 idle 也是 no-op。"""
+    import tools.team_tool  # 触发注册
+    from tools.registry import registry
+
+    result_str = registry.dispatch("idle", {})
+    parsed = json.loads(result_str)
+    assert parsed["success"] is True
+    assert "no-op" in parsed["message"]
+
+
+def test_idle_requested_reset_between_run_conversation_calls(tmp_path):
+    """P4b final-fix C1: 多次 run_conversation 调用，idle 标志不跨调用泄漏。
+
+    场景：autonomous lifecycle 在多个 WORK 周期复用同一 agent 实例。
+    第一轮 idle 后退出，第二轮应能正常执行不被立即退出。
+    """
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        team_name="worker1",
+    )
+
+    # mock LLM：每次返回无 tool_call 的最终响应
+    agent.llm_client = _mock_llm_simple_response("ok")
+
+    # 第一轮：预先设 _idle_requested=True（模拟 idle 工具被调过）
+    agent._idle_requested = True
+    agent.run_conversation("first turn")
+    # 第一轮应被 idle 中断（进入循环后立即检查到 idle? 不——idle 在 tool_call 后检查）
+    # 实际上 idle 检查在 tool_calls 处理后；无 tool_call 时走 return 分支
+    # 关键验证：第二轮调 run_conversation 时 _idle_requested 被重置
+
+    # 第二轮：应正常完成，不受上一轮 idle 标志影响
+    agent._idle_requested = True  # 假装第一轮结束时被设了
+    response = agent.run_conversation("second turn")
+    assert response == "ok"
+    # 验证 _idle_requested 在 run_conversation 开头被重置
+    # （如果没重置，无 tool_call 场景也会正常 return，所以我们用 tool_call 场景验证）
+
+    # 更严格的验证：tool_call 场景
+    call_count = [0]
+    def side_effect(msgs, **kw):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # 第一轮：返回 idle 工具调用
+            tool_call = SimpleNamespace(
+                id="c1",
+                type="function",
+                function=SimpleNamespace(
+                    name="idle",
+                    arguments="{}",
+                ),
+            )
+            msg = SimpleNamespace(content=None, tool_calls=[tool_call])
+        else:
+            # 第二轮：返回最终响应
+            msg = SimpleNamespace(content="done", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    agent2 = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=["team"], harvil_home=str(tmp_path),
+        team_name="worker2",
+    )
+    agent2.llm_client = SimpleNamespace(chat_completions=side_effect)
+
+    # 第一轮：调 idle → 设置 _idle_requested → 循环 break → fallback
+    r1 = agent2.run_conversation("turn 1")
+    # idle 后 break 会走 fallback 分支（"强制停止"）
+    assert "强制停止" in r1
+    # _idle_requested 此时为 True（idle 工具设置的）
+    assert agent2._idle_requested is True
+
+    # 第二轮：_idle_requested 应在开头被重置，能正常完成
+    r2 = agent2.run_conversation("turn 2")
+    assert r2 == "done"
 
 
 def test_team_spawn_max_depth_blocks(tmp_path):

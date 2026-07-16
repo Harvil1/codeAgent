@@ -66,6 +66,7 @@ def main():
 
     if args.autonomous:
         # === P4b-T3: autonomous 模式 ===
+        # P4b final-fix I2: try/except 包裹 lifecycle.run，避免静默崩溃
         from agent.team.lifecycle import AutonomousLifecycle
         team_cfg = config.get("team", {})
         lifecycle = AutonomousLifecycle(
@@ -77,8 +78,22 @@ def main():
             idle_timeout=team_cfg.get("autonomous_idle_timeout", 60.0),
             poll_interval=team_cfg.get("autonomous_poll_interval", 5.0),
         )
-        lifecycle.run(initial_task=args.task)
-        logger.info("worker %s autonomous 生命周期结束", args.name)
+        try:
+            lifecycle.run(initial_task=args.task)
+            coordinator.update_status(args.name, "completed")
+            logger.info("worker %s autonomous 生命周期结束", args.name)
+        except Exception as e:
+            logger.exception("worker %s autonomous 异常", args.name)
+            try:
+                bus.send(
+                    from_=args.name, to="main",
+                    type_="message",
+                    content=f"[worker autonomous crashed: {e}]",
+                )
+            except Exception:
+                pass
+            coordinator.update_status(args.name, "failed")
+            sys.exit(1)
     else:
         # 一次性模式（Phase 4a）
         try:
