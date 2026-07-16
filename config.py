@@ -43,6 +43,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fallback_model": None,
     },
 
+    # batch2-T3: 辅助 LLM 配置（可选，用于检索/压缩/记忆提取等辅助任务）
+    # 未配置（None）时 fallback 到主 model 配置
+    "aux_model": None,
+
     # Agent 行为
     "agent": {
         "max_iterations": 90,

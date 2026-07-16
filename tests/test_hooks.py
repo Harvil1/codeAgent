@@ -11,6 +11,7 @@ from agent.hooks import (
 def test_hook_event_has_four_values():
     assert {e.value for e in HookEvent} == {
         "user_prompt_submit", "pre_tool_use", "post_tool_use", "stop",
+        "pre_llm_call", "post_llm_call",
     }
 
 

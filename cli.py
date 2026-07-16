@@ -156,6 +156,8 @@ class RuntimeContext:
         # 1. 记忆系统
         if self.config.get("memory", {}).get("enabled", True):
             self.memory_store = MemoryStore(harvil_home=self.home)
+            # batch2-T3: memory_manager 的 LLM client 在 agent 创建后注入
+            # （因为需要和 aux_llm_router 共享）
             self.memory_manager = MemoryManager(self.memory_store)
 
         # === Mem-T7 NEW: memory retriever 装配（多文件检索） ===
@@ -219,7 +221,41 @@ class RuntimeContext:
             )
             raise SystemExit(1)
 
-        return AIAgent(
+        # === batch2-T3: 创建 AuxLLMRouter ===
+        aux_llm_router = None
+        aux_cfg = self.config.get("aux_model")
+        if aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model"):
+            try:
+                from agent.aux_llm import AuxLLMRouter
+                # 先创建一个临时的主 client 供 router 用
+                from agent.llm_client import create_llm_client
+                main_client = create_llm_client({
+                    "format": model_cfg.get("format", "openai"),
+                    "base_url": model_cfg.get("base_url"),
+                    "api_key": api_key,
+                    "model": model_cfg["name"],
+                })
+                aux_llm_router = AuxLLMRouter(
+                    main_client=main_client,
+                    main_model=model_cfg["name"],
+                    aux_config=aux_cfg,
+                )
+            except Exception as e:
+                logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
+                aux_llm_router = None
+
+        # batch2-T3: 给 memory_manager 注入 LLM client（优先用 aux）
+        if self.memory_manager:
+            if aux_llm_router:
+                self.memory_manager._llm_client = aux_llm_router
+                self.memory_manager._llm_model = (
+                    aux_cfg.get("model") if aux_cfg else None
+                )
+            else:
+                # 没配置 aux 时用主 client（延迟到 agent 创建后注入）
+                pass
+
+        agent = AIAgent(
             base_url=model_cfg.get("base_url"),
             api_key=api_key,
             model=model_cfg["name"],
@@ -239,7 +275,15 @@ class RuntimeContext:
             team_bus=self.team_bus,  # === P4a-T7 NEW ===
             team_coordinator=self.team_coordinator,  # === P4a-T7 NEW ===
             team_name="main",  # === P4a-T7 NEW ===
+            aux_llm_router=aux_llm_router,  # === batch2-T3 NEW ===
         )
+
+        # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
+        if self.memory_manager and self.memory_manager._llm_client is None:
+            self.memory_manager._llm_client = agent.llm_client
+            self.memory_manager._llm_model = agent.model
+
+        return agent
 
     def _maybe_trigger_curator(self):
         """后台检查 curator 是否该运行（非阻塞）。"""

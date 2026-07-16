@@ -1,6 +1,7 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
-4 种 event：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
+6 种 event：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
+          + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2 新增）
 2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
 失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
 """
@@ -18,13 +19,19 @@ class HookEvent(Enum):
     PRE_TOOL_USE = "pre_tool_use"
     POST_TOOL_USE = "post_tool_use"
     STOP = "stop"
+    # batch2-T2: LLM 调用前后的 hook
+    PRE_LLM_CALL = "pre_llm_call"
+    POST_LLM_CALL = "post_llm_call"
 
 
-# 程序式 hook 的 4 种签名
+# 程序式 hook 的签名
 UserPromptSubmitFn = Callable[[str], Optional[str]]
 PreToolUseFn = Callable[[str, dict], Optional[dict]]
 PostToolUseFn = Callable[[str, dict, str], Optional[str]]
 StopFn = Callable[[], Optional[str]]
+# batch2-T2: LLM hooks
+PreLLMCallFn = Callable[[list, Optional[list]], Optional[tuple]]
+PostLLMCallFn = Callable[[object], Optional[object]]
 
 
 @dataclass
@@ -79,6 +86,29 @@ class HookRegistry:
     def register_stop(self, fn, *, name=None):
         self._hooks[HookEvent.STOP].append(
             Hook(name=name or "anonymous", event=HookEvent.STOP,
+                 kind="programmatic", fn=fn)
+        )
+
+    # ---- batch2-T2: LLM hooks 注册 ----
+    def register_pre_llm_call(self, fn, *, name=None):
+        """注册 PRE_LLM_CALL hook。
+
+        fn 签名: (messages: list, tools: Optional[list]) -> Optional[tuple[list, Optional[list]]]
+        返回 (messages, tools) 元组以修改；返回 None 表示不修改。
+        """
+        self._hooks[HookEvent.PRE_LLM_CALL].append(
+            Hook(name=name or "anonymous", event=HookEvent.PRE_LLM_CALL,
+                 kind="programmatic", fn=fn)
+        )
+
+    def register_post_llm_call(self, fn, *, name=None):
+        """注册 POST_LLM_CALL hook。
+
+        fn 签名: (response) -> Optional[response]
+        返回新 response 以修改；返回 None 表示不修改。
+        """
+        self._hooks[HookEvent.POST_LLM_CALL].append(
+            Hook(name=name or "anonymous", event=HookEvent.POST_LLM_CALL,
                  kind="programmatic", fn=fn)
         )
 
@@ -248,3 +278,46 @@ class HookRegistry:
         if result is None:
             return None
         return result.get("continue")
+
+    # ---- batch2-T2: 执行 PRE_LLM_CALL / POST_LLM_CALL ----
+    def run_pre_llm_call(self, messages: list, tools: Optional[list],
+                         *, session_id: str = "") -> tuple:
+        """链式：每个 hook 可修改 messages 和 tools。
+
+        fn 签名: (messages, tools) -> Optional[(messages, tools)]
+        返回 None 时不修改（保持上一轮输出）。
+        失败 fail-open（视为 None）。
+        """
+        for hook in self._hooks[HookEvent.PRE_LLM_CALL]:
+            try:
+                result = hook.fn(messages, tools)
+                if result is not None:
+                    # 解包元组
+                    if isinstance(result, tuple) and len(result) == 2:
+                        messages, tools = result
+                    else:
+                        logger.warning(
+                            "PRE_LLM_CALL hook %s 返回非 (messages, tools) 元组，忽略",
+                            hook.name,
+                        )
+            except Exception as e:
+                logger.warning("PRE_LLM_CALL hook %s 异常（视为 None）: %s",
+                               hook.name, e)
+        return messages, tools
+
+    def run_post_llm_call(self, response, *, session_id: str = ""):
+        """链式：每个 hook 可修改 response。
+
+        fn 签名: (response) -> Optional[response]
+        返回 None 时不修改。
+        失败 fail-open。
+        """
+        for hook in self._hooks[HookEvent.POST_LLM_CALL]:
+            try:
+                result = hook.fn(response)
+                if result is not None:
+                    response = result
+            except Exception as e:
+                logger.warning("POST_LLM_CALL hook %s 异常（视为 None）: %s",
+                               hook.name, e)
+        return response

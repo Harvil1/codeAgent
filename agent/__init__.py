@@ -62,6 +62,7 @@ class AIAgent:
         team_coordinator=None,   # === P4a-T6 NEW ===
         team_name=None,          # === P4a-T6 NEW ===
         spawn_depth: int = 0,    # === P4b-T2 NEW ===
+        aux_llm_router=None,     # === batch2-T3 NEW ===
     ):
         """
         参数：
@@ -172,6 +173,9 @@ class AIAgent:
         # === P4b-T2 NEW: idle 标志 + spawn 深度 ===
         self._idle_requested = False
         self.spawn_depth = spawn_depth
+
+        # === batch2-T3 NEW: 辅助 LLM 路由器 ===
+        self.aux_llm_router = aux_llm_router
 
         # === batch1-T2 NEW: LLM 用量统计（prompt cache 记账）===
         self._llm_usage_stats = {
@@ -314,10 +318,14 @@ class AIAgent:
                 mem_cfg = (self.config or {}).get("memory", {})
                 retrieval_model = mem_cfg.get("retrieval_model") or self.model
                 max_results = mem_cfg.get("retrieval_max_results", 5)
+                # batch2-T3: 优先用 aux_llm_router 做检索（便宜模型）
+                retrieval_client = self.llm_client
+                if self.aux_llm_router:
+                    retrieval_client = self.aux_llm_router
                 relevant_ids = self.memory_retriever(
                     query=user_message,
                     index_text=self._cached_memory_index,
-                    llm_client=self.llm_client,
+                    llm_client=retrieval_client,
                     model=retrieval_model,
                     max_results=max_results,
                 )
@@ -442,11 +450,27 @@ class AIAgent:
                     session_id=self.session_id,
                 )
                 if compressed:
+                    # === batch2-T1: 压缩前调 memory_manager.on_pre_compress 提取事实 ===
+                    if self.memory_manager:
+                        try:
+                            self.memory_manager.on_pre_compress(None, messages)
+                        except Exception as e:
+                            logger.warning("on_pre_compress 编排异常: %s", e)
                     # 压缩会修改历史，需要同步并重建 system prompt
                     self.conversation_history = messages[1:]  # 跳过 system
                     self.invalidate_system_prompt()
                     system_prompt = self._get_system_prompt()
                     self._compression_attempts += 1
+
+            # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
+            if (self.hooks_registry
+                    and self.config.get("hooks", {}).get("enabled", True)):
+                try:
+                    messages, tool_schemas = self.hooks_registry.run_pre_llm_call(
+                        messages, tool_schemas, session_id=self.session_id or "",
+                    )
+                except Exception as e:
+                    logger.warning("PRE_LLM_CALL hook 编排异常: %s", e)
 
             # 调用 LLM（带重试和备用 client）
             try:
@@ -494,6 +518,17 @@ class AIAgent:
             api_call_count += 1
             # batch1-T2: 记录 LLM 用量（prompt cache 记账）
             self._record_llm_usage(response)
+
+            # === batch2-T2: POST_LLM_CALL hook（LLM 返回后、处理 tool_calls 前）===
+            if (self.hooks_registry
+                    and self.config.get("hooks", {}).get("enabled", True)):
+                try:
+                    response = self.hooks_registry.run_post_llm_call(
+                        response, session_id=self.session_id or "",
+                    )
+                except Exception as e:
+                    logger.warning("POST_LLM_CALL hook 编排异常: %s", e)
+
             # 每轮 LLM 调用后递增 todo 计数
             if self.todo_manager:
                 self.todo_manager.increment_round()
