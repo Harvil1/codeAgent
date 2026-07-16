@@ -1712,3 +1712,24 @@ def test_e2e_autonomous_lifecycle_picks_up_message_mid_idle(tmp_path):
     assert lifecycle.state == STATE_SHUTDOWN
 
 
+def test_autonomous_worker_crash_sends_failure_message(tmp_path):
+    """autonomous lifecycle work_fn 持续抛异常 → 不崩，最终 SHUTDOWN。"""
+    from agent.team.lifecycle import AutonomousLifecycle, STATE_SHUTDOWN
+
+    def bad_work(task):
+        raise RuntimeError("always fails")
+
+    lifecycle = AutonomousLifecycle(
+        work_fn=bad_work,
+        poll_inbox_fn=lambda: [],
+        poll_tasks_fn=lambda: [],
+        claim_task_fn=lambda tid: False,
+        on_shutdown_fn=lambda: None,
+        idle_timeout=0.1,
+        poll_interval=0.05,
+    )
+    lifecycle.run(initial_task="x")
+    # work 抛异常后被 try/except 吞，进入 IDLE，超时 SHUTDOWN
+    assert lifecycle.state == STATE_SHUTDOWN
+
+

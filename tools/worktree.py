@@ -155,8 +155,8 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
         timeout=30,
     )
     if result.returncode != 0:
-        # 事件：create.fail
-        _log_worktree_event(repo_root, "create.fail", {
+        # 事件：create.failed
+        _log_worktree_event(repo_root, "create.failed", {
             "branch": branch,
             "worktree_dir": str(worktree_dir),
             "error": result.stderr.strip(),
@@ -175,14 +175,14 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
     def cleanup(keep: bool = False):
         if keep:
             logger.info("保留 worktree: %s", worktree_dir)
-            # 事件：cleanup.keep
-            _log_worktree_event(repo_root, "cleanup.keep", {
+            # 事件：remove.keep
+            _log_worktree_event(repo_root, "remove.keep", {
                 "branch": branch,
                 "worktree_dir": str(worktree_dir),
             })
             return
-        # 事件：cleanup.before
-        _log_worktree_event(repo_root, "cleanup.before", {
+        # 事件：remove.before
+        _log_worktree_event(repo_root, "remove.before", {
             "branch": branch,
             "worktree_dir": str(worktree_dir),
         })
@@ -204,8 +204,8 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
             logger.debug("清理 worktree 失败: %s", e)
         # 兜底删除目录
         shutil.rmtree(worktree_dir, ignore_errors=True)
-        # 事件：cleanup.after
-        _log_worktree_event(repo_root, "cleanup.after", {
+        # 事件：remove.after
+        _log_worktree_event(repo_root, "remove.after", {
             "branch": branch,
             "worktree_dir": str(worktree_dir),
         })

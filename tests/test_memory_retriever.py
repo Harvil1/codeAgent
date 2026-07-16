@@ -70,3 +70,29 @@ def test_retrieve_relevant_handles_non_list_json():
         llm_client=llm, model="m",
     )
     assert result == []
+
+
+def test_retrieve_relevant_uses_correct_prompt():
+    """验证 retriever 发给 LLM 的 prompt 含 query 和 index。"""
+    from unittest.mock import MagicMock
+    from agent.memory_retriever import retrieve_relevant
+
+    captured_msgs = []
+    def capture(msgs, **kw):
+        captured_msgs.append(msgs)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="[]"))]
+        return resp
+
+    llm = MagicMock()
+    llm.chat_completions.side_effect = capture
+
+    retrieve_relevant(
+        query="如何配置 pytest",
+        index_text="- [pytest](.memory/x.md) — pytest 配置",
+        llm_client=llm, model="m",
+    )
+    assert len(captured_msgs) == 1
+    prompt_text = captured_msgs[0][0]["content"]
+    assert "pytest" in prompt_text  # query 关键词
+    assert "<index>" in prompt_text or "pytest 配置" in prompt_text  # index 内容

@@ -135,6 +135,19 @@ def test_pre_tool_use_exception_isolated():
     assert modified is None
 
 
+def test_pre_tool_use_fail_closed_exception_denies():
+    """fail_closed=True 时 hook 异常 → 视为拒绝。"""
+    from agent.hooks import HookRegistry
+    def bad(n, a): raise ValueError("boom")
+    reg = HookRegistry()
+    reg.register_pre_tool_use(bad, name="bad", fail_closed=True)
+    deny, modified = reg.run_pre_tool_use("t", {}, session_id="s")
+    # fail_closed → 异常被吞但 deny 返回错误消息
+    assert deny is not None
+    assert "boom" in deny or "ValueError" in deny
+    assert modified is None
+
+
 # ---------------------------------------------------------------------------
 # POST_TOOL_USE
 # ---------------------------------------------------------------------------

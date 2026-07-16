@@ -146,3 +146,29 @@ def test_bg_stop_unknown_returns_not_found():
     )
     parsed = json.loads(result_str)
     assert parsed.get("error_type") == "bg_task_not_found"
+
+
+def test_bg_start_no_manager_returns_bg_unavailable():
+    """bg_manager=None 时返回 bg_unavailable error。"""
+    import json
+    from tools.registry import registry
+    result_str = registry.dispatch("bg_start", {"command": ["echo", "x"]})
+    parsed = json.loads(result_str)
+    assert parsed.get("error_type") == "bg_unavailable"
+
+
+def test_bg_start_invalid_command_returns_invalid_args(tmp_path):
+    """command 为空或非 list 时返回 invalid_args。"""
+    import json
+    from agent.background import BackgroundManager
+    from tools.registry import registry
+    mgr = BackgroundManager()
+    # command 缺失
+    result_str = registry.dispatch("bg_start", {}, bg_manager=mgr)
+    parsed = json.loads(result_str)
+    assert parsed.get("error_type") == "invalid_args"
+    # command 非 list
+    result_str = registry.dispatch("bg_start", {"command": "not-a-list"}, bg_manager=mgr)
+    parsed = json.loads(result_str)
+    assert parsed.get("error_type") == "invalid_args"
+    mgr.shutdown()

@@ -69,8 +69,15 @@ def main():
         # P4b final-fix I2: try/except 包裹 lifecycle.run，避免静默崩溃
         from agent.team.lifecycle import AutonomousLifecycle
         team_cfg = config.get("team", {})
+
+        def _run_work(task):
+            """每个 WORK 周期前清空 history（spec §9.3：WORK 周期独立）。"""
+            agent.conversation_history = []  # 清空，避免跨周期累积
+            agent._idle_requested = False    # 已在 run_conversation 头部重置，但防御性
+            return agent.run_conversation(task)
+
         lifecycle = AutonomousLifecycle(
-            work_fn=lambda task: agent.run_conversation(task),
+            work_fn=_run_work,
             poll_inbox_fn=lambda: bus.read_inbox(args.name),
             poll_tasks_fn=lambda: [],  # 暂不接入 task_store
             claim_task_fn=lambda tid: False,

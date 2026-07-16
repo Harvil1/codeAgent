@@ -265,8 +265,8 @@ def test_worktree_create_logs_events(tmp_path):
     event_types = [e["event"] for e in events]
     assert "create.before" in event_types
     assert "create.after" in event_types
-    assert "cleanup.before" in event_types
-    assert "cleanup.after" in event_types
+    assert "remove.before" in event_types
+    assert "remove.after" in event_types
 
 
 def test_log_worktree_event_failure_is_safe(tmp_path):
