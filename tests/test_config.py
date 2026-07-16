@@ -270,7 +270,7 @@ def test_memory_manager_on_pre_compress_is_noop():
     from pathlib import Path
 
     with tempfile.TemporaryDirectory() as td:
-        store = MemoryStore(Path(td))
+        store = MemoryStore(harvil_home=Path(td))
         mm = MemoryManager(memory_store=store, external_provider=None)
         mm.on_pre_compress(None, [])  # 不抛
 
@@ -368,3 +368,31 @@ def test_default_config_cron_defaults():
     assert c["enabled"] is True
     assert c["jobs_path"] is None
     assert c["poll_interval_seconds"] == 30.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Task 4 & 6: memory 多文件字段
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_memory_multifile_fields():
+    """config.py 的 DEFAULT_CONFIG['memory'] 应含多文件模式的所有新字段。"""
+    from config import DEFAULT_CONFIG
+    m = DEFAULT_CONFIG["memory"]
+    required_keys = (
+        "multifile_enabled", "memory_dir", "retrieval_enabled",
+        "retrieval_max_results", "retrieval_model"
+    )
+    for key in required_keys:
+        assert key in m, f"缺 {key}"
+
+
+def test_default_config_memory_multifile_defaults():
+    """memory 多文件字段的默认值应符合规范。"""
+    from config import DEFAULT_CONFIG
+    m = DEFAULT_CONFIG["memory"]
+    assert m["multifile_enabled"] is True
+    assert m["memory_dir"] is None
+    assert m["retrieval_enabled"] is True
+    assert m["retrieval_max_results"] == 5
+    assert m["retrieval_model"] is None

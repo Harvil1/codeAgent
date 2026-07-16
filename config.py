@@ -118,6 +118,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "provider": None,                # 外部 provider（如 honcho）
         "memory_char_limit": 2200,
         "user_char_limit": 1375,
+        "multifile_enabled": True,       # 多文件模式开关
+        "memory_dir": None,              # 记忆目录（None → ~/.agent/memories）
+        "retrieval_enabled": True,       # 语义检索开关
+        "retrieval_max_results": 5,      # 检索最大结果数
+        "retrieval_model": None,         # 检索模型（None → 用主模型）
     },
 
     # 技能

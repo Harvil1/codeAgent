@@ -148,17 +148,14 @@ def build_system_prompt(
         if skill_index:
             parts.append(f"## 可用技能\n{skill_index}")
 
-    # 5. 记忆快照（frozen）
+    # 5. 记忆索引（多文件模式，Phase 5）
     if memory_store:
         try:
-            mem_block = memory_store.format_for_system_prompt("memory")
-            user_block = memory_store.format_for_system_prompt("user")
-            if mem_block:
-                parts.append(mem_block)
-            if user_block:
-                parts.append(user_block)
-        except Exception:
-            pass
+            index_block = memory_store.snapshot_for_prompt()
+            if index_block:
+                parts.append(f"## 记忆索引\n{index_block}")
+        except Exception as e:
+            logger.warning("读取记忆索引失败: %s", e)
 
     # 6. 外部 provider 的静态块
     if memory_manager:

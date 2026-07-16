@@ -34,12 +34,21 @@ def test_build_system_prompt_no_guidance():
 
 
 def test_build_system_prompt_with_memory(tmp_path):
-    """包含记忆快照。"""
+    """包含记忆快照（使用索引格式）。"""
     from agent.memory_store import MemoryStore
-    store = MemoryStore(tmp_path)
-    store.add("memory", "测试记忆条目")
+    store = MemoryStore(harvil_home=tmp_path)
+    # 添加一些测试记忆（使用 project 类型）
+    store.save(
+        name="test-memory",
+        description="测试记忆条目",
+        type="project",
+        body="这是测试记忆的正文"
+    )
 
     sp = build_system_prompt(memory_store=store)
+    # 新格式：记忆索引段
+    assert "## 记忆索引" in sp
+    # 记忆描述应该在索引中
     assert "测试记忆条目" in sp
 
 
