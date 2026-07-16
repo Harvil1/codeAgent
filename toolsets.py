@@ -64,7 +64,7 @@ TOOLSETS: Dict[str, dict] = {
     "team": {
         "description": "Team 多 agent 协作（Phase 4a）",
         "tools": ["team_send", "team_inbox", "team_members",
-                  "team_spawn", "team_shutdown"],
+                  "team_spawn", "team_shutdown", "idle"],
         "includes": [],
     },
 }

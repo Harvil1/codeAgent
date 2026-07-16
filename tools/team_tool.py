@@ -72,6 +72,15 @@ TEAM_SHUTDOWN_SCHEMA = {
     },
 }
 
+IDLE_SCHEMA = {
+    "name": "idle",
+    "description": (
+        "声明当前没有更多工作要做，进入 IDLE 状态等新任务。"
+        "仅在 autonomous worker 模式下有意义；主 agent 调用是 no-op。"
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
 
 def _handle_team_send(args: dict, **kwargs) -> str:
     bus = kwargs.get("team_bus")
@@ -138,15 +147,31 @@ def _handle_team_members(args: dict, **kwargs) -> str:
 
 def _handle_team_spawn(args: dict, **kwargs) -> str:
     coord = kwargs.get("team_coordinator")
+    agent = kwargs.get("agent_ref")
+    config = kwargs.get("config") or {}
     if coord is None:
         return _err("team coordinator 未初始化", "team_unavailable")
     name = args.get("name")
     task = args.get("task")
     if not name or not task:
         return _err("name 和 task 必需", "invalid_args")
+
+    # === P4b-T2 NEW: depth 检查 ===
+    current_depth = getattr(agent, "spawn_depth", 0) if agent else 0
+    max_depth = config.get("team", {}).get("max_depth", 2)
+    if current_depth >= max_depth:
+        return json.dumps({
+            "success": False,
+            "error": f"max_depth {max_depth} reached (current: {current_depth})",
+            "error_type": "team_max_depth",
+        }, ensure_ascii=False)
+
     role = args.get("role", "worker")
     try:
-        member = coord.spawn(name=name, role=role, task=task)
+        member = coord.spawn(
+            name=name, role=role, task=task,
+            depth=current_depth + 1,
+        )
         return json.dumps({
             "success": True, "name": name, "pid": member.pid,
             "status": member.status,
@@ -170,6 +195,22 @@ def _handle_team_shutdown(args: dict, **kwargs) -> str:
         return _err(f"未找到或仍在运行: {name}", "team_not_found")
     return json.dumps({
         "success": True, "name": name, "status": "shutdown",
+    }, ensure_ascii=False)
+
+
+def _handle_idle(args: dict, **kwargs) -> str:
+    """idle 工具：设置 agent._idle_requested = True。
+
+    无 agent_ref 时（主 agent 调）返回 ok 但无副作用。
+    """
+    agent = kwargs.get("agent_ref")
+    if agent is None:
+        return json.dumps({
+            "success": True, "message": "idle requested (no agent ref)",
+        }, ensure_ascii=False)
+    agent._idle_requested = True
+    return json.dumps({
+        "success": True, "message": "idle requested",
     }, ensure_ascii=False)
 
 
@@ -198,4 +239,8 @@ registry.register(
 registry.register(
     name="team_shutdown", toolset="team",
     schema=TEAM_SHUTDOWN_SCHEMA, handler=_handle_team_shutdown, emoji="🛑",
+)
+registry.register(
+    name="idle", toolset="team",
+    schema=IDLE_SCHEMA, handler=_handle_idle, emoji="💤",
 )

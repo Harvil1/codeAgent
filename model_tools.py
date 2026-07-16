@@ -87,6 +87,7 @@ def handle_function_call(
     team_bus=None,               # === P4a-T6 NEW ===
     team_coordinator=None,       # === P4a-T6 NEW ===
     team_name=None,              # === P4a-T6 NEW ===
+    agent_ref=None,              # === P4b-T2 NEW ===
 ) -> str:
     """分发工具调用，返回 JSON 字符串结果。
 
@@ -134,6 +135,7 @@ def handle_function_call(
         team_bus=team_bus,               # === P4a-T6 NEW ===
         team_coordinator=team_coordinator,   # === P4a-T6 NEW ===
         team_name=team_name,             # === P4a-T6 NEW ===
+        agent_ref=agent_ref,             # === P4b-T2 NEW ===
     )
 
     # === P2-T7 NEW: POST_TOOL_USE hook ===

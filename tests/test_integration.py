@@ -1469,3 +1469,53 @@ def test_e2e_team_send_and_inbox_through_bus(tmp_path: Path):
     assert msgs[0].request_id == mid
 
 
+# ---------------------------------------------------------------------------
+# P4b-T2: idle 工具 + spawn depth 检查
+# ---------------------------------------------------------------------------
+
+def test_idle_tool_sets_flag():
+    """调 idle 工具 → AIAgent._idle_requested = True。"""
+    import tools.team_tool  # 触发注册
+    from tools.registry import registry
+    from agent import AIAgent
+
+    agent = _make_test_agent()
+    agent._idle_requested = False
+    result_str = registry.dispatch(
+        "idle", {},
+        agent_ref=agent,
+    )
+    parsed = json.loads(result_str)
+    assert parsed["success"] is True
+    assert agent._idle_requested is True
+
+
+def test_team_spawn_max_depth_blocks(tmp_path):
+    """depth >= max_depth 时 spawn 返回 team_max_depth error。"""
+    import tools.team_tool
+    from tools.registry import registry
+    from agent.team.bus import MessageBus
+    from agent.team.coordinator import TeamCoordinator
+
+    bus = MessageBus(team_dir=tmp_path)
+    coord = TeamCoordinator(team_dir=tmp_path, harvil_home=tmp_path,
+                             config={"team": {"max_members": 10, "max_depth": 2}})
+    coord.register(name="main", role="lead")
+
+    # 假装主 agent 已经 depth=2
+    class FakeAgent:
+        spawn_depth = 2
+    agent = FakeAgent()
+
+    result_str = registry.dispatch(
+        "team_spawn",
+        {"name": "w1", "task": "x"},
+        team_bus=bus, team_coordinator=coord, team_name="main",
+        agent_ref=agent,
+        config={"team": {"max_members": 10, "max_depth": 2}},
+    )
+    parsed = json.loads(result_str)
+    assert parsed["success"] is False
+    assert parsed["error_type"] == "team_max_depth"
+
+

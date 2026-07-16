@@ -96,8 +96,12 @@ class TeamCoordinator:
         return _with_lock(self._registry_lock, _add)
 
     def spawn(self, *, name: str, role: str, task: str,
+              depth: int = 1,
               command: Optional[list] = None) -> TeamMember:
-        """启动子 agent 进程。command 默认是 agent.team.worker 入口。"""
+        """启动子 agent 进程。command 默认是 agent.team.worker 入口。
+
+        depth 用于递归限制（Phase 4b），默认 1（第一层子 agent）。
+        """
         # 先注册（status=spawning）
         member = self.register(name=name, role=role, status="spawning")
         member.task = task
@@ -108,6 +112,7 @@ class TeamCoordinator:
             "--task", task,
             "--team-dir", str(self._team_dir),
             "--agent-home", str(self._harvil_home),
+            "--depth", str(depth),
         ]
 
         try:

@@ -62,6 +62,7 @@ class AIAgent:
         team_bus=None,           # === P4a-T6 NEW ===
         team_coordinator=None,   # === P4a-T6 NEW ===
         team_name=None,          # === P4a-T6 NEW ===
+        spawn_depth: int = 0,    # === P4b-T2 NEW ===
     ):
         """
         参数：
@@ -168,6 +169,10 @@ class AIAgent:
         self.team_bus = team_bus
         self.team_coordinator = team_coordinator
         self.team_name = team_name
+
+        # === P4b-T2 NEW: idle 标志 + spawn 深度 ===
+        self._idle_requested = False
+        self.spawn_depth = spawn_depth
 
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
@@ -505,6 +510,7 @@ class AIAgent:
                         team_bus=self.team_bus,              # === P4a-T6 NEW ===
                         team_coordinator=self.team_coordinator,  # === P4a-T6 NEW ===
                         team_name=self.team_name,            # === P4a-T6 NEW ===
+                        agent_ref=self,                     # === P4b-T2 NEW ===
                     )
 
                     # 工具结果追加到历史（必须配对 tool_call_id）
@@ -514,6 +520,11 @@ class AIAgent:
                         "name": tool_name,
                         "content": result,  # JSON 字符串
                     })
+
+                # === P4b-T2 NEW: idle 标志检查 ===
+                if self._idle_requested:
+                    logger.info("idle 已请求，退出 run_conversation")
+                    break
 
                 # 继续循环，让 LLM 看到工具结果
                 continue
