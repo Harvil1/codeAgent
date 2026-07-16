@@ -58,7 +58,7 @@ def test_tool_dispatch_through_handle_function_call():
 
 def test_agent_accepts_all_components(tmp_path):
     """AIAgent 能接收 memory_store + memory_manager + session_store。"""
-    memory_store = MemoryStore(tmp_path)
+    memory_store = MemoryStore(harvil_home=tmp_path)
     memory_manager = MemoryManager(memory_store)
     session_store = SessionStore(tmp_path / "s.db")
 
@@ -110,7 +110,7 @@ def _make_mock_client(response_text="hello", tool_calls=None):
 
 def test_mock_simple_conversation(tmp_path):
     """Mock 一轮简单对话（无工具调用）。"""
-    memory_store = MemoryStore(tmp_path)
+    memory_store = MemoryStore(harvil_home=tmp_path)
     memory_store.add("memory", "测试记忆")
 
     agent = AIAgent(
@@ -174,7 +174,7 @@ def test_mock_conversation_with_tool_call(tmp_path):
 
 def test_mock_conversation_with_memory_injection(tmp_path):
     """记忆快照被注入到 system prompt。"""
-    memory_store = MemoryStore(tmp_path)
+    memory_store = MemoryStore(harvil_home=tmp_path)
     memory_store.add("memory", "特殊标记 XYZ")
 
     agent = AIAgent(

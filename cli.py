@@ -123,14 +123,16 @@ class RuntimeContext:
 
         # 1. 记忆系统
         if self.config.get("memory", {}).get("enabled", True):
-            self.memory_store = MemoryStore(
-                self.home,
-                memory_char_limit=self.config.get("memory", {}).get(
-                    "memory_char_limit", 2200),
-                user_char_limit=self.config.get("memory", {}).get(
-                    "user_char_limit", 1375),
-            )
+            self.memory_store = MemoryStore(harvil_home=self.home)
             self.memory_manager = MemoryManager(self.memory_store)
+
+        # === Mem-T7 NEW: memory retriever 装配（多文件检索） ===
+        self.memory_retriever = None
+        mem_cfg = self.config.get("memory", {})
+        if (mem_cfg.get("enabled", True) and
+                mem_cfg.get("retrieval_enabled", True)):
+            from agent.memory_retriever import retrieve_relevant
+            self.memory_retriever = retrieve_relevant  # 函数引用
 
         # 2. 会话存储
         if self.config.get("sessions", {}).get("auto_save", True):
@@ -199,6 +201,7 @@ class RuntimeContext:
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
             bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
             cron_scheduler=self.cron_scheduler,  # === P2c-T5 NEW ===
+            memory_retriever=self.memory_retriever,  # === Mem-T7 NEW ===
         )
 
     def _maybe_trigger_curator(self):
