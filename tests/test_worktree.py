@@ -1,5 +1,6 @@
 """P2 测试：worktree 隔离 + summary_only。"""
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import pytest
 from tools.worktree import (
     is_git_repo, create_isolated_workspace, list_worktrees,
     _create_temp_workspace,
+    _log_worktree_event,
+    _resolve_events_path,
 )
 from tools.delegate_tool import _summarize_child_result
 from tools.registry import registry
@@ -201,3 +204,81 @@ def test_delegate_summary_only_in_schema():
     props = delegate["function"]["parameters"]["properties"]
     assert "summary_only" in props
     assert "isolated_workspace" in props
+
+
+# ---------------------------------------------------------------------------
+# P3-T2: worktree 事件流
+# ---------------------------------------------------------------------------
+
+def test_log_worktree_event_writes_jsonl(tmp_path):
+    """_log_worktree_event 在 repo_root/.worktrees/.events.jsonl 写入 JSON 行。"""
+    # 模拟一个 repo root
+    fake_repo = tmp_path / "myrepo"
+    fake_repo.mkdir()
+    (fake_repo / ".git").mkdir()  # 模拟 git 仓库
+
+    _log_worktree_event(fake_repo, "create.after", {"branch": "test", "worktree_dir": "/tmp/x"})
+
+    events_file = fake_repo / ".worktrees" / ".events.jsonl"
+    assert events_file.exists()
+    lines = events_file.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["event"] == "create.after"
+    assert record["payload"]["branch"] == "test"
+    assert "ts" in record
+
+
+def test_resolve_events_path_returns_none_for_non_git(tmp_path):
+    """非 git 仓库时 _resolve_events_path 返回 None。"""
+    result = _resolve_events_path(tmp_path)
+    assert result is None
+
+
+def test_worktree_create_logs_events(tmp_path):
+    """git worktree 创建后事件文件包含 create.before 和 create.after。"""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(tmp_path), capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(tmp_path), capture_output=True,
+    )
+    (tmp_path / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+
+    path, cleanup = create_isolated_workspace(base_path=tmp_path, name="evt-test")
+    try:
+        pass
+    finally:
+        cleanup()
+
+    events_file = tmp_path / ".worktrees" / ".events.jsonl"
+    assert events_file.exists()
+    lines = events_file.read_text(encoding="utf-8").strip().split("\n")
+    events = [json.loads(line) for line in lines]
+    event_types = [e["event"] for e in events]
+    assert "create.before" in event_types
+    assert "create.after" in event_types
+    assert "cleanup.before" in event_types
+    assert "cleanup.after" in event_types
+
+
+def test_log_worktree_event_failure_is_safe(tmp_path):
+    """_log_worktree_event 写入失败时不抛（只 log warning）。"""
+    # 用一个不可写的路径模拟失败（文件路径指向一个已存在的目录）
+    fake_repo = tmp_path / "repo"
+    fake_repo.mkdir()
+    (fake_repo / ".git").mkdir()
+    # 把 .worktrees 做成一个文件（而非目录），让 mkdir 失败或 open 失败
+    # 实际上 _resolve_events_path 会 mkdir，所以需要更巧妙的方式
+    # 直接 mock _resolve_events_path 返回一个不可能写入的路径
+    with patch("tools.worktree._resolve_events_path", return_value=Path("/nonexistent/path/events.jsonl")):
+        # 不应抛异常
+        _log_worktree_event(fake_repo, "create.after", {"test": True})
+

@@ -15,15 +15,62 @@ git 仓库：用 git worktree 创建（共享历史，独立分支和文件）
         cleanup()
 """
 
+import json
 import logging
 import shutil
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 事件流（worktree lifecycle 审计日志）
+# ---------------------------------------------------------------------------
+
+def _resolve_events_path(workspace_or_repo) -> Path:
+    """解析事件文件路径。
+
+    放在仓库根目录下的 .worktrees/.events.jsonl。
+    非 git / 无法确定 repo root 时返回 None。
+    """
+    p = Path(workspace_or_repo) if workspace_or_repo else None
+    repo_root = None
+    if p is not None:
+        # 如果传入的已经是 repo root（包含 .git），直接用
+        if (p / ".git").exists():
+            repo_root = p
+        else:
+            repo_root = get_repo_root(p)
+    if repo_root is None:
+        return None
+    events_dir = repo_root / ".worktrees"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    return events_dir / ".events.jsonl"
+
+
+def _log_worktree_event(repo_root, event_type: str, payload: dict) -> None:
+    """写入一条 worktree 事件到 jsonl 文件。
+
+    失败时只 log warning，不抛（事件流是审计辅助，不影响主流程）。
+    """
+    events_file = _resolve_events_path(repo_root)
+    if events_file is None:
+        return
+    record = {
+        "event": event_type,
+        "payload": payload,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        with open(events_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("写入 worktree 事件失败: %s", e)
 
 
 def is_git_repo(path=None) -> bool:
@@ -93,6 +140,13 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
     worktree_dir = repo_root.parent / ".harvil-worktrees" / f"{name}-{short_id}"
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
+    # 事件：create.before
+    _log_worktree_event(repo_root, "create.before", {
+        "branch": branch,
+        "worktree_dir": str(worktree_dir),
+        "name": name,
+    })
+
     result = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree_dir)],
         cwd=str(repo_root),
@@ -101,14 +155,37 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
         timeout=30,
     )
     if result.returncode != 0:
+        # 事件：create.fail
+        _log_worktree_event(repo_root, "create.fail", {
+            "branch": branch,
+            "worktree_dir": str(worktree_dir),
+            "error": result.stderr.strip(),
+        })
         raise RuntimeError(f"git worktree add 失败: {result.stderr}")
 
     logger.info("已创建 git worktree: %s（分支 %s）", worktree_dir, branch)
 
+    # 事件：create.after
+    _log_worktree_event(repo_root, "create.after", {
+        "branch": branch,
+        "worktree_dir": str(worktree_dir),
+        "name": name,
+    })
+
     def cleanup(keep: bool = False):
         if keep:
             logger.info("保留 worktree: %s", worktree_dir)
+            # 事件：cleanup.keep
+            _log_worktree_event(repo_root, "cleanup.keep", {
+                "branch": branch,
+                "worktree_dir": str(worktree_dir),
+            })
             return
+        # 事件：cleanup.before
+        _log_worktree_event(repo_root, "cleanup.before", {
+            "branch": branch,
+            "worktree_dir": str(worktree_dir),
+        })
         try:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree_dir)],
@@ -127,6 +204,11 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
             logger.debug("清理 worktree 失败: %s", e)
         # 兜底删除目录
         shutil.rmtree(worktree_dir, ignore_errors=True)
+        # 事件：cleanup.after
+        _log_worktree_event(repo_root, "cleanup.after", {
+            "branch": branch,
+            "worktree_dir": str(worktree_dir),
+        })
 
     return worktree_dir, cleanup
 
@@ -135,6 +217,13 @@ def _create_temp_workspace(name: str) -> Tuple[Path, Callable]:
     """非 git 仓库时创建空临时目录。"""
     prefix = f"harvil-{name}-"
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
+
+    # 事件：create.after（temp workspace 也记录，但 repo_root 为 None 时不写文件）
+    _log_worktree_event(None, "create.after", {
+        "worktree_dir": str(tmp),
+        "name": name,
+        "type": "temp",
+    })
 
     def cleanup(keep: bool = False):
         if keep:

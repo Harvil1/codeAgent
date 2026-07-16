@@ -146,8 +146,11 @@ def _handle_task_complete(args: dict, **kwargs) -> str:
     if task is None:
         return json.dumps({"error": f"任务不存在: {task_id}"}, ensure_ascii=False)
 
-    # 检查解锁了哪些任务
-    ready = [t["id"] for t in store.find_ready()]
+    # 检查解锁了哪些任务（含 id/subject/status，方便 LLM 判断下一步）
+    ready = [
+        {"id": t["id"], "subject": t.get("subject", ""), "status": t.get("status", "")}
+        for t in store.find_ready()
+    ]
     return json.dumps({
         "success": True,
         "task": task,

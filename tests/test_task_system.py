@@ -245,6 +245,37 @@ def test_task_list_tool(tmp_path):
     assert data["count"] >= 1
 
 
+def test_task_complete_returns_unblocked_with_subject(tmp_path):
+    """task_complete 返回的 unblocked 含 id/subject/status 三字段。"""
+    # 创建依赖链 A → B
+    a_result = registry.dispatch(
+        "task_create", {"subject": "任务A"}, harvil_home=tmp_path,
+    )
+    a_id = json.loads(a_result)["task"]["id"]
+    b_result = registry.dispatch(
+        "task_create",
+        {"subject": "任务B", "blocked_by": [a_id]},
+        harvil_home=tmp_path,
+    )
+    b_id = json.loads(b_result)["task"]["id"]
+
+    # 完成 A，B 被解锁
+    result = registry.dispatch(
+        "task_complete", {"id": a_id}, harvil_home=tmp_path,
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    unblocked = data["unblocked"]
+    assert isinstance(unblocked, list)
+    assert len(unblocked) >= 1
+    # 找到 B
+    b_entries = [u for u in unblocked if u["id"] == b_id]
+    assert len(b_entries) == 1
+    entry = b_entries[0]
+    assert entry["subject"] == "任务B"
+    assert entry["status"] == "pending"
+
+
 def test_task_tools_in_core():
     """4 个 task 工具在 core 工具集里。"""
     tools = ensure_tools_discovered() or []
