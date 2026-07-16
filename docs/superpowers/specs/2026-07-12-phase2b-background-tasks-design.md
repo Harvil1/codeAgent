@@ -270,7 +270,7 @@ def __init__(self, ..., bg_manager=None, ...):
 
 ## §9 Windows 兼容
 
-- `subprocess.Popen` 用 `text=True, encoding="utf-8"`（CLAUDE.md 强制）
+- `subprocess.Popen` 用 `text=True, encoding="utf-8"`（HARVIL.md 强制）
 - `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP` 用于 detach（Windows）
 - `start_new_session=True` 用于 detach（POSIX）
 - 平台分支封装在 `_detach_flags(detach: bool) -> dict` helper

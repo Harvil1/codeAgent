@@ -8,7 +8,7 @@
 - 默认非 detach（agent 退出清理）；detach=True 用 start_new_session/CREATE_NEW_PROCESS_GROUP
 - 并发上限默认 5
 
-跨平台：subprocess 必须 text=True, encoding="utf-8"（CLAUDE.md 强制）。
+跨平台：subprocess 必须 text=True, encoding="utf-8"（HARVIL.md 强制）。
 """
 import copy
 import logging

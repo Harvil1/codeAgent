@@ -405,7 +405,7 @@ if memory_store:
 | 文件名 | ULID | name slug | 避免特殊字符 + 时间排序 |
 | 索引位置 | system prompt（frozen） | user turn | 会话内稳定，保护 prompt cache |
 | 相关记忆注入位置 | user turn（持久进 history） | 临时消息 | 是上下文，不是状态通知 |
-| 删除 | 软删除（移到 .archive） | 硬删除 | CLAUDE.md "完全可逆" 原则 |
+| 删除 | 软删除（移到 .archive） | 硬删除 | HARVIL.md "完全可逆" 原则 |
 | 检索模型 | 主 model（可配） | 强制便宜模型 | 简单；用户可在 config 切换 |
 
 ## 附录 B: 与现有原则对齐

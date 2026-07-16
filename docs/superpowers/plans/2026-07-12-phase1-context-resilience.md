@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 文件 I/O 必须指定 `encoding="utf-8"`（CLAUDE.md 强制，ruff `PLW1514`）
+- 文件 I/O 必须指定 `encoding="utf-8"`（HARVIL.md 强制，ruff `PLW1514`）
 - 依赖管理统一用 `uv add`（不要 `pip install`，不要手改 `pyproject.toml`）
 - 所有工具 handler 返回 JSON 字符串；错误用 `{"error": "...", "error_type": "..."}`
 - 写文件路径走 `agent.permission.safe_path(write=True, allowed_roots=[...])`

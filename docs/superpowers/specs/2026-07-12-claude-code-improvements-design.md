@@ -140,8 +140,8 @@ Phase 5: 长期维护
 ### 与现有契约衔接
 
 - `maybe_compress` 返回 `(messages, bool)` 的契约不变，pipeline 沿用，最小化对 `agent/__init__.py` 的改动面。
-- `invalidate_system_prompt()` 仍是唯一允许的 system prompt 失效入口（CLAUDE.md 关键设计原则 #2）。
-- transcript 和 offload 文件都走 `safe_path`（CLAUDE.md 安全机制），通过 `harvil_home` 参数声明 `allowed_roots`。
+- `invalidate_system_prompt()` 仍是唯一允许的 system prompt 失效入口（HARVIL.md 关键设计原则 #2）。
+- transcript 和 offload 文件都走 `safe_path`（HARVIL.md 安全机制），通过 `harvil_home` 参数声明 `allowed_roots`。
 
 ---
 
@@ -383,7 +383,7 @@ def maybe_offload(
 - ✅ Phase 5 的 Dream 任务统一清理（按 mtime + 大小限额）
 - ✅ 用户可手动删整个 `.task_outputs/` 目录
 
-**safe_path 集成**（CLAUDE.md 安全机制）：
+**safe_path 集成**（HARVIL.md 安全机制）：
 - `output_offload` 写入路径走 `safe_path(write=True, allowed_roots=[agent_home/".task_outputs"])`
 - `read_file` 工具读回这些文件时天然走现有白名单（默认包含 agent_home）
 
@@ -813,9 +813,9 @@ dream:       # Phase 5a
 | 多代理并发 | 路线图标红，需 spike | 直接定多线程 | 跨进程文件锁是高风险，需先验证 |
 | Reactive 次数 | once-per-session | 多次重试 | 避免压缩→超限→压缩死循环 |
 
-## 附录 B: 与现有 CLAUDE.md 原则的对齐
+## 附录 B: 与现有 HARVIL.md 原则的对齐
 
-| CLAUDE.md 原则 | 本设计如何遵守 |
+| HARVIL.md 原则 | 本设计如何遵守 |
 |---|---|
 | 核心是窄腰，能力在边缘 | Hooks（Phase 2）把扩展点从循环体内移到体外；新管线（Phase 1）替换 `maybe_compress` 单点 |
 | Prompt Caching 神圣不可侵犯 | system prompt 仍只在会话开始构建一次；新增的 TOOL_USAGE_GUIDANCE 是首次构建时拼入；压缩仍走 invalidate 重建 |

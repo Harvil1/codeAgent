@@ -521,7 +521,7 @@ logger.warning("hook %s timed out after %ss", hook.name, timeout)
 | 防失控机制 | stop_fire_count 上限 | 无 | Stop hook 可能让循环永不退出 |
 | Registry 持有方 | RuntimeContext 注入 | 模块单例 | 与现有 memory_store / session_store 等模式一致 |
 | IPC 协议 | JSON over stdin/stdout | 自定义二进制 / HTTP | 简单、语言无关、易调试 |
-| PreToolUse deny 返回 | hook_deny error_type | 跳过 tool 消息 | 必须保 tool_call 配对（CLAUDE.md 铁律） |
+| PreToolUse deny 返回 | hook_deny error_type | 跳过 tool 消息 | 必须保 tool_call 配对（HARVIL.md 铁律） |
 
 ## 附录 B: 与 Phase 1 协同
 
@@ -532,7 +532,7 @@ logger.warning("hook %s timed out after %ss", hook.name, timeout)
 | reactive_compact | 与 Hooks 独立，hook 不能拦截 reactive |
 | use_new_pipeline 开关 | 与 config.hooks.enabled 独立 |
 
-## 附录 C: 与现有 CLAUDE.md 原则的对齐
+## 附录 C: 与现有 HARVIL.md 原则的对齐
 
 | 原则 | 本设计如何遵守 |
 |---|---|

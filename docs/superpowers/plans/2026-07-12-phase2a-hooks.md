@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 文件 I/O 必须 `encoding="utf-8"`（CLAUDE.md 强制）
+- 文件 I/O 必须 `encoding="utf-8"`（HARVIL.md 强制）
 - 用 `uv`，不要 `pip install`
 - 中文注释/commit；英文标识符
 - 不要 import 用不到的模块（ruff F401）

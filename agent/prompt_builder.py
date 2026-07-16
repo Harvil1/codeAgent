@@ -166,7 +166,7 @@ def build_system_prompt(
         except Exception:
             pass
 
-    # 7. 上下文文件（AGENTS.md / CLAUDE.md 等）
+    # 7. 上下文文件（AGENTS.md / HARVIL.md 等）
     if context_files:
         for cf in context_files:
             cf = Path(cf)
