@@ -41,11 +41,17 @@ class MCPClient:
         command: str,
         args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
     ):
         self.name = name
         self.command = command
         self.args = args or []
         self.env = env or {}
+        # 工具过滤：include 优先于 exclude
+        # include 只保留列出的；exclude 跳过列出的
+        self.include = include
+        self.exclude = exclude
         self.process: Optional[subprocess.Popen] = None
         self._request_id = 0
         self._lock = threading.Lock()
@@ -208,7 +214,15 @@ class MCPManager:
         self._lock = threading.Lock()
 
     def connect_all(self, config: Optional[Dict[str, dict]] = None) -> None:
-        """连接所有配置的 server。"""
+        """连接所有配置的 server。
+
+        配置里可选 include/exclude 字段（include 优先）：
+            "github": {
+                "command": "...",
+                "include": ["create_issue"],
+                "exclude": []
+            }
+        """
         if config is None:
             config = load_mcp_config()
 
@@ -219,6 +233,8 @@ class MCPManager:
                     command=cfg.get("command", ""),
                     args=cfg.get("args", []),
                     env=cfg.get("env", {}),
+                    include=cfg.get("include"),
+                    exclude=cfg.get("exclude"),
                 )
                 client.connect()
                 with self._lock:
@@ -227,7 +243,10 @@ class MCPManager:
                 logger.warning("MCP server %s 连接失败: %s", name, e)
 
     def get_all_tools(self) -> List[dict]:
-        """获取所有 server 的工具列表（含 server 名前缀）。"""
+        """获取所有 server 的工具列表（含 server 名前缀）。
+
+        应用每个 client 的 include/exclude 过滤（include 优先于 exclude）。
+        """
         all_tools = []
         with self._lock:
             clients = list(self._clients.items())
@@ -237,11 +256,28 @@ class MCPManager:
                 continue
             try:
                 tools = client.list_tools()
+                # 读取 include/exclude（兼容 MagicMock 等动态属性）
+                include = getattr(client, "include", None)
+                exclude = getattr(client, "exclude", None)
+                # 只接受真实 list/None，避免 MagicMock 属性干扰
+                if not isinstance(include, (list, type(None))):
+                    include = None
+                if not isinstance(exclude, (list, type(None))):
+                    exclude = None
+
                 for tool in tools:
+                    tool_name = tool.get("name", "")
+                    # include/exlude 过滤（include 优先）
+                    if include is not None:
+                        if tool_name not in include:
+                            continue
+                    elif exclude:
+                        if tool_name in exclude:
+                            continue
                     all_tools.append({
                         "server": server_name,
-                        "original_name": tool.get("name", ""),
-                        "full_name": f"mcp__{server_name}__{tool.get('name', '')}",
+                        "original_name": tool_name,
+                        "full_name": f"mcp__{server_name}__{tool_name}",
                         "description": tool.get("description", ""),
                         "inputSchema": tool.get("inputSchema", {
                             "type": "object", "properties": {},
@@ -298,3 +334,21 @@ def get_mcp_manager() -> MCPManager:
 def is_mcp_tool(name: str) -> bool:
     """判断工具名是否是 MCP 工具（mcp__ 前缀）。"""
     return name.startswith("mcp__")
+
+
+def filter_tool_name(
+    tool_name: str,
+    include: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+) -> bool:
+    """判断单个工具是否应该保留。
+
+    include 优先：include 非空时，只有在 include 里才保留。
+    exclude：在 exclude 里的不保留。
+    两者都空时保留所有。
+    """
+    if include is not None:
+        return tool_name in include
+    if exclude:
+        return tool_name not in exclude
+    return True

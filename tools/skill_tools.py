@@ -124,6 +124,8 @@ LOAD_SKILL_SCHEMA = {
         "调用此工具获取完整内容（~2000 tokens/技能）。"
         "区别于 skill_view：load_skill 只返回指令正文（去 frontmatter），"
         "专门给 LLM 按需读取执行。"
+        "\n\n支持技能束：传 name=\"bundle:<bundle_name>\" 一次性加载多个技能"
+        "（在 ~/.agent/.skill-bundles.json 配置）。"
     ),
     "parameters": {
         "type": "object",
@@ -141,6 +143,20 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
 
     skills_dir = _get_skills_dir_from_context(kwargs)
+
+    # batch1-T3: 支持 bundle:<name> 加载技能束
+    if name.startswith("bundle:"):
+        bundle_name = name[len("bundle:"):]
+        from agent.skill_bundle import load_bundle
+        result = load_bundle(bundle_name, skills_dir)
+        # 对成功加载的技能 bump view 计数
+        for sname in result.get("skills_loaded", []):
+            try:
+                bump_view(skills_dir, sname)
+            except Exception:
+                pass
+        return json.dumps(result, ensure_ascii=False)
+
     skill_md = skills_dir / name / "SKILL.md"
     if not skill_md.exists():
         return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)

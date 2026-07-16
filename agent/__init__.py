@@ -173,12 +173,63 @@ class AIAgent:
         self._idle_requested = False
         self.spawn_depth = spawn_depth
 
+        # === batch1-T2 NEW: LLM 用量统计（prompt cache 记账）===
+        self._llm_usage_stats = {
+            "total_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_creation_tokens": 0,
+        }
+
+        # === batch1-T4 NEW: 子 agent 追踪（中断传播）===
+        self._children: list = []
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
         协作式中断：不直接杀线程（可能损坏消息历史），而是设置标志。
+        中断会传播到所有活跃子 agent。
         """
         self._interrupt_requested = True
+        # 传播到子 agent
+        for child in self._children:
+            try:
+                child.interrupt()
+            except Exception as e:
+                logger.warning("子 agent 中断失败: %s", e)
+
+    def _record_llm_usage(self, response) -> None:
+        """记录一次 LLM 调用的 token 用量（batch1-T2）。"""
+        self._llm_usage_stats["total_calls"] += 1
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        try:
+            self._llm_usage_stats["total_prompt_tokens"] += (
+                getattr(usage, "prompt_tokens", 0) or 0
+            )
+            self._llm_usage_stats["total_completion_tokens"] += (
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+            # prompt cache 相关（DeepSeek / OpenAI / Anthropic 都可能有）
+            self._llm_usage_stats["total_cache_read_tokens"] += (
+                getattr(usage, "prompt_cache_hit_tokens", 0)
+                or getattr(usage, "cache_read_input_tokens", 0)
+                or 0
+            )
+            self._llm_usage_stats["total_cache_creation_tokens"] += (
+                getattr(usage, "prompt_cache_miss_tokens", 0)
+                or getattr(usage, "cache_creation_input_tokens", 0)
+                or 0
+            )
+        except Exception as e:
+            logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
+
+    @property
+    def llm_usage_stats(self) -> dict:
+        """只读视图（副本）用于 /usage 展示。"""
+        return dict(self._llm_usage_stats)
 
     def _get_system_prompt(self) -> str:
         """获取系统提示。第一次调用时构建，后续返回缓存。
@@ -441,6 +492,8 @@ class AIAgent:
                 break
 
             api_call_count += 1
+            # batch1-T2: 记录 LLM 用量（prompt cache 记账）
+            self._record_llm_usage(response)
             # 每轮 LLM 调用后递增 todo 计数
             if self.todo_manager:
                 self.todo_manager.increment_round()

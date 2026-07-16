@@ -110,3 +110,40 @@ def execute_skill(
         f"---\n"
         f"用户消息: {user_message}"
     )
+
+
+def scan_bundle_commands(skills_dir: Path) -> Dict[str, dict]:
+    """扫描技能束配置，返回 {command_name: bundle_info}。
+
+    技能束命令格式 /bundle:<name>，与普通技能命令 /<name> 区分。
+    """
+    from agent.skill_bundle import load_bundles_config
+    bundles = load_bundles_config()
+    commands = {}
+    for name, cfg in bundles.items():
+        cmd_name = f"/bundle:{name}"
+        commands[cmd_name] = {
+            "name": name,
+            "description": cfg.get("description", ""),
+            "skills": cfg.get("skills", []),
+            "is_bundle": True,
+        }
+    return commands
+
+
+def execute_bundle(bundle_name: str, user_message: str, skills_dir: Path) -> str:
+    """加载技能束里所有技能的正文，合并成 user 消息返回。"""
+    from agent.skill_bundle import load_bundle
+    result = load_bundle(bundle_name, skills_dir)
+    if "error" in result:
+        return f"[技能束加载失败: {result['error']}]\n\n用户消息: {user_message}"
+
+    body = result.get("body", "")
+    loaded = result.get("skills_loaded", [])
+    missing = result.get("skills_missing", [])
+
+    parts = [f"[技能束已加载: {bundle_name}（{len(loaded)} 个技能）]\n"]
+    if missing:
+        parts.append(f"[注意: {len(missing)} 个技能未找到: {', '.join(missing)}]\n\n")
+    parts.append(f"{body}\n\n---\n用户消息: {user_message}")
+    return "".join(parts)

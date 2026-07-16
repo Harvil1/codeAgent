@@ -32,7 +32,7 @@ from agent import AIAgent
 from agent.memory_store import MemoryStore
 from agent.memory_manager import MemoryManager
 from agent.session_store import SessionStore
-from agent.skill_commands import scan_skill_commands, execute_skill
+from agent.skill_commands import scan_skill_commands, execute_skill, scan_bundle_commands, execute_bundle
 from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
 from config import load_config
@@ -59,6 +59,7 @@ class RuntimeContext:
         self.agent = None
         self.session_id = None
         self.skill_commands = {}
+        self.bundle_commands = {}  # batch1-T3: 技能束斜杠命令
         # === P2-T8 NEW: Hooks 系统 ===
         from agent.hooks import HookRegistry
         self.hooks_registry = HookRegistry()
@@ -183,6 +184,8 @@ class RuntimeContext:
 
         # 5. 扫描技能命令
         self.skill_commands = scan_skill_commands(skills_dir())
+        # batch1-T3: 扫描技能束命令
+        self.bundle_commands = scan_bundle_commands(skills_dir())
 
         # 6. 后台触发 curator（不阻塞启动）
         self._maybe_trigger_curator()
@@ -766,6 +769,19 @@ def _show_usage(rt: RuntimeContext):
         console.print(f"迭代预算剩余: [bold]{rt.agent.iteration_budget.remaining}[/bold]"
                       f"/{rt.agent.iteration_budget.total}")
         console.print(f"对话历史长度: [bold]{len(rt.agent.conversation_history)}[/bold] 条消息")
+        # batch1-T2: LLM token 用量统计
+        stats = rt.agent.llm_usage_stats
+        if stats["total_calls"] > 0:
+            console.print(f"\n[bold]LLM Token 用量：[/bold]")
+            console.print(f"  调用次数:          [bold]{stats['total_calls']}[/bold]")
+            console.print(f"  输入 tokens:       [bold]{stats['total_prompt_tokens']:,}[/bold]")
+            console.print(f"  输出 tokens:       [bold]{stats['total_completion_tokens']:,}[/bold]")
+            console.print(f"  Cache 命中 tokens: [bold]{stats['total_cache_read_tokens']:,}[/bold]")
+            console.print(f"  Cache 写入 tokens: [bold]{stats['total_cache_creation_tokens']:,}[/bold]")
+            total_in = stats["total_prompt_tokens"]
+            if total_in > 0:
+                hit_rate = stats["total_cache_read_tokens"] / total_in * 100
+                console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
     if rt.session_store and rt.session_id:
         info = rt.session_store.get_session(rt.session_id)
         if info:
@@ -870,16 +886,28 @@ def run_interactive(resume_last: bool = False):
 
         # 1. 处理 slash 命令
         if user_input.startswith("/"):
-            # 先检查是否是技能命令
+            # 先检查是否是技能束命令
             cmd_name = user_input.split()[0]
-            if cmd_name in rt.skill_commands:
+            if cmd_name in rt.bundle_commands:
+                pass  # 走技能束触发逻辑
+            elif cmd_name in rt.skill_commands:
                 pass  # 走技能触发逻辑
             elif _handle_command(user_input, rt):
                 continue
 
-        # 2. 检查是否触发技能
+        # 2. 检查是否触发技能束
         cmd_name = user_input.split()[0] if " " in user_input else user_input
-        if cmd_name in rt.skill_commands:
+        if cmd_name in rt.bundle_commands:
+            bundle_info = rt.bundle_commands[cmd_name]
+            rest_msg = user_input[len(cmd_name):].strip()
+            user_input = execute_bundle(
+                bundle_info["name"],
+                rest_msg or "(执行此技能束中的所有技能)",
+                skills_dir(),
+            )
+            console.print(f"[dim][已触发技能束: {bundle_info['name']}（{len(bundle_info['skills'])} 个技能）][/dim]")
+        # 3. 检查是否触发技能
+        elif cmd_name in rt.skill_commands:
             skill_info = rt.skill_commands[cmd_name]
             rest_msg = user_input[len(cmd_name):].strip()
             user_input = execute_skill(

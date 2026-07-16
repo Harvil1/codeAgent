@@ -277,6 +277,8 @@ def _run_child(
     - 工作目录
 
     子代理不继承父代理的对话历史。
+
+    batch1-T4: 子 agent 注册到父 agent._children，支持中断传播。
     """
     # 延迟导入避免循环
     from agent import AIAgent
@@ -326,6 +328,10 @@ def _run_child(
         except Exception as e:
             logger.warning("创建隔离工作区失败，用当前目录: %s", e)
 
+    # batch1-T4: 获取父 agent 引用（用于中断传播）
+    parent_agent = kwargs.get("agent_ref")
+
+    child = None
     try:
         # leaf 角色：限制工具集
         if role == "leaf":
@@ -342,16 +348,30 @@ def _run_child(
             system_prompt_override=system_prompt,
         )
 
+        # batch1-T4: 注册到父 agent._children（中断传播）
+        if parent_agent is not None:
+            try:
+                parent_agent._children.append(child)
+            except Exception:
+                pass
+
         # 运行子代理
         result = child.chat(f"请执行任务: {goal}")
 
         # summary_only：超长结果用 LLM 生成摘要，节省父代理 context
         summary_only = kwargs.get("summary_only", True)
         if summary_only and len(result) > 500:
-            result = _summarize_child_result(result, child.client, child.model)
+            result = _summarize_child_result(result, child.llm_client, child.model)
 
         return result
     finally:
+        # batch1-T4: 从父 agent._children 移除
+        if parent_agent is not None and child is not None:
+            try:
+                if child in parent_agent._children:
+                    parent_agent._children.remove(child)
+            except Exception:
+                pass
         # 恢复工作目录
         if workspace_cleanup:
             try:
