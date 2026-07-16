@@ -58,6 +58,7 @@ class AIAgent:
         hooks_registry=None,   # === P2-T6 NEW ===
         bg_manager=None,       # === P2b-T5 NEW ===
         cron_scheduler=None,   # === P2c-T4 NEW ===
+        memory_retriever=None,  # === Mem-T5 NEW ===
     ):
         """
         参数：
@@ -150,6 +151,16 @@ class AIAgent:
         # === P2c-T4 NEW: cron 调度器 ===
         self.cron_scheduler = cron_scheduler
 
+        # === Mem-T5 NEW: memory 检索器 ===
+        self.memory_retriever = memory_retriever
+        # 缓存 memory 索引（会话内 frozen，保护 prompt cache）
+        self._cached_memory_index = ""
+        if self.memory_store:
+            try:
+                self._cached_memory_index = self.memory_store.snapshot_for_prompt()
+            except Exception as e:
+                logger.warning("缓存 memory 索引失败: %s", e)
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -213,10 +224,43 @@ class AIAgent:
                 logger.warning("cron drain_due 异常: %s", e)
                 cron_messages = []
 
+        # === Mem-T5 NEW: memory 检索 + 注入 ===
+        relevant_memories_text = ""
+        if (self.memory_retriever and self.memory_store
+                and self._cached_memory_index):
+            try:
+                relevant_ids = self.memory_retriever.retrieve_relevant(
+                    query=user_message,
+                    index_text=self._cached_memory_index,
+                    llm_client=self.llm_client,
+                    model=self.model,
+                    max_results=5,
+                )
+                if relevant_ids:
+                    bodies = []
+                    for mid in relevant_ids:
+                        body = self.memory_store.load_body(mid)
+                        if body:
+                            bodies.append(f"[memory:{mid}]\n{body}")
+                    if bodies:
+                        relevant_memories_text = "\n\n".join(bodies)
+            except Exception as e:
+                logger.warning("memory retrieval 失败（fail-open）: %s", e)
+                relevant_memories_text = ""
+
+        # 组装实际入 history 的 user_content
+        if relevant_memories_text:
+            user_message_for_history = (
+                f"<relevant_memories>\n{relevant_memories_text}\n</relevant_memories>\n\n"
+                f"{user_message}"
+            )
+        else:
+            user_message_for_history = user_message
+
         # 1. 追加用户消息到历史
         self.conversation_history.append({
             "role": "user",
-            "content": user_message,
+            "content": user_message_for_history,
         })
 
         # 2. 获取系统提示（第一次构建，后续缓存）

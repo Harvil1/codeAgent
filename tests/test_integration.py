@@ -1227,3 +1227,75 @@ def test_e2e_cron_full_lifecycle(tmp_path):
         f"应当含 job message 'cron test message'，实际: {contents}"
     )
 
+
+# ---------------------------------------------------------------------------
+# Mem-T5: AIAgent memory retriever 注入
+# ---------------------------------------------------------------------------
+
+def test_aiagent_accepts_memory_retriever_kwarg():
+    agent = _make_test_agent()
+    assert agent.memory_retriever is None
+
+
+def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
+    """retriever 返回 id → store 读 body → 注入 <relevant_memories>。"""
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.memory_store import MemoryStore
+
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="pytest 配置",
+        description="项目用 pytest",
+        type="project",
+        body="运行测试用 uv run pytest tests/ -v",
+    )
+
+    # mock retriever 返回 [mid]
+    fake_retriever = MagicMock()
+    fake_retriever.retrieve_relevant.return_value = [mid]
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        memory_store=store, memory_retriever=fake_retriever,
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("怎么跑测试")
+
+    # conversation_history[0] 应含 <relevant_memories> + mid body
+    first_user = agent.conversation_history[0]["content"]
+    assert "<relevant_memories>" in first_user
+    assert "uv run pytest" in first_user
+    # 原始 user message 也应在
+    assert "怎么跑测试" in first_user
+
+
+def test_aiagent_no_memory_retriever_backward_compat(tmp_path):
+    """memory_retriever=None 时不抛，user_message 原样入 history。"""
+    agent = _make_test_agent()
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hello")
+    assert agent.conversation_history[0]["content"] == "hello"
+
+
+def test_retrieval_failure_does_not_break_main_loop(tmp_path):
+    """retriever 抛异常时主循环不崩。"""
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.memory_store import MemoryStore
+
+    store = MemoryStore(harvil_home=tmp_path)
+    bad_retriever = MagicMock()
+    bad_retriever.retrieve_relevant.side_effect = RuntimeError("boom")
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        memory_store=store, memory_retriever=bad_retriever,
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("hi")
+    # 不抛 + user_message 原样入 history
+    assert agent.conversation_history[0]["content"] == "hi"
+
