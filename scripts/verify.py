@@ -385,7 +385,7 @@ def main():
     print("  HarvilAgent 复刻检查清单验证")
     print("=" * 60)
 
-    tmp = Path(tempfile.mkdtemp(prefix="hermes_verify_"))
+    tmp = Path(tempfile.mkdtemp(prefix="harvil_verify_"))
     checks = [
         ("基础对话", [
             ("agent 初始化", check_agent_initialization),

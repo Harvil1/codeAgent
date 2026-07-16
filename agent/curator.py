@@ -10,7 +10,7 @@
   第 1 阶段：确定性状态转换（纯时间规则，无 LLM）
   第 2 阶段：LLM 合并审查（可选，默认关闭）
 
-手动触发：hermes curator run [--dry-run]
+手动触发：harvil curator run [--dry-run]
 """
 
 import json

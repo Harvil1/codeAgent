@@ -59,7 +59,7 @@ class MemoryManager:
     def on_pre_compress(self, snapshot_path, messages: list) -> None:
         """钩子：压缩前调用。Phase 1 留空（no-op），未来扩展用。
 
-        设计原因：HermesAgent 当前记忆模型是主动式（LLM 通过 memory_tool 自己写），
+        设计原因：HarvilAgent 当前记忆模型是主动式（LLM 通过 memory_tool 自己写），
         强行加 LLM 被动抽取会和现有模型冲突。Phase 5（或独立 Phase 1.5）实现。
         """
         pass

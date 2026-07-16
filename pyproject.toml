@@ -1,7 +1,7 @@
 [project]
 name = "harvilagent"
 version = "0.1.0"
-description = "自学习 AI Agent（基于 Hermes Agent 复刻指南）"
+description = "自学习 AI Agent（基于 Harvil Agent 复刻指南）"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "anthropic>=0.116.0",
