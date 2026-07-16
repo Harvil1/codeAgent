@@ -59,6 +59,9 @@ class AIAgent:
         bg_manager=None,       # === P2b-T5 NEW ===
         cron_scheduler=None,   # === P2c-T4 NEW ===
         memory_retriever=None,  # === Mem-T5 NEW ===
+        team_bus=None,           # === P4a-T6 NEW ===
+        team_coordinator=None,   # === P4a-T6 NEW ===
+        team_name=None,          # === P4a-T6 NEW ===
     ):
         """
         参数：
@@ -161,6 +164,11 @@ class AIAgent:
             except Exception as e:
                 logger.warning("缓存 memory 索引失败: %s", e)
 
+        # === P4a-T6 NEW: team 消息总线 + 协调器 ===
+        self.team_bus = team_bus
+        self.team_coordinator = team_coordinator
+        self.team_name = team_name
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -223,6 +231,20 @@ class AIAgent:
             except Exception as e:
                 logger.warning("cron drain_due 异常: %s", e)
                 cron_messages = []
+
+        # === P4a-T6 NEW: drain team inbox（临时，不进 history）===
+        team_messages_text = ""
+        if self.team_bus and self.team_name:
+            try:
+                msgs = self.team_bus.read_inbox(self.team_name)
+                if msgs:
+                    team_messages_text = "\n".join(
+                        f"[from {m.from_} ({m.type})] {m.content}"
+                        for m in msgs
+                    )
+            except Exception as e:
+                logger.warning("team inbox drain 异常: %s", e)
+                team_messages_text = ""
 
         # === Mem-T5 NEW: memory 检索 + 注入 ===
         relevant_memories_text = ""
@@ -326,6 +348,15 @@ class AIAgent:
                 })
                 # 本轮注入后清空，避免后续轮次重复
                 cron_messages = []
+
+            # === P4a-T6 NEW: 注入 team messages（临时，不进 history）===
+            if team_messages_text:
+                messages.append({
+                    "role": "user",
+                    "content": f"<team_messages>\n{team_messages_text}\n</team_messages>",
+                })
+                # 本轮注入后清空，避免后续轮次重复
+                team_messages_text = ""
 
             # TodoWrite 提醒：3 轮未更新时注入 reminder（临时，不进 history）
             if self.todo_manager and self.todo_manager.should_remind():
@@ -471,6 +502,9 @@ class AIAgent:
                         config=self.config,
                         hooks_registry=self.hooks_registry,  # === P2-T7 NEW ===
                         bg_manager=self.bg_manager,          # === P2b-T7 NEW ===
+                        team_bus=self.team_bus,              # === P4a-T6 NEW ===
+                        team_coordinator=self.team_coordinator,  # === P4a-T6 NEW ===
+                        team_name=self.team_name,            # === P4a-T6 NEW ===
                     )
 
                     # 工具结果追加到历史（必须配对 tool_call_id）

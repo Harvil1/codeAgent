@@ -84,6 +84,9 @@ def handle_function_call(
     config: Optional[Dict[str, Any]] = None,
     hooks_registry=None,  # === P2-T7 NEW ===
     bg_manager=None,      # === P2b-T7 NEW ===
+    team_bus=None,               # === P4a-T6 NEW ===
+    team_coordinator=None,       # === P4a-T6 NEW ===
+    team_name=None,              # === P4a-T6 NEW ===
 ) -> str:
     """分发工具调用，返回 JSON 字符串结果。
 
@@ -128,6 +131,9 @@ def handle_function_call(
         tool_call_id=tool_call_id,
         config=config,
         bg_manager=bg_manager,  # === P2b-T7 NEW ===
+        team_bus=team_bus,               # === P4a-T6 NEW ===
+        team_coordinator=team_coordinator,   # === P4a-T6 NEW ===
+        team_name=team_name,             # === P4a-T6 NEW ===
     )
 
     # === P2-T7 NEW: POST_TOOL_USE hook ===

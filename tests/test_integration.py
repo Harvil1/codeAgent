@@ -1364,3 +1364,43 @@ def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     assert "怎么跑测试" in first_user
 
 
+# ---------------------------------------------------------------------------
+# P4a-T6: AIAgent team_bus 集成
+# ---------------------------------------------------------------------------
+
+def test_aiagent_accepts_team_kwargs():
+    """AIAgent 接受 team_bus/team_coordinator/team_name kwargs（默认 None）。"""
+    agent = _make_test_agent()
+    assert agent.team_bus is None
+    assert agent.team_coordinator is None
+    assert agent.team_name is None
+
+
+def test_aiagent_team_messages_injected_into_temporary_user_msg(tmp_path):
+    """team_bus.read_inbox 返回的消息作为 <team_messages> 临时注入（不进 conversation_history）。"""
+    from unittest.mock import MagicMock
+    from agent import AIAgent
+    from agent.team.bus import TeamMessage
+
+    fake_bus = MagicMock()
+    fake_bus.read_inbox.return_value = [
+        TeamMessage(
+            id="m1", from_="worker1", to="main",
+            type="response", content="task done",
+            ts="2026-07-12T15:30:00", request_id=None,
+        ),
+    ]
+
+    agent = AIAgent(
+        base_url="http://fake", api_key="fake", model="fake",
+        enabled_toolsets=[], harvil_home=str(tmp_path),
+        team_bus=fake_bus, team_name="main",
+    )
+    agent.llm_client = _mock_llm_simple_response("ok")
+    agent.run_conversation("check")
+
+    # conversation_history 不应含 team_messages（临时注入）
+    for msg in agent.conversation_history:
+        assert "<team_messages>" not in msg.get("content", "")
+
+
