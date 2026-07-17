@@ -12,11 +12,16 @@
 """
 
 import json
-from typing import Optional
+import os
+from pathlib import Path
+from typing import List, Optional
 
 from agent.task_store import get_task_store, VALID_STATUSES
 from agent.team.task_binding import assert_owned, TaskOwnershipError
 from tools.registry import registry
+
+
+MAX_ARTIFACT_SIZE = 100 * 1024 * 1024  # 100MB
 
 
 def _ownership_denied(msg: str) -> str:
@@ -60,6 +65,28 @@ def _infer_author(kwargs: dict) -> str:
     if team_name:
         return team_name
     return "main"
+
+
+def _validate_artifact_path(path: str) -> Optional[str]:
+    """验证单个附件路径。返回 None=OK，否则返回错误描述。"""
+    p = Path(path)
+    if not p.exists():
+        return f"路径不存在: {path}"
+    if not os.path.isfile(path):
+        return f"不是文件（拒绝目录）: {path}"
+    if not os.access(path, os.R_OK):
+        return f"不可读: {path}"
+    size = p.stat().st_size
+    if size > MAX_ARTIFACT_SIZE:
+        return f"文件过大: {size} bytes（上限 {MAX_ARTIFACT_SIZE}）"
+    return None
+
+
+def _artifact_error_type(msg: str) -> str:
+    """根据验证错误消息选 error_type。"""
+    if "过大" in msg:
+        return "artifact_too_large"
+    return "invalid_artifact_path"
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +192,32 @@ TASK_COMMENT_SCHEMA = {
             "content": {"type": "string", "description": "留言内容"},
         },
         "required": ["id", "content"],
+    },
+}
+
+TASK_ARTIFACTS_SCHEMA = {
+    "name": "task_artifacts",
+    "description": (
+        "管理任务的交付物文件路径列表（add / remove）。"
+        "路径必须存在、可读、单个文件 ≤100MB。"
+        "用于让下游（gateway notifier 等）知道交付物在哪。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "任务 ID"},
+            "add": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "要加入的文件绝对路径列表",
+            },
+            "remove": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "要移除的文件路径列表",
+            },
+        },
+        "required": ["id"],
     },
 }
 
@@ -287,6 +340,32 @@ def _handle_task_comment(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
+def _handle_task_artifacts(args: dict, **kwargs) -> str:
+    """管理 task.artifacts 列表（add / remove）。原子性：批量 add 任一失败整批拒绝。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    add_paths: List[str] = args.get("add") or []
+    remove_paths: List[str] = args.get("remove") or []
+    store = _get_store(kwargs)
+
+    # 原子性：先全部验证 add，任一失败 → 整批拒绝
+    for p in add_paths:
+        verr = _validate_artifact_path(p)
+        if verr:
+            return json.dumps(
+                {"error": verr, "error_type": _artifact_error_type(verr)},
+                ensure_ascii=False,
+            )
+
+    if add_paths:
+        store.add_artifacts(task["id"], add_paths)
+    if remove_paths:
+        store.remove_artifacts(task["id"], remove_paths)
+    updated = store.get(task["id"])
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -314,4 +393,8 @@ registry.register(
 registry.register(
     name="task_comment", toolset="core",
     schema=TASK_COMMENT_SCHEMA, handler=_handle_task_comment, emoji="💬",
+)
+registry.register(
+    name="task_artifacts", toolset="core",
+    schema=TASK_ARTIFACTS_SCHEMA, handler=_handle_task_artifacts, emoji="📎",
 )

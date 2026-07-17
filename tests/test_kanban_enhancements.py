@@ -193,3 +193,126 @@ def test_comment_handler_blocks_foreign_id(store, monkeypatch):
     )
     data = json.loads(result)
     assert data["error_type"] == "permission_denied"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: task_artifacts handler + validation
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import (
+    _handle_task_artifacts,
+    _validate_artifact_path,
+    _artifact_error_type,
+    MAX_ARTIFACT_SIZE,
+)
+
+
+def test_artifacts_handler_add_valid_path(store, monkeypatch, tmp_path):
+    """加真实文件 → 成功。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    f = tmp_path / "out.txt"
+    f.write_text("hello", encoding="utf-8")
+    result = _handle_task_artifacts(
+        {"id": task["id"], "add": [str(f)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert str(f) in data["task"]["artifacts"]
+
+
+def test_artifacts_handler_add_nonexistent(store, monkeypatch):
+    """加不存在的路径 → invalid_artifact_path，列表不变。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_artifacts(
+        {"id": task["id"], "add": ["/nonexistent/file.txt"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "invalid_artifact_path"
+    refreshed = store.get(task["id"])
+    assert refreshed["artifacts"] == []
+
+
+def test_artifacts_handler_add_directory(store, monkeypatch, tmp_path):
+    """加目录（不是文件）→ invalid_artifact_path。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_artifacts(
+        {"id": task["id"], "add": [str(tmp_path)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "invalid_artifact_path"
+    assert "不是文件" in data["error"]
+
+
+def test_artifacts_handler_atomic_failure(store, monkeypatch, tmp_path):
+    """add [valid, invalid, valid] → 整批失败，列表不变。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    valid = tmp_path / "ok.txt"
+    valid.write_text("ok", encoding="utf-8")
+    result = _handle_task_artifacts(
+        {"id": task["id"], "add": [str(valid), "/nonexistent", str(valid)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "invalid_artifact_path"
+    refreshed = store.get(task["id"])
+    assert refreshed["artifacts"] == []  # 整批失败
+
+
+def test_artifacts_handler_remove(store, monkeypatch, tmp_path):
+    """add 后 remove → 列表清空。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    f1 = tmp_path / "a.txt"
+    f1.write_text("a", encoding="utf-8")
+    f2 = tmp_path / "b.txt"
+    f2.write_text("b", encoding="utf-8")
+    # add
+    _handle_task_artifacts(
+        {"id": task["id"], "add": [str(f1), str(f2)]},
+        harvil_home=str(store._dir.parent),
+    )
+    # remove f1
+    result = _handle_task_artifacts(
+        {"id": task["id"], "remove": [str(f1)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert str(f1) not in data["task"]["artifacts"]
+    assert str(f2) in data["task"]["artifacts"]
+
+
+def test_artifacts_handler_blocks_foreign_id(store, monkeypatch, tmp_path):
+    """跨任务加附件被拒。"""
+    task_a = store.create(subject="A")
+    task_b = store.create(subject="B")
+    monkeypatch.setenv("HARVIL_KANBAN_TASK", task_a["id"])
+    f = tmp_path / "x.txt"
+    f.write_text("x", encoding="utf-8")
+    result = _handle_task_artifacts(
+        {"id": task_b["id"], "add": [str(f)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "permission_denied"
+
+
+def test_validate_artifact_path_oversized(monkeypatch, tmp_path):
+    """超过 100MB → artifact_too_large。"""
+    f = tmp_path / "big.txt"
+    f.write_text("small", encoding="utf-8")  # 真实小文件
+    # mock stat 返回超大 size
+    class _FakeStat:
+        st_size = MAX_ARTIFACT_SIZE + 1
+    monkeypatch.setattr(Path, "stat", lambda self: _FakeStat())
+    err = _validate_artifact_path(str(f))
+    assert err is not None
+    assert "过大" in err
+    assert _artifact_error_type(err) == "artifact_too_large"
