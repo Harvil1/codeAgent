@@ -172,6 +172,49 @@ BROWSER_FORWARD_SCHEMA = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+BROWSER_GET_IMAGES_SCHEMA = {
+    "name": "browser_get_images",
+    "description": "提取页面上所有 img 的 URL 列表（按 min_width/min_height 过滤小图）。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "min_width": {"type": "integer", "default": 100, "description": "过滤掉太小的图"},
+            "min_height": {"type": "integer", "default": 100},
+        },
+    },
+}
+
+BROWSER_CONSOLE_SCHEMA = {
+    "name": "browser_console",
+    "description": "读取浏览器 console 日志（自上次 navigate 起）。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "level": {
+                "type": "string",
+                "enum": ["log", "info", "warning", "error"],
+                "default": "log",
+                "description": "最低级别过滤（error > warning > info > log）",
+            },
+        },
+    },
+}
+
+BROWSER_VISION_SCHEMA = {
+    "name": "browser_vision",
+    "description": (
+        "截图 + 用 LLM 视觉模型分析（用 agent 配置的默认 model）。"
+        "适合页面布局/视觉问题。具体 DOM 内容用 browser_snapshot。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "问 LLM 什么（如 '描述这个页面的布局'）"},
+        },
+        "required": ["query"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # handler
@@ -344,6 +387,114 @@ def _handle_browser_forward(args: dict, **kwargs) -> str:
         return _err(f"前进失败: {e}", "navigation_error")
 
 
+def _handle_browser_get_images(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    min_w = args.get("min_width", 100)
+    min_h = args.get("min_height", 100)
+    try:
+        page = session.get_page()
+        # Playwright：在浏览器里跑 JS 提取 img 信息
+        raw_imgs = page.eval_on_selector_all(
+            "img",
+            """(imgs) => imgs.map(img => ({
+                src: img.src || img.currentSrc || "",
+                width: img.naturalWidth || img.width || 0,
+                height: img.naturalHeight || img.height || 0,
+                alt: img.alt || "",
+            }))""",
+        )
+        filtered = [
+            img for img in raw_imgs
+            if img.get("src")
+            and img.get("width", 0) >= min_w
+            and img.get("height", 0) >= min_h
+        ]
+        return json.dumps({
+            "success": True,
+            "images": filtered,
+            "count": len(filtered),
+            "total_found": len(raw_imgs),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"提取图片失败: {e}", "get_images_error")
+
+
+# console 日志级别优先级
+_CONSOLE_LEVELS = {"log": 0, "info": 1, "warning": 2, "error": 3}
+
+
+def _handle_browser_console(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    level = args.get("level", "log")
+    try:
+        page = session.get_page()
+        logs = getattr(page, "_harvil_console_logs", [])
+        threshold = _CONSOLE_LEVELS.get(level, 0)
+        filtered = [
+            entry for entry in logs
+            if _CONSOLE_LEVELS.get(entry.get("type", "log"), 0) >= threshold
+        ]
+        return json.dumps({
+            "success": True,
+            "logs": filtered,
+            "count": len(filtered),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"读取 console 失败: {e}", "console_error")
+
+
+def _handle_browser_vision(args: dict, **kwargs) -> str:
+    query = (args.get("query") or "").strip()
+    if not query:
+        return _err("query 不能为空")
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    agent = kwargs.get("agent_ref")
+    client = getattr(agent, "_browser_vision_client", None) if agent else None
+    if client is None:
+        return _err(
+            "vision LLM client 未配置（agent._browser_vision_client 为 None）",
+            "vision_unavailable",
+        )
+    try:
+        page = session.get_page()
+        png_bytes = page.screenshot()
+        import base64
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        # OpenAI 兼容 vision API
+        response = client.chat.completions.create(
+            model=kwargs.get("config", {}).get("model", {}).get("name", "deepseek-chat"),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": query},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64}",
+                            },
+                        },
+                    ],
+                },
+            ],
+            max_tokens=1000,
+        )
+        description = response.choices[0].message.content
+        return json.dumps({
+            "success": True,
+            "description": description,
+            "query": query,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"vision 调用失败: {e}", "vision_error")
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -394,4 +545,19 @@ registry.register(
     name="browser_forward", toolset="browser",
     schema=BROWSER_FORWARD_SCHEMA, handler=_handle_browser_forward,
     check_fn=_check_browser_available, emoji="➡",
+)
+registry.register(
+    name="browser_get_images", toolset="browser",
+    schema=BROWSER_GET_IMAGES_SCHEMA, handler=_handle_browser_get_images,
+    check_fn=_check_browser_available, emoji="🖼",
+)
+registry.register(
+    name="browser_console", toolset="browser",
+    schema=BROWSER_CONSOLE_SCHEMA, handler=_handle_browser_console,
+    check_fn=_check_browser_available, emoji="📊",
+)
+registry.register(
+    name="browser_vision", toolset="browser",
+    schema=BROWSER_VISION_SCHEMA, handler=_handle_browser_vision,
+    check_fn=_check_browser_available, emoji="👁",
 )

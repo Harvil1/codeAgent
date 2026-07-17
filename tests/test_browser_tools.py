@@ -350,3 +350,111 @@ def test_forward_calls_go_forward():
     data = json.loads(result)
     assert data["success"] is True
     fake_page.go_forward.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: browser_get_images + browser_console + browser_vision
+# ---------------------------------------------------------------------------
+
+from tools.browser_tool import (  # noqa: E402
+    _handle_browser_get_images,
+    _handle_browser_console,
+    _handle_browser_vision,
+)
+
+
+def test_get_images_extracts_img_urls():
+    """mock page.eval_on_selector_all 返 URL list。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_page.eval_on_selector_all.return_value = [
+        {"src": "https://example.com/a.png", "width": 200, "height": 100},
+        {"src": "https://example.com/b.png", "width": 50, "height": 50},
+    ]
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_get_images(
+        {"min_width": 100, "min_height": 100},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    # width=50 < min_width=100 → 过滤
+    assert len(data["images"]) == 1
+    assert data["images"][0]["src"] == "https://example.com/a.png"
+
+
+def test_console_returns_logs():
+    """mock page.no_more_dialogs / 用 getattr 模拟 console 消息。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    # Playwright 真实 API 没直接读取历史 console 的方法
+    # 我们的 handler 应该订阅 console event + 缓存到 page._harvil_console_logs
+    # 测试里 mock 一个缓存属性
+    fake_page._harvil_console_logs = [
+        {"type": "log", "text": "hello"},
+        {"type": "error", "text": "oops"},
+        {"type": "warning", "text": "careful"},
+    ]
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_console(
+        {"level": "warning"},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    # level=warning 应包含 warning + error，不包含 log
+    types = [entry["type"] for entry in data["logs"]]
+    assert "warning" in types
+    assert "error" in types
+    assert "log" not in types
+
+
+def test_vision_success():
+    """mock session.get_page().screenshot + LLM client → success。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_page.screenshot.return_value = b"fake-png-bytes"
+    fake_session.get_page.return_value = fake_page
+
+    fake_agent = _make_agent_with_session(fake_session)
+    # mock LLM client（agent 持有的 openai client）
+    fake_client = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices = [MagicMock(message=MagicMock(content="A simple page"))]
+    fake_client.chat.completions.create.return_value = fake_response
+    fake_agent._browser_vision_client = fake_client  # 注入
+
+    result = _handle_browser_vision(
+        {"query": "describe"},
+        agent_ref=fake_agent,
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert "A simple page" in data["description"]
+
+
+def test_vision_no_api_key():
+    """没 LLM client → vision_unavailable。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_page.screenshot.return_value = b"x"
+    fake_session.get_page.return_value = fake_page
+
+    fake_agent = _make_agent_with_session(fake_session)
+    fake_agent._browser_vision_client = None
+
+    result = _handle_browser_vision(
+        {"query": "describe"}, agent_ref=fake_agent,
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "vision_unavailable"
+
+
+def test_get_images_browser_unavailable():
+    result = _handle_browser_get_images(
+        {}, agent_ref=_make_agent_with_session(None),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "browser_unavailable"
