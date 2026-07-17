@@ -95,17 +95,37 @@ class HandoffBundleMeta:
 # 内部工具
 # ---------------------------------------------------------------------------
 
+# 进程级单调计数器：Windows 时钟分辨率约 16ms，连续保存时 _generate_id 与
+# _now_iso 可能产生相同时间戳，导致 list_bundles 排序不稳定。当检测到时间戳
+# 未前进时，自增计数器附加到毫秒位，保证后保存的 bundle 严格大于先保存的。
+_last_ts_ms: int = 0
+_collision_counter: int = 0
+
+
+def _monotonic_ts_ms() -> int:
+    """返回单调递增的毫秒时间戳（同一真实毫秒内用计数器兜底）。"""
+    global _last_ts_ms, _collision_counter
+    now_ms = int(datetime.now().timestamp() * 1000)
+    if now_ms <= _last_ts_ms:
+        _collision_counter += 1
+        return _last_ts_ms + _collision_counter
+    _last_ts_ms = now_ms
+    _collision_counter = 0
+    return now_ms
+
+
 def _generate_id() -> str:
     """生成时间排序的唯一 ID（沿用 memory_store.py 的模式）。"""
-    ts = int(datetime.now().timestamp() * 1000)
+    ts = _monotonic_ts_ms()
     short_uuid = uuid.uuid4().hex[:8]
     return f"{ts}{short_uuid}"
 
 
 def _now_iso() -> str:
-    """ISO8601 with milliseconds + Z。"""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") \
-        + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+    """ISO8601 with milliseconds + Z。与 _generate_id 共享单调时间戳源。"""
+    ts_ms = _monotonic_ts_ms()
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{(ts_ms % 1000):03d}Z"
 
 
 def _parse_iso(s: str) -> datetime:
@@ -258,14 +278,83 @@ class HandoffStore:
             schema_checksum=data.get("schema_checksum", ""),
         )
 
-    def _resolve_id(self, query: str) -> str:
-        """内部：把 query 解析为完整 bundle_id（不做歧义处理，Task 2 会扩展）。
+    # ------------------------------------------------------------------
+    # list / resolve / delete
+    # ------------------------------------------------------------------
 
-        Task 1 简化版：
-        - 完整 ID（文件存在）→ 直接返回
-        - 否则抛 BundleNotFoundError（Task 2 加前缀/index）
-        """
+    def list_bundles(self) -> List[HandoffBundleMeta]:
+        """按 created_at 倒序返回活跃 bundle（不含 .archive/）。"""
+        metas: List[HandoffBundleMeta] = []
+        for path in self._handoff_dir.glob("*.json"):
+            if path.parent.name == ".archive":
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                metas.append(HandoffBundleMeta(
+                    bundle_id=data["bundle_id"],
+                    created_at=_parse_iso(data["created_at"]),
+                    title=data.get("title"),
+                    message_count=len(data.get("transcript", [])),
+                    handoff_state=data.get("handoff_state", "pending"),
+                    file_size=path.stat().st_size,
+                ))
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning("跳过损坏的 bundle %s: %s", path, e)
+                continue
+        # 倒序：created_at 大的在前（_now_iso 单调递增，无 tie）
+        metas.sort(key=lambda m: m.created_at, reverse=True)
+        return metas
+
+    def resolve_id(self, query: str) -> str:
+        """把 ULID/前缀/序号 解析为完整 bundle_id（public 接口）。"""
+        return self._resolve_id(query)
+
+    def _resolve_id(self, query: str) -> str:
+        """内部：ULID 前缀（≥4 字符）或 list 序号 解析为完整 bundle_id。"""
+        # 1. 完整 ID 直接命中
         candidate = self._handoff_dir / f"{query}.json"
         if candidate.exists():
             return query
-        raise BundleNotFoundError(f"未找到 bundle: {query}")
+
+        # 2. 前缀匹配（≥4 字符）——先于序号判断，避免纯数字前缀（如
+        #    时间戳部分）被误当成 list index
+        if len(query) >= 4:
+            matches = [
+                p.stem for p in self._handoff_dir.glob(f"{query}*.json")
+                if p.parent.name != ".archive"
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise AmbiguousBundleIDError(
+                    f"前缀 '{query}' 匹配多个 bundle: {matches}",
+                    candidates=matches,
+                )
+            raise BundleNotFoundError(f"未找到 bundle: {query}")
+
+        # 3. 纯数字：当作 list 序号（仅短 query 走到此分支）
+        if query.isdigit():
+            metas = self.list_bundles()
+            idx = int(query)
+            if 0 <= idx < len(metas):
+                return metas[idx].bundle_id
+            raise BundleNotFoundError(
+                f"序号 {idx} 超出范围（共 {len(metas)} 个 bundle）"
+            )
+
+        # 4. 前缀太短且未命中
+        raise BundleNotFoundError(f"未找到 bundle: {query}（前缀至少 4 字符）")
+
+    def delete(self, bundle_id: str) -> Path:
+        """软删除：移到 .archive/<bundle_id>.json。返回归档路径。"""
+        full_id = self._resolve_id(bundle_id)
+        src = self._handoff_dir / f"{full_id}.json"
+        if not src.exists():
+            raise BundleNotFoundError(f"未找到 bundle: {full_id}")
+
+        archive_dir = self._handoff_dir / ".archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dest = archive_dir / f"{full_id}.json"
+        src.replace(dest)  # 原子 rename
+        logger.info("bundle %s 已软删除到 %s", full_id, dest)
+        return dest
