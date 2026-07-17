@@ -136,11 +136,19 @@ TASK_UPDATE_SCHEMA = {
 
 TASK_COMPLETE_SCHEMA = {
     "name": "task_complete",
-    "description": "标记任务为完成。会自动解锁依赖本任务的其他任务。",
+    "description": (
+        "标记任务完成。会自动解锁依赖本任务的其他任务。"
+        "可选 artifacts：完成时一并加入交付物路径（与 task_artifacts 同款验证）。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "id": {"type": "string", "description": "任务 ID"},
+            "artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "可选。完成时一并加入的交付物路径",
+            },
         },
         "required": ["id"],
     },
@@ -247,15 +255,10 @@ def _handle_task_create(args: dict, **kwargs) -> str:
 
 
 def _handle_task_update(args: dict, **kwargs) -> str:
-    task_id = (args.get("id") or "").strip()
-    if not task_id:
-        return json.dumps({"error": "id 不能为空"}, ensure_ascii=False)
-
-    try:
-        assert_owned(task_id)
-    except TaskOwnershipError as e:
-        return _ownership_denied(str(e))
-
+    """更新 task 字段（status / owner / description / subject）。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
     store = _get_store(kwargs)
     fields = {}
     for key in ("status", "owner", "description", "subject"):
@@ -266,27 +269,29 @@ def _handle_task_update(args: dict, **kwargs) -> str:
                 )
             fields[key] = args[key]
 
-    task = store.update(task_id, **fields)
-    if task is None:
-        return json.dumps({"error": f"任务不存在: {task_id}"}, ensure_ascii=False)
-    return json.dumps({"success": True, "task": task}, ensure_ascii=False)
+    updated = store.update(task["id"], **fields)
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
 def _handle_task_complete(args: dict, **kwargs) -> str:
-    task_id = (args.get("id") or "").strip()
-    if not task_id:
-        return json.dumps({"error": "id 不能为空"}, ensure_ascii=False)
-
-    try:
-        assert_owned(task_id)
-    except TaskOwnershipError as e:
-        return _ownership_denied(str(e))
-
+    """标记完成。可选 artifacts 一次性提交（先验证，原子性）。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    # 新增：先验证 artifacts，再 complete（任一失败 → 整个调用不变）
+    artifacts: List[str] = args.get("artifacts") or []
     store = _get_store(kwargs)
-    task = store.complete(task_id)
-    if task is None:
-        return json.dumps({"error": f"任务不存在: {task_id}"}, ensure_ascii=False)
+    if artifacts:
+        for p in artifacts:
+            verr = _validate_artifact_path(p)
+            if verr:
+                return json.dumps(
+                    {"error": verr, "error_type": _artifact_error_type(verr)},
+                    ensure_ascii=False,
+                )
+        store.add_artifacts(task["id"], artifacts)
 
+    completed = store.complete(task["id"])
     # 检查解锁了哪些任务（含 id/subject/status，方便 LLM 判断下一步）
     ready = [
         {"id": t["id"], "subject": t.get("subject", ""), "status": t.get("status", "")}
@@ -294,7 +299,7 @@ def _handle_task_complete(args: dict, **kwargs) -> str:
     ]
     return json.dumps({
         "success": True,
-        "task": task,
+        "task": completed,
         "unblocked": ready,
     }, ensure_ascii=False)
 

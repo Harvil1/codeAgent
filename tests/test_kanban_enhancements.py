@@ -316,3 +316,42 @@ def test_validate_artifact_path_oversized(monkeypatch, tmp_path):
     assert err is not None
     assert "过大" in err
     assert _artifact_error_type(err) == "artifact_too_large"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: task_complete artifacts 扩展
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import _handle_task_complete
+
+
+def test_complete_with_artifacts(store, monkeypatch, tmp_path):
+    """complete 时带 artifacts → 完成后 artifacts 已填。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    f = tmp_path / "final.txt"
+    f.write_text("done", encoding="utf-8")
+    result = _handle_task_complete(
+        {"id": task["id"], "artifacts": [str(f)]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["task"]["status"] == "completed"
+    assert str(f) in data["task"]["artifacts"]
+
+
+def test_complete_with_invalid_artifacts(store, monkeypatch):
+    """complete 时带无效路径 → 不完成（status 不变），artifacts 不动。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    store.claim(task["id"], owner="test")  # status → in_progress
+    result = _handle_task_complete(
+        {"id": task["id"], "artifacts": ["/nonexistent/bad.txt"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "invalid_artifact_path"
+    refreshed = store.get(task["id"])
+    assert refreshed["status"] == "in_progress"  # 不变
+    assert refreshed["artifacts"] == []  # 不动
