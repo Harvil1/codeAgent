@@ -21,7 +21,7 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
-VALID_STATUSES = {"pending", "in_progress", "completed", "deleted"}
+VALID_STATUSES = {"pending", "in_progress", "completed", "deleted", "blocked"}
 
 
 def _now_iso() -> str:
@@ -84,6 +84,8 @@ class TaskStore:
             "last_heartbeat_at": None,
             "comments": [],
             "artifacts": [],
+            "block_reason": None,
+            "block_kind": None,
         }
         self._write(task_id, task)
         logger.info("创建任务 %s: %s", task_id, subject)
@@ -220,6 +222,59 @@ class TaskStore:
         task["updated_at"] = _now_iso()
         self._write(task_id, task)
         return task
+
+    # ------------------------------------------------------------------
+    # DAG 增强（cycle-safe dependency management）
+    # ------------------------------------------------------------------
+
+    def has_path(self, start_id: str, target_id: str) -> bool:
+        """DFS：从 start_id 沿 blocked_by 边走，能否到达 target_id？
+
+        blocked_by 语义：A.blocked_by=[B] 表示 A 依赖 B。
+        所以"沿 blocked_by 走"= "查 start 依赖谁、间接依赖谁"。
+        """
+        visited = set()
+        stack = [start_id]
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            cur_task = self.get(cur)
+            if cur_task is None:
+                continue
+            for dep in cur_task.get("blocked_by", []):
+                if dep == target_id:
+                    return True
+                stack.append(dep)
+        return False
+
+    def add_dependency(
+        self, child_id: str, parent_id: str,
+        *, validate: bool = True,
+    ) -> Optional[dict]:
+        """加 child 依赖 parent 的边（child.blocked_by += [parent]）。
+
+        validate=True 时做 cycle 检测：若 parent 已经（直接或间接）依赖 child，拒绝。
+        self-link 永远拒绝（即使 validate=False）。
+        """
+        if parent_id == child_id:
+            raise ValueError("self-link forbidden")
+        child = self.get(child_id)
+        if child is None:
+            return None
+        if validate:
+            if self.has_path(parent_id, child_id):
+                raise ValueError(
+                    f"cycle detected: {parent_id} 已经依赖 {child_id}，"
+                    f"再加 {child_id} → {parent_id} 边会成环"
+                )
+        blocked_by = child.setdefault("blocked_by", [])
+        if parent_id not in blocked_by:
+            blocked_by.append(parent_id)
+        child["updated_at"] = _now_iso()
+        self._write(child_id, child)
+        return child
 
 
 # 全局单例
