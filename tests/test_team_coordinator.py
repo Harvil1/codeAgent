@@ -69,3 +69,84 @@ def test_spawn_max_members_raises(tmp_path: Path):
 def _python():
     import sys
     return sys.executable
+
+
+class _FakePopen:
+    """假 Popen，捕获 env 用于断言。"""
+    def __init__(self, cmd, **kwargs):
+        self.captured_env = dict(kwargs.get("env") or {})
+        self.pid = 12345
+        self._poll = 0
+
+    def poll(self):
+        return self._poll
+
+
+def test_spawn_without_task_id_no_env(tmp_path, monkeypatch):
+    """不传 task_id → 子进程 env 不含 HARVIL_KANBAN_TASK。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    coord = TeamCoordinator(
+        team_dir=tmp_path, harvil_home=tmp_path,
+        config={"team": {"max_members": 10}},
+    )
+    captured = {}
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return _FakePopen(cmd, **kwargs)
+    monkeypatch.setattr("agent.team.coordinator.subprocess.Popen", fake_popen)
+
+    coord.spawn(name="w1", role="worker", task="...", depth=1)
+    assert "HARVIL_KANBAN_TASK" not in captured["env"]
+
+
+def test_spawn_with_task_id_claims_and_sets_env(tmp_path, monkeypatch):
+    """传 task_id → TaskStore.claim + env 注入。"""
+    from agent.task_store import get_task_store
+    store = get_task_store(harvil_home=str(tmp_path))
+    task = store.create(subject="测试任务")
+
+    coord = TeamCoordinator(
+        team_dir=tmp_path, harvil_home=tmp_path,
+        config={"team": {"max_members": 10}},
+    )
+    captured = {}
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return _FakePopen(cmd, **kwargs)
+    monkeypatch.setattr("agent.team.coordinator.subprocess.Popen", fake_popen)
+
+    coord.spawn(
+        name="w1", role="worker", task="...",
+        depth=1, task_id=task["id"],
+    )
+
+    # env 注入
+    assert captured["env"]["HARVIL_KANBAN_TASK"] == task["id"]
+    # claim 持久化
+    refreshed = store.get(task["id"])
+    assert refreshed["owner"] == "w1"
+    assert refreshed["status"] == "in_progress"
+
+
+def test_spawn_with_invalid_task_id_raises(tmp_path, monkeypatch):
+    """task_id 不存在 → ValueError，且不调 Popen。"""
+    coord = TeamCoordinator(
+        team_dir=tmp_path, harvil_home=tmp_path,
+        config={"team": {"max_members": 10}},
+    )
+    popen_called = []
+    def fake_popen(cmd, **kwargs):
+        popen_called.append(cmd)
+        return _FakePopen(cmd, **kwargs)
+    monkeypatch.setattr("agent.team.coordinator.subprocess.Popen", fake_popen)
+
+    import pytest
+    with pytest.raises(ValueError, match="不存在"):
+        coord.spawn(
+            name="w1", role="worker", task="...",
+            task_id="task_nonexistent",
+        )
+    assert popen_called == []  # 没启动子进程
+    # registry 里状态应为 failed
+    members = coord.list_members()
+    assert any(m.name == "w1" and m.status == "failed" for m in members)

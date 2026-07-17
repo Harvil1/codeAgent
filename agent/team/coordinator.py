@@ -4,6 +4,7 @@ registry.json 持久化所有成员状态。spawn 用 subprocess.Popen 起子进
 """
 import json
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
@@ -96,10 +97,16 @@ class TeamCoordinator:
 
     def spawn(self, *, name: str, role: str, task: str,
               depth: int = 1,
+              task_id: Optional[str] = None,
               command: Optional[list] = None) -> TeamMember:
         """启动子 agent 进程。command 默认是 agent.team.worker 入口。
 
         depth 用于递归限制（Phase 4b），默认 1（第一层子 agent）。
+
+        task_id: 可选。若提供：
+          1. spawn 前 TaskStore.claim(task_id, owner=name)（持久化绑定）
+          2. 注入 HARVIL_KANBAN_TASK=task_id 到子进程 env（进程绑定）
+          task_id 不存在时抛 ValueError，registry 标 failed，不启动子进程。
         """
         # 先注册（status=spawning）
         member = self.register(name=name, role=role, status="spawning")
@@ -114,16 +121,30 @@ class TeamCoordinator:
             "--depth", str(depth),
         ]
 
+        # task_id 绑定：claim + env 注入
+        env = os.environ.copy()
+        if task_id is not None:
+            from agent.task_store import get_task_store
+            from agent.team.task_binding import ENV_VAR
+            store = get_task_store(harvil_home=str(self._harvil_home))
+            claimed = store.claim(task_id, owner=name)
+            if claimed is None:
+                self.update_status(name, "failed")
+                raise ValueError(f"task_id {task_id} 不存在")
+            env[ENV_VAR] = task_id
+
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=env,
             )
             member.pid = proc.pid
             self._processes[name] = proc
             self.update_status(name, "running", pid=proc.pid)
-            logger.info("spawned team member %s (pid=%d)", name, proc.pid)
+            logger.info("spawned team member %s (pid=%d, task_id=%s)",
+                        name, proc.pid, task_id or "<none>")
         except OSError as e:
             logger.error("spawn 失败 %s: %s", name, e)
             self.update_status(name, "failed")
