@@ -145,3 +145,51 @@ def test_infer_author():
     assert _infer_author({"team_name": "w1"}) == "w1"
     assert _infer_author({}) == "main"
     assert _infer_author({"team_name": None}) == "main"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: task_comment handler
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import _handle_task_comment
+
+
+def test_comment_handler_appends(store, monkeypatch):
+    """handler 后 comments 多一条。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_comment(
+        {"id": task["id"], "content": "first comment"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    refreshed = store.get(task["id"])
+    assert len(refreshed["comments"]) == 1
+    assert refreshed["comments"][0]["content"] == "first comment"
+
+
+def test_comment_handler_rejects_empty_content(store, monkeypatch):
+    """content 为空 → 错误。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_comment(
+        {"id": task["id"], "content": "   "},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "content" in data["error"]
+
+
+def test_comment_handler_blocks_foreign_id(store, monkeypatch):
+    """跨任务 comment 被拒。"""
+    task_a = store.create(subject="A")
+    task_b = store.create(subject="B")
+    monkeypatch.setenv("HARVIL_KANBAN_TASK", task_a["id"])
+    result = _handle_task_comment(
+        {"id": task_b["id"], "content": "hi"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "permission_denied"

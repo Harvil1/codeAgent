@@ -151,6 +151,23 @@ TASK_HEARTBEAT_SCHEMA = {
     },
 }
 
+TASK_COMMENT_SCHEMA = {
+    "name": "task_comment",
+    "description": (
+        "给任务追加一条持久化留言（写进任务本，跨会话保留）。"
+        "用于：给下一个 worker 留问题、记录部分发现、记设计决策。"
+        "临时推理不要写这里，放普通回复里。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "任务 ID"},
+            "content": {"type": "string", "description": "留言内容"},
+        },
+        "required": ["id", "content"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # handler
@@ -254,6 +271,22 @@ def _handle_task_heartbeat(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
+def _handle_task_comment(args: dict, **kwargs) -> str:
+    """追加 comment 到 task.comments。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    content = (args.get("content") or "").strip()
+    if not content:
+        return json.dumps(
+            {"error": "content 不能为空"}, ensure_ascii=False,
+        )
+    author = _infer_author(kwargs)
+    store = _get_store(kwargs)
+    updated = store.add_comment(task["id"], author=author, content=content)
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -277,4 +310,8 @@ registry.register(
 registry.register(
     name="task_heartbeat", toolset="core",
     schema=TASK_HEARTBEAT_SCHEMA, handler=_handle_task_heartbeat, emoji="💓",
+)
+registry.register(
+    name="task_comment", toolset="core",
+    schema=TASK_COMMENT_SCHEMA, handler=_handle_task_comment, emoji="💬",
 )
