@@ -194,3 +194,64 @@ def test_unblock_non_blocked_rejected(store, monkeypatch):
     data = json.loads(result)
     assert "error" in data
     assert "blocked" in data["error"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: task_link handler
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import _handle_task_link
+
+
+def test_link_adds_edge(store, monkeypatch):
+    """task_link(parent, child) → child.blocked_by 含 parent。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    parent = store.create(subject="P")
+    child = store.create(subject="C")
+    result = _handle_task_link(
+        {"parent_id": parent["id"], "child_id": child["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert parent["id"] in data["task"]["blocked_by"]
+
+
+def test_link_self_rejected(store, monkeypatch):
+    """parent_id == child_id → cycle_detected。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    x = store.create(subject="X")
+    result = _handle_task_link(
+        {"parent_id": x["id"], "child_id": x["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "cycle_detected"
+
+
+def test_link_cycle_rejected(store, monkeypatch):
+    """已有 A→B，再 link B→A → cycle_detected。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    a = store.create(subject="A")
+    b = store.create(subject="B", blocked_by=[a["id"]])
+    # 现在 B 依赖 A；尝试让 A 依赖 B（加 A→B 边，即 link parent=B, child=A）
+    result = _handle_task_link(
+        {"parent_id": b["id"], "child_id": a["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "cycle_detected"
+
+
+def test_link_respects_ownership(store, monkeypatch):
+    """parent 或 child 跨任务 → permission_denied。"""
+    task_a = store.create(subject="A")
+    task_b = store.create(subject="B")
+    monkeypatch.setenv("HARVIL_KANBAN_TASK", task_a["id"])
+    # worker A 想给 B 加依赖（parent=A, child=B），但 B 不是 A 的
+    result = _handle_task_link(
+        {"parent_id": task_a["id"], "child_id": task_b["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "permission_denied"

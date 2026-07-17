@@ -272,6 +272,23 @@ TASK_UNBLOCK_SCHEMA = {
     },
 }
 
+TASK_LINK_SCHEMA = {
+    "name": "task_link",
+    "description": (
+        "post-creation 加依赖边：让 child 依赖 parent（parent 完成前 child 不能开始）。"
+        "含 cycle 检测和 self-link 拒绝。"
+        "parent_id 和 child_id 都过 ownership 门控。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "parent_id": {"type": "string", "description": "被依赖的任务 ID"},
+            "child_id": {"type": "string", "description": "加依赖的任务 ID"},
+        },
+        "required": ["parent_id", "child_id"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # handler
@@ -467,6 +484,40 @@ def _handle_task_unblock(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
+def _handle_task_link(args: dict, **kwargs) -> str:
+    """task_link: 加 child 依赖 parent 的边（含 cycle+self-link 检测，双重 ownership 门控）。"""
+    parent_id = (args.get("parent_id") or "").strip()
+    child_id = (args.get("child_id") or "").strip()
+    if not parent_id or not child_id:
+        return json.dumps(
+            {"error": "parent_id 和 child_id 必需"}, ensure_ascii=False,
+        )
+    # 双重 ownership 门控：parent 和 child 都要过
+    try:
+        assert_owned(parent_id)
+        assert_owned(child_id)
+    except TaskOwnershipError as e:
+        return _ownership_denied(str(e))
+    store = _get_store(kwargs)
+    try:
+        updated = store.add_dependency(child_id, parent_id, validate=True)
+    except ValueError as e:
+        msg = str(e)
+        error_type = (
+            "cycle_detected" if "cycle" in msg or "self-link" in msg
+            else "invalid_args"
+        )
+        return json.dumps(
+            {"error": msg, "error_type": error_type},
+            ensure_ascii=False,
+        )
+    if updated is None:
+        return json.dumps(
+            {"error": f"任务不存在: {child_id}"}, ensure_ascii=False,
+        )
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -506,4 +557,8 @@ registry.register(
 registry.register(
     name="task_unblock", toolset="core",
     schema=TASK_UNBLOCK_SCHEMA, handler=_handle_task_unblock, emoji="▶",
+)
+registry.register(
+    name="task_link", toolset="core",
+    schema=TASK_LINK_SCHEMA, handler=_handle_task_link, emoji="🔗",
 )
