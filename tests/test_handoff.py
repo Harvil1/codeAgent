@@ -249,3 +249,139 @@ def test_delete_is_soft_to_archive(store, sample_transcript, sample_model):
     assert archived_path.parent.name == ".archive"
     # list 不再包含
     assert all(b.bundle_id != bundle_id for b in store.list_bundles())
+
+
+# ---------------------------------------------------------------------------
+# export / import
+# ---------------------------------------------------------------------------
+
+def test_export_import_roundtrip(
+    store, sample_transcript, sample_model, tmp_path
+):
+    """export 后 import 到新 store，内容一致。"""
+    bundle_id = store.save(transcript=sample_transcript,
+                           source_session_id=None,
+                           model=sample_model, title="原 bundle")
+
+    dest = tmp_path / "exported.json"
+    returned_path = store.export_to(bundle_id, dest)
+    assert returned_path == dest
+    assert dest.exists()
+
+    # 用新 store 导入
+    new_store = HandoffStore(tmp_path / "new_handoff")
+    new_id = new_store.import_from(dest)
+
+    # 加载对比内容
+    orig = store.load(bundle_id)
+    imported = new_store.load(new_id)
+
+    assert imported.transcript == orig.transcript
+    assert imported.title == orig.title
+    assert imported.model == orig.model
+    assert imported.source_platform == orig.source_platform  # 不改 source_platform
+
+
+def test_import_with_existing_id_regenerates_ulid(
+    store, sample_transcript, sample_model, tmp_path
+):
+    """同 bundle_id 二次导入得到新 ULID，但内容一致。"""
+    bundle_id = store.save(transcript=sample_transcript,
+                           source_session_id=None, model=sample_model)
+    bundle_path = Path(store._handoff_dir) / f"{bundle_id}.json"
+
+    # 再次导入相同文件
+    new_id = store.import_from(bundle_path)
+    assert new_id != bundle_id  # 重新生成
+
+    # 内容一致
+    a = store.load(bundle_id)
+    b = store.load(new_id)
+    assert a.transcript == b.transcript
+
+
+# ---------------------------------------------------------------------------
+# 密钥扫描
+# ---------------------------------------------------------------------------
+
+def test_secret_detection_rejects_sk_key(store, sample_model):
+    """含 sk- 开头的 OpenAI/DeepSeek key 触发 SecretDetectedError。"""
+    from agent.handoff import SecretDetectedError
+    transcript = [
+        {"role": "user", "content": "我的 API key 是 sk-abc123def456ghi789jkl012mno345pqr678"},
+    ]
+    with pytest.raises(SecretDetectedError) as exc_info:
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+    # matches 含命中信息
+    assert len(exc_info.value.matches) >= 1
+
+
+def test_secret_detection_bearer_token(store, sample_model):
+    from agent.handoff import SecretDetectedError
+    transcript = [
+        {"role": "tool", "tool_call_id": "x",
+         "content": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart"},
+    ]
+    with pytest.raises(SecretDetectedError):
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+
+
+def test_secret_detection_api_key_pattern(store, sample_model):
+    from agent.handoff import SecretDetectedError
+    transcript = [
+        {"role": "assistant", "content": '配置：api_key="AKIAIOSFODNN7EXAMPLE123456"'},
+    ]
+    with pytest.raises(SecretDetectedError):
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+
+
+def test_secret_detection_pem_private_key(store, sample_model):
+    from agent.handoff import SecretDetectedError
+    transcript = [
+        {"role": "user", "content": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA..."},
+    ]
+    with pytest.raises(SecretDetectedError):
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+
+
+def test_secret_detection_allow_secrets_flag(
+    store, sample_model, caplog
+):
+    """allow_secrets=True 时跳过扫描（不推荐，API 层逃生口）。"""
+    transcript = [
+        {"role": "user", "content": "key: sk-abc123def456ghi789jkl012mno345pqr678"},
+    ]
+    bundle_id = store.save(
+        transcript=transcript, source_session_id=None,
+        model=sample_model, allow_secrets=True,
+    )
+    assert bundle_id  # 不抛
+
+
+# ---------------------------------------------------------------------------
+# 大小上限
+# ---------------------------------------------------------------------------
+
+def test_size_limit_rejects_large_bundle(store, sample_model):
+    """构造 >10MB transcript 触发 BundleTooLargeError。"""
+    from agent.handoff import BundleTooLargeError
+    # 11MB 文本（约 1100 万字符）
+    big_content = "x" * (11 * 1024 * 1024)
+    transcript = [{"role": "user", "content": big_content}]
+    with pytest.raises(BundleTooLargeError):
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+
+
+# ---------------------------------------------------------------------------
+# mark_completed
+# ---------------------------------------------------------------------------
+
+def test_mark_completed_updates_state(store, sample_transcript, sample_model):
+    """mark_completed 把 handoff_state 改为 'completed'。"""
+    bundle_id = store.save(transcript=sample_transcript,
+                           source_session_id=None, model=sample_model)
+    assert store.load(bundle_id).handoff_state == "pending"
+
+    store.mark_completed(bundle_id)
+
+    assert store.load(bundle_id).handoff_state == "completed"

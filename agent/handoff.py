@@ -149,6 +149,37 @@ def _compute_checksum(transcript: List[dict]) -> str:
     return "sha256:" + hashlib.sha256(transcript_bytes).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# 密钥扫描（Task 3）
+# ---------------------------------------------------------------------------
+
+SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),                          # OpenAI/DeepSeek
+    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{20,}"),               # Bearer token
+    re.compile(r"api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),       # api_key=XXX
+    re.compile(r"token[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),         # token=XXX
+    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),            # PEM 私钥
+]
+
+
+def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
+    """扫描 transcript 找密钥模式。返回命中列表。"""
+    matches: List[Dict[str, Any]] = []
+    for idx, msg in enumerate(transcript):
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        for pat in SECRET_PATTERNS:
+            for m in pat.finditer(content):
+                matches.append({
+                    "message_index": idx,
+                    "role": msg.get("role", "?"),
+                    "pattern": pat.pattern,
+                    "snippet": m.group(0)[:50],  # 截断防再次暴露
+                })
+    return matches
+
+
 def _atomic_write(path: Path, json_str: str) -> None:
     """先写 .tmp 再 rename，避免半写文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,8 +226,16 @@ class HandoffStore:
         allow_secrets: bool = False,
     ) -> str:
         """生成 bundle 写入磁盘，返回 bundle_id。"""
-        # 密钥扫描（Task 3 会真正实现，此处先 stub 通过）
-        # 大小检查（Task 3 会真正实现）
+        # 密钥扫描（除非显式 allow_secrets）
+        if not allow_secrets:
+            matches = _scan_for_secrets(transcript)
+            if matches:
+                raise SecretDetectedError(
+                    f"检测到 {len(matches)} 处疑似密钥，拒绝保存。"
+                    f"命中：{matches[0]['pattern']} @ msg#{matches[0]['message_index']}",
+                    matches=matches,
+                )
+
         bundle_id = _generate_id()
         created_at = _now_iso()
         checksum = _compute_checksum(transcript)
@@ -358,3 +397,70 @@ class HandoffStore:
         src.replace(dest)  # 原子 rename
         logger.info("bundle %s 已软删除到 %s", full_id, dest)
         return dest
+
+    # ------------------------------------------------------------------
+    # export / import / mark_completed
+    # ------------------------------------------------------------------
+
+    def export_to(self, bundle_id: str, dest_path: Path) -> Path:
+        """拷贝 bundle 到任意路径（不改 bundle_id）。"""
+        full_id = self._resolve_id(bundle_id)
+        src = self._handoff_dir / f"{full_id}.json"
+        if not src.exists():
+            raise BundleNotFoundError(f"未找到 bundle: {full_id}")
+
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(src.read_bytes())  # 二进制拷贝避免编码问题
+        logger.info("bundle %s 已导出到 %s", full_id, dest)
+        return dest
+
+    def import_from(self, src_path: Path) -> str:
+        """从外部路径导入 bundle。返回 bundle_id。
+
+        - 如果 bundle_id 已存在，生成新 ULID（其他字段保留）
+        - 校验 format_version + JSON 完整性
+        """
+        src = Path(src_path)
+        if not src.exists():
+            raise FileNotFoundError(f"文件不存在: {src}")
+
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise BundleCorruptedError(f"JSON 解析失败: {e}") from e
+
+        if data.get("format_version") != self.SUPPORTED_FORMAT_VERSION:
+            raise BundleCorruptedError(
+                f"不支持的 format_version: {data.get('format_version')}"
+            )
+
+        existing_id = data.get("bundle_id", "")
+        # 如果 ID 已被占用，重新生成
+        if (self._handoff_dir / f"{existing_id}.json").exists():
+            new_id = _generate_id()
+            data["bundle_id"] = new_id
+        else:
+            new_id = existing_id
+
+        # 写入（带 checksum 重算，确保一致）
+        if "schema_checksum" not in data or not data.get("schema_checksum"):
+            data["schema_checksum"] = _compute_checksum(data.get("transcript", []))
+        # 如果重新生成了 ID，需要重写 created_at？不，保留原 created_at 让用户知道源时间。
+
+        bundle_path = self._handoff_dir / f"{new_id}.json"
+        _atomic_write(bundle_path, json.dumps(data, ensure_ascii=False, indent=2))
+        logger.info("bundle 已导入: %s (源: %s)", new_id, src)
+        return new_id
+
+    def mark_completed(self, bundle_id: str) -> None:
+        """把 handoff_state 改为 'completed'。"""
+        full_id = self._resolve_id(bundle_id)
+        path = self._handoff_dir / f"{full_id}.json"
+        if not path.exists():
+            raise BundleNotFoundError(f"未找到 bundle: {full_id}")
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["handoff_state"] = "completed"
+        _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
+        logger.info("bundle %s 标记为 completed", full_id)
