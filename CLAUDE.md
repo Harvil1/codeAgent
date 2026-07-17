@@ -157,6 +157,13 @@ uv run python -m curator_cli status
 uv run python -m curator_cli run --dry-run
 uv run python -m curator_cli pin <skill-name>
 
+# 会话移交（handoff）
+/handoff save "标题"        # 保存当前会话为 bundle
+/handoff list               # 列出所有 bundle
+/handoff load <id>          # 加载 bundle 覆盖当前会话
+/handoff export <id> <path> # 导出 bundle 到文件（用于跨机迁移）
+/handoff import <path>      # 从文件导入 bundle
+
 # 依赖管理（必须用 uv，不要用 pip）
 uv add <包名>                           # 添加运行时依赖
 uv add --dev <包名>                     # 添加开发依赖
@@ -192,6 +199,7 @@ uv sync                                 # 同步已声明依赖
 | 子代理委托 + worktree + 摘要 | `tools/delegate_tool.py:_run_child` |
 | 配置默认值（所有参数源头） | `config.py:DEFAULT_CONFIG` |
 | 复刻指南（设计权衡详解） | `D:\project\hermes-agent-main\replication-guide\` |
+| 会话移交 bundle | `agent/handoff.py:HandoffStore` |
 
 ## 已知约束（设计如此，不是 bug）
 
