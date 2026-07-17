@@ -89,3 +89,108 @@ def test_add_dependency_no_validate_bypasses_cycle(store):
     updated = store.add_dependency(a["id"], b["id"], validate=False)
     assert updated is not None
     assert b["id"] in updated["blocked_by"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: task_block + task_unblock handler
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import _handle_task_block, _handle_task_unblock
+
+
+def test_block_sets_status_and_reason(store, monkeypatch):
+    """task_block → status=blocked, block_reason=reason, block_kind=kind。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_block(
+        {"id": task["id"], "reason": "waiting for API", "kind": "needs_input"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["task"]["status"] == "blocked"
+    assert data["task"]["block_reason"] == "waiting for API"
+    assert data["task"]["block_kind"] == "needs_input"
+
+
+def test_block_rejects_empty_reason(store, monkeypatch):
+    """reason="" → error。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_block(
+        {"id": task["id"], "reason": "   "},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "reason" in data["error"]
+
+
+def test_block_rejects_invalid_kind(store, monkeypatch):
+    """kind="random" → error。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_block(
+        {"id": task["id"], "reason": "X", "kind": "random"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "kind" in data["error"]
+
+
+def test_block_blocks_foreign_id(store, monkeypatch):
+    """跨任务 block 被 permission_denied。"""
+    task_a = store.create(subject="A")
+    task_b = store.create(subject="B")
+    monkeypatch.setenv("HARVIL_KANBAN_TASK", task_a["id"])
+    result = _handle_task_block(
+        {"id": task_b["id"], "reason": "X"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "permission_denied"
+
+
+def test_unblock_resets_to_pending(store, monkeypatch):
+    """task_unblock 默认回 pending，清空 block_reason/kind。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    store.update(task["id"], status="blocked",
+                 block_reason="X", block_kind="needs_input")
+    result = _handle_task_unblock(
+        {"id": task["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["task"]["status"] == "pending"
+    assert data["task"]["block_reason"] is None
+    assert data["task"]["block_kind"] is None
+
+
+def test_unblock_custom_status(store, monkeypatch):
+    """new_status='in_progress' → status=in_progress。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    store.update(task["id"], status="blocked", block_reason="X")
+    result = _handle_task_unblock(
+        {"id": task["id"], "new_status": "in_progress"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["task"]["status"] == "in_progress"
+
+
+def test_unblock_non_blocked_rejected(store, monkeypatch):
+    """对 pending 任务调 unblock → error。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_unblock(
+        {"id": task["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert "error" in data
+    assert "blocked" in data["error"]

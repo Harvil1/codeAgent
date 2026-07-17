@@ -124,7 +124,7 @@ TASK_UPDATE_SCHEMA = {
             "id": {"type": "string", "description": "任务 ID"},
             "status": {
                 "type": "string",
-                "enum": ["pending", "in_progress", "completed"],
+                "enum": ["pending", "in_progress", "completed", "blocked"],
                 "description": "新状态",
             },
             "owner": {"type": "string", "description": "认领者"},
@@ -223,6 +223,49 @@ TASK_ARTIFACTS_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "要移除的文件路径列表",
+            },
+        },
+        "required": ["id"],
+    },
+}
+
+TASK_BLOCK_SCHEMA = {
+    "name": "task_block",
+    "description": (
+        "把任务标记为 blocked（卡住）。必须填 reason 解释为什么卡住。"
+        "可选 kind：'dependency'（等其他任务）/ 'needs_input'（等人决策）/ "
+        "'capability'（缺权限/凭证）/ 'transient'（偶发失败可能恢复）。"
+        "kind 仅作人类可读标签，不影响自动化行为。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "任务 ID"},
+            "reason": {"type": "string", "description": "为什么卡住（必填）"},
+            "kind": {
+                "type": "string",
+                "enum": ["dependency", "needs_input", "capability", "transient"],
+                "description": "可选，block 类型标签",
+            },
+        },
+        "required": ["id", "reason"],
+    },
+}
+
+TASK_UNBLOCK_SCHEMA = {
+    "name": "task_unblock",
+    "description": (
+        "解除 task 的 blocked 状态。默认回到 pending；可选 new_status='in_progress'。"
+        "清空 block_reason / block_kind。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "任务 ID"},
+            "new_status": {
+                "type": "string",
+                "enum": ["pending", "in_progress"],
+                "default": "pending",
             },
         },
         "required": ["id"],
@@ -371,6 +414,59 @@ def _handle_task_artifacts(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
+def _handle_task_block(args: dict, **kwargs) -> str:
+    """task_block: status=blocked + block_reason + block_kind。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    reason = (args.get("reason") or "").strip()
+    if not reason:
+        return json.dumps(
+            {"error": "reason 不能为空"}, ensure_ascii=False,
+        )
+    kind = args.get("kind")
+    if kind is not None and kind not in (
+        "dependency", "needs_input", "capability", "transient",
+    ):
+        return json.dumps(
+            {"error": f"非法 kind: {kind}"}, ensure_ascii=False,
+        )
+    store = _get_store(kwargs)
+    updated = store.update(
+        task["id"],
+        status="blocked",
+        block_reason=reason,
+        block_kind=kind,
+    )
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
+def _handle_task_unblock(args: dict, **kwargs) -> str:
+    """task_unblock: 解除 blocked，清空 block_reason/block_kind。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    new_status = args.get("new_status") or "pending"
+    if new_status not in ("pending", "in_progress"):
+        return json.dumps(
+            {"error": f"非法 new_status: {new_status}（只允许 pending 或 in_progress）"},
+            ensure_ascii=False,
+        )
+    if task.get("status") != "blocked":
+        return json.dumps(
+            {"error": f"任务不是 blocked 状态（当前: {task.get('status')}）"},
+            ensure_ascii=False,
+        )
+    store = _get_store(kwargs)
+    updated = store.update(
+        task["id"],
+        status=new_status,
+        block_reason=None,
+        block_kind=None,
+    )
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -402,4 +498,12 @@ registry.register(
 registry.register(
     name="task_artifacts", toolset="core",
     schema=TASK_ARTIFACTS_SCHEMA, handler=_handle_task_artifacts, emoji="📎",
+)
+registry.register(
+    name="task_block", toolset="core",
+    schema=TASK_BLOCK_SCHEMA, handler=_handle_task_block, emoji="⏸",
+)
+registry.register(
+    name="task_unblock", toolset="core",
+    schema=TASK_UNBLOCK_SCHEMA, handler=_handle_task_unblock, emoji="▶",
 )
