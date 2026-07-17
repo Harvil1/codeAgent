@@ -142,3 +142,131 @@ def test_close_browser_unavailable():
     )
     data = json.loads(result)
     assert data["error_type"] == "browser_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: browser_snapshot + browser_click + browser_type
+# ---------------------------------------------------------------------------
+
+from tools.browser_tool import (  # noqa: E402
+    _handle_browser_snapshot,
+    _handle_browser_click,
+    _handle_browser_type,
+)
+
+
+def test_snapshot_success():
+    """mock session.snapshot 返树 → 返回。"""
+    fake_session = MagicMock()
+    fake_session.snapshot.return_value = {
+        "tree": {"role": "WebArea", "name": "Test"},
+        "truncated": False,
+        "chars": 50,
+    }
+    result = _handle_browser_snapshot(
+        {},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["chars"] == 50
+    assert data["truncated"] is False
+
+
+def test_snapshot_custom_max_chars():
+    """max_chars 参数透传到 session.snapshot。"""
+    fake_session = MagicMock()
+    fake_session.snapshot.return_value = {
+        "tree": {}, "truncated": True, "chars": 100,
+    }
+    _handle_browser_snapshot(
+        {"max_chars": 100},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    fake_session.snapshot.assert_called_once_with(100)
+
+
+def test_snapshot_browser_unavailable():
+    result = _handle_browser_snapshot(
+        {}, agent_ref=_make_agent_with_session(None),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "browser_unavailable"
+
+
+def test_click_empty_ref():
+    result = _handle_browser_click(
+        {"ref": ""},
+        agent_ref=_make_agent_with_session(MagicMock()),
+    )
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_click_stale_ref():
+    """session.resolve_ref 返 None → stale_ref。"""
+    fake_session = MagicMock()
+    fake_session.resolve_ref.return_value = None
+    result = _handle_browser_click(
+        {"ref": "a99"},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "stale_ref"
+
+
+def test_click_success():
+    """mock resolve_ref + page.click → success。"""
+    fake_session = MagicMock()
+    fake_session.resolve_ref.return_value = 'button:has-text("Submit")'
+    fake_page = MagicMock()
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_click(
+        {"ref": "a1"},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.click.assert_called_once_with('button:has-text("Submit")', timeout=10000)
+
+
+def test_click_browser_unavailable():
+    result = _handle_browser_click(
+        {"ref": "a1"}, agent_ref=_make_agent_with_session(None),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "browser_unavailable"
+
+
+def test_type_success():
+    """mock session + page.fill → success。"""
+    fake_session = MagicMock()
+    fake_session.resolve_ref.return_value = 'input[aria-label="Search"]'
+    fake_page = MagicMock()
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_type(
+        {"ref": "a1", "text": "hello"},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.fill.assert_called_once_with('input[aria-label="Search"]', "hello")
+    fake_page.press.assert_not_called()  # submit=False
+
+
+def test_type_with_submit():
+    """submit=True → page.fill + page.press('Enter')。"""
+    fake_session = MagicMock()
+    fake_session.resolve_ref.return_value = 'input[aria-label="Q"]'
+    fake_page = MagicMock()
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_type(
+        {"ref": "a1", "text": "q", "submit": True},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.press.assert_called_once_with('input[aria-label="Q"]', "Enter")

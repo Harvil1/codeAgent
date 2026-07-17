@@ -92,6 +92,49 @@ BROWSER_CLOSE_SCHEMA = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+BROWSER_SNAPSHOT_SCHEMA = {
+    "name": "browser_snapshot",
+    "description": (
+        "获取页面的 accessibility tree（无障碍树）。每个可交互节点分配 ref。"
+        "LLM 通过 ref 调 click/type/scroll。默认截断到 8000 字符。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "max_chars": {
+                "type": "integer", "default": 8000,
+                "description": "返回的最大字符数",
+            },
+        },
+    },
+}
+
+BROWSER_CLICK_SCHEMA = {
+    "name": "browser_click",
+    "description": "点击 snapshot 里 ref 指向的元素。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "snapshot 返回的 ref（如 'a12'）"},
+        },
+        "required": ["ref"],
+    },
+}
+
+BROWSER_TYPE_SCHEMA = {
+    "name": "browser_type",
+    "description": "在 snapshot 里 ref 指向的输入框输入文本。可选 submit=True 输完按 Enter。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string"},
+            "text": {"type": "string"},
+            "submit": {"type": "boolean", "default": False, "description": "输入后按 Enter"},
+        },
+        "required": ["ref", "text"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # handler
@@ -134,6 +177,71 @@ def _handle_browser_close(args: dict, **kwargs) -> str:
         return _err(f"关闭失败: {e}", "close_error")
 
 
+def _handle_browser_snapshot(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    max_chars = args.get("max_chars", 8000)
+    try:
+        result = session.snapshot(max_chars)
+        return json.dumps({
+            "success": True,
+            **result,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"snapshot 失败: {e}", "snapshot_error")
+
+
+def _handle_browser_click(args: dict, **kwargs) -> str:
+    ref = (args.get("ref") or "").strip()
+    if not ref:
+        return _err("ref 不能为空")
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        selector = session.resolve_ref(ref)
+        if selector is None:
+            return _err(
+                f"无效 ref: {ref}（可能 snapshot 过期，请重新调 browser_snapshot）",
+                "stale_ref",
+            )
+        page = session.get_page()
+        page.click(selector, timeout=10000)
+        return json.dumps({"success": True, "clicked": ref}, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"点击失败: {e}", "click_error")
+
+
+def _handle_browser_type(args: dict, **kwargs) -> str:
+    ref = (args.get("ref") or "").strip()
+    text = args.get("text", "")
+    if not ref:
+        return _err("ref 不能为空")
+    if text is None:
+        return _err("text 不能为空")
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        selector = session.resolve_ref(ref)
+        if selector is None:
+            return _err(
+                f"无效 ref: {ref}（可能 snapshot 过期）",
+                "stale_ref",
+            )
+        page = session.get_page()
+        page.fill(selector, text)
+        if args.get("submit"):
+            page.press(selector, "Enter")
+        return json.dumps(
+            {"success": True, "typed": ref, "chars": len(text)},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return _err(f"输入失败: {e}", "type_error")
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -149,4 +257,19 @@ registry.register(
     name="browser_close", toolset="browser",
     schema=BROWSER_CLOSE_SCHEMA, handler=_handle_browser_close,
     check_fn=_check_browser_available, emoji="✖",
+)
+registry.register(
+    name="browser_snapshot", toolset="browser",
+    schema=BROWSER_SNAPSHOT_SCHEMA, handler=_handle_browser_snapshot,
+    check_fn=_check_browser_available, emoji="📸",
+)
+registry.register(
+    name="browser_click", toolset="browser",
+    schema=BROWSER_CLICK_SCHEMA, handler=_handle_browser_click,
+    check_fn=_check_browser_available, emoji="👆",
+)
+registry.register(
+    name="browser_type", toolset="browser",
+    schema=BROWSER_TYPE_SCHEMA, handler=_handle_browser_type,
+    check_fn=_check_browser_available, emoji="⌨️",
 )
