@@ -270,3 +270,83 @@ def test_type_with_submit():
     data = json.loads(result)
     assert data["success"] is True
     fake_page.press.assert_called_once_with('input[aria-label="Q"]', "Enter")
+
+
+# ---------------------------------------------------------------------------
+# Task 4: browser_scroll + browser_press_key + browser_back + browser_forward
+# ---------------------------------------------------------------------------
+
+from tools.browser_tool import (  # noqa: E402
+    _handle_browser_scroll,
+    _handle_browser_press_key,
+    _handle_browser_back,
+    _handle_browser_forward,
+)
+
+
+def test_scroll_down_main_page():
+    """ref 不传 → 滚主页面（page.mouse.wheel）。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_session.get_page.return_value = fake_page
+    fake_session.resolve_ref.return_value = None  # 不 resolve
+
+    result = _handle_browser_scroll(
+        {"direction": "down", "amount": 2},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    # page.mouse.wheel(dy=...) 被调用
+    assert fake_page.mouse.wheel.called
+
+
+def test_press_key_enter():
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_press_key(
+        {"key": "Enter"},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.press.assert_called_once_with("body", "Enter")
+
+
+def test_press_key_empty():
+    result = _handle_browser_press_key(
+        {"key": ""},
+        agent_ref=_make_agent_with_session(MagicMock()),
+    )
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_back_calls_go_back():
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_page.url = "https://example.com/back"
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_back(
+        {}, agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.go_back.assert_called_once()
+
+
+def test_forward_calls_go_forward():
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_page.url = "https://example.com/forward"
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_forward(
+        {}, agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    fake_page.go_forward.assert_called_once()

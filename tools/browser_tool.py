@@ -135,6 +135,43 @@ BROWSER_TYPE_SCHEMA = {
     },
 }
 
+BROWSER_SCROLL_SCHEMA = {
+    "name": "browser_scroll",
+    "description": "滚动页面或某个元素。不传 ref 则滚主页面。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "可选，滚某个元素；不传则滚主页面"},
+            "direction": {"type": "string", "enum": ["up", "down"], "default": "down"},
+            "amount": {"type": "integer", "default": 1, "description": "滚动步数（每次约一屏）"},
+        },
+    },
+}
+
+BROWSER_PRESS_KEY_SCHEMA = {
+    "name": "browser_press_key",
+    "description": "按键盘键（Enter、Tab、Escape、ArrowDown 等）。参见 KeyboardEvent.key。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "键名（如 'Enter', 'Escape', 'ArrowDown'）"},
+        },
+        "required": ["key"],
+    },
+}
+
+BROWSER_BACK_SCHEMA = {
+    "name": "browser_back",
+    "description": "浏览器后退。",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+BROWSER_FORWARD_SCHEMA = {
+    "name": "browser_forward",
+    "description": "浏览器前进。",
+    "parameters": {"type": "object", "properties": {}},
+}
+
 
 # ---------------------------------------------------------------------------
 # handler
@@ -242,6 +279,71 @@ def _handle_browser_type(args: dict, **kwargs) -> str:
         return _err(f"输入失败: {e}", "type_error")
 
 
+def _handle_browser_scroll(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    direction = args.get("direction", "down")
+    amount = args.get("amount", 1)
+    ref = args.get("ref")
+    try:
+        page = session.get_page()
+        dy = amount * 600 if direction == "down" else -amount * 600
+        if ref:
+            selector = session.resolve_ref(ref)
+            if selector is None:
+                return _err(f"无效 ref: {ref}", "stale_ref")
+            el = page.query_selector(selector)
+            if el:
+                el.scroll_into_view_if_needed()
+        else:
+            page.mouse.wheel(0, dy)
+        return json.dumps({
+            "success": True, "direction": direction, "amount": amount,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"滚动失败: {e}", "scroll_error")
+
+
+def _handle_browser_press_key(args: dict, **kwargs) -> str:
+    key = (args.get("key") or "").strip()
+    if not key:
+        return _err("key 不能为空")
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        page = session.get_page()
+        page.press("body", key)
+        return json.dumps({"success": True, "key": key}, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"按键失败: {e}", "press_key_error")
+
+
+def _handle_browser_back(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        page = session.get_page()
+        page.go_back(wait_until="domcontentloaded", timeout=30000)
+        return json.dumps({"success": True, "url": page.url}, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"后退失败: {e}", "navigation_error")
+
+
+def _handle_browser_forward(args: dict, **kwargs) -> str:
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        page = session.get_page()
+        page.go_forward(wait_until="domcontentloaded", timeout=30000)
+        return json.dumps({"success": True, "url": page.url}, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"前进失败: {e}", "navigation_error")
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -272,4 +374,24 @@ registry.register(
     name="browser_type", toolset="browser",
     schema=BROWSER_TYPE_SCHEMA, handler=_handle_browser_type,
     check_fn=_check_browser_available, emoji="⌨️",
+)
+registry.register(
+    name="browser_scroll", toolset="browser",
+    schema=BROWSER_SCROLL_SCHEMA, handler=_handle_browser_scroll,
+    check_fn=_check_browser_available, emoji="📜",
+)
+registry.register(
+    name="browser_press_key", toolset="browser",
+    schema=BROWSER_PRESS_KEY_SCHEMA, handler=_handle_browser_press_key,
+    check_fn=_check_browser_available, emoji="⌨",
+)
+registry.register(
+    name="browser_back", toolset="browser",
+    schema=BROWSER_BACK_SCHEMA, handler=_handle_browser_back,
+    check_fn=_check_browser_available, emoji="⬅",
+)
+registry.register(
+    name="browser_forward", toolset="browser",
+    schema=BROWSER_FORWARD_SCHEMA, handler=_handle_browser_forward,
+    check_fn=_check_browser_available, emoji="➡",
 )
