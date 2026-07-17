@@ -385,3 +385,133 @@ def test_mark_completed_updates_state(store, sample_transcript, sample_model):
     store.mark_completed(bundle_id)
 
     assert store.load(bundle_id).handoff_state == "completed"
+
+
+# ---------------------------------------------------------------------------
+# CLI 集成
+# ---------------------------------------------------------------------------
+
+def test_handle_handoff_save_command(tmp_path, monkeypatch):
+    """mock RuntimeContext + AIAgent，验证 /handoff save 流程。"""
+    from cli import RuntimeContext, _handle_command
+
+    # 构造最小 rt mock
+    handoff_dir = tmp_path / ".handoff"
+
+    class FakeAgent:
+        def __init__(self):
+            self.conversation_history = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ]
+            self.session_id = "fake-session-id"
+            self.config = {"model": {"name": "deepseek-chat", "provider": "deepseek"}}
+        def invalidate_system_prompt(self):
+            pass
+
+    class FakeRT:
+        def __init__(self):
+            self.home = tmp_path
+            self.agent = FakeAgent()
+            self.session_id = "fake-session-id"
+            self.config = {"model": {"name": "deepseek-chat", "provider": "deepseek"}}
+            from agent.handoff import HandoffStore
+            self.handoff_store = HandoffStore(handoff_dir)
+
+    rt = FakeRT()
+    # 直接调用 _handle_command（绕过交互循环）
+    handled = _handle_command("/handoff save 测试标题", rt)
+    assert handled is True
+
+    # bundle 已生成
+    bundles = rt.handoff_store.list_bundles()
+    assert len(bundles) == 1
+    assert bundles[0].title == "测试标题"
+    assert bundles[0].message_count == 2
+
+
+def test_handle_handoff_list_command(tmp_path, capsys):
+    """/handoff list 输出表格。"""
+    from cli import RuntimeContext, _handle_command
+    from agent.handoff import HandoffStore
+
+    handoff_dir = tmp_path / ".handoff"
+    store = HandoffStore(handoff_dir)
+    store.save(
+        transcript=[{"role": "user", "content": "hi"}],
+        source_session_id=None,
+        model={"name": "x", "provider": "x"},
+        title="测试",
+    )
+
+    class FakeRT:
+        def __init__(self):
+            self.handoff_store = store
+
+    rt = FakeRT()
+    handled = _handle_command("/handoff list", rt)
+    assert handled is True
+
+    out = capsys.readouterr().out
+    assert "测试" in out
+
+
+def test_handle_handoff_no_subcommand_shows_help(tmp_path, capsys):
+    """/handoff 无参数显示子命令帮助。"""
+    from cli import _handle_command
+
+    class FakeRT:
+        pass
+
+    handled = _handle_command("/handoff", FakeRT())
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "save" in out
+    assert "list" in out
+    assert "load" in out
+
+
+def test_handle_handoff_load_overwrites_history(tmp_path, monkeypatch):
+    """/handoff load <id> 替换 agent.conversation_history。"""
+    from cli import _handle_command
+    from agent.handoff import HandoffStore
+
+    handoff_dir = tmp_path / ".handoff"
+    store = HandoffStore(handoff_dir)
+    new_bundle_transcript = [
+        {"role": "user", "content": "loaded msg 1"},
+        {"role": "assistant", "content": "loaded reply"},
+    ]
+    bundle_id = store.save(
+        transcript=new_bundle_transcript,
+        source_session_id=None,
+        model={"name": "x", "provider": "x"},
+    )
+
+    class FakeAgent:
+        def __init__(self):
+            self.conversation_history = [{"role": "user", "content": "old"}]
+            self.session_id = "old-session"
+        def invalidate_system_prompt(self):
+            pass
+
+    class FakeRT:
+        def __init__(self):
+            self.agent = FakeAgent()
+            self.handoff_store = store
+            # mock SessionStore（create_session 返回新 id）
+            class FakeSessionStore:
+                def create_session(self, **kwargs):
+                    return "new-session-id"
+            self.session_store = FakeSessionStore()
+
+    rt = FakeRT()
+    # mock 用户确认（输入 y）
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "y")
+
+    handled = _handle_command(f"/handoff load {bundle_id}", rt)
+    assert handled is True
+
+    # agent 历史已被替换
+    assert rt.agent.conversation_history == new_bundle_transcript
+    assert rt.agent.session_id == "new-session-id"

@@ -38,6 +38,15 @@ from agent.curator import should_run_now, run_curator_review
 from config import load_config
 from constants import get_agent_home, skills_dir, sessions_db_path
 from tools.skill_usage import bump_use, load_usage
+from agent.handoff import (
+    HandoffStore,
+    HandoffError,
+    BundleNotFoundError,
+    AmbiguousBundleIDError,
+    SecretDetectedError,
+    BundleTooLargeError,
+    BundleCorruptedError,
+)
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -125,6 +134,9 @@ class RuntimeContext:
                 self.team_bus = None
                 self.team_coordinator = None
 
+        # === ⑮ NEW: Handoff bundle 存储 ===
+        self.handoff_store = None  # 在 initialize() 中真正初始化
+
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
@@ -188,6 +200,14 @@ class RuntimeContext:
         self.skill_commands = scan_skill_commands(skills_dir())
         # batch1-T3: 扫描技能束命令
         self.bundle_commands = scan_bundle_commands(skills_dir())
+
+        # 7. Handoff 存储
+        try:
+            handoff_dir = Path(self.home) / ".handoff"
+            self.handoff_store = HandoffStore(handoff_dir)
+        except Exception as e:
+            logger.warning("HandoffStore 初始化失败: %s", e)
+            self.handoff_store = None
 
         # 6. 后台触发 curator（不阻塞启动）
         self._maybe_trigger_curator()
@@ -428,6 +448,227 @@ def _on_tool_call(name: str, args: dict):
 # Slash 命令处理
 # ---------------------------------------------------------------------------
 
+def _handle_handoff_command(args: str, rt) -> bool:
+    """处理 /handoff <sub> [args]。
+
+    子命令：save / list / load / show / delete / export / import / help
+    """
+    parts = args.split(None, 1)
+    sub = parts[0].lower() if parts else "help"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if sub in ("help", "h", "?", ""):
+        console.print(Panel(
+            "[bold]/handoff 子命令[/bold]\n\n"
+            "[cyan]/handoff save [title][/cyan]    保存当前会话为 bundle\n"
+            "[cyan]/handoff list[/cyan]           列出所有 bundle\n"
+            "[cyan]/handoff load <id|idx>[/cyan]  加载 bundle（覆盖当前会话）\n"
+            "[cyan]/handoff show <id|idx>[/cyan]  查看 bundle 详情\n"
+            "[cyan]/handoff delete <id|idx>[/cyan] 软删除 bundle\n"
+            "[cyan]/handoff export <id> <path>[/cyan]  导出 bundle 到路径\n"
+            "[cyan]/handoff import <path>[/cyan]  从路径导入 bundle\n",
+            border_style="blue",
+        ))
+        return True
+
+    if rt.handoff_store is None:
+        console.print("[red]handoff 存储未初始化[/red]")
+        return True
+
+    store = rt.handoff_store
+
+    if sub == "save":
+        title = rest.strip() or None
+        try:
+            bundle_id = store.save(
+                transcript=rt.agent.conversation_history,
+                source_session_id=rt.session_id,
+                model=rt.config.get("model", {}),
+                title=title,
+            )
+            meta = next((m for m in store.list_bundles()
+                         if m.bundle_id == bundle_id), None)
+            count = meta.message_count if meta else "?"
+            size = meta.file_size if meta else 0
+            console.print(
+                f"[green]✓ bundle {bundle_id} 已保存[/green] "
+                f"[dim]({count} 条消息，{size} bytes)[/dim]"
+            )
+        except SecretDetectedError as e:
+            console.print(f"[red]检测到 {len(e.matches)} 处疑似密钥，拒绝保存[/red]")
+            for m in e.matches[:3]:
+                console.print(
+                    f"[dim]  - msg#{m['message_index']} ({m['role']}): "
+                    f"{m['pattern']}[/dim]"
+                )
+        except BundleTooLargeError as e:
+            console.print(f"[red]{e}[/red]")
+            console.print("[dim]建议先 /compress 压缩上下文[/dim]")
+        return True
+
+    if sub in ("list", "ls"):
+        metas = store.list_bundles()
+        if not metas:
+            console.print("[dim]暂无 handoff bundle。用 /handoff save 创建。[/dim]")
+            return True
+
+        table = Table(title=f"Handoff Bundles（{len(metas)}）")
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("Bundle ID", style="cyan")
+        table.add_column("标题")
+        table.add_column("消息数", justify="right")
+        table.add_column("状态")
+        table.add_column("创建时间")
+
+        for idx, m in enumerate(metas):
+            table.add_row(
+                str(idx),
+                m.bundle_id,
+                m.title or "(无标题)",
+                str(m.message_count),
+                m.handoff_state,
+                m.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(table)
+        return True
+
+    if sub == "show":
+        if not rest:
+            console.print("[yellow]用法：/handoff show <id|index>[/yellow]")
+            return True
+        try:
+            bundle = store.load(rest.strip())
+        except BundleNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+            return True
+        except AmbiguousBundleIDError as e:
+            console.print(f"[yellow]前缀匹配多个 bundle：[/yellow]")
+            for c in e.candidates:
+                console.print(f"[dim]  - {c}[/dim]")
+            return True
+
+        console.print(Panel(
+            f"[bold]{bundle.title or '(无标题)'}[/bold]\n\n"
+            f"[cyan]bundle_id:[/cyan]      {bundle.bundle_id}\n"
+            f"[cyan]created_at:[/cyan]     {bundle.created_at.isoformat()}\n"
+            f"[cyan]source_platform:[/cyan] {bundle.source_platform}\n"
+            f"[cyan]model:[/cyan]          {bundle.model}\n"
+            f"[cyan]state:[/cyan]          {bundle.handoff_state}\n"
+            f"[cyan]messages:[/cyan]       {len(bundle.transcript)}\n"
+            f"[cyan]memory_ptrs:[/cyan]    {len(bundle.memory_pointers)}\n"
+            f"[cyan]checksum:[/cyan]       {bundle.schema_checksum[:20]}...",
+            title="Bundle 详情",
+            border_style="blue",
+        ))
+        # 显示最近 6 条
+        recent = bundle.transcript[-6:]
+        if recent:
+            console.print("\n[cyan]最近消息：[/cyan]")
+            for m in recent:
+                role = m.get("role")
+                content = (m.get("content") or "").strip()
+                if len(content) > 200:
+                    content = content[:197] + "..."
+                if role == "user":
+                    console.print(f"[bold cyan]你:[/bold cyan] {content}")
+                elif role == "assistant":
+                    console.print(f"[bold green]AI:[/bold green] {content}")
+        return True
+
+    if sub == "load":
+        if not rest:
+            console.print("[yellow]用法：/handoff load <id|index>[/yellow]")
+            return True
+        try:
+            bundle = store.load(rest.strip())
+        except (BundleNotFoundError, AmbiguousBundleIDError) as e:
+            console.print(f"[red]{e}[/red]")
+            return True
+
+        # 当前会话非空时确认
+        current_count = len(getattr(rt.agent, "conversation_history", []))
+        if current_count > 0:
+            console.print(
+                f"[yellow]将覆盖当前会话（{current_count} 条消息）。"
+                f"是否先 /handoff save? 直接 load 输入 y：[/yellow]"
+            )
+            try:
+                answer = input("(y/N): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                console.print("[dim]已取消[/dim]")
+                return True
+
+        # 替换历史 + 新建 session 留痕
+        rt.agent.conversation_history = list(bundle.transcript)
+        if hasattr(rt.agent, "invalidate_system_prompt"):
+            rt.agent.invalidate_system_prompt()
+        if getattr(rt, "session_store", None):
+            new_sid = rt.session_store.create_session(
+                model=bundle.model.get("name", ""),
+                provider=bundle.model.get("provider", ""),
+            )
+            rt.agent.session_id = new_sid
+            rt.session_id = new_sid
+
+        store.mark_completed(bundle.bundle_id)
+        console.print(
+            f"[green]✓ 已加载 bundle（{len(bundle.transcript)} 条消息，"
+            f"标题：{bundle.title or '(无标题)'}）[/green]"
+        )
+        if bundle.memory_pointers:
+            console.print(
+                f"[dim]引用了 {len(bundle.memory_pointers)} 条 memory"
+                f"（本机是否存在请用 /memory 查看）[/dim]"
+            )
+        return True
+
+    if sub in ("delete", "rm"):
+        if not rest:
+            console.print("[yellow]用法：/handoff delete <id|index>[/yellow]")
+            return True
+        try:
+            archived = store.delete(rest.strip())
+            console.print(f"[green]✓ 已软删除到 {archived}[/green]")
+        except BundleNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+        except AmbiguousBundleIDError as e:
+            console.print(f"[yellow]前缀匹配多个 bundle：[/yellow]")
+            for c in e.candidates:
+                console.print(f"[dim]  - {c}[/dim]")
+        return True
+
+    if sub == "export":
+        parts2 = rest.split(None, 1)
+        if len(parts2) < 2:
+            console.print("[yellow]用法：/handoff export <id|index> <path>[/yellow]")
+            return True
+        target_id, dest_str = parts2[0], parts2[1]
+        try:
+            dest = store.export_to(target_id, Path(dest_str).expanduser())
+            console.print(f"[green]✓ 已导出到 {dest}[/green]")
+        except (BundleNotFoundError, AmbiguousBundleIDError) as e:
+            console.print(f"[red]{e}[/red]")
+        return True
+
+    if sub == "import":
+        if not rest:
+            console.print("[yellow]用法：/handoff import <path>[/yellow]")
+            return True
+        try:
+            new_id = store.import_from(Path(rest.strip()).expanduser())
+            console.print(f"[green]✓ 已导入 bundle {new_id}[/green]")
+        except FileNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+        except BundleCorruptedError as e:
+            console.print(f"[red]bundle 损坏：{e}[/red]")
+        return True
+
+    console.print(f"[yellow]未知子命令：{sub}（用 /handoff help 查看）[/yellow]")
+    return True
+
+
 def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     """处理 slash 命令。返回 True 表示已处理。"""
     parts = cmd.split(None, 1)
@@ -477,6 +718,9 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         _switch_model(rt, args)
         return True
 
+    if name == "/handoff":
+        return _handle_handoff_command(args, rt)
+
     if name == "/approved":
         _manage_whitelist(rt, args)
         return True
@@ -496,6 +740,7 @@ def _show_help():
         "[cyan]/usage[/cyan]     显示工具用量\n"
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
+        "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
