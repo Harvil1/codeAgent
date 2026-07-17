@@ -81,6 +81,9 @@ class TaskStore:
             "blocked_by": list(blocked_by or []),
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
+            "last_heartbeat_at": None,
+            "comments": [],
+            "artifacts": [],
         }
         self._write(task_id, task)
         logger.info("创建任务 %s: %s", task_id, subject)
@@ -168,6 +171,55 @@ class TaskStore:
             if not self.can_start(t["id"]):
                 blocked.append(t)
         return blocked
+
+    # ------------------------------------------------------------------
+    # Kanban 增强（heartbeat / comments / artifacts）
+    # ------------------------------------------------------------------
+
+    def heartbeat(self, task_id: str) -> Optional[dict]:
+        """更新 last_heartbeat_at 为当前时间。"""
+        return self.update(task_id, last_heartbeat_at=_now_iso())
+
+    def add_comment(
+        self, task_id: str, *, author: str, content: str,
+    ) -> Optional[dict]:
+        """追加一条 comment。comments 只增不删。"""
+        task = self.get(task_id)
+        if task is None:
+            return None
+        task.setdefault("comments", []).append({
+            "author": author,
+            "content": content,
+            "created_at": _now_iso(),
+        })
+        task["updated_at"] = _now_iso()
+        self._write(task_id, task)
+        return task
+
+    def add_artifacts(self, task_id: str, paths: List[str]) -> Optional[dict]:
+        """把 paths 去重追加到 artifacts。"""
+        task = self.get(task_id)
+        if task is None:
+            return None
+        existing = task.setdefault("artifacts", [])
+        for p in paths:
+            if p not in existing:
+                existing.append(p)
+        task["updated_at"] = _now_iso()
+        self._write(task_id, task)
+        return task
+
+    def remove_artifacts(self, task_id: str, paths: List[str]) -> Optional[dict]:
+        """从 artifacts 移除 paths。"""
+        task = self.get(task_id)
+        if task is None:
+            return None
+        task["artifacts"] = [
+            p for p in task.get("artifacts", []) if p not in paths
+        ]
+        task["updated_at"] = _now_iso()
+        self._write(task_id, task)
+        return task
 
 
 # 全局单例
