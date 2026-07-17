@@ -6,6 +6,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "anthropic>=0.116.0",
     "openai>=1.0.0,<2",
+    "playwright>=1.40",
     "prompt-toolkit==3.0.48",
     "python-docx>=1.2.0",
     "python-dotenv==1.0.1",
