@@ -95,3 +95,93 @@ def test_team_shutdown_unknown(tmp_path: Path):
     parsed = json.loads(result_str)
     assert parsed["success"] is False
     assert "error" in parsed
+
+
+def test_team_spawn_with_task_id_forwards(monkeypatch, tmp_path):
+    """team_spawn(args={..., 'task_id': X}) → coord.spawn(task_id=X)。"""
+    from tools.team_tool import _handle_team_spawn
+
+    captured = {}
+    class _FakeMember:
+        pid = 12345
+        status = "running"
+    class _FakeCoord:
+        def spawn(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeMember()
+
+    result = _handle_team_spawn(
+        args={"name": "w1", "task": "do X", "task_id": "task_abc"},
+        team_coordinator=_FakeCoord(),
+        agent_ref=None,
+        config={"team": {"max_depth": 2}},
+    )
+    import json
+    data = json.loads(result)
+    assert data["success"] is True
+    assert captured["task_id"] == "task_abc"
+    assert captured["name"] == "w1"
+
+
+def test_team_spawn_without_task_id_passes_none(monkeypatch):
+    """不传 task_id → coord.spawn 不收 task_id 参数（None）。"""
+    from tools.team_tool import _handle_team_spawn
+
+    captured = {}
+    class _FakeMember:
+        pid = 12345
+        status = "running"
+    class _FakeCoord:
+        def spawn(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeMember()
+
+    _handle_team_spawn(
+        args={"name": "w1", "task": "do X"},
+        team_coordinator=_FakeCoord(),
+        agent_ref=None,
+        config={"team": {"max_depth": 2}},
+    )
+    assert captured.get("task_id") is None
+
+
+def test_team_spawn_empty_task_id_treated_as_absent(monkeypatch):
+    """空字符串 task_id → 归一化为 None。"""
+    from tools.team_tool import _handle_team_spawn
+
+    captured = {}
+    class _FakeMember:
+        pid = 12345
+        status = "running"
+    class _FakeCoord:
+        def spawn(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeMember()
+
+    _handle_team_spawn(
+        args={"name": "w1", "task": "do X", "task_id": ""},
+        team_coordinator=_FakeCoord(),
+        agent_ref=None,
+        config={"team": {"max_depth": 2}},
+    )
+    assert captured.get("task_id") is None
+
+
+def test_team_spawn_invalid_task_id_returns_error(monkeypatch):
+    """coord.spawn 抛 ValueError → 返回 invalid_task_id。"""
+    from tools.team_tool import _handle_team_spawn
+
+    class _FakeCoord:
+        def spawn(self, **kwargs):
+            raise ValueError("task_id task_xxx 不存在")
+
+    result = _handle_team_spawn(
+        args={"name": "w1", "task": "do X", "task_id": "task_xxx"},
+        team_coordinator=_FakeCoord(),
+        agent_ref=None,
+        config={"team": {"max_depth": 2}},
+    )
+    import json
+    data = json.loads(result)
+    assert data["success"] is False
+    assert data["error_type"] == "invalid_task_id"

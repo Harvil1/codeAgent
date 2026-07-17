@@ -50,13 +50,25 @@ TEAM_MEMBERS_SCHEMA = {
 
 TEAM_SPAWN_SCHEMA = {
     "name": "team_spawn",
-    "description": "启动一个子 agent 进程处理任务（一次性，完成后自动退出）",
+    "description": (
+        "启动一个子 agent 进程处理任务（一次性，完成后自动退出）。\n"
+        "可选 task_id：若提供，worker 进程被绑定到该 task，"
+        "其内部的 task_update / task_complete 只能操作该任务（防止 prompt 注入跨任务操作）。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "新 agent 的名字（必须唯一）"},
             "role": {"type": "string", "default": "worker"},
             "task": {"type": "string", "description": "交给新 agent 跑的 prompt"},
+            "task_id": {
+                "type": "string",
+                "description": (
+                    "可选。绑定的 TaskStore 任务 ID。"
+                    "若提供，Coordinator 会先 claim 该任务（owner=name, status=in_progress），"
+                    "并把 HARVIL_KANBAN_TASK 注入子进程 env。"
+                ),
+            },
         },
         "required": ["name", "task"],
     },
@@ -168,16 +180,26 @@ def _handle_team_spawn(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     role = args.get("role", "worker")
+    # task_id 归一化：空字符串/None 都视为「不绑定」
+    task_id = args.get("task_id") or None
+
     try:
         member = coord.spawn(
             name=name, role=role, task=task,
             depth=current_depth + 1,
+            task_id=task_id,
         )
         return json.dumps({
             "success": True, "name": name, "pid": member.pid,
             "status": member.status,
+            "task_id": task_id,
         }, ensure_ascii=False)
-    except (ValueError, RuntimeError) as e:
+    except ValueError as e:
+        # task_id 不存在等
+        msg = str(e)
+        error_type = "invalid_task_id" if "不存在" in msg else "team_spawn_error"
+        return _err(msg, error_type)
+    except RuntimeError as e:
         return _err(str(e), "team_spawn_error")
     except Exception as e:
         return _err(f"spawn 失败: {e}", "team_error")
