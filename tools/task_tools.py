@@ -15,7 +15,20 @@ import json
 from typing import Optional
 
 from agent.task_store import get_task_store, VALID_STATUSES
+from agent.team.task_binding import assert_owned, TaskOwnershipError
 from tools.registry import registry
+
+
+def _ownership_denied(msg: str) -> str:
+    """把 TaskOwnershipError 消息包成 permission_denied JSON 错误。
+
+    msg 来自 assert_owned 抛出的异常，已包含 bound task_id 和 attempted
+    task_id（如 "worker bound to task 'task_A', cannot operate on 'task_B'"）。
+    """
+    return json.dumps({
+        "error": msg,
+        "error_type": "permission_denied",
+    }, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +133,11 @@ def _handle_task_update(args: dict, **kwargs) -> str:
     if not task_id:
         return json.dumps({"error": "id 不能为空"}, ensure_ascii=False)
 
+    try:
+        assert_owned(task_id)
+    except TaskOwnershipError as e:
+        return _ownership_denied(str(e))
+
     store = _get_store(kwargs)
     fields = {}
     for key in ("status", "owner", "description", "subject"):
@@ -140,6 +158,11 @@ def _handle_task_complete(args: dict, **kwargs) -> str:
     task_id = (args.get("id") or "").strip()
     if not task_id:
         return json.dumps({"error": "id 不能为空"}, ensure_ascii=False)
+
+    try:
+        assert_owned(task_id)
+    except TaskOwnershipError as e:
+        return _ownership_denied(str(e))
 
     store = _get_store(kwargs)
     task = store.complete(task_id)
