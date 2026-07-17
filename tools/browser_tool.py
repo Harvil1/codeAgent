@@ -216,6 +216,24 @@ BROWSER_VISION_SCHEMA = {
 }
 
 
+BROWSER_CDP_SCHEMA = {
+    "name": "browser_cdp",
+    "description": (
+        "直接发 Chrome DevTools Protocol 命令（逃生舱）。"
+        "只在其他 browser_* 工具都搞不定时用。"
+        "常用命令：Page.reload、Runtime.evaluate、Network.getX 等。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "CDP 方法名（如 'Page.reload'）"},
+            "args": {"type": "object", "description": "CDP 参数"},
+        },
+        "required": ["command"],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # handler
 # ---------------------------------------------------------------------------
@@ -495,6 +513,23 @@ def _handle_browser_vision(args: dict, **kwargs) -> str:
         return _err(f"vision 调用失败: {e}", "vision_error")
 
 
+def _handle_browser_cdp(args: dict, **kwargs) -> str:
+    command = (args.get("command") or "").strip()
+    if not command:
+        return _err("command 不能为空")
+    session = _get_session(kwargs)
+    if session is None:
+        return _err("browser_session 未初始化", "browser_unavailable")
+    try:
+        cdp_args = args.get("args") or {}
+        page = session.get_page()
+        client = page.context.new_cdp_session(page)
+        result = client.send(command, cdp_args)
+        return json.dumps({"success": True, "result": result}, ensure_ascii=False)
+    except Exception as e:
+        return _err(f"CDP 命令失败: {e}", "cdp_error")
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -560,4 +595,9 @@ registry.register(
     name="browser_vision", toolset="browser",
     schema=BROWSER_VISION_SCHEMA, handler=_handle_browser_vision,
     check_fn=_check_browser_available, emoji="👁",
+)
+registry.register(
+    name="browser_cdp", toolset="browser",
+    schema=BROWSER_CDP_SCHEMA, handler=_handle_browser_cdp,
+    check_fn=_check_browser_available, emoji="🔌",
 )

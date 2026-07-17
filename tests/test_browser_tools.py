@@ -458,3 +458,49 @@ def test_get_images_browser_unavailable():
     )
     data = json.loads(result)
     assert data["error_type"] == "browser_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: browser_cdp
+# ---------------------------------------------------------------------------
+
+from tools.browser_tool import _handle_browser_cdp  # noqa: E402
+
+
+def test_cdp_empty_command():
+    result = _handle_browser_cdp(
+        {"command": ""},
+        agent_ref=_make_agent_with_session(MagicMock()),
+    )
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_cdp_success():
+    """mock page.context.new_cdp_session.send → success。"""
+    fake_session = MagicMock()
+    fake_page = MagicMock()
+    fake_cdp_client = MagicMock()
+    fake_cdp_client.send.return_value = {"value": 42}
+    fake_page.context.new_cdp_session.return_value = fake_cdp_client
+    fake_session.get_page.return_value = fake_page
+
+    result = _handle_browser_cdp(
+        {"command": "Runtime.evaluate", "args": {"expression": "6*7"}},
+        agent_ref=_make_agent_with_session(fake_session),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["result"] == {"value": 42}
+    fake_cdp_client.send.assert_called_once_with(
+        "Runtime.evaluate", {"expression": "6*7"},
+    )
+
+
+def test_cdp_browser_unavailable():
+    result = _handle_browser_cdp(
+        {"command": "Page.reload"},
+        agent_ref=_make_agent_with_session(None),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "browser_unavailable"
