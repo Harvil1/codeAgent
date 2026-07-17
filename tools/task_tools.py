@@ -31,6 +31,37 @@ def _ownership_denied(msg: str) -> str:
     }, ensure_ascii=False)
 
 
+def _get_owned_task(args: dict, kwargs: dict):
+    """过 ownership + 取任务。失败返回 (None, error_json)；成功返回 (task, None)。
+
+    所有 task_* 写工具共用此 helper，避免 empty-id + ownership 检查重复。
+    """
+    task_id = (args.get("id") or "").strip()
+    if not task_id:
+        return None, json.dumps(
+            {"error": "id 不能为空"}, ensure_ascii=False,
+        )
+    try:
+        assert_owned(task_id)
+    except TaskOwnershipError as e:
+        return None, _ownership_denied(str(e))
+    store = _get_store(kwargs)
+    task = store.get(task_id)
+    if task is None:
+        return None, json.dumps(
+            {"error": f"任务不存在: {task_id}"}, ensure_ascii=False,
+        )
+    return task, None
+
+
+def _infer_author(kwargs: dict) -> str:
+    """从上下文推断 comment author。"""
+    team_name = kwargs.get("team_name")
+    if team_name:
+        return team_name
+    return "main"
+
+
 # ---------------------------------------------------------------------------
 # schema
 # ---------------------------------------------------------------------------
@@ -100,6 +131,23 @@ TASK_LIST_SCHEMA = {
                 "description": "按状态过滤（默认全部）",
             },
         },
+    },
+}
+
+TASK_HEARTBEAT_SCHEMA = {
+    "name": "task_heartbeat",
+    "description": (
+        "报告当前任务仍在进行（更新 last_heartbeat_at）。"
+        "长任务（训练/编码/爬虫）每几分钟调一次。"
+        "可选 note 会作为 comment 追加。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "任务 ID"},
+            "note": {"type": "string", "description": "可选，附加为 comment"},
+        },
+        "required": ["id"],
     },
 }
 
@@ -192,6 +240,20 @@ def _handle_task_list(args: dict, **kwargs) -> str:
     }, ensure_ascii=False)
 
 
+def _handle_task_heartbeat(args: dict, **kwargs) -> str:
+    """更新 last_heartbeat_at；note 非空时附加为 comment。"""
+    task, err = _get_owned_task(args, kwargs)
+    if err:
+        return err
+    note = args.get("note")
+    store = _get_store(kwargs)
+    if note:
+        author = _infer_author(kwargs)
+        store.add_comment(task["id"], author=author, content=note)
+    updated = store.heartbeat(task["id"])
+    return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
@@ -211,4 +273,8 @@ registry.register(
 registry.register(
     name="task_list", toolset="core",
     schema=TASK_LIST_SCHEMA, handler=_handle_task_list, emoji="📋",
+)
+registry.register(
+    name="task_heartbeat", toolset="core",
+    schema=TASK_HEARTBEAT_SCHEMA, handler=_handle_task_heartbeat, emoji="💓",
 )

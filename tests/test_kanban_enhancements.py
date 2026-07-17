@@ -89,3 +89,59 @@ def test_legacy_task_compat(store, tmp_path):
     assert len(t["comments"]) == 1
     t2 = store.add_artifacts("task_legacy", ["/p"])
     assert t2["artifacts"] == ["/p"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: task_heartbeat handler
+# ---------------------------------------------------------------------------
+
+from tools.task_tools import _handle_task_heartbeat, _infer_author
+
+
+def test_heartbeat_handler_updates_task(store, monkeypatch):
+    """handler 调用后 task.last_heartbeat_at 非 None。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_heartbeat(
+        {"id": task["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    assert data["task"]["last_heartbeat_at"] is not None
+
+
+def test_heartbeat_handler_with_note_adds_comment(store, monkeypatch):
+    """带 note 的 heartbeat 同时加一条 comment，author=main（无 team_name）。"""
+    monkeypatch.delenv("HARVIL_KANBAN_TASK", raising=False)
+    task = store.create(subject="X")
+    result = _handle_task_heartbeat(
+        {"id": task["id"], "note": "epoch 50/100"},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["success"] is True
+    refreshed = store.get(task["id"])
+    assert len(refreshed["comments"]) == 1
+    assert refreshed["comments"][0]["content"] == "epoch 50/100"
+    assert refreshed["comments"][0]["author"] == "main"
+
+
+def test_heartbeat_handler_blocks_foreign_id(store, monkeypatch):
+    """env 绑 task_A 时 heartbeat(task_B) → permission_denied。"""
+    task_a = store.create(subject="A")
+    task_b = store.create(subject="B")
+    monkeypatch.setenv("HARVIL_KANBAN_TASK", task_a["id"])
+    result = _handle_task_heartbeat(
+        {"id": task_b["id"]},
+        harvil_home=str(store._dir.parent),
+    )
+    data = json.loads(result)
+    assert data["error_type"] == "permission_denied"
+
+
+def test_infer_author():
+    """_infer_author: 有 team_name → team_name；无 → 'main'。"""
+    assert _infer_author({"team_name": "w1"}) == "w1"
+    assert _infer_author({}) == "main"
+    assert _infer_author({"team_name": None}) == "main"
