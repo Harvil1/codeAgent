@@ -189,6 +189,15 @@ class AIAgent:
         # === batch1-T4 NEW: 子 agent 追踪（中断传播）===
         self._children: list = []
 
+        # === ⑪b NEW: 自动心跳桥 ===
+        # spawned worker 每次工具调用后自动 bump task.last_heartbeat_at
+        # 主 agent 无 HARVIL_KANBAN_TASK env，no-op
+        try:
+            from agent.team.auto_heartbeat import register as _register_auto_heartbeat
+            _register_auto_heartbeat(self.hooks_registry)
+        except Exception as e:
+            logger.warning("注册 auto_heartbeat hook 失败（不影响主流程）: %s", e)
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
