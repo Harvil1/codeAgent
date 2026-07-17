@@ -381,6 +381,13 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("team_coordinator shutdown 失败: %s", e)
 
+        # === ⑪c NEW: agent 资源清理（browser_session 等） ===
+        if hasattr(self, "agent") and self.agent:
+            try:
+                self.agent.cleanup()
+            except Exception as e:
+                logger.warning("agent.cleanup 失败: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # 回调

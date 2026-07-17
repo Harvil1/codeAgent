@@ -198,6 +198,34 @@ class AIAgent:
         except Exception as e:
             logger.warning("注册 auto_heartbeat hook 失败（不影响主流程）: %s", e)
 
+        # === ⑪c NEW: 浏览器会话 ===
+        # 仅在 browser toolset 启用时创建（lazy init，不立即启 Chromium）
+        self.browser_session = None
+        if "browser" in (enabled_toolsets or []):
+            try:
+                from agent.browser_session import BrowserSession
+                self.browser_session = BrowserSession(headless=True)
+                logger.info("BrowserSession 已创建（lazy，未启动）")
+            except Exception as e:
+                logger.warning(
+                    "BrowserSession 初始化失败（browser 工具将不可用）: %s", e,
+                )
+                self.browser_session = None
+
+    def cleanup(self):
+        """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
+
+        幂等：多次调用安全。每个子清理都包 try/except，互不影响。
+        """
+        # 关闭浏览器
+        if self.browser_session:
+            try:
+                self.browser_session.cleanup()
+            except Exception as e:
+                logger.warning("关闭 browser_session 失败: %s", e)
+            finally:
+                self.browser_session = None
+
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 

@@ -69,6 +69,17 @@ TOOLSETS: Dict[str, dict] = {
                   "team_spawn", "team_shutdown", "idle"],
         "includes": [],
     },
+    "browser": {
+        "description": "浏览器自动化（13 个工具，基于 Playwright）",
+        "tools": [
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_press_key",
+            "browser_back", "browser_forward", "browser_close",
+            "browser_get_images", "browser_vision", "browser_console",
+            "browser_cdp",
+        ],
+        "includes": [],
+    },
 }
 
 
