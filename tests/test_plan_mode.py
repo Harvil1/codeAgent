@@ -498,3 +498,111 @@ def test_plan_off_slash_command_idempotent_when_not_in_plan_mode():
     handled = _handle_command("/plan off", rt)
     assert handled is True
     assert agent.plan_mode is False
+
+
+# ============================================================================
+# Task 9: 端到端集成
+# ============================================================================
+
+def test_e2e_plan_approve_then_execute():
+    """端到端：进入 plan_mode → 调研 → 调 exit_plan_mode → 审批通过 → 切回执行。
+
+    注：当前实现 tool_schemas 在 run_conversation 开头一次性计算，
+    不会在同一轮 run_conversation 内 mid-loop 切换 toolset。
+    本测试验证整条流程跑通：read_file 调研 → exit_plan_mode → 审批 → 最终响应。
+    toolset 切换由下一次 run_conversation 生效（见 test_plan_mode_switches_toolset_to_plan）。
+    """
+    agent = _make_minimal_agent(plan_approval_callback=lambda p: (True, ""))
+    agent.plan_mode = True
+
+    # mock 三轮 LLM response
+    # 第 1 轮：调 read_file 调研
+    read_resp = MagicMock()
+    read_resp.choices = [MagicMock()]
+    read_resp.choices[0].message.content = ""
+    tc_read = MagicMock()
+    tc_read.id = "call_read"
+    tc_read.function.name = "read_file"
+    tc_read.function.arguments = json.dumps({"path": "/tmp/x"})
+    read_resp.choices[0].message.tool_calls = [tc_read]
+
+    # 第 2 轮：调 exit_plan_mode
+    exit_resp = _make_exit_plan_mode_tool_call("完整计划：1. 改 foo.py")
+
+    # 第 3 轮：审批通过后 LLM 开始执行（不再调工具，给最终响应）
+    final_resp = _make_final_response("执行完成")
+
+    responses = [read_resp, exit_resp, final_resp]
+
+    # 记录每轮 get_tool_definitions 收到的 toolset
+    captured_toolsets = []
+
+    def fake_get(enabled_toolsets, *args, **kwargs):
+        captured_toolsets.append(list(enabled_toolsets))
+        # 返回所有被请求工具的 schema，避免 LLM 拒绝
+        from tools.registry import registry, discover_builtin_tools
+        discover_builtin_tools()
+        return registry.get_definitions(enabled_toolsets, quiet=True)
+
+    with patch("model_tools.get_tool_definitions", side_effect=fake_get), \
+         patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        # read_file handler 由 registry.dispatch 拦截，避免真读文件
+        from tools.registry import registry, discover_builtin_tools
+        discover_builtin_tools()
+        original_dispatch = registry.dispatch
+
+        def patched_dispatch(name, args, **kw):
+            if name == "read_file":
+                return json.dumps({"content": "file content"})
+            return original_dispatch(name, args, **kw)
+
+        with patch.object(registry, "dispatch", side_effect=patched_dispatch):
+            agent.run_conversation("帮我改个文件")
+
+    # 断言：初始进入 plan_mode 时用 ["plan"] 工具集
+    assert captured_toolsets[0] == ["plan"], f"初始应 ['plan']，实际 {captured_toolsets[0]}"
+    # 审批通过后 plan_mode 必须为 False（这是 toolset 切换的前提条件）
+    assert agent.plan_mode is False, "审批通过后 plan_mode 应清零"
+    # 至少 3 次 LLM 调用被消费（验证 read_file → exit_plan_mode → 最终响应 三步完整跑通）
+    assert len(responses) == 3, "responses 应被全部消费"
+    # 找到 exit_plan_mode 对应的 tool 消息，应含 plan_approved=True
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    approved_msg = next(
+        (m for m in tool_msgs if "plan_approved" in (m.get("content") or "")),
+        None,
+    )
+    assert approved_msg is not None, "缺 plan_approved 的 tool 消息"
+    # read_file 的 tool 结果也应存在
+    read_msg = next(
+        (m for m in tool_msgs if "file content" in (m.get("content") or "")),
+        None,
+    )
+    assert read_msg is not None, "缺 read_file 的 tool 消息"
+    # 最终 assistant 消息应含"执行完成"
+    assistant_msgs = [m for m in agent.conversation_history if m.get("role") == "assistant" and m.get("content")]
+    assert any("执行完成" in (m.get("content") or "") for m in assistant_msgs), "缺最终响应"
+
+
+def test_e2e_plan_reject_then_revise_approve():
+    """端到端：拒绝 → 修订 → 再次审批通过。"""
+    call_count = [0]
+
+    def cb(plan):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return False, "第一次太粗"
+        return True, ""
+
+    agent = _make_minimal_agent(plan_approval_callback=cb)
+    agent.plan_mode = True
+
+    responses = [
+        _make_exit_plan_mode_tool_call("v1 计划"),
+        _make_exit_plan_mode_tool_call("v2 计划"),
+        _make_final_response("ok"),
+    ]
+    with patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        agent.run_conversation("test")
+
+    assert call_count[0] == 2, "回调应被调 2 次（拒绝+批准）"
+    assert agent.plan_mode is False, "最终应切回执行模式"
