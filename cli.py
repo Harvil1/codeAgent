@@ -731,7 +731,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/skills":
-        _list_skills(rt)
+        _handle_skills_command(rt, args)
         return True
 
     if name == "/memory":
@@ -779,7 +779,7 @@ def _show_help():
     console.print(Panel(
         "[bold]可用命令[/bold]\n\n"
         "[cyan]/new[/cyan]       开始新对话\n"
-        "[cyan]/skills[/cyan]    列出技能\n"
+        "[cyan]/skills[/cyan]    列出技能（/skills rate <name> <1-5> | /skills recommend）\n"
         "[cyan]/memory[/cyan]    查看记忆\n"
         "[cyan]/sessions[/cyan]  列出历史会话\n"
         "[cyan]/resume[/cyan]    恢复历史会话（/resume [序号]）\n"
@@ -796,6 +796,27 @@ def _show_help():
     ))
 
 
+def _handle_skills_command(rt: RuntimeContext, args: str):
+    """处理 /skills [list|rate|recommend] 子命令。"""
+    parts = args.split(None, 1)
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if sub in ("list", "ls", ""):
+        _list_skills(rt)
+        return
+
+    if sub == "rate":
+        _rate_skill(rt, rest)
+        return
+
+    if sub in ("recommend", "rec"):
+        _recommend_skills(rt)
+        return
+
+    console.print(f"[yellow]未知子命令：{sub}（用 list / rate / recommend）[/yellow]")
+
+
 def _list_skills(rt: RuntimeContext):
     sd = skills_dir()
     usage = load_usage(sd)
@@ -803,7 +824,8 @@ def _list_skills(rt: RuntimeContext):
     table = Table(title="技能列表")
     table.add_column("命令", style="cyan")
     table.add_column("描述")
-    table.add_column("使用次数", justify="right")
+    table.add_column("使用", justify="right")
+    table.add_column("评分", justify="right")
 
     found = False
     for skill_md in sorted(sd.glob("*/SKILL.md")):
@@ -823,12 +845,78 @@ def _list_skills(rt: RuntimeContext):
         except Exception:
             pass
 
-        table.add_row(f"/{name}", desc, str(rec.get("use_count", 0)))
+        rating = rec.get("rating")
+        rating_str = f"{rating}★" if rating else "-"
+        table.add_row(f"/{name}", desc, str(rec.get("use_count", 0)), rating_str)
 
     if found:
         console.print(table)
+        console.print(
+            "\n[dim]/skills rate <name> <1-5> 打分 | "
+            "/skills recommend 推荐[/dim]"
+        )
     else:
         console.print("[yellow]暂无技能。用 skill_manage 工具创建。[/yellow]")
+
+
+def _rate_skill(rt: RuntimeContext, args: str):
+    """/skills rate <name> <1-5>"""
+    parts = args.split()
+    if len(parts) != 2:
+        console.print("[yellow]用法：/skills rate <技能名> <1-5>[/yellow]")
+        return
+
+    name, rating_str = parts
+    try:
+        rating = int(rating_str)
+    except ValueError:
+        console.print(f"[red]评分必须是整数：{rating_str}[/red]")
+        return
+
+    from tools.skill_usage import set_rating
+    ok, msg = set_rating(skills_dir(), name, rating)
+    if ok:
+        console.print(f"[green]✓ {msg}[/green]")
+    else:
+        console.print(f"[red]{msg}[/red]")
+
+
+def _recommend_skills(rt: RuntimeContext):
+    """/skills recommend — 基于使用次数 + 评分的综合推荐。"""
+    from tools.skill_usage import get_recommendations
+
+    recs = get_recommendations(skills_dir(), limit=5)
+    if not recs:
+        console.print("[yellow]暂无技能可推荐。[/yellow]")
+        return
+
+    console.print(f"[bold]推荐技能 Top {len(recs)}：[/bold]")
+    console.print(
+        "[dim]综合分 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1"
+        "（pinned +10）[/dim]\n"
+    )
+
+    table = Table()
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("技能", style="cyan")
+    table.add_column("综合分", justify="right")
+    table.add_column("使用", justify="right")
+    table.add_column("评分", justify="right")
+    table.add_column("描述")
+
+    for i, r in enumerate(recs, 1):
+        pin = "📌 " if r["pinned"] else ""
+        rating_str = f"{r['rating']}★" if r["rating"] else "-"
+        desc = (r["description"] or "")[:50]
+        table.add_row(
+            str(i),
+            f"{pin}/{r['name']}",
+            str(r["score"]),
+            str(r["use_count"]),
+            rating_str,
+            desc,
+        )
+    console.print(table)
 
 
 def _show_memory(rt: RuntimeContext):

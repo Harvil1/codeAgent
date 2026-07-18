@@ -220,3 +220,93 @@ def restore_skill(skills_dir: Path, skill_name: str) -> tuple:
         return True, f"已恢复: {skill_name}"
     except Exception as e:
         return False, f"恢复失败: {e}"
+
+
+# ---------------------------------------------------------------------------
+# B4 评分 + 推荐
+# ---------------------------------------------------------------------------
+
+def set_rating(skills_dir: Path, skill_name: str, rating: int) -> tuple:
+    """给技能打分（1-5 星）。
+
+    返回 (是否成功, 消息)。
+    评分越界的拒绝；技能不存在的拒绝。
+    """
+    if not isinstance(rating, int) or rating < 1 or rating > 5:
+        return False, f"评分越界：{rating}（应为 1-5 整数）"
+
+    # 检查技能存在（不强制有使用记录）
+    skill_path = Path(skills_dir) / skill_name / "SKILL.md"
+    if not skill_path.exists():
+        return False, f"技能不存在: {skill_name}"
+
+    try:
+        data = load_usage(skills_dir)
+        rec = _ensure_record(data, skill_name)
+        rec["rating"] = rating
+        rec["rated_at"] = _now_iso()
+        save_usage(skills_dir, data)
+        return True, f"已给 /{skill_name} 打 {rating} 星"
+    except Exception as e:
+        return False, f"评分失败: {e}"
+
+
+def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
+    """返回推荐技能列表（按综合分数倒序）。
+
+    综合分数 = use_count * 1.0 + rating * 2.0 + view_count * 0.1
+
+    pinned 技能优先；archived 技能排除。
+
+    返回 [{"name", "score", "use_count", "rating", "description"}, ...]
+    """
+    data = load_usage(skills_dir)
+    sd = Path(skills_dir)
+
+    candidates = []
+    for skill_md in sorted(sd.glob("*/SKILL.md")):
+        name = skill_md.parent.name
+        rec = data.get(name, {})
+
+        # 排除归档
+        if rec.get("state") == STATE_ARCHIVED:
+            continue
+
+        use_count = int(rec.get("use_count", 0))
+        rating = int(rec.get("rating", 0))
+        view_count = int(rec.get("view_count", 0))
+        pinned = bool(rec.get("pinned", False))
+
+        # 综合分（pinned 加 10 分强 boost）
+        score = use_count * 1.0 + rating * 2.0 + view_count * 0.1
+        if pinned:
+            score += 10.0
+
+        # 描述
+        description = ""
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+            # 简单提取 frontmatter description
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 2:
+                    for line in parts[1].splitlines():
+                        if line.strip().startswith("description:"):
+                            description = line.split(":", 1)[1].strip().strip('"').strip("'")
+                            break
+        except Exception:
+            pass
+
+        candidates.append({
+            "name": name,
+            "score": round(score, 2),
+            "use_count": use_count,
+            "rating": rating,
+            "view_count": view_count,
+            "pinned": pinned,
+            "description": description,
+        })
+
+    # 按分数倒序
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates[:limit]
