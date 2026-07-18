@@ -200,6 +200,7 @@ uv sync                                 # 同步已声明依赖
 | 配置默认值（所有参数源头） | `config.py:DEFAULT_CONFIG` |
 | 复刻指南（设计权衡详解） | `D:\project\hermes-agent-main\replication-guide\` |
 | 会话移交 bundle | `agent/handoff.py:HandoffStore` |
+| Vision/Image 工具 | `tools/image_tool.py`（image_analyze / image_ocr，复用 safe_path） |
 
 ## 已知约束（设计如此，不是 bug）
 
