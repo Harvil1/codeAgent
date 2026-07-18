@@ -82,6 +82,20 @@ TOOLSETS: Dict[str, dict] = {
         ],
         "includes": [],
     },
+    "plan": {
+        "description": "计划模式工具集（只读 + 计划工具，不能修改任何东西）",
+        "tools": [
+            "read_file",
+            "search_files",
+            "skills_list",
+            "skill_view",
+            "load_skill",
+            "session_search",
+            "todo_write",
+            "exit_plan_mode",
+        ],
+        "includes": [],
+    },
 }
 
 
