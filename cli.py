@@ -986,21 +986,86 @@ def _resume_session_interactive(rt: RuntimeContext, args: str):
 
 
 def _search_sessions(rt: RuntimeContext, query: str):
+    """搜索历史对话。
+
+    支持的过滤参数（key=value 形式，可组合）：
+      role=<user|assistant|tool>       按角色过滤
+      tool=<tool_name>                 按工具调用过滤（如 tool=terminal）
+      since=<YYYY-MM-DD>               起始时间
+      until=<YYYY-MM-DD>               截止时间
+      limit=<N>                        结果数（默认 10）
+
+    例：
+      /search 报错 role=user
+      /search python tool=terminal since=2026-07-01
+    """
     if not rt.session_store:
         console.print("[yellow]会话存储未启用[/yellow]")
         return
 
-    results = rt.session_store.search(query, limit=10)
-    if not results:
-        console.print(f"[yellow]未找到匹配 '{query}' 的对话[/yellow]")
+    # 解析 query 和 filters
+    parts = query.split()
+    keywords = []
+    filters = {}
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            filters[k.lower()] = v
+        else:
+            keywords.append(p)
+
+    if not keywords:
+        console.print("[yellow]用法：/search <关键词> [key=value ...][/yellow]")
+        console.print(
+            "[dim]过滤：role= user/assistant/tool | tool= <name> | "
+            "since= YYYY-MM-DD | until= YYYY-MM-DD | limit= N[/dim]"
+        )
         return
 
-    console.print(f"[bold]搜索 '{query}' 的结果：[/bold]")
+    keyword = " ".join(keywords)
+    limit = int(filters.get("limit", "10"))
+    role = filters.get("role")
+    tool_name = filters.get("tool")
+    since = filters.get("since")
+    until = filters.get("until")
+
+    # 日期补全（since 自动加 T00:00:00，until 自动加 T23:59:59）
+    if since and "T" not in since:
+        since = since + "T00:00:00"
+    if until and "T" not in until:
+        until = until + "T23:59:59"
+
+    results = rt.session_store.search(
+        keyword,
+        limit=limit,
+        role=role,
+        tool_name=tool_name,
+        since=since,
+        until=until,
+    )
+    if not results:
+        console.print(f"[yellow]未找到匹配 '{keyword}' 的对话[/yellow]")
+        return
+
+    # 显示当前过滤条件
+    active_filters = []
+    if role:
+        active_filters.append(f"role={role}")
+    if tool_name:
+        active_filters.append(f"tool={tool_name}")
+    if since:
+        active_filters.append(f"since={since[:10]}")
+    if until:
+        active_filters.append(f"until={until[:10]}")
+    filter_str = f" [dim]({', '.join(active_filters)})[/dim]" if active_filters else ""
+
+    console.print(f"[bold]搜索 '{keyword}' 的结果（{len(results)} 条）：[/bold]{filter_str}")
     for r in results:
         title = r.get("title") or "(无标题)"
         snippet = r.get("snippet", "")
+        role_tag = f"[dim][{r.get('role', '?')}][/dim] "
         console.print(f"\n[cyan]{title}[/cyan] [dim]({r.get('timestamp', '')[:19]})[/dim]")
-        console.print(f"  {snippet}")
+        console.print(f"  {role_tag}{snippet}")
 
 
 def _manage_whitelist(rt: RuntimeContext, args: str):

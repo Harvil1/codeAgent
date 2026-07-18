@@ -299,13 +299,23 @@ class SessionStore:
         *,
         limit: int = 10,
         session_id: Optional[str] = None,
+        role: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
     ) -> List[dict]:
-        """全文搜索消息。
+        """全文搜索消息，支持过滤。
 
         使用 FTS5，支持：
         - 关键词匹配
         - 短语匹配（用引号）
         - 相关性排序
+
+        过滤参数（B2 增强）：
+        - session_id: 限定会话
+        - role: 限定角色（user/assistant/tool）
+        - tool_name: 限定消息含特定工具调用（Python 层过滤）
+        - since/until: ISO8601 时间范围（字符串比较）
 
         返回匹配的消息 + 会话信息。
         """
@@ -314,42 +324,79 @@ class SessionStore:
         if fts_query == '""':
             return []
 
+        # 动态构造 WHERE 子句
+        where_clauses = ["messages_fts MATCH ?"]
+        params: list = [fts_query]
+
+        if session_id:
+            where_clauses.append("m.session_id = ?")
+            params.append(session_id)
+        if role:
+            where_clauses.append("m.role = ?")
+            params.append(role)
+        if since:
+            where_clauses.append("m.timestamp >= ?")
+            params.append(since)
+        if until:
+            where_clauses.append("m.timestamp <= ?")
+            params.append(until)
+
+        where_sql = " AND ".join(where_clauses)
+
+        # 取候选（不加 limit，Python 层 tool_name 过滤后再截断）
+        # 但为防卡死，给一个 10x limit 上限
+        fetch_limit = limit * 10 if tool_name else limit
+        sql = f"""
+            SELECT m.content, m.role, m.session_id, m.timestamp,
+                   m.tool_calls,
+                   s.title,
+                   snippet(messages_fts, 0, '<<', '>>', '...', 20) as snippet,
+                   rank
+            FROM messages_fts
+            JOIN messages m ON messages_fts.message_id = m.id
+            LEFT JOIN sessions s ON m.session_id = s.id
+            WHERE {where_sql}
+            ORDER BY rank
+            LIMIT ?
+        """
+        params.append(fetch_limit)
+
         try:
             with self._get_conn() as conn:
-                if session_id:
-                    sql = """
-                        SELECT m.content, m.role, m.session_id, m.timestamp,
-                               s.title,
-                               snippet(messages_fts, 0, '<<', '>>', '...', 20) as snippet,
-                               rank
-                        FROM messages_fts
-                        JOIN messages m ON messages_fts.message_id = m.id
-                        LEFT JOIN sessions s ON m.session_id = s.id
-                        WHERE messages_fts MATCH ?
-                          AND m.session_id = ?
-                        ORDER BY rank
-                        LIMIT ?
-                    """
-                    rows = conn.execute(sql, (fts_query, session_id, limit)).fetchall()
-                else:
-                    sql = """
-                        SELECT m.content, m.role, m.session_id, m.timestamp,
-                               s.title,
-                               snippet(messages_fts, 0, '<<', '>>', '...', 20) as snippet,
-                               rank
-                        FROM messages_fts
-                        JOIN messages m ON messages_fts.message_id = m.id
-                        LEFT JOIN sessions s ON m.session_id = s.id
-                        WHERE messages_fts MATCH ?
-                        ORDER BY rank
-                        LIMIT ?
-                    """
-                    rows = conn.execute(sql, (fts_query, limit)).fetchall()
+                rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
             logger.warning("FTS 搜索失败: %s", e)
             return []
 
-        return [dict(row) for row in rows]
+        results = [dict(row) for row in rows]
+
+        # tool_name 过滤（Python 层，解析 tool_calls JSON）
+        if tool_name:
+            filtered = []
+            for r in results:
+                tc = r.get("tool_calls")
+                if not tc:
+                    continue
+                try:
+                    calls = json.loads(tc) if isinstance(tc, str) else tc
+                    if isinstance(calls, list):
+                        for c in calls:
+                            if isinstance(c, dict):
+                                fn = c.get("function", {})
+                                if isinstance(fn, dict) and fn.get("name") == tool_name:
+                                    filtered.append(r)
+                                    break
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            results = filtered[:limit]
+        else:
+            results = results[:limit]
+
+        # 移除内部字段 tool_calls（保持向后兼容）
+        for r in results:
+            r.pop("tool_calls", None)
+
+        return results
 
     def get_stats(self) -> dict:
         """聚合统计：会话/消息/工具调用频次/角色分布。
