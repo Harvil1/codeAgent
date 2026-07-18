@@ -1100,6 +1100,37 @@ def _show_usage(rt: RuntimeContext):
             if total_in > 0:
                 hit_rate = stats["total_cache_read_tokens"] / total_in * 100
                 console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
+
+            # 成本估算（批次 2：A3）
+            try:
+                from agent.pricing import estimate_cost_usd
+                model_cfg = rt.config.get("model", {})
+                est = estimate_cost_usd(
+                    provider=model_cfg.get("provider", ""),
+                    model=model_cfg.get("name", ""),
+                    prompt_tokens=stats["total_prompt_tokens"],
+                    completion_tokens=stats["total_completion_tokens"],
+                    cache_read_tokens=stats["total_cache_read_tokens"],
+                    cache_creation_tokens=stats["total_cache_creation_tokens"],
+                )
+                if est is not None:
+                    console.print(f"\n[bold]成本估算：[/bold]")
+                    console.print(f"  总成本:    [bold green]${est['cost_usd']:.4f}[/bold green]")
+                    bk = est["breakdown"]
+                    console.print(
+                        f"  [dim]输入:     ${bk['input']:.4f}"
+                        f" | Cache 命中: ${bk['cache_hit']:.4f}"
+                        f" | Cache 写入: ${bk['cache_write']:.4f}"
+                        f" | 输出: ${bk['output']:.4f}[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"\n[dim]成本估算：未知模型 "
+                        f"{model_cfg.get('provider', '?')}/"
+                        f"{model_cfg.get('name', '?')}（pricing.py 未收录）[/dim]"
+                    )
+            except Exception as e:
+                logger.debug("成本估算失败（fail-open）: %s", e)
     if rt.session_store and rt.session_id:
         info = rt.session_store.get_session(rt.session_id)
         if info:
