@@ -205,3 +205,81 @@ def test_normal_mode_uses_enabled_toolsets():
             agent.run_conversation("test")
 
     assert captured_toolsets[0] == ["core", "browser"]
+
+
+# ============================================================================
+# Task 5: Plan Mode reminder 注入
+# ============================================================================
+
+def test_plan_mode_reminder_injected_when_plan_mode_true():
+    """plan_mode=True 时 messages 末尾含 plan_mode_reminder。"""
+    agent = _make_minimal_agent()
+    agent.plan_mode = True
+
+    captured_messages = []
+
+    def fake_call_with_retry(client, messages, **kwargs):
+        captured_messages.append(list(messages))
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "ok"
+        mock_resp.choices[0].message.tool_calls = None
+        return mock_resp
+
+    with patch("agent.llm_retry.call_with_retry", side_effect=fake_call_with_retry):
+        agent.run_conversation("test")
+
+    assert captured_messages, "LLM 未被调用"
+    last_msgs = captured_messages[0]
+    reminder_found = any(
+        "<plan_mode_reminder>" in (m.get("content") or "")
+        for m in last_msgs
+    )
+    assert reminder_found, "messages 缺 plan_mode_reminder"
+
+
+def test_plan_mode_reminder_absent_when_plan_mode_false():
+    """plan_mode=False 时 messages 不含 plan_mode_reminder。"""
+    agent = _make_minimal_agent()
+    assert agent.plan_mode is False
+
+    captured_messages = []
+
+    def fake_call_with_retry(client, messages, **kwargs):
+        captured_messages.append(list(messages))
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "ok"
+        mock_resp.choices[0].message.tool_calls = None
+        return mock_resp
+
+    with patch("agent.llm_retry.call_with_retry", side_effect=fake_call_with_retry):
+        agent.run_conversation("test")
+
+    last_msgs = captured_messages[0]
+    reminder_found = any(
+        "<plan_mode_reminder>" in (m.get("content") or "")
+        for m in last_msgs
+    )
+    assert not reminder_found, "plan_mode=False 不应注入 reminder"
+
+
+def test_plan_mode_reminder_not_in_conversation_history():
+    """reminder 是临时消息，不进 conversation_history（保护 prompt cache）。"""
+    agent = _make_minimal_agent()
+    agent.plan_mode = True
+
+    with patch("agent.llm_retry.call_with_retry") as mock_llm:
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "ok"
+        mock_resp.choices[0].message.tool_calls = None
+        mock_llm.return_value = mock_resp
+        agent.run_conversation("test")
+
+    # history 里有 user("test") + assistant("ok")，不应有 reminder
+    for msg in agent.conversation_history:
+        content = msg.get("content") or ""
+        assert "<plan_mode_reminder>" not in content, (
+            "reminder 不应进 conversation_history"
+        )

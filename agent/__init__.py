@@ -486,6 +486,19 @@ class AIAgent:
                 if reminder:
                     messages.append({"role": "user", "content": reminder})
 
+            # === PlanMode NEW: 计划模式提醒（临时，不进 history）===
+            if self.plan_mode:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<plan_mode_reminder>\n"
+                        "你处于【计划模式】，只能调研，不能修改任何东西。\n"
+                        "完成调研后必须调 exit_plan_mode(plan=...) 提交计划等待用户审批。\n"
+                        "计划要包含：要改什么文件、为什么、步骤、风险点。\n"
+                        "</plan_mode_reminder>"
+                    ),
+                })
+
             # 上下文压缩（接近 token 上限时触发）
             # Phase 1 Commit 7：双轨期结束，直接走新管线
             if self.compression_enabled:
