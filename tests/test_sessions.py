@@ -242,3 +242,100 @@ def test_maybe_set_title_skip_if_exists(store):
     maybe_set_title(store, sid, "新消息", "已有标题")
     # 不应该被覆盖
     assert store.get_session(sid)["title"] == "已有标题"
+
+
+# ============ P2-12: fork_session 测试 ============
+
+def test_fork_session_creates_new_id(store):
+    """fork 后新 session 有自己的 id。"""
+    src = store.create_session(title="原会话", model="deepseek-chat")
+    store.append_message(src, "user", "hi")
+    store.append_message(src, "assistant", "hello")
+
+    forked = store.fork_session(src)
+    assert forked != src
+    assert store.get_session(forked) is not None
+
+
+def test_fork_session_copies_all_messages(store):
+    """fork 后新 session 包含原会话所有消息。"""
+    src = store.create_session(title="原会话")
+    store.append_message(src, "user", "问题 1")
+    store.append_message(src, "assistant", "答案 1")
+    store.append_message(src, "user", "问题 2")
+    store.append_message(src, "assistant", "答案 2")
+
+    forked = store.fork_session(src)
+    msgs = store.get_messages(forked)
+    assert len(msgs) == 4
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "问题 1"
+    assert msgs[3]["content"] == "答案 2"
+
+
+def test_fork_session_preserves_tool_calls(store):
+    """fork 保留 tool_calls / tool_call_id（消息结构完整）。"""
+    src = store.create_session()
+    store.append_message(src, "user", "do search")
+    # assistant 带 tool_calls 时 content 用空串（schema NOT NULL）
+    store.append_message(
+        src, "assistant", "",
+        tool_calls=[{"id": "c1", "function": {"name": "search", "arguments": "{}"}}],
+    )
+    store.append_message(src, "tool", "result", tool_call_id="c1")
+
+    forked = store.fork_session(src)
+    msgs = store.get_messages(forked)
+    assert any(m.get("tool_calls") for m in msgs)
+    tool_msg = [m for m in msgs if m["role"] == "tool"][0]
+    assert tool_msg["tool_call_id"] == "c1"
+
+
+def test_fork_session_does_not_mutate_source(store):
+    """fork 后原会话不变（独立分支）。"""
+    src = store.create_session(title="原会话")
+    store.append_message(src, "user", "原消息")
+
+    forked = store.fork_session(src)
+    # 在 fork 上追加新消息
+    store.append_message(forked, "user", "fork 后的新消息")
+
+    # 原 session 消息数不变
+    src_msgs = store.get_messages(src)
+    assert len(src_msgs) == 1
+    assert src_msgs[0]["content"] == "原消息"
+
+
+def test_fork_session_default_title_inherits(store):
+    """不传 title 时默认 'Fork of <原 title>'。"""
+    src = store.create_session(title="实验 A")
+    store.append_message(src, "user", "x")
+
+    forked = store.fork_session(src)
+    forked_info = store.get_session(forked)
+    assert forked_info["title"] == "Fork of 实验 A"
+
+
+def test_fork_session_inherits_model_provider(store):
+    """fork 继承原会话的 model 和 provider。"""
+    src = store.create_session(model="deepseek-chat", provider="deepseek")
+    store.append_message(src, "user", "hi")
+
+    forked = store.fork_session(src)
+    info = store.get_session(forked)
+    assert info["model"] == "deepseek-chat"
+    assert info["provider"] == "deepseek"
+
+
+def test_fork_session_unknown_source_raises(store):
+    """fork 不存在的 session 抛 ValueError。"""
+    import pytest
+    with pytest.raises(ValueError, match="source session"):
+        store.fork_session("nonexistent-id")
+
+
+def test_fork_session_empty_source_creates_empty_fork(store):
+    """fork 空会话（无消息）也合法。"""
+    src = store.create_session(title="空会话")
+    forked = store.fork_session(src)
+    assert store.get_messages(forked) == []

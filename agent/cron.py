@@ -27,10 +27,18 @@ class CronJob:
     cron: str
     message: str
     enabled: bool = True
-    catch_up: bool = False  # 本 phase 不实现 catch_up，仅占位
+    catch_up: bool = False  # P1-7: True 时启动会补跑错过的一次触发
     # === CronRecurringExpiry NEW ===
     created_at: str = ""    # ISO 时间戳；老 jobs.json 缺时 _parse_job 补 now
     recurring: bool = True  # False = 一次性，触发后自动 disable（不删除）
+    # === P1-7 NEW ===
+    last_fired_at: str = ""  # 上次实际触发时间（ISO timespec=minutes）；空=首次
+    # catch_up 扫描窗口上限（小时），避免 last_fired_at 太久远时扫太多分钟
+    # 默认 24h：超过的不补跑（用户重启间隔通常 < 24h；过长间隔视为废弃 job）
+
+
+# P1-7: catch_up 扫描窗口上限（小时）
+DEFAULT_CATCH_UP_WINDOW_HOURS = 24
 
 
 class CronScheduler:
@@ -63,12 +71,96 @@ class CronScheduler:
         """启动后台 thread。幂等。"""
         if self._thread and self._thread.is_alive():
             return
+        # P1-7: 启动时先补跑错过的触发（catch_up=True 的 jobs）
+        try:
+            self._apply_catch_up(datetime.now())
+        except Exception as e:
+            logger.warning("catch_up 启动补跑失败（不阻塞调度）: %s", e)
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True, name="cron-scheduler"
         )
         self._thread.start()
         logger.info("CronScheduler 后台线程已启动 (poll=%ss)", self._poll_interval)
+
+    def _apply_catch_up(
+        self, now: datetime, *, window_hours: int = DEFAULT_CATCH_UP_WINDOW_HOURS,
+    ):
+        """P1-7: 启动时补跑错过的一次触发。
+
+        对每个 enabled + catch_up=True 的 job：
+          - last_fired_at 为空（首次）→ 跳过
+          - last_fired_at 距 now > window_hours → 跳过（避免大量扫描）
+          - 扫 [last_fired_at, now] 每分钟，第一个 cron_match 就 push 补跑通知 + break
+
+        补跑只 push 一次（不重复），通知里标 catch_up=True 区分实时触发。
+        扫描结果不影响 last_fired_at（下次正常 tick 才更新）。
+        """
+        from datetime import timedelta
+        catch_up_count = 0
+        with self._lock:
+            jobs_snapshot = list(self._jobs)
+
+        for job in jobs_snapshot:
+            if not job.enabled or not job.catch_up:
+                continue
+            if not job.last_fired_at:
+                continue
+            try:
+                last_fired = datetime.fromisoformat(job.last_fired_at)
+            except (ValueError, TypeError) as e:
+                logger.debug(
+                    "catch_up: job %s last_fired_at 解析失败 %s（跳过）",
+                    job.id, e,
+                )
+                continue
+
+            elapsed_hours = (now - last_fired).total_seconds() / 3600
+            if elapsed_hours > window_hours:
+                logger.info(
+                    "catch_up: job %s last_fired_at 距今 %.1fh 超过 %dh 上限，跳过",
+                    job.id, elapsed_hours, window_hours,
+                )
+                continue
+            if elapsed_hours <= 0:
+                continue  # last_fired 在未来（时钟漂移）→ 跳过
+
+            # 扫每分钟（不含端点：从 last_fired+1min 到 now-1min）
+            # 即不重复 last_fired 那次，也不预触发 now 这分钟（让正常 tick 处理）
+            scan_start = last_fired + timedelta(minutes=1)
+            scan_end = now - timedelta(minutes=1)
+            cursor = scan_start
+            found = False
+            while cursor <= scan_end:
+                try:
+                    if cron_match(job.cron, cursor):
+                        found = True
+                        break
+                except ValueError:
+                    break  # 表达式无效，跳过
+                cursor += timedelta(minutes=1)
+
+            if found:
+                with self._lock:
+                    self._notifications.append({
+                        "job_id": job.id,
+                        "message": job.message,
+                        "fired_at": now.isoformat(timespec="seconds"),
+                        "catch_up": True,
+                        "missed_between": f"{scan_start.isoformat(timespec='minutes')} ~ {scan_end.isoformat(timespec='minutes')}",
+                    })
+                catch_up_count += 1
+                logger.info(
+                    "catch_up: job %s 补跑 1 次（窗口 %s ~ %s）",
+                    job.id,
+                    scan_start.isoformat(timespec="minutes"),
+                    scan_end.isoformat(timespec="minutes"),
+                )
+
+        if catch_up_count:
+            # 持久化更新（虽然 last_fired_at 没变，但通知里需要标记，最好不持久化
+            # 因为 catch_up 不算"实际触发"。让下次正常 tick 更新 last_fired_at。）
+            pass
 
     def stop(self) -> None:
         """停止后台 thread。幂等。"""
@@ -141,6 +233,8 @@ class CronScheduler:
         # === CronRecurringExpiry NEW: 老格式兼容 ===
         created_at = h.get("created_at") or datetime.now().isoformat(timespec="seconds")
         recurring = h.get("recurring", True)
+        # P1-7: last_fired_at 兼容（老 jobs.json 缺时为空，首次 _tick 后才填）
+        last_fired_at = h.get("last_fired_at", "")
         return CronJob(
             id=job_id,
             cron=cron,
@@ -149,6 +243,7 @@ class CronScheduler:
             catch_up=h.get("catch_up", False),
             created_at=created_at,
             recurring=recurring,
+            last_fired_at=last_fired_at,
         )
 
     def _run_loop(self):
@@ -177,6 +272,7 @@ class CronScheduler:
 
         expired_ids: set = set()
         fired_oneshot_ids: set = set()
+        fired_any = False  # P1-7: 任何触发都需持久化 last_fired_at
 
         for job in jobs_snapshot:
             if not job.enabled:
@@ -210,11 +306,14 @@ class CronScheduler:
                 if self._last_fired.get(job.id) == minute_marker:
                     continue  # 同分钟去重
                 self._last_fired[job.id] = minute_marker
+                # P1-7: 持久化 last_fired_at（让下次启动 catch_up 能用）
+                job.last_fired_at = now.isoformat(timespec="minutes")
                 self._notifications.append({
                     "job_id": job.id,
                     "message": job.message,
                     "fired_at": now.isoformat(timespec="seconds"),
                 })
+                fired_any = True
 
             # === CronRecurringExpiry NEW: 记录一次性任务 ===
             if not job.recurring:
@@ -232,6 +331,10 @@ class CronScheduler:
                 "cron disable 了 %d 个 job（过期 %d + 一次性 %d）",
                 len(to_disable), len(expired_ids), len(fired_oneshot_ids),
             )
+        elif fired_any:
+            # P1-7: 没有 disable 但有触发 → 也持久化（更新 last_fired_at）
+            with self._lock:
+                self._persist_jobs_unlocked()
 
     def _persist_jobs_unlocked(self) -> None:
         """把当前 _jobs 写回 jobs.json（原子替换）。
@@ -254,6 +357,7 @@ class CronScheduler:
                         "catch_up": j.catch_up,
                         "created_at": j.created_at,
                         "recurring": j.recurring,
+                        "last_fired_at": j.last_fired_at,  # P1-7
                     }
                     for j in self._jobs
                 ]

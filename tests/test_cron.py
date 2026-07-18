@@ -460,3 +460,180 @@ def test_scheduler_init_defaults_max_age_days_to_7():
             enabled=False,
         )
         assert sched._max_age_days == 7
+
+
+# ============ P1-7: catch_up 错过补偿测试 ============
+
+def test_tick_updates_last_fired_at(tmp_path):
+    """_tick 正常触发时更新 job.last_fired_at（持久化字段）。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "every-minute",
+         "catch_up": True},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    now = datetime(2026, 7, 18, 10, 0, 0)
+    sched._tick(now)
+    notifs = sched.drain_due()
+    assert len(notifs) == 1
+    # last_fired_at 被更新
+    job = sched._jobs[0]
+    assert job.last_fired_at == now.isoformat(timespec="minutes")
+
+
+def test_catch_up_compensates_missed_trigger(tmp_path):
+    """catch_up=True 的 job：启动时检测到错过触发，补跑一次。
+
+    场景：cron 是 "* * * * *"（每分钟），上次触发是 30 分钟前，
+    现在启动应补一条 catch_up 通知。
+    """
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True,
+         "last_fired_at": "2026-07-18T09:30"},  # 30 分钟前
+    ])
+    # 用 monkey patch 固定 now
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    # 用 _apply_catch_up 直接测，传固定 now
+    fake_now = datetime(2026, 7, 18, 10, 0, 0)
+    sched._apply_catch_up(fake_now)
+
+    notifs = sched.drain_due()
+    catch_up_notifs = [n for n in notifs if n.get("catch_up")]
+    assert len(catch_up_notifs) == 1, f"应补 1 次，实际 {catch_up_notifs}"
+    assert catch_up_notifs[0]["job_id"] == "j1"
+
+
+def test_catch_up_skipped_when_disabled_flag(tmp_path):
+    """catch_up=False 的 job 不补跑。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": False,
+         "last_fired_at": "2026-07-18T09:30"},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    sched._apply_catch_up(datetime(2026, 7, 18, 10, 0, 0))
+
+    notifs = sched.drain_due()
+    assert len(notifs) == 0
+
+
+def test_catch_up_skipped_without_last_fired_at(tmp_path):
+    """首次启动（last_fired_at 为空）不补跑。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True},
+        # 无 last_fired_at
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    sched._apply_catch_up(datetime(2026, 7, 18, 10, 0, 0))
+
+    notifs = sched.drain_due()
+    assert len(notifs) == 0
+
+
+def test_catch_up_skipped_when_no_match_in_window(tmp_path):
+    """catch_up=True 但窗口内 cron 没满足 → 不补跑。
+
+    场景：cron "0 9 * * *"（每天 9:00），上次 7-17 09:00 触发，
+    现在 7-18 08:30 启动 → 还没到 9:00，不该补跑。
+    """
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "0 9 * * *", "message": "9am",
+         "catch_up": True,
+         "last_fired_at": "2026-07-17T09:00"},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    sched._apply_catch_up(datetime(2026, 7, 18, 8, 30, 0))
+
+    notifs = sched.drain_due()
+    assert len(notifs) == 0
+
+
+def test_catch_up_only_fires_once_per_missed_window(tmp_path):
+    """补跑只 push 一次，不重复（即使窗口内 cron 满足多次）。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True,
+         "last_fired_at": "2026-07-18T09:00"},  # 1 小时前，应该有 60 次满足
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    sched._apply_catch_up(datetime(2026, 7, 18, 10, 0, 0))
+
+    notifs = sched.drain_due()
+    catch_up_notifs = [n for n in notifs if n.get("catch_up")]
+    assert len(catch_up_notifs) == 1  # 只补一次，不爆消息
+
+
+def test_catch_up_skips_disabled_jobs(tmp_path):
+    """enabled=False 的 job 不补跑（即使 catch_up=True）。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True, "enabled": False,
+         "last_fired_at": "2026-07-18T09:30"},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    sched._apply_catch_up(datetime(2026, 7, 18, 10, 0, 0))
+
+    notifs = sched.drain_due()
+    assert len(notifs) == 0
+
+
+def test_catch_up_caps_scan_at_24h(tmp_path):
+    """补跑扫描有上限（默认 24h），避免 last_fired_at 太久远时扫太多分钟。"""
+    p = tmp_path / "jobs.json"
+    # last_fired_at 是 7 天前（远超 24h）
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True,
+         "last_fired_at": "2026-07-11T10:00"},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    # 应该跳过（不扫一周的分钟）
+    sched._apply_catch_up(datetime(2026, 7, 18, 10, 0, 0))
+
+    notifs = sched.drain_due()
+    # 超过 24h 窗口 → 不补跑（避免大量扫描）
+    catch_up_notifs = [n for n in notifs if n.get("catch_up")]
+    assert len(catch_up_notifs) == 0
+
+
+def test_start_invokes_catch_up(tmp_path):
+    """start() 时自动调 _apply_catch_up。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick",
+         "catch_up": True,
+         "last_fired_at": "2026-07-18T09:30"},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=True, poll_interval_seconds=999)
+    try:
+        sched.start()
+        # 给后台线程跑一次 tick + catch_up
+        time.sleep(0.5)
+        notifs = sched.drain_due()
+        # 应该至少有 catch_up 触发的通知（或当前分钟 tick 触发的）
+        assert len(notifs) >= 1
+    finally:
+        sched.stop()
+
+
+def test_persist_includes_last_fired_at(tmp_path):
+    """_persist_jobs_unlocked 把 last_fired_at 写回 jobs.json。"""
+    p = tmp_path / "jobs.json"
+    _write_jobs(p, [
+        {"id": "j1", "cron": "* * * * *", "message": "tick", "catch_up": True},
+    ])
+    sched = CronScheduler(jobs_path=p, enabled=False)
+    # 正常触发更新 last_fired_at
+    sched._tick(datetime(2026, 7, 18, 10, 0, 0))
+    # reload 验证持久化
+    sched2 = CronScheduler(jobs_path=p, enabled=False)
+    job = sched2._jobs[0]
+    assert job.last_fired_at == datetime(2026, 7, 18, 10, 0).isoformat(timespec="minutes")

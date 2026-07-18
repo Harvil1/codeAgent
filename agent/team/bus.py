@@ -122,10 +122,18 @@ class MessageBus:
         content: str,
         request_id: Optional[str] = None,
     ) -> str:
-        """追加一条消息到 `to` 的 inbox。返回 message_id。"""
+        """追加一条消息到 `to` 的 inbox。返回 message_id。
+
+        P1-8 类型校验：type_='response' 时 request_id 必填（防孤儿 response）。
+        """
         if type_ not in VALID_TYPES:
             raise ValueError(
                 f"type_ 必须是 {VALID_TYPES} 之一，实际: {type_}"
+            )
+        # P1-8: response 必须配对 request_id
+        if type_ == "response" and not request_id:
+            raise ValueError(
+                "type='response' 的消息必须传 request_id（防孤儿 response）"
             )
         msg_id = uuid.uuid4().hex[:12]
         msg = {
@@ -145,6 +153,54 @@ class MessageBus:
 
         _with_lock(self._lock_path(to), _append)
         return msg_id
+
+    # ---- P1-8 NEW: request-response 协议化便捷方法 ----
+    def send_request(
+        self, *, from_: str, to: str, content: str,
+    ) -> str:
+        """发 type='request' 消息，自动生成 request_id（req_ 前缀）。
+
+        返回 request_id，调用方拿它等响应。
+        """
+        request_id = f"req_{uuid.uuid4().hex[:10]}"
+        self.send(
+            from_=from_, to=to, type_="request",
+            content=content, request_id=request_id,
+        )
+        return request_id
+
+    def send_response(
+        self, *, from_: str, to: str, request_id: str, content: str,
+    ) -> str:
+        """用 request_id 回复（type='response'）。
+
+        request_id 必填（None 时 raise ValueError）。
+        """
+        if not request_id:
+            raise ValueError(
+                "send_response 必须传 request_id（关联原 request）"
+            )
+        return self.send(
+            from_=from_, to=to, type_="response",
+            content=content, request_id=request_id,
+        )
+
+    @staticmethod
+    def find_response(
+        messages: List[TeamMessage], request_id: str,
+    ) -> Optional[TeamMessage]:
+        """从消息列表里找匹配 request_id 的 response。找不到返回 None。
+
+        典型用法：调用方 send_request 后周期性 read_inbox，
+        用 find_response 找出对应的 response，没找到就继续 poll。
+        """
+        for m in messages:
+            if (
+                m.type == "response"
+                and m.request_id == request_id
+            ):
+                return m
+        return None
 
     def read_inbox(self, name: str) -> List[TeamMessage]:
         """消费式读取：返回所有消息，清空文件。"""

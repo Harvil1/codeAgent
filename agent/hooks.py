@@ -1,7 +1,10 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
-6 种 event：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
-          + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2 新增）
+11 种 event（P2-13 扩展后）：
+  核心 6 种：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
+           + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2）
+  新增 5 种（P2-13）：SESSION_START / SESSION_END
+           + PRE_COMPACT / POST_COMPACT + CONFIG_CHANGE
 2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
 失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
 """
@@ -22,6 +25,12 @@ class HookEvent(Enum):
     # batch2-T2: LLM 调用前后的 hook
     PRE_LLM_CALL = "pre_llm_call"
     POST_LLM_CALL = "post_llm_call"
+    # P2-13 NEW: 会话/压缩/配置 5 个新事件
+    SESSION_START = "session_start"
+    SESSION_END = "session_end"
+    PRE_COMPACT = "pre_compact"
+    POST_COMPACT = "post_compact"
+    CONFIG_CHANGE = "config_change"
 
 
 # 程序式 hook 的签名
@@ -32,6 +41,10 @@ StopFn = Callable[[], Optional[str]]
 # batch2-T2: LLM hooks
 PreLLMCallFn = Callable[[list, Optional[list]], Optional[tuple]]
 PostLLMCallFn = Callable[[object], Optional[object]]
+# P2-13: 新事件用统一 payload 风格（dict 进，Optional[dict] 出）
+# - SESSION_START/END/POST_COMPACT/CONFIG_CHANGE: 纯通知型，返回值忽略
+# - PRE_COMPACT: 可返回 {"abort": True} 阻止该层压缩
+PayloadFn = Callable[[dict], Optional[dict]]
 
 
 @dataclass
@@ -86,6 +99,42 @@ class HookRegistry:
     def register_stop(self, fn, *, name=None):
         self._hooks[HookEvent.STOP].append(
             Hook(name=name or "anonymous", event=HookEvent.STOP,
+                 kind="programmatic", fn=fn)
+        )
+
+    # ---- P2-13 NEW: 会话/压缩/配置事件的注册 ----
+    def register_session_start(self, fn, *, name=None):
+        """fn(payload: dict) -> None。payload: {session_id, started_at, agent_home}。"""
+        self._hooks[HookEvent.SESSION_START].append(
+            Hook(name=name or "anonymous", event=HookEvent.SESSION_START,
+                 kind="programmatic", fn=fn)
+        )
+
+    def register_session_end(self, fn, *, name=None):
+        """fn(payload: dict) -> None。payload: {session_id, reason, ended_at}。"""
+        self._hooks[HookEvent.SESSION_END].append(
+            Hook(name=name or "anonymous", event=HookEvent.SESSION_END,
+                 kind="programmatic", fn=fn)
+        )
+
+    def register_pre_compact(self, fn, *, name=None):
+        """fn(payload: dict) -> Optional[{"abort": True}]。payload: {layer, messages_count, est_tokens}。"""
+        self._hooks[HookEvent.PRE_COMPACT].append(
+            Hook(name=name or "anonymous", event=HookEvent.PRE_COMPACT,
+                 kind="programmatic", fn=fn)
+        )
+
+    def register_post_compact(self, fn, *, name=None):
+        """fn(payload: dict) -> None。payload: {messages_before, messages_after, layer}。"""
+        self._hooks[HookEvent.POST_COMPACT].append(
+            Hook(name=name or "anonymous", event=HookEvent.POST_COMPACT,
+                 kind="programmatic", fn=fn)
+        )
+
+    def register_config_change(self, fn, *, name=None):
+        """fn(payload: dict) -> None。payload: {changed_keys, old, new}。"""
+        self._hooks[HookEvent.CONFIG_CHANGE].append(
+            Hook(name=name or "anonymous", event=HookEvent.CONFIG_CHANGE,
                  kind="programmatic", fn=fn)
         )
 
@@ -321,3 +370,59 @@ class HookRegistry:
                 logger.warning("POST_LLM_CALL hook %s 异常（视为 None）: %s",
                                hook.name, e)
         return response
+
+    # ---- P2-13 NEW: 会话/压缩/配置事件的执行 ----
+    def run_session_start(self, payload: dict) -> None:
+        """通知型：所有 SESSION_START hook 都被调，返回值忽略。失败 fail-open。"""
+        for hook in self._hooks[HookEvent.SESSION_START]:
+            try:
+                hook.fn(payload)
+            except Exception as e:
+                logger.warning("SESSION_START hook %s 异常（忽略）: %s",
+                               hook.name, e)
+
+    def run_session_end(self, payload: dict) -> None:
+        """通知型：所有 SESSION_END hook 都被调。失败 fail-open。"""
+        for hook in self._hooks[HookEvent.SESSION_END]:
+            try:
+                hook.fn(payload)
+            except Exception as e:
+                logger.warning("SESSION_END hook %s 异常（忽略）: %s",
+                               hook.name, e)
+
+    def run_pre_compact(self, payload: dict) -> dict:
+        """可短路：任一 hook 返回 {"abort": True} 则停止后续 + 通知调用方。
+
+        返回 {"abort": bool}。abort=True 时调用方应跳过该层压缩。
+        """
+        for hook in self._hooks[HookEvent.PRE_COMPACT]:
+            try:
+                result = hook.fn(payload)
+                if result and result.get("abort"):
+                    logger.info(
+                        "PRE_COMPACT hook %s 请求 abort（layer=%s）",
+                        hook.name, payload.get("layer"),
+                    )
+                    return {"abort": True, "blocked_by": hook.name}
+            except Exception as e:
+                logger.warning("PRE_COMPACT hook %s 异常（视为 None）: %s",
+                               hook.name, e)
+        return {"abort": False}
+
+    def run_post_compact(self, payload: dict) -> None:
+        """通知型：压缩完成后通知所有 hook（metrics 收集、日志等）。"""
+        for hook in self._hooks[HookEvent.POST_COMPACT]:
+            try:
+                hook.fn(payload)
+            except Exception as e:
+                logger.warning("POST_COMPACT hook %s 异常（忽略）: %s",
+                               hook.name, e)
+
+    def run_config_change(self, payload: dict) -> None:
+        """通知型：配置变更后通知所有 hook（审计、缓存失效等）。"""
+        for hook in self._hooks[HookEvent.CONFIG_CHANGE]:
+            try:
+                hook.fn(payload)
+            except Exception as e:
+                logger.warning("CONFIG_CHANGE hook %s 异常（忽略）: %s",
+                               hook.name, e)

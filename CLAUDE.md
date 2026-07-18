@@ -207,10 +207,15 @@ uv sync                                 # 同步已声明依赖
 | 会话移交 bundle | `agent/handoff.py:HandoffStore` |
 | Vision/Image 工具 | `tools/image_tool.py`（image_analyze / image_ocr，复用 safe_path） |
 | Plan Mode（计划模式 + 审批） | `agent/__init__.py`（plan_mode 字段 + 主循环三处分支）+ `tools/plan_mode_tool.py` + `cli.py`（/plan 命令） |
-| Cron 调度（一次性 + 7 天过期） | `agent/cron.py:CronScheduler`（`_tick` 含过期/一次性 disable） |
+| Cron 调度（一次性 + 7 天过期 + catch_up 补偿） | `agent/cron.py:CronScheduler`（`_tick` 含过期/一次性；`_apply_catch_up` 启动时补跑错过触发） |
 | snip 成对保护（L1 裁剪不拆散 tool_call/result） | `agent/context_pipeline.py:snip_compact`（`_has_tool_calls` / `_is_tool_result` 辅助） |
 | 主动 output_offload（L2.5 大 tool 结果落盘） | `agent/context_pipeline.py:offload_large_tool_results`（`compress_if_needed` 编排里调） |
 | 后台任务停滞看门狗（stall_timeout 秒无输出 → 通知） | `agent/background.py:BackgroundManager._watch_with_stall`（默认 45s，`config.bg_task.stall_timeout` 配置） |
+| Hook 事件（11 种） | `agent/hooks.py:HookEvent`（核心 6 + SESSION_START/END、PRE/POST_COMPACT、CONFIG_CHANGE） |
+| 子任务进度摘要（pendingToolUseSummary） | `agent/progress.py:ProgressReporter`（`tools/delegate_tool.py:_run_child` 接入） |
+| 团队 request-response 协议 | `agent/team/bus.py:MessageBus.send_request`/`send_response`/`find_response`（response 强制配 request_id） |
+| session fork | `agent/session_store.py:SessionStore.fork_session`（消息全复制到新 id） |
+| MCP 多传输 + OAuth | `agent/mcp_client.py:MCPTransport` 抽象 + `StdioTransport`/`HTTPTransport`（含 OAuth refresh） |
 
 ## 已知约束（设计如此，不是 bug）
 

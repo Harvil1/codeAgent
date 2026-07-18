@@ -9,9 +9,14 @@ from agent.hooks import (
 # ---------------------------------------------------------------------------
 
 def test_hook_event_has_four_values():
+    """枚举值集合（P2-13 后扩到 11 个）。"""
     assert {e.value for e in HookEvent} == {
         "user_prompt_submit", "pre_tool_use", "post_tool_use", "stop",
         "pre_llm_call", "post_llm_call",
+        # P2-13 新增
+        "session_start", "session_end",
+        "pre_compact", "post_compact",
+        "config_change",
     }
 
 
@@ -342,3 +347,113 @@ def test_declarative_failure_isolated():
     reg = HookRegistry()
     reg.register_declarative(bad_hook)
     assert reg.run_user_prompt_submit("hello", session_id="s") == "hello"
+
+
+# ============ P2-13: 新事件类型测试 ============
+
+def test_hook_event_has_new_types():
+    """HookEvent 枚举包含 P2-13 新增的 5 个事件类型。"""
+    new_events = {
+        HookEvent.SESSION_START,
+        HookEvent.SESSION_END,
+        HookEvent.PRE_COMPACT,
+        HookEvent.POST_COMPACT,
+        HookEvent.CONFIG_CHANGE,
+    }
+    assert len(new_events) == 5
+
+
+def test_register_session_start_invokes_callback():
+    """register_session_start 注册的回调会被 run_session_start 调用。"""
+    reg = HookRegistry()
+    calls = []
+    reg.register_session_start(
+        lambda payload: calls.append(payload), name="log_session"
+    )
+    reg.run_session_start({"session_id": "s1", "started_at": "2026-07-18"})
+    assert len(calls) == 1
+    assert calls[0]["session_id"] == "s1"
+
+
+def test_session_start_fail_open():
+    """SESSION_START hook 抛异常时不影响主流程（fail-open）。"""
+    reg = HookRegistry()
+
+    def boom(payload):
+        raise ValueError("hook broke")
+    reg.register_session_start(boom)
+
+    # 不应抛
+    reg.run_session_start({"session_id": "s1"})
+
+
+def test_session_end_called_in_order():
+    """多个 SESSION_END hook 按 register 顺序调。"""
+    reg = HookRegistry()
+    order = []
+    reg.register_session_end(lambda p: order.append("first"), name="a")
+    reg.register_session_end(lambda p: order.append("second"), name="b")
+    reg.run_session_end({"session_id": "s1", "reason": "quit"})
+    assert order == ["first", "second"]
+
+
+def test_pre_compact_can_abort():
+    """PRE_COMPACT hook 返回 {abort: True} 时，run_pre_compact 返回 abort=True。
+
+    场景：用户配置"不允许 L4 LLM 压缩"的 hook。
+    """
+    reg = HookRegistry()
+    reg.register_pre_compact(
+        lambda payload: {"abort": True} if payload.get("layer") == "llm" else None,
+        name="block_llm_compact",
+    )
+    result = reg.run_pre_compact({"layer": "llm", "messages_count": 200})
+    assert result["abort"] is True
+
+
+def test_pre_compact_no_abort_returns_none():
+    """PRE_COMPACT 所有 hook 返回 None 时不 abort。"""
+    reg = HookRegistry()
+    reg.register_pre_compact(lambda p: None, name="observer")
+    result = reg.run_pre_compact({"layer": "snip"})
+    assert result["abort"] is False
+
+
+def test_post_compact_receives_before_after():
+    """POST_COMPACT hook 收到 before/after 消息数。"""
+    reg = HookRegistry()
+    captured = []
+    reg.register_post_compact(
+        lambda p: captured.append(p), name="metrics"
+    )
+    reg.run_post_compact({
+        "messages_before": 200,
+        "messages_after": 60,
+        "layer": "llm",
+    })
+    assert captured[0]["messages_before"] == 200
+    assert captured[0]["messages_after"] == 60
+
+
+def test_config_change_receives_diff():
+    """CONFIG_CHANGE hook 收到 old/new/changed_keys。"""
+    reg = HookRegistry()
+    captured = []
+    reg.register_config_change(
+        lambda p: captured.append(p), name="audit"
+    )
+    reg.run_config_change({
+        "changed_keys": ["model.name", "model.fallback_model"],
+        "old": {"model": {"name": "deepseek-chat"}},
+        "new": {"model": {"name": "deepseek-reasoner"}},
+    })
+    assert "model.name" in captured[0]["changed_keys"]
+
+
+def test_new_hooks_isolated_per_registry():
+    """不同 HookRegistry 实例的 hook 不互相影响。"""
+    reg1 = HookRegistry()
+    reg2 = HookRegistry()
+    reg1.register_session_start(lambda p: None, name="a")
+    # reg2 不应有这个 hook
+    assert len(reg2._hooks[HookEvent.SESSION_START]) == 0

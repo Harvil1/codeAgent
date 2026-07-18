@@ -356,8 +356,24 @@ def _run_child(
             except Exception:
                 pass
 
-        # 运行子代理
-        result = child.chat(f"请执行任务: {goal}")
+        # === P1-10: pendingToolUseSummary ===
+        # 长任务执行期间用 aux_llm 周期生成进度摘要，推到父 agent 的 stream_callback
+        # 让前端知道"还在做什么"。aux_llm 不可用时降级为心跳。
+        from agent.progress import ProgressReporter
+        progress_stream = getattr(parent_agent, "_stream_callback", None) if parent_agent else None
+        progress_aux = getattr(parent_agent, "aux_llm_router", None) if parent_agent else None
+        progress_interval = (kwargs.get("config") or {}).get(
+            "delegation", {},
+        ).get("progress_interval", 30.0)
+
+        with ProgressReporter(
+            goal=goal,
+            stream_callback=progress_stream,
+            aux_llm_router=progress_aux,
+            interval=progress_interval,
+        ):
+            # 运行子代理
+            result = child.chat(f"请执行任务: {goal}")
 
         # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
         try:

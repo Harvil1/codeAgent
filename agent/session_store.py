@@ -391,6 +391,54 @@ class SessionStore:
             )
 
     # ------------------------------------------------------------------
+    # P2-12 NEW: resume / fork
+    # ------------------------------------------------------------------
+
+    def fork_session(
+        self,
+        source_session_id: str,
+        *,
+        title: Optional[str] = None,
+    ) -> str:
+        """克隆现有会话为新会话（消息全复制）。
+
+        用途：在现有对话基础上做实验分支，不破坏原对话。
+        resume 已由 RuntimeContext.resume_session 提供（加载消息到 agent 内存），
+        本方法只做"克隆到新 session_id"。
+
+        参数：
+            source_session_id: 被克隆的源会话 ID
+            title: 新会话标题；None 时默认 "Fork of <源标题>"
+
+        返回新 session_id。源会话不变。
+        """
+        source = self.get_session(source_session_id)
+        if source is None:
+            raise ValueError(
+                f"source session 不存在: {source_session_id}"
+            )
+
+        src_title = source.get("title") or source_session_id[:8]
+        new_id = self.create_session(
+            title=title or f"Fork of {src_title}",
+            model=source.get("model"),
+            provider=source.get("provider"),
+        )
+
+        # 复制所有消息（保留 tool_calls / tool_call_id 结构）
+        msgs = self.get_messages(source_session_id)
+        for m in msgs:
+            self.append_message(
+                new_id,
+                m["role"],
+                m.get("content") or "",
+                tool_calls=m.get("tool_calls"),
+                tool_call_id=m.get("tool_call_id"),
+            )
+
+        return new_id
+
+    # ------------------------------------------------------------------
     # 全文搜索
     # ------------------------------------------------------------------
 
