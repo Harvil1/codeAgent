@@ -618,10 +618,32 @@ def _handle_handoff_command(args: str, rt) -> bool:
             f"标题：{bundle.title or '(无标题)'}）[/green]"
         )
         if bundle.memory_pointers:
-            console.print(
-                f"[dim]引用了 {len(bundle.memory_pointers)} 条 memory"
-                f"（本机是否存在请用 /memory 查看）[/dim]"
-            )
+            # 精确检查每个 memory pointer 是否在本机存在
+            mem_store = getattr(rt, "memory_store", None)
+            if mem_store is not None:
+                existing = sum(
+                    1 for mid in bundle.memory_pointers
+                    if mem_store.load_body(mid) is not None
+                )
+                total = len(bundle.memory_pointers)
+                color = "green" if existing == total else "yellow"
+                console.print(
+                    f"[{color}]memory 引用：{existing}/{total} 本机存在[/{color}]"
+                )
+                if existing < total:
+                    missing = [
+                        mid for mid in bundle.memory_pointers
+                        if mem_store.load_body(mid) is None
+                    ]
+                    console.print(
+                        f"[dim]缺失：{', '.join(missing[:5])}"
+                        f"{' ...' if len(missing) > 5 else ''}[/dim]"
+                    )
+            else:
+                console.print(
+                    f"[dim]引用了 {len(bundle.memory_pointers)} 条 memory"
+                    f"（本机 memory_store 未初始化，无法验证）[/dim]"
+                )
         return True
 
     if sub in ("delete", "rm"):

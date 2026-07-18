@@ -132,10 +132,14 @@ def _parse_iso(s: str) -> datetime:
     """解析 ISO8601（容错：处理带/不带 Z、毫秒）。"""
     s2 = s.rstrip("Z")
     try:
-        return datetime.fromisoformat(s2)
+        dt = datetime.fromisoformat(s2)
+        # fromisoformat 可能返回 naive datetime（无时区），统一加 UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
-        # 退而求其次
-        return datetime.utcnow()
+        # 退而求其次：返回当前 UTC 时间（timezone-aware，避免 utcnow 弃用警告）
+        return datetime.now(timezone.utc)
 
 
 def _compute_checksum(transcript: List[dict]) -> str:
@@ -350,6 +354,12 @@ class HandoffStore:
 
     def _resolve_id(self, query: str) -> str:
         """内部：ULID 前缀（≥4 字符）或 list 序号 解析为完整 bundle_id。"""
+        # 0. 路径消毒：拒绝含分隔符或 .. 的 query（防 glob/path 注入）
+        if not query or "/" in query or "\\" in query or ".." in query:
+            raise BundleNotFoundError(
+                f"无效 bundle 标识: {query!r}（含路径分隔符或 .. ）"
+            )
+
         # 1. 完整 ID 直接命中
         candidate = self._handoff_dir / f"{query}.json"
         if candidate.exists():

@@ -235,6 +235,15 @@ def test_resolve_id_list_index(store, sample_transcript, sample_model):
     assert store.resolve_id("0") == newest_id
 
 
+def test_resolve_id_rejects_path_traversal(store):
+    """含路径分隔符或 .. 的 query 拒绝（防 glob/path 注入）。"""
+    import pytest as _pytest
+    from agent.handoff import BundleNotFoundError
+    for malicious in ["../foo", "..\\foo", "foo/bar", "foo\\bar", ".."]:
+        with _pytest.raises(BundleNotFoundError):
+            store.resolve_id(malicious)
+
+
 def test_delete_is_soft_to_archive(store, sample_transcript, sample_model):
     """delete 把文件移到 .archive/，不硬删。"""
     bundle_id = store.save(transcript=sample_transcript,
@@ -330,6 +339,16 @@ def test_secret_detection_api_key_pattern(store, sample_model):
     from agent.handoff import SecretDetectedError
     transcript = [
         {"role": "assistant", "content": '配置：api_key="AKIAIOSFODNN7EXAMPLE123456"'},
+    ]
+    with pytest.raises(SecretDetectedError):
+        store.save(transcript=transcript, source_session_id=None, model=sample_model)
+
+
+def test_secret_detection_token_pattern(store, sample_model):
+    """token=... 形式的密钥也要被识别（第 4 个 SECRET_PATTERN）。"""
+    from agent.handoff import SecretDetectedError
+    transcript = [
+        {"role": "user", "content": 'github_token=abcdefghijklmnopqrstuvwxyz123456'},
     ]
     with pytest.raises(SecretDetectedError):
         store.save(transcript=transcript, source_session_id=None, model=sample_model)

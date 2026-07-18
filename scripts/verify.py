@@ -98,37 +98,44 @@ def check_memory_tool_write(tmp):
     """memory 工具能写入记忆。"""
     from tools.registry import registry
     from agent.memory_store import MemoryStore
-    store = MemoryStore(tmp)
+    store = MemoryStore(harvil_home=tmp)
 
     result = registry.dispatch(
         "memory",
-        {"action": "add", "target": "memory", "content": "验证测试"},
+        {"action": "save", "name": "验证测试", "description": "验证测试",
+         "type": "other", "body": "验证测试"},
         memory_store=store,
     )
     data = json.loads(result)
-    if data.get("success") and "验证测试" in store.memory_entries:
-        return _ok("已写入 MEMORY.md")
+    if data.get("success"):
+        entries = store.list_all()
+        if any("验证测试" in (e.body or "") for e in entries):
+            return _ok("已写入 .memory/")
     return _fail(f"写入失败: {data}")
 
 
 def check_memory_persist(tmp):
-    """MEMORY.md 文件被创建。"""
+    """记忆文件被创建（.memory/ 目录 + MEMORY.md 索引）。"""
     from agent.memory_store import MemoryStore
-    store = MemoryStore(tmp)
+    store = MemoryStore(harvil_home=tmp)
     store.add("memory", "持久化测试")
-    if (tmp / "MEMORY.md").exists():
-        return _ok("MEMORY.md 已创建")
-    return _fail("MEMORY.md 未创建")
+    # 多文件模式：.memory/ 下有 .md 文件；索引在 MEMORY.md
+    memory_dir = tmp / ".memory"
+    has_files = memory_dir.exists() and any(memory_dir.glob("*.md"))
+    if has_files or (tmp / "MEMORY.md").exists():
+        return _ok(".memory/ 已创建")
+    return _fail("记忆文件未创建")
 
 
 def check_memory_reload(tmp):
     """重启后记忆能加载。"""
     from agent.memory_store import MemoryStore
-    s1 = MemoryStore(tmp)
+    s1 = MemoryStore(harvil_home=tmp)
     s1.add("memory", "重启测试")
 
-    s2 = MemoryStore(tmp)
-    if "重启测试" in s2.memory_entries:
+    s2 = MemoryStore(harvil_home=tmp)
+    entries = s2.list_all()
+    if any("重启测试" in (e.body or "") for e in entries):
         return _ok("记忆已跨实例加载")
     return _fail("记忆丢失")
 
