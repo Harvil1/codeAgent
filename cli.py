@@ -95,6 +95,7 @@ class RuntimeContext:
                     jobs_path=Path(cron_path),
                     poll_interval_seconds=cron_cfg.get("poll_interval_seconds", 30.0),
                     enabled=True,
+                    max_age_days=cron_cfg.get("max_age_days", 7),  # === CronRecurringExpiry NEW ===
                 )
                 self.cron_scheduler.start()
             except Exception as e:

@@ -202,6 +202,7 @@ uv sync                                 # 同步已声明依赖
 | 会话移交 bundle | `agent/handoff.py:HandoffStore` |
 | Vision/Image 工具 | `tools/image_tool.py`（image_analyze / image_ocr，复用 safe_path） |
 | Plan Mode（计划模式 + 审批） | `agent/__init__.py`（plan_mode 字段 + 主循环三处分支）+ `tools/plan_mode_tool.py` + `cli.py`（/plan 命令） |
+| Cron 调度（一次性 + 7 天过期） | `agent/cron.py:CronScheduler`（`_tick` 含过期/一次性 disable） |
 
 ## 已知约束（设计如此，不是 bug）
 

@@ -117,6 +117,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,                        # False 时整个 cron 关闭
         "jobs_path": None,                      # None → 默认 ~/.agent/.cron/jobs.json
         "poll_interval_seconds": 30.0,          # 后台线程 tick 间隔
+        "max_age_days": 7,                      # === CronRecurringExpiry NEW === 超过自动 disable（防僵尸）
     },
 
     # Team 多 agent 协作（Phase 4a）

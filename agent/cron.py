@@ -42,6 +42,7 @@ class CronScheduler:
         jobs_path: Path,
         poll_interval_seconds: float = 30.0,
         enabled: bool = True,
+        max_age_days: int = 7,  # === CronRecurringExpiry NEW ===
     ):
         self._jobs: list = []
         self._lock = threading.Lock()
@@ -52,10 +53,9 @@ class CronScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._jobs_path = jobs_path
-        # === CronRecurringExpiry NEW: 从 config 读 max_age_days ===
-        # 默认 7 天。运行时通过 _run_loop 传给 _tick。
-        # 测试可直接调 _tick(now, max_age_days=N) 覆盖。
-        self._max_age_days = 7
+        # === CronRecurringExpiry NEW: 从构造参数读 max_age_days ===
+        # RuntimeContext 从 config["cron"]["max_age_days"] 传入；测试可直接构造时覆盖
+        self._max_age_days = max_age_days
         self._load_jobs(jobs_path)
 
     # ---- 启停 ----

@@ -420,3 +420,43 @@ def test_tick_expired_takes_precedence_over_cron_match():
         # 过期优先，不应入 notifications
         assert not sched._notifications
         assert sched._jobs[0].enabled is False
+
+
+# ============================================================================
+# Task 3: config + __init__ 参数
+# ============================================================================
+
+def test_default_config_has_cron_max_age_days():
+    """DEFAULT_CONFIG 含 cron.max_age_days，默认 7。"""
+    from config import DEFAULT_CONFIG
+    assert "cron" in DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["cron"].get("max_age_days") == 7
+
+
+def test_scheduler_init_accepts_max_age_days():
+    """CronScheduler 构造可传 max_age_days，存到 _max_age_days。"""
+    from agent.cron import CronScheduler
+    from pathlib import Path
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(
+            jobs_path=Path(tmp) / "jobs.json",
+            enabled=False,
+            max_age_days=30,
+        )
+        assert sched._max_age_days == 30
+
+
+def test_scheduler_init_defaults_max_age_days_to_7():
+    """不传 max_age_days 时默认 7。"""
+    from agent.cron import CronScheduler
+    from pathlib import Path
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(
+            jobs_path=Path(tmp) / "jobs.json",
+            enabled=False,
+        )
+        assert sched._max_age_days == 7
