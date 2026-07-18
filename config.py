@@ -213,6 +213,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
     # 启用的工具集
     "enabled_toolsets": ["core"],
+
+    # Plan Mode 总开关（Task 7）
+    "plan_mode": {
+        "enabled": True,  # Plan Mode 总开关；False 时 /plan 命令报错"功能未启用"
+    },
 }
 
 

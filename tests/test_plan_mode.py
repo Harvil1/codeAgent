@@ -401,3 +401,14 @@ def test_plan_approval_callback_exception_treated_as_reject():
     assert rejected_msg is not None
     data = json.loads(rejected_msg["content"])
     assert "网络断了" in data["feedback"]
+
+
+# ============================================================================
+# Task 7: config 默认值
+# ============================================================================
+
+def test_default_config_has_plan_mode_enabled():
+    """DEFAULT_CONFIG 含 plan_mode.enabled，默认 True。"""
+    from config import DEFAULT_CONFIG
+    assert "plan_mode" in DEFAULT_CONFIG, "DEFAULT_CONFIG 缺 plan_mode 段"
+    assert DEFAULT_CONFIG["plan_mode"].get("enabled") is True
