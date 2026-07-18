@@ -412,3 +412,89 @@ def test_default_config_has_plan_mode_enabled():
     from config import DEFAULT_CONFIG
     assert "plan_mode" in DEFAULT_CONFIG, "DEFAULT_CONFIG 缺 plan_mode 段"
     assert DEFAULT_CONFIG["plan_mode"].get("enabled") is True
+
+
+# ============================================================================
+# Task 8: CLI slash 命令 + 审批回调
+# ============================================================================
+
+def test_cli_plan_approval_callback_approve_with_y():
+    """输入 y → 批准。"""
+    from cli import cli_plan_approval_callback
+    with patch("builtins.input", side_effect=["y"]):
+        approved, feedback = cli_plan_approval_callback("我的计划")
+    assert approved is True
+    assert feedback == ""
+
+
+def test_cli_plan_approval_callback_reject_with_n():
+    """输入 n/空 → 拒绝。"""
+    from cli import cli_plan_approval_callback
+    with patch("builtins.input", side_effect=["n"]):
+        approved, feedback = cli_plan_approval_callback("我的计划")
+    assert approved is False
+
+
+def test_cli_plan_approval_callback_edit_collects_feedback():
+    """输入 edit → 收集 feedback。"""
+    from cli import cli_plan_approval_callback
+    with patch("builtins.input", side_effect=["edit", "步骤 3 改成 X"]):
+        approved, feedback = cli_plan_approval_callback("我的计划")
+    assert approved is False
+    assert feedback == "步骤 3 改成 X"
+
+
+def _make_mock_rt(agent=None):
+    """构造一个最小 mock RuntimeContext，只暴露 .agent。"""
+    rt = MagicMock()
+    if agent is None:
+        agent = _make_minimal_agent()
+    rt.agent = agent
+    # 其他被 _handle_command 用到的属性走 MagicMock 默认（不会真调）
+    return rt
+
+
+def test_plan_slash_command_enters_plan_mode():
+    """/plan 命令把 rt.agent.plan_mode 设为 True。"""
+    from cli import _handle_command
+    agent = _make_minimal_agent()
+    rt = _make_mock_rt(agent=agent)
+
+    handled = _handle_command("/plan", rt)
+    assert handled is True
+    assert agent.plan_mode is True
+
+
+def test_plan_off_slash_command_exits_plan_mode():
+    """/plan off 命令把 rt.agent.plan_mode 设为 False。"""
+    from cli import _handle_command
+    agent = _make_minimal_agent()
+    agent.plan_mode = True
+    rt = _make_mock_rt(agent=agent)
+
+    handled = _handle_command("/plan off", rt)
+    assert handled is True
+    assert agent.plan_mode is False
+
+
+def test_plan_slash_command_idempotent_when_already_in_plan_mode():
+    """已在 plan_mode 时 /plan 不报错，幂等。"""
+    from cli import _handle_command
+    agent = _make_minimal_agent()
+    agent.plan_mode = True
+    rt = _make_mock_rt(agent=agent)
+
+    handled = _handle_command("/plan", rt)
+    assert handled is True
+    assert agent.plan_mode is True  # 仍是 True
+
+
+def test_plan_off_slash_command_idempotent_when_not_in_plan_mode():
+    """不在 plan_mode 时 /plan off 不报错，幂等。"""
+    from cli import _handle_command
+    agent = _make_minimal_agent()
+    rt = _make_mock_rt(agent=agent)
+
+    handled = _handle_command("/plan off", rt)
+    assert handled is True
+    assert agent.plan_mode is False

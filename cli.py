@@ -296,6 +296,7 @@ class RuntimeContext:
             team_coordinator=self.team_coordinator,  # === P4a-T7 NEW ===
             team_name="main",  # === P4a-T7 NEW ===
             aux_llm_router=aux_llm_router,  # === batch2-T3 NEW ===
+            plan_approval_callback=cli_plan_approval_callback,  # === PlanMode NEW ===
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
@@ -712,6 +713,36 @@ def _handle_handoff_command(args: str, rt) -> bool:
     return True
 
 
+def cli_plan_approval_callback(plan: str) -> tuple:
+    """Plan Mode 审批回调：打印计划 + 询问 y/N/edit。
+
+    返回 (approved: bool, feedback: str)。
+    - y/yes → (True, "")
+    - edit → 收集一行 feedback → (False, feedback)
+    - 其他（n/空/任意）→ (False, "用户拒绝")
+    """
+    print("\n" + "=" * 60)
+    print("Agent 提交了以下计划，请审批：")
+    print("=" * 60)
+    print(plan)
+    print("=" * 60)
+    print("\n批准？[y/N/edit]")
+    try:
+        choice = input("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False, "用户中断输入"
+    if choice in ("y", "yes"):
+        return True, ""
+    if choice == "edit":
+        print("请输入修订建议（单行）：")
+        try:
+            feedback = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return False, "用户中断输入"
+        return False, feedback or "用户未输入修订建议"
+    return False, "用户拒绝（未提供原因）"
+
+
 def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     """处理 slash 命令。返回 True 表示已处理。"""
     parts = cmd.split(None, 1)
@@ -765,6 +796,24 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         _switch_model(rt, args)
         return True
 
+    if name == "/plan":
+        if args.strip() == "off":
+            if rt.agent.plan_mode:
+                rt.agent.plan_mode = False
+                console.print("[green]已强制退出计划模式。[/green]")
+            else:
+                console.print("[yellow]当前不在计划模式。[/yellow]")
+        else:
+            if not rt.agent.plan_mode:
+                rt.agent.plan_mode = True
+                console.print(
+                    "[green]已进入计划模式。[/green] "
+                    "Agent 只能调研，完成调研后调 exit_plan_mode 等待审批。"
+                )
+            else:
+                console.print("[yellow]已经在计划模式中。[/yellow]")
+        return True
+
     if name == "/handoff":
         return _handle_handoff_command(args, rt)
 
@@ -787,6 +836,7 @@ def _show_help():
         "[cyan]/usage[/cyan]     显示工具用量\n"
         "[cyan]/stats[/cyan]     会话统计（跨会话聚合）\n"
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
+        "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
