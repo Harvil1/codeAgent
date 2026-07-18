@@ -30,6 +30,8 @@ _CORE_TOOLS = [
     "task_create", "task_update", "task_complete", "task_list",
     # Python 代码沙箱（让 LLM 直接写代码执行）
     "execute_code",
+    # Vision/Image 分析（B1：本地图片分析 + OCR）
+    "image_analyze", "image_ocr",
 ]
 
 TOOLSETS: Dict[str, dict] = {
