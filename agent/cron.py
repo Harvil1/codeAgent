@@ -28,6 +28,9 @@ class CronJob:
     message: str
     enabled: bool = True
     catch_up: bool = False  # 本 phase 不实现 catch_up，仅占位
+    # === CronRecurringExpiry NEW ===
+    created_at: str = ""    # ISO 时间戳；老 jobs.json 缺时 _parse_job 补 now
+    recurring: bool = True  # False = 一次性，触发后自动 disable（不删除）
 
 
 class CronScheduler:
@@ -131,12 +134,17 @@ class CronScheduler:
         if not message:
             logger.warning("cron job '%s' 缺 message 字段，跳过", job_id)
             return None
+        # === CronRecurringExpiry NEW: 老格式兼容 ===
+        created_at = h.get("created_at") or datetime.now().isoformat(timespec="seconds")
+        recurring = h.get("recurring", True)
         return CronJob(
             id=job_id,
             cron=cron,
             message=message,
             enabled=h.get("enabled", True),
             catch_up=h.get("catch_up", False),
+            created_at=created_at,
+            recurring=recurring,
         )
 
     def _run_loop(self):
@@ -172,3 +180,46 @@ class CronScheduler:
                     "message": job.message,
                     "fired_at": now.isoformat(timespec="seconds"),
                 })
+
+    def _persist_jobs_unlocked(self) -> None:
+        """把当前 _jobs 写回 jobs.json（原子替换）。
+
+        调用方必须已持 _lock（方法名 _unlocked 提示）。
+        失败时 log warning 不抛——不能让持久化失败杀掉调度线程。
+
+        原子写：tmp 文件 + os.replace，避免半写文件。
+        """
+        import os
+        import tempfile
+        try:
+            data = {
+                "jobs": [
+                    {
+                        "id": j.id,
+                        "cron": j.cron,
+                        "message": j.message,
+                        "enabled": j.enabled,
+                        "catch_up": j.catch_up,
+                        "created_at": j.created_at,
+                        "recurring": j.recurring,
+                    }
+                    for j in self._jobs
+                ]
+            }
+            content = json.dumps(data, ensure_ascii=False, indent=2)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._jobs_path.parent), suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, str(self._jobs_path))
+            except Exception:
+                # 清理残留 tmp 文件
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.warning("cron jobs 持久化失败（不阻塞调度）: %s", e)
