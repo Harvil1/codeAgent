@@ -757,6 +757,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         _show_usage(rt)
         return True
 
+    if name == "/stats":
+        _show_stats(rt)
+        return True
+
     if name == "/model":
         _switch_model(rt, args)
         return True
@@ -781,6 +785,7 @@ def _show_help():
         "[cyan]/resume[/cyan]    恢复历史会话（/resume [序号]）\n"
         "[cyan]/search[/cyan]    搜索历史对话（/search <关键词>）\n"
         "[cyan]/usage[/cyan]     显示工具用量\n"
+        "[cyan]/stats[/cyan]     会话统计（跨会话聚合）\n"
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
@@ -1158,8 +1163,91 @@ def _show_usage(rt: RuntimeContext):
             console.print(f"当前会话消息数: [bold]{info['message_count']}[/bold]")
 
 
-# ---------------------------------------------------------------------------
-# 主入口
+def _show_stats(rt: RuntimeContext):
+    """跨会话聚合统计：会话/消息/工具调用/角色分布 + 当前会话成本。"""
+    if not rt.session_store:
+        console.print("[yellow]session_store 未初始化[/yellow]")
+        return
+
+    stats = rt.session_store.get_stats()
+
+    # === 总览 ===
+    console.print(Panel(
+        f"[cyan]会话总数:[/cyan]  [bold]{stats['sessions']}[/bold]\n"
+        f"[cyan]消息总数:[/cyan]  [bold]{stats['messages']}[/bold]\n"
+        f"[cyan]最早会话:[/cyan]  {stats['earliest'] or '(无)'}\n"
+        f"[cyan]最新会话:[/cyan]  {stats['latest'] or '(无)'}",
+        title="[bold]总览[/bold]",
+        border_style="blue",
+    ))
+
+    # === 角色分布 ===
+    if stats["role_distribution"]:
+        roles = stats["role_distribution"]
+        total = sum(roles.values()) or 1
+        lines = []
+        for role, cnt in sorted(roles.items(), key=lambda x: -x[1]):
+            pct = cnt / total * 100
+            lines.append(f"  {role:10}  [bold]{cnt}[/bold]  [dim]({pct:.1f}%)[/dim]")
+        console.print(f"\n[bold]角色分布：[/bold]")
+        console.print("\n".join(lines))
+
+    # === Top 5 最长会话 ===
+    if stats["top_sessions"]:
+        console.print(f"\n[bold]最长会话 Top 5：[/bold]")
+        table = Table()
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("消息数", justify="right")
+        table.add_column("模型")
+        table.add_column("标题")
+        table.add_column("更新时间")
+        for i, s in enumerate(stats["top_sessions"], 1):
+            title = (s.get("title") or "(无标题)")[:30]
+            model = s.get("model") or "?"
+            updated = (s.get("updated_at") or "")[:19]
+            table.add_row(str(i), str(s.get("message_count", 0)), model, title, updated)
+        console.print(table)
+
+    # === 工具调用 Top 10 ===
+    if stats["tool_calls"]:
+        console.print(f"\n[bold]工具调用 Top {len(stats['tool_calls'])}：[/bold]")
+        table = Table()
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("工具名", style="cyan")
+        table.add_column("次数", justify="right")
+        max_count = stats["tool_calls"][0]["count"] or 1
+        for i, t in enumerate(stats["tool_calls"], 1):
+            bar_len = int(t["count"] / max_count * 20)
+            bar = "█" * bar_len
+            table.add_row(str(i), t["name"], str(t["count"]),
+                          f"[dim]{bar}[/dim]")
+        console.print(table)
+    else:
+        console.print(f"\n[dim]暂无工具调用记录[/dim]")
+
+    # === 当前会话成本（复用 pricing） ===
+    if rt.agent:
+        agent_stats = rt.agent.llm_usage_stats
+        if agent_stats.get("total_calls", 0) > 0:
+            try:
+                from agent.pricing import estimate_cost_usd
+                model_cfg = rt.config.get("model", {})
+                est = estimate_cost_usd(
+                    provider=model_cfg.get("provider", ""),
+                    model=model_cfg.get("name", ""),
+                    prompt_tokens=agent_stats.get("total_prompt_tokens", 0),
+                    completion_tokens=agent_stats.get("total_completion_tokens", 0),
+                    cache_read_tokens=agent_stats.get("total_cache_read_tokens", 0),
+                    cache_creation_tokens=agent_stats.get("total_cache_creation_tokens", 0),
+                )
+                if est:
+                    console.print(
+                        f"\n[bold]当前会话成本：[/bold] "
+                        f"[bold green]${est['cost_usd']:.4f}[/bold green] "
+                        f"[dim]({agent_stats['total_calls']} 次调用)[/dim]"
+                    )
+            except Exception as e:
+                logger.debug("stats 成本估算失败: %s", e)
 # ---------------------------------------------------------------------------
 
 def _show_history_messages(rt: RuntimeContext, limit: int = 6):

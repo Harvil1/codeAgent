@@ -351,6 +351,79 @@ class SessionStore:
 
         return [dict(row) for row in rows]
 
+    def get_stats(self) -> dict:
+        """聚合统计：会话/消息/工具调用频次/角色分布。
+
+        返回：
+            {
+                "sessions": int,
+                "messages": int,
+                "earliest": Optional[str],     # ISO 时间
+                "latest": Optional[str],
+                "top_sessions": List[dict],    # Top 5 按 message_count
+                "tool_calls": List[dict],      # Top 10 工具 [{"name": ..., "count": ...}]
+                "role_distribution": dict,     # {"user": int, "assistant": int, ...}
+            }
+        """
+        with self._get_conn() as conn:
+            # 总览
+            overview = conn.execute(
+                """SELECT
+                       COUNT(*) AS sessions,
+                       COALESCE(SUM(message_count), 0) AS messages,
+                       MIN(created_at) AS earliest,
+                       MAX(updated_at) AS latest
+                   FROM sessions"""
+            ).fetchone()
+
+            # Top 5 最长会话
+            top_sessions = conn.execute(
+                """SELECT id, title, message_count, model, updated_at
+                   FROM sessions
+                   ORDER BY message_count DESC LIMIT 5"""
+            ).fetchall()
+
+            # 角色分布
+            roles = conn.execute(
+                """SELECT role, COUNT(*) AS cnt
+                   FROM messages GROUP BY role"""
+            ).fetchall()
+            role_dist = {r["role"]: r["cnt"] for r in roles}
+
+            # 工具调用统计：扫所有 messages.tool_calls（JSON 数组）
+            # SQLite 没有 JSON 解析（除非装了 JSON1 扩展），这里读所有非空 tool_calls 在 Python 里解析
+            tool_rows = conn.execute(
+                "SELECT tool_calls FROM messages WHERE tool_calls IS NOT NULL"
+            ).fetchall()
+
+        tool_counter: dict = {}
+        for r in tool_rows:
+            try:
+                calls = json.loads(r["tool_calls"])
+                if isinstance(calls, list):
+                    for call in calls:
+                        if isinstance(call, dict):
+                            fn = call.get("function", {})
+                            name = fn.get("name") if isinstance(fn, dict) else None
+                            if name:
+                                tool_counter[name] = tool_counter.get(name, 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        sorted_tools = sorted(
+            tool_counter.items(), key=lambda x: x[1], reverse=True
+        )[:10]
+
+        return {
+            "sessions": overview["sessions"] if overview else 0,
+            "messages": overview["messages"] if overview else 0,
+            "earliest": overview["earliest"] if overview else None,
+            "latest": overview["latest"] if overview else None,
+            "top_sessions": [dict(s) for s in top_sessions],
+            "tool_calls": [{"name": n, "count": c} for n, c in sorted_tools],
+            "role_distribution": role_dist,
+        }
+
     @staticmethod
     def _build_fts_query(query: str) -> str:
         """构造 FTS5 查询。
