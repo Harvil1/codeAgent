@@ -209,15 +209,24 @@ def check_retry_succeeds_eventually(monkeypatch_sleep):
     from unittest.mock import MagicMock
 
     monkeypatch_sleep(lambda s: None)
+    # call_with_retry 调用 llm_client.chat_completions(messages, tools=tools)
+    # 所以 mock 一个 LLMClient 风格的 client（不是 OpenAI SDK 风格）
     client = MagicMock()
     err = _make_api_error(429)
-    client.chat.completions.create.side_effect = [err, err, SimpleNamespace(
+    ok_resp = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))]
-    )]
+    )
+    client.chat_completions.side_effect = [err, err, ok_resp]
 
     try:
-        result = call_with_retry(client, "m", [], max_retries=3, initial_backoff=0.001)
-        if client.chat.completions.create.call_count == 3:
+        result = call_with_retry(
+            client,
+            [{"role": "user", "content": "m"}],
+            tools=[],
+            max_retries=3,
+            initial_backoff=0.001,
+        )
+        if client.chat_completions.call_count == 3:
             return _ok("重试 2 次后成功")
     except Exception as e:
         return _fail(f"重试失败: {e}")
@@ -229,24 +238,30 @@ def check_fallback_model(monkeypatch_sleep):
     from unittest.mock import MagicMock
 
     monkeypatch_sleep(lambda s: None)
+    # 主 client：3 次全失败
     client = MagicMock()
     err = _make_api_error(429)
-    client.chat.completions.create.side_effect = [
-        err, err, err,  # 主模型 3 次失败
-        SimpleNamespace(  # 备用模型成功
-            choices=[SimpleNamespace(message=SimpleNamespace(content="backup", tool_calls=None))]
-        ),
-    ]
+    client.chat_completions.side_effect = [err, err, err]
+    # 备用 client：第 4 次成功（call_with_retry 用 fallback_llm_client 而非 fallback_model）
+    fallback_client = MagicMock()
+    fallback_client.chat_completions.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="backup", tool_calls=None))]
+    )
 
     try:
         result = call_with_retry(
-            client, "main", [], max_retries=3, initial_backoff=0.001,
-            fallback_model="backup",
+            client,
+            [{"role": "user", "content": "main"}],
+            tools=[],
+            max_retries=3,
+            initial_backoff=0.001,
+            fallback_llm_client=fallback_client,
         )
-        if client.chat.completions.create.call_count == 4:
-            return _ok("切到备用模型")
+        if (client.chat_completions.call_count == 3
+                and fallback_client.chat_completions.call_count == 1):
+            return _ok("切到备用 client")
     except Exception as e:
-        return _fail(f"备用模型失败: {e}")
+        return _fail(f"备用 client 失败: {e}")
     return _fail("未切换")
 
 
@@ -277,14 +292,15 @@ def check_load_skill_returns_body(tmp):
 
 def check_summarize_child_result():
     from tools.delegate_tool import _summarize_child_result
+    from unittest.mock import MagicMock
 
     long = "详细结果。" * 200  # 800 字符
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(
-            create=lambda **kw: SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="压缩摘要"))]
-            )
-        ))
+    # _summarize_child_result 调 call_with_retry(client, messages)
+    # call_with_retry 调 client.chat_completions(messages, tools=tools)
+    # 所以 mock 一个 LLMClient 风格的 client（不是 OpenAI SDK 风格）
+    client = MagicMock()
+    client.chat_completions.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="压缩摘要"))]
     )
     result = _summarize_child_result(long, client, "model")
     if "[摘要]" in result and "压缩摘要" in result and long not in result:
