@@ -248,3 +248,175 @@ def test_persist_jobs_unlocked_atomic_replace():
         # 不应有 .tmp 残留
         tmp_files = list(Path(tmp).glob("*.tmp"))
         assert not tmp_files, f"残留临时文件: {tmp_files}"
+
+
+# ============================================================================
+# Task 2: _tick 加 7 天过期 + 一次性 disable
+# ============================================================================
+
+def test_tick_expires_job_over_7_days():
+    """created_at 超 7 天的 job 被 disable，不入 notifications。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        eight_days_ago = (datetime.now() - timedelta(days=8)).isoformat(timespec="seconds")
+        sched._jobs = [
+            CronJob(
+                id="old", cron="* * * * *", message="expired",
+                created_at=eight_days_ago,
+            ),
+        ]
+        sched._tick(datetime.now())
+        assert sched._jobs[0].enabled is False, "过期 job 应被 disable"
+        assert not sched._notifications, "过期 job 不应入 notifications"
+
+
+def test_tick_keeps_job_under_7_days():
+    """created_at 3 天前的 job 仍可正常触发。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        three_days_ago = (datetime.now() - timedelta(days=3)).isoformat(timespec="seconds")
+        sched._jobs = [
+            CronJob(
+                id="recent", cron="* * * * *", message="ok",
+                created_at=three_days_ago,
+            ),
+        ]
+        sched._tick(datetime.now())
+        assert sched._jobs[0].enabled is True, "3 天的 job 不应被 disable"
+        assert len(sched._notifications) == 1
+        assert sched._notifications[0]["job_id"] == "recent"
+
+
+def test_tick_disables_non_recurring_after_fire():
+    """recurring=False 触发后 enabled=False。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        sched._jobs = [
+            CronJob(
+                id="once", cron="* * * * *", message="one-shot",
+                recurring=False,
+            ),
+        ]
+        sched._tick(datetime.now())
+        assert sched._jobs[0].enabled is False, "一次性 job 触发后应 disable"
+        assert len(sched._notifications) == 1
+
+
+def test_tick_keeps_recurring_after_fire():
+    """recurring=True 触发后仍 enabled。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        sched._jobs = [
+            CronJob(
+                id="repeat", cron="* * * * *", message="daily",
+                recurring=True,
+            ),
+        ]
+        sched._tick(datetime.now())
+        assert sched._jobs[0].enabled is True, "recurring=True 不应 disable"
+        assert len(sched._notifications) == 1
+
+
+def test_tick_respects_max_age_days_param():
+    """max_age_days 参数生效（=1 时 2 天前的 job 过期）。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        two_days_ago = (datetime.now() - timedelta(days=2)).isoformat(timespec="seconds")
+        sched._jobs = [
+            CronJob(
+                id="j", cron="* * * * *", message="x",
+                created_at=two_days_ago,
+            ),
+        ]
+        sched._tick(datetime.now(), max_age_days=1)
+        assert sched._jobs[0].enabled is False, "max_age_days=1 时 2 天前应过期"
+
+
+def test_tick_handles_bad_created_at_gracefully():
+    """created_at 格式坏时不阻塞 tick（job 照常触发）。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        sched._jobs = [
+            CronJob(
+                id="bad", cron="* * * * *", message="x",
+                created_at="not-a-date",
+            ),
+        ]
+        sched._tick(datetime.now())
+        # 不应抛异常，job 照常触发
+        assert len(sched._notifications) == 1
+        assert sched._jobs[0].enabled is True
+
+
+def test_tick_persists_disable_state():
+    """disable 后 jobs.json 反映新状态。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jobs_path = Path(tmp) / "jobs.json"
+        sched = CronScheduler(jobs_path=jobs_path, enabled=False)
+        eight_days_ago = (datetime.now() - timedelta(days=8)).isoformat(timespec="seconds")
+        sched._jobs = [
+            CronJob(id="old", cron="* * * * *", message="x", created_at=eight_days_ago),
+        ]
+        sched._tick(datetime.now())
+
+        # 重读 jobs.json 验证持久化
+        data = json.loads(jobs_path.read_text(encoding="utf-8"))
+        assert data["jobs"][0]["enabled"] is False, "jobs.json 应反映 disabled 状态"
+
+
+def test_tick_expired_takes_precedence_over_cron_match():
+    """过期检查先于 cron_match（边界：既过期又匹配时优先 disable）。"""
+    from agent.cron import CronScheduler, CronJob
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = CronScheduler(jobs_path=Path(tmp) / "jobs.json", enabled=False)
+        eight_days_ago = (datetime.now() - timedelta(days=8)).isoformat(timespec="seconds")
+        sched._jobs = [
+            CronJob(
+                id="old", cron="* * * * *", message="x",
+                created_at=eight_days_ago,
+            ),
+        ]
+        sched._tick(datetime.now())
+        # 过期优先，不应入 notifications
+        assert not sched._notifications
+        assert sched._jobs[0].enabled is False

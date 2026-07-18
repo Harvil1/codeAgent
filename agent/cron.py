@@ -52,6 +52,10 @@ class CronScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._jobs_path = jobs_path
+        # === CronRecurringExpiry NEW: 从 config 读 max_age_days ===
+        # 默认 7 天。运行时通过 _run_loop 传给 _tick。
+        # 测试可直接调 _tick(now, max_age_days=N) 覆盖。
+        self._max_age_days = 7
         self._load_jobs(jobs_path)
 
     # ---- 启停 ----
@@ -149,28 +153,59 @@ class CronScheduler:
 
     def _run_loop(self):
         """后台 daemon thread：每 poll_interval 秒 tick 一次。"""
+        # === CronRecurringExpiry NEW: 从配置读 max_age_days ===
+        max_age_days = self._max_age_days
         while not self._stop_event.is_set():
             if self._enabled:
                 try:
-                    self._tick(datetime.now())
+                    self._tick(datetime.now(), max_age_days=max_age_days)
                 except Exception as e:
                     logger.warning("cron tick 异常: %s", e)
             self._stop_event.wait(self._poll_interval)
 
-    def _tick(self, now: datetime):
-        """核心调度逻辑。可独立测试（不检查 _enabled）。"""
+    def _tick(self, now: datetime, *, max_age_days: int = 7):
+        """核心调度逻辑。可独立测试（不检查 _enabled）。
+
+        NEW:
+        - 7 天过期检查（created_at 缺失/解析失败时跳过检查）
+        - non-recurring 触发后自动 disable
+        - 任何 enable 变化都通过 _persist_jobs_unlocked 持久化
+        """
         minute_marker = now.strftime("%Y-%m-%d %H:%M")
         with self._lock:
             jobs_snapshot = list(self._jobs)
+
+        expired_ids: set = set()
+        fired_oneshot_ids: set = set()
+
         for job in jobs_snapshot:
             if not job.enabled:
                 continue
+
+            # === CronRecurringExpiry NEW: 7 天过期检查 ===
+            if job.created_at:
+                try:
+                    created = datetime.fromisoformat(job.created_at)
+                    if (now - created).days >= max_age_days:
+                        logger.info(
+                            "cron job %s 已超 %d 天，自动 disable",
+                            job.id, max_age_days,
+                        )
+                        expired_ids.add(job.id)
+                        continue
+                except (ValueError, TypeError) as e:
+                    logger.debug(
+                        "created_at 解析失败 %s: %s（跳过过期检查）",
+                        job.id, e,
+                    )
+
             try:
                 if not cron_match(job.cron, now):
                     continue
             except ValueError as e:
                 logger.warning("cron %s 表达式无效 '%s': %s", job.id, job.cron, e)
                 continue
+
             with self._lock:
                 if self._last_fired.get(job.id) == minute_marker:
                     continue  # 同分钟去重
@@ -180,6 +215,23 @@ class CronScheduler:
                     "message": job.message,
                     "fired_at": now.isoformat(timespec="seconds"),
                 })
+
+            # === CronRecurringExpiry NEW: 记录一次性任务 ===
+            if not job.recurring:
+                fired_oneshot_ids.add(job.id)
+
+        # === CronRecurringExpiry NEW: 统一 disable + persist ===
+        to_disable = expired_ids | fired_oneshot_ids
+        if to_disable:
+            with self._lock:
+                for job in self._jobs:
+                    if job.id in to_disable:
+                        job.enabled = False
+                self._persist_jobs_unlocked()
+            logger.info(
+                "cron disable 了 %d 个 job（过期 %d + 一次性 %d）",
+                len(to_disable), len(expired_ids), len(fired_oneshot_ids),
+            )
 
     def _persist_jobs_unlocked(self) -> None:
         """把当前 _jobs 写回 jobs.json（原子替换）。
