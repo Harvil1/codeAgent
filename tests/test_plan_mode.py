@@ -51,3 +51,60 @@ def test_plan_toolset_excludes_destructive_tools():
     assert not (set(tools) & forbidden), (
         f"plan 工具集不应包含修改类工具，发现: {set(tools) & forbidden}"
     )
+
+
+# ============================================================================
+# Task 2: exit_plan_mode handler
+# ============================================================================
+
+def test_exit_plan_mode_registered():
+    """exit_plan_mode 被注册到 registry 的 plan toolset。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()  # 触发 tools/*.py 自注册
+
+    entry = registry._tools.get("exit_plan_mode")
+    assert entry is not None, "exit_plan_mode 未注册"
+    assert entry.toolset == "plan", f"toolset 应为 'plan'，实际 '{entry.toolset}'"
+
+
+def test_exit_plan_mode_empty_plan_returns_invalid_args():
+    """空 plan 返回 invalid_args 错误。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    result_json = registry.dispatch("exit_plan_mode", {"plan": ""})
+    data = json.loads(result_json)
+    assert data["error_type"] == "invalid_args"
+    assert "plan" in data["error"]
+
+
+def test_exit_plan_mode_missing_plan_returns_invalid_args():
+    """缺 plan 参数返回 invalid_args 错误。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    result_json = registry.dispatch("exit_plan_mode", {})
+    data = json.loads(result_json)
+    assert data["error_type"] == "invalid_args"
+
+
+def test_exit_plan_mode_valid_plan_returns_approval_required():
+    """非空 plan 返回 plan_approval_required + 原文。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    plan_text = "## 步骤\n1. 改 foo.py\n2. 加测试"
+    result_json = registry.dispatch("exit_plan_mode", {"plan": plan_text})
+    data = json.loads(result_json)
+    assert data["error_type"] == "plan_approval_required"
+    assert data["plan"] == plan_text
+
+
+def test_exit_plan_mode_whitespace_only_plan_returns_invalid_args():
+    """纯空白 plan 视为空。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    result_json = registry.dispatch("exit_plan_mode", {"plan": "   \n\t  "})
+    data = json.loads(result_json)
+    assert data["error_type"] == "invalid_args"
