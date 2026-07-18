@@ -282,10 +282,13 @@ class AIAgent:
         缓存是为了保护 LLM provider 的 prompt cache。
         """
         if not self._system_prompt_built:
+            # 从 config 读 language（默认 "zh"）
+            language = (self.config or {}).get("language", "zh") if self.config else "zh"
             self._cached_system_prompt = build_system_prompt(
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
                 enabled_toolsets=self.enabled_toolsets,
+                language=language,
             )
             self._system_prompt_built = True
         return self._cached_system_prompt

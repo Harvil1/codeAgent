@@ -55,6 +55,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_bytes": 20 * 1024 * 1024,  # 20 MB
     },
 
+    # B6 NEW: 输出语言（"zh" 中文 / "en" 英文）
+    # 影响 system prompt 的身份声明和输出约定段
+    "language": "zh",
+
     # Agent 行为
     "agent": {
         "max_iterations": 90,

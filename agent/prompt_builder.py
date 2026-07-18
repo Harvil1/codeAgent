@@ -86,13 +86,38 @@ TODO_GUIDANCE = (
 
 
 # ---------------------------------------------------------------------------
-# 身份声明
+# 身份声明（多语言：中文/英文）
 # ---------------------------------------------------------------------------
 
-IDENTITY = (
+IDENTITY_ZH = (
     "你是一个自学习 AI Agent（基于 Harvil Agent 复刻指南实现）。\n"
     "你能使用工具、记忆跨会话的事实、管理自己的技能库。"
     "你的目标是高效帮助用户完成任务，并随着使用不断提升自己的能力。"
+)
+
+IDENTITY_EN = (
+    "You are a self-learning AI Agent (based on the Harvil Agent replication guide).\n"
+    "You can use tools, remember facts across sessions, and manage your own skill library."
+    " Your goal is to help users accomplish tasks efficiently and improve your"
+    " capabilities over time."
+)
+
+# 向后兼容别名（中文为默认）
+IDENTITY = IDENTITY_ZH
+
+
+OUTPUT_CONVENTION_ZH = (
+    "## 输出约定\n"
+    "- 使用中文回复\n"
+    "- 代码标识符（变量名、函数名、类名）使用英文\n"
+    "- 长输出分段，使用 markdown 格式"
+)
+
+OUTPUT_CONVENTION_EN = (
+    "## Output Convention\n"
+    "- Respond in English\n"
+    "- Use English for code identifiers (variable/function/class names)\n"
+    "- Break long output into sections; use Markdown formatting"
 )
 
 
@@ -109,23 +134,29 @@ def build_system_prompt(
     context_files: Optional[List[Path]] = None,
     extra_instructions: str = "",
     include_guidance: bool = True,
+    language: str = "zh",
 ) -> str:
     """组装 system prompt。
 
     这是一次性操作：结果会被 agent 缓存，本次会话不再重建。
+
+    language: "zh"（默认）或 "en"。只影响身份声明和输出约定；
+    其他指导段（记忆/技能/搜索等）目前仅中文，因为 LLM 能理解中文
+    指导即使输出英文。后续如需全量多语言可扩展。
     """
     parts = []
 
-    # 1. 身份
-    parts.append(IDENTITY)
+    # 1. 身份（按语言）
+    if language == "en":
+        parts.append(IDENTITY_EN)
+    else:
+        parts.append(IDENTITY_ZH)
 
-    # 2. 输出约定
-    parts.append(
-        "## 输出约定\n"
-        "- 使用中文回复\n"
-        "- 代码标识符（变量名、函数名、类名）使用英文\n"
-        "- 长输出分段，使用 markdown 格式"
-    )
+    # 2. 输出约定（按语言）
+    if language == "en":
+        parts.append(OUTPUT_CONVENTION_EN)
+    else:
+        parts.append(OUTPUT_CONVENTION_ZH)
 
     # 3. 核心指导
     if include_guidance:
