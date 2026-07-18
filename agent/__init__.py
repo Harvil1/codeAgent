@@ -657,13 +657,54 @@ class AIAgent:
                         agent_ref=self,                     # === P4b-T2 NEW ===
                     )
 
-                    # 工具结果追加到历史（必须配对 tool_call_id）
-                    self.conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tool_name,
-                        "content": result,  # JSON 字符串
-                    })
+                    # === PlanMode NEW: 捕获 exit_plan_mode 审批请求 ===
+                    plan_handled = False
+                    try:
+                        result_data = json.loads(result) if isinstance(result, str) else {}
+                    except (json.JSONDecodeError, ValueError):
+                        result_data = {}
+
+                    if result_data.get("error_type") == "plan_approval_required":
+                        plan_text = result_data.get("plan", "")
+                        try:
+                            if self.plan_approval_callback is not None:
+                                approved, feedback = self.plan_approval_callback(plan_text)
+                            else:
+                                approved, feedback = True, ""
+                        except Exception as cb_exc:
+                            logger.warning("plan_approval_callback 异常: %s", cb_exc)
+                            approved = False
+                            feedback = f"审批回调异常: {cb_exc}"
+
+                        if approved:
+                            self.plan_mode = False
+                            tool_content = json.dumps({
+                                "plan_approved": True,
+                                "message": "用户已批准计划。现在可以开始执行：用 todo_write 列步骤然后执行。",
+                            }, ensure_ascii=False)
+                        else:
+                            tool_content = json.dumps({
+                                "plan_rejected": True,
+                                "feedback": feedback or "用户未提供拒绝原因",
+                                "message": "用户拒绝了计划。请根据 feedback 修订后重新调 exit_plan_mode。",
+                            }, ensure_ascii=False)
+
+                        self.conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tool_name,
+                            "content": tool_content,
+                        })
+                        plan_handled = True
+
+                    if not plan_handled:
+                        # 工具结果追加到历史（必须配对 tool_call_id）
+                        self.conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tool_name,
+                            "content": result,  # JSON 字符串
+                        })
 
                 # === P4b-T2 NEW: idle 标志检查 ===
                 if self._idle_requested:

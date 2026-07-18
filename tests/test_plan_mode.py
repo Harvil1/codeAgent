@@ -283,3 +283,121 @@ def test_plan_mode_reminder_not_in_conversation_history():
         assert "<plan_mode_reminder>" not in content, (
             "reminder 不应进 conversation_history"
         )
+
+
+# ============================================================================
+# Task 6: 审批分支
+# ============================================================================
+
+def _make_exit_plan_mode_tool_call(plan_text):
+    """构造一个 exit_plan_mode tool_call 的 mock LLM response。"""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock()]
+    mock_resp.choices[0].message.content = ""
+    tc = MagicMock()
+    tc.id = "call_exit1"
+    tc.function.name = "exit_plan_mode"
+    tc.function.arguments = json.dumps({"plan": plan_text})
+    mock_resp.choices[0].message.tool_calls = [tc]
+    return mock_resp
+
+
+def _make_final_response(text="done"):
+    """构造无 tool_calls 的最终响应。"""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock()]
+    mock_resp.choices[0].message.content = text
+    mock_resp.choices[0].message.tool_calls = None
+    return mock_resp
+
+
+def test_plan_approval_approved_clears_plan_mode():
+    """审批通过 → plan_mode 变 False，tool 消息含 plan_approved=True。"""
+    agent = _make_minimal_agent(plan_approval_callback=lambda p: (True, ""))
+    agent.plan_mode = True
+
+    responses = [
+        _make_exit_plan_mode_tool_call("我的计划"),
+        _make_final_response("开始执行"),
+    ]
+    with patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        agent.run_conversation("test")
+
+    assert agent.plan_mode is False, "审批通过后 plan_mode 应为 False"
+    # 找到 exit_plan_mode 对应的 tool 消息
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    exit_tool_msg = next(
+        (m for m in tool_msgs if "plan_approved" in (m.get("content") or "")),
+        None,
+    )
+    assert exit_tool_msg is not None, "缺 plan_approved 的 tool 消息"
+    data = json.loads(exit_tool_msg["content"])
+    assert data["plan_approved"] is True
+
+
+def test_plan_approval_rejected_keeps_plan_mode():
+    """审批拒绝 → 保持 plan_mode=True，tool 消息含 plan_rejected + feedback。"""
+    def reject_cb(plan):
+        return False, "步骤 3 风险太大"
+
+    agent = _make_minimal_agent(plan_approval_callback=reject_cb)
+    agent.plan_mode = True
+
+    responses = [
+        _make_exit_plan_mode_tool_call("我的计划"),
+        _make_final_response("已修订"),
+    ]
+    with patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        agent.run_conversation("test")
+
+    assert agent.plan_mode is True, "拒绝后 plan_mode 应保持 True"
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    rejected_msg = next(
+        (m for m in tool_msgs if "plan_rejected" in (m.get("content") or "")),
+        None,
+    )
+    assert rejected_msg is not None
+    data = json.loads(rejected_msg["content"])
+    assert data["plan_rejected"] is True
+    assert data["feedback"] == "步骤 3 风险太大"
+
+
+def test_plan_approval_no_callback_auto_approves():
+    """plan_approval_callback=None → 默认自动批准。"""
+    agent = _make_minimal_agent()  # callback=None
+    agent.plan_mode = True
+
+    responses = [
+        _make_exit_plan_mode_tool_call("我的计划"),
+        _make_final_response("ok"),
+    ]
+    with patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        agent.run_conversation("test")
+
+    assert agent.plan_mode is False, "无 callback 时应自动批准"
+
+
+def test_plan_approval_callback_exception_treated_as_reject():
+    """回调抛异常 → 视为拒绝，feedback 含异常信息。"""
+    def boom_cb(plan):
+        raise RuntimeError("网络断了")
+
+    agent = _make_minimal_agent(plan_approval_callback=boom_cb)
+    agent.plan_mode = True
+
+    responses = [
+        _make_exit_plan_mode_tool_call("我的计划"),
+        _make_final_response("retry"),
+    ]
+    with patch("agent.llm_retry.call_with_retry", side_effect=responses):
+        agent.run_conversation("test")
+
+    assert agent.plan_mode is True, "异常应视为拒绝，保持 plan_mode"
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    rejected_msg = next(
+        (m for m in tool_msgs if "plan_rejected" in (m.get("content") or "")),
+        None,
+    )
+    assert rejected_msg is not None
+    data = json.loads(rejected_msg["content"])
+    assert "网络断了" in data["feedback"]
