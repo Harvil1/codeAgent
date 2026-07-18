@@ -507,10 +507,9 @@ def test_plan_off_slash_command_idempotent_when_not_in_plan_mode():
 def test_e2e_plan_approve_then_execute():
     """端到端：进入 plan_mode → 调研 → 调 exit_plan_mode → 审批通过 → 切回执行。
 
-    注：当前实现 tool_schemas 在 run_conversation 开头一次性计算，
-    不会在同一轮 run_conversation 内 mid-loop 切换 toolset。
-    本测试验证整条流程跑通：read_file 调研 → exit_plan_mode → 审批 → 最终响应。
-    toolset 切换由下一次 run_conversation 生效（见 test_plan_mode_switches_toolset_to_plan）。
+    验证 tool_schemas 在主循环内每轮刷新：plan_mode 中途切换（审批通过）后，
+    同一次 run_conversation 内 toolset 应由 ['plan'] 切到 ['core']，
+    LLM 在第 3 轮就能看到执行类工具，无需用户再发新消息。
     """
     agent = _make_minimal_agent(plan_approval_callback=lambda p: (True, ""))
     agent.plan_mode = True
@@ -559,9 +558,23 @@ def test_e2e_plan_approve_then_execute():
         with patch.object(registry, "dispatch", side_effect=patched_dispatch):
             agent.run_conversation("帮我改个文件")
 
-    # 断言：初始进入 plan_mode 时用 ["plan"] 工具集
-    assert captured_toolsets[0] == ["plan"], f"初始应 ['plan']，实际 {captured_toolsets[0]}"
-    # 审批通过后 plan_mode 必须为 False（这是 toolset 切换的前提条件）
+    # 断言：toolset 三次转换完整验证（每轮 tool_schemas 都被刷新）
+    # 第 1 轮 read_file 调研：plan_mode=True → ['plan']
+    # 第 2 轮 exit_plan_mode 提交计划：plan_mode 在 dispatch 后才被清零，本轮开始时仍为 True → ['plan']
+    # 第 3 轮 最终响应：plan_mode 已为 False → ['core']
+    assert len(captured_toolsets) >= 3, (
+        f"至少应捕获 3 次 toolset（3 轮 LLM），实际 {len(captured_toolsets)}"
+    )
+    assert captured_toolsets[0] == ["plan"], (
+        f"第 1 轮应 ['plan']，实际 {captured_toolsets[0]}"
+    )
+    assert captured_toolsets[1] == ["plan"], (
+        f"第 2 轮应 ['plan']，实际 {captured_toolsets[1]}"
+    )
+    assert captured_toolsets[2] == ["core"], (
+        f"第 3 轮应 ['core']（审批后切回），实际 {captured_toolsets[2]}"
+    )
+    # 审批通过后 plan_mode 必须为 False
     assert agent.plan_mode is False, "审批通过后 plan_mode 应清零"
     # 至少 3 次 LLM 调用被消费（验证 read_file → exit_plan_mode → 最终响应 三步完整跑通）
     assert len(responses) == 3, "responses 应被全部消费"

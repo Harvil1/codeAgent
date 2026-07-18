@@ -411,12 +411,8 @@ class AIAgent:
         # 2. 获取系统提示（第一次构建，后续缓存）
         system_prompt = self._get_system_prompt()
 
-        # 3. 获取工具定义（过滤启用的工具集 + check_fn）
-        # 延迟导入避免循环依赖
+        # 3. 延迟导入避免循环依赖
         from model_tools import get_tool_definitions, handle_function_call
-        # === PlanMode: plan_mode 下强制切到 plan 工具集（只读）===
-        effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
-        tool_schemas = get_tool_definitions(effective_toolsets)
 
         # 4. 主循环
         api_call_count = 0
@@ -528,6 +524,12 @@ class AIAgent:
                     self.invalidate_system_prompt()
                     system_prompt = self._get_system_prompt()
                     self._compression_attempts += 1
+
+            # === PlanMode: plan_mode 下强制切到 plan 工具集（只读）===
+            # 注意：必须在循环内每轮重算，让 plan_mode 中途切换（如审批通过）
+            # 后能立即刷新工具集，否则 LLM 看到的还是 ['plan']，无法执行计划。
+            effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
+            tool_schemas = get_tool_definitions(effective_toolsets)
 
             # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
             if (self.hooks_registry
