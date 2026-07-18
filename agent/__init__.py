@@ -63,6 +63,7 @@ class AIAgent:
         team_name=None,          # === P4a-T6 NEW ===
         spawn_depth: int = 0,    # === P4b-T2 NEW ===
         aux_llm_router=None,     # === batch2-T3 NEW ===
+        plan_approval_callback=None,  # === PlanMode NEW ===
     ):
         """
         参数：
@@ -176,6 +177,13 @@ class AIAgent:
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
+
+        # === PlanMode NEW: 计划模式状态 + 审批回调 ===
+        # plan_mode=True 时下一轮起切换到 ["plan"] 工具集（只读）
+        # plan_approval_callback(plan: str) -> (approved: bool, feedback: str)
+        # None 表示自动批准（测试/库用法）
+        self.plan_mode: bool = False
+        self.plan_approval_callback = plan_approval_callback
 
         # === B1 NEW: vision client（image_analyze / image_ocr / browser_vision 共用） ===
         # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。

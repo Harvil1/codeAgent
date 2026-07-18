@@ -108,3 +108,44 @@ def test_exit_plan_mode_whitespace_only_plan_returns_invalid_args():
     result_json = registry.dispatch("exit_plan_mode", {"plan": "   \n\t  "})
     data = json.loads(result_json)
     assert data["error_type"] == "invalid_args"
+
+
+# ============================================================================
+# Task 3: AIAgent.plan_mode 字段
+# ============================================================================
+
+def _make_minimal_agent(**overrides):
+    """构造一个最小 mock 的 AIAgent（不连真 LLM）。"""
+    from agent import AIAgent
+    base = dict(
+        base_url="http://localhost",
+        api_key="test-key",
+        model="test-model",
+        enabled_toolsets=["core"],
+    )
+    base.update(overrides)
+    # patch create_llm_client 避免真连
+    with patch("agent.llm_client.create_llm_client") as mock:
+        mock.return_value = MagicMock()
+        return AIAgent(**base)
+
+
+def test_agent_default_plan_mode_false():
+    """新建 agent 默认 plan_mode=False。"""
+    agent = _make_minimal_agent()
+    assert agent.plan_mode is False
+
+
+def test_agent_default_plan_approval_callback_none():
+    """新建 agent 默认 plan_approval_callback=None（自动批准）。"""
+    agent = _make_minimal_agent()
+    assert agent.plan_approval_callback is None
+
+
+def test_agent_accepts_plan_approval_callback():
+    """构造时可注入 plan_approval_callback。"""
+    def cb(plan):
+        return True, ""
+
+    agent = _make_minimal_agent(plan_approval_callback=cb)
+    assert agent.plan_approval_callback is cb
