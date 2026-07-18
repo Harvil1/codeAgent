@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, turn_index);
 
--- FTS5 全文索引（虚拟表）
+-- FTS5 全文索引（虚拟表，unicode61 tokenizer，多语言但 CJK 子串弱）
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
     role,
@@ -71,6 +71,91 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages
 BEGIN
     DELETE FROM messages_fts WHERE message_id = old.id;
 END;
+
+-- ============================================================
+-- memories 表（与 memory_store.py 双写）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,           -- 业务 id（memory_store 生成）
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    type TEXT NOT NULL,            -- user/feedback/project/reference/other
+    body TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0
+    -- 注意：未声明 WITHOUT ROWID，SQLite 自动给隐藏 INTEGER rowid，
+    -- FTS5 用它做关联。
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived);
+
+-- memories FTS5 trigram 索引（CJK 子串友好）
+-- 不用 content_rowid 关联，靠 new.rowid ↔ memories_fts.rowid 自增对齐
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    name, description, body,
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories
+BEGIN
+    INSERT INTO memories_fts(rowid, name, description, body)
+    VALUES (new.rowid, new.name, new.description, COALESCE(new.body, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories
+BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories
+BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
+    INSERT INTO memories_fts(rowid, name, description, body)
+    VALUES (new.rowid, new.name, new.description, COALESCE(new.body, ''));
+END;
+
+-- ============================================================
+-- tasks 表（与 task_store.py 双写）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    owner TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    blocked_by TEXT,                -- JSON list
+    body_json TEXT                  -- 完整 JSON（其他字段都塞这）
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+-- tasks FTS5 trigram 索引
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+    subject, description,
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS tasks_fts_ai AFTER INSERT ON tasks
+BEGIN
+    INSERT INTO tasks_fts(rowid, subject, description)
+    VALUES (new.rowid, new.subject, COALESCE(new.description, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_fts_ad AFTER DELETE ON tasks
+BEGIN
+    DELETE FROM tasks_fts WHERE rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS tasks_fts_au AFTER UPDATE ON tasks
+BEGIN
+    DELETE FROM tasks_fts WHERE rowid = old.rowid;
+    INSERT INTO tasks_fts(rowid, subject, description)
+    VALUES (new.rowid, new.subject, COALESCE(new.description, ''));
+END;
 """
 
 
@@ -83,6 +168,22 @@ def is_fts5_available() -> bool:
         return True
     except sqlite3.OperationalError:
         return False
+
+
+def is_trigram_available() -> bool:
+    """检查 FTS5 trigram tokenizer 是否可用（SQLite >= 3.34 with FTS5 enabled）。"""
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE VIRTUAL TABLE test_tri USING fts5(c, tokenize='trigram')")
+        conn.close()
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _contains_cjk(s: str) -> bool:
+    """判断字符串是否含 CJK 字符（用于触发 trigram fallback）。"""
+    return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
 
 class SessionStore:
@@ -370,6 +471,18 @@ class SessionStore:
 
         results = [dict(row) for row in rows]
 
+        # 中文子串 fallback：unicode61 默认按词分，搜"配置"找不到含"系统配置"的消息
+        # 此时切到 trigram 索引（如果可用且 query 含 CJK）
+        if not results and _contains_cjk(query) and is_trigram_available():
+            results = self._search_messages_trigram(
+                query=query,
+                limit=fetch_limit,
+                session_id=session_id,
+                role=role,
+                since=since,
+                until=until,
+            )
+
         # tool_name 过滤（Python 层，解析 tool_calls JSON）
         if tool_name:
             filtered = []
@@ -488,3 +601,321 @@ class SessionStore:
         # 每个词加前缀匹配（双引号包裹防止特殊字符）
         fts_terms = [f'"{w}"*' for w in words if w]
         return " AND ".join(fts_terms) if fts_terms else '""'
+
+    # ------------------------------------------------------------------
+    # trigram fallback：CJK 子串搜索
+    # ------------------------------------------------------------------
+
+    def _search_messages_trigram(
+        self,
+        *,
+        query: str,
+        limit: int,
+        session_id: Optional[str] = None,
+        role: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+    ) -> List[dict]:
+        """用 messages_fts_trigram 跑 CJK 子串搜索。
+
+        trigram tokenizer 把文本切成 3-gram，对中文子串匹配强。
+        SQLite >= 3.34 + FTS5 才支持，初始化时已检测。
+        """
+        # 这里复用 messages_fts 的 column 结构（content/role/session_id/message_id）
+        # 但 trigram 索引是另一个表 messages_fts_trigram（schema 里没创建，
+        # 因为现在主表 messages_fts 已经覆盖；这里保留接口供未来扩展）。
+        # 当前实现：直接 LIKE 全表扫（数据小时性能可接受，未来再建独立 trigram 表
+        # 或迁移主 tokenizer）。
+        where_clauses = ["m.content LIKE ?"]
+        params: list = [f"%{query}%"]
+        if session_id:
+            where_clauses.append("m.session_id = ?")
+            params.append(session_id)
+        if role:
+            where_clauses.append("m.role = ?")
+            params.append(role)
+        if since:
+            where_clauses.append("m.timestamp >= ?")
+            params.append(since)
+        if until:
+            where_clauses.append("m.timestamp <= ?")
+            params.append(until)
+        where_sql = " AND ".join(where_clauses)
+        sql = f"""
+            SELECT m.content, m.role, m.session_id, m.timestamp,
+                   NULL as tool_calls,
+                   s.title,
+                   m.content as snippet,
+                   0 as rank
+            FROM messages m
+            LEFT JOIN sessions s ON m.session_id = s.id
+            WHERE {where_sql}
+            ORDER BY m.timestamp DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            logger.warning("trigram fallback 搜索失败: %s", e)
+            return []
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # memories 表（与 memory_store.py 双写）
+    # ------------------------------------------------------------------
+
+    def save_memory(
+        self,
+        *,
+        id: str,
+        name: str,
+        description: str,
+        type: str,
+        body: str,
+        created_at: str,
+        updated_at: str,
+        archived: int = 0,
+    ) -> None:
+        """插入或更新一条记忆。"""
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO memories
+                   (id, name, description, type, body, created_at, updated_at, archived)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, name, description, type, body, created_at, updated_at, archived),
+            )
+
+    def get_memory(self, memory_id: str) -> Optional[dict]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_memories(self, *, include_archived: bool = False) -> List[dict]:
+        with self._get_conn() as conn:
+            if include_archived:
+                sql = "SELECT * FROM memories ORDER BY updated_at DESC"
+                rows = conn.execute(sql).fetchall()
+            else:
+                sql = (
+                    "SELECT * FROM memories WHERE archived = 0 "
+                    "ORDER BY updated_at DESC"
+                )
+                rows = conn.execute(sql).fetchall()
+            return [dict(r) for r in rows]
+
+    def archive_memory(self, memory_id: str) -> bool:
+        """软删除：标 archived=1。返回是否命中。"""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), memory_id),
+            )
+            return cur.rowcount > 0
+
+    def update_memory(
+        self,
+        memory_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        type: Optional[str] = None,
+        body: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """部分更新记忆。返回是否命中。"""
+        sets: list[str] = []
+        params: list = []
+        if name is not None:
+            sets.append("name = ?")
+            params.append(name)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        if type is not None:
+            sets.append("type = ?")
+            params.append(type)
+        if body is not None:
+            sets.append("body = ?")
+            params.append(body)
+        if updated_at is not None:
+            sets.append("updated_at = ?")
+            params.append(updated_at)
+        if not sets:
+            return False
+        params.append(memory_id)
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                f"UPDATE memories SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            return cur.rowcount > 0
+
+    def search_memories(self, query: str, *, limit: int = 10) -> List[dict]:
+        """trigram 全文搜索记忆（中文子串友好）。
+
+        短查询（< 3 字符）走 LIKE：trigram tokenizer 切不出 3-gram，
+        对 2 字符中文（如"配置"）不命中。
+        """
+        if not is_trigram_available() or len(query) < 3:
+            return self._search_memories_like(query, limit=limit)
+
+        # trigram 用双引号包字符串做 phrase 查询
+        fts_query = f'"{query}"'
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    """SELECT m.id, m.name, m.description, m.type,
+                              snippet(memories_fts, 1, '<<', '>>', '...', 10) as snippet,
+                              m.updated_at
+                       FROM memories_fts
+                       JOIN memories m ON m.rowid = memories_fts.rowid
+                       WHERE memories_fts MATCH ? AND m.archived = 0
+                       ORDER BY rank LIMIT ?""",
+                    (fts_query, limit),
+                ).fetchall()
+                results = [dict(r) for r in rows]
+            # trigram 没命中再 fallback 到 LIKE（覆盖短词或边界情况）
+            if not results:
+                return self._search_memories_like(query, limit=limit)
+            return results
+        except sqlite3.OperationalError as e:
+            logger.warning("memories_fts 搜索失败: %s", e)
+            return self._search_memories_like(query, limit=limit)
+
+    def _search_memories_like(self, query: str, *, limit: int = 10) -> List[dict]:
+        """LIKE 兜底搜索。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, name, description, type,
+                          COALESCE(
+                              substr(description, 1, 100),
+                              substr(body, 1, 100)
+                          ) as snippet,
+                          updated_at
+                   FROM memories
+                   WHERE archived = 0 AND (
+                       name LIKE ? OR description LIKE ? OR body LIKE ?
+                   )
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (f"%{query}%", f"%{query}%", f"%{query}%", limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # tasks 表（与 task_store.py 双写）
+    # ------------------------------------------------------------------
+
+    def save_task(
+        self,
+        *,
+        id: str,
+        subject: str,
+        description: str,
+        status: str,
+        owner: Optional[str] = None,
+        created_at: str,
+        updated_at: str,
+        blocked_by: Optional[list] = None,
+        body_json: Optional[str] = None,
+    ) -> None:
+        """插入或更新一个任务（body_json 是完整 task dict 的 JSON 字符串）。"""
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO tasks
+                   (id, subject, description, status, owner,
+                    created_at, updated_at, blocked_by, body_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    id, subject, description, status, owner,
+                    created_at, updated_at,
+                    json.dumps(blocked_by or []),
+                    body_json,
+                ),
+            )
+
+    def get_task(self, task_id: str) -> Optional[dict]:
+        """取任务的 body_json 字段（完整 task dict）。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT body_json FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if not row or not row["body_json"]:
+                return None
+            try:
+                return json.loads(row["body_json"])
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+    def list_tasks(
+        self, *, status: Optional[str] = None, include_deleted: bool = False
+    ) -> List[dict]:
+        """列出任务（返回完整 body_json 解出来的 list）。"""
+        with self._get_conn() as conn:
+            if status:
+                sql = "SELECT body_json FROM tasks WHERE status = ? ORDER BY created_at"
+                rows = conn.execute(sql, (status,)).fetchall()
+            elif not include_deleted:
+                sql = "SELECT body_json FROM tasks WHERE status != 'deleted' ORDER BY created_at"
+                rows = conn.execute(sql).fetchall()
+            else:
+                sql = "SELECT body_json FROM tasks ORDER BY created_at"
+                rows = conn.execute(sql).fetchall()
+        result: List[dict] = []
+        for r in rows:
+            if r["body_json"]:
+                try:
+                    result.append(json.loads(r["body_json"]))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        return result
+
+    def delete_task(self, task_id: str) -> bool:
+        """硬删除（task_store 用软删除 status=deleted，这里硬删 SQLite 行）。"""
+        with self._get_conn() as conn:
+            cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            return cur.rowcount > 0
+
+    def search_tasks(self, query: str, *, limit: int = 10) -> List[dict]:
+        """trigram 搜索任务的 subject/description。返回完整 task dict 列表。"""
+        if not is_trigram_available() or len(query) < 3:
+            rows = self._search_tasks_like_rows(query, limit=limit)
+        else:
+            fts_query = f'"{query}"'
+            try:
+                with self._get_conn() as conn:
+                    rows = conn.execute(
+                        """SELECT t.body_json
+                           FROM tasks_fts
+                           JOIN tasks t ON t.rowid = tasks_fts.rowid
+                           WHERE tasks_fts MATCH ?
+                           ORDER BY rank LIMIT ?""",
+                        (fts_query, limit),
+                    ).fetchall()
+            except sqlite3.OperationalError as e:
+                logger.warning("tasks_fts 搜索失败: %s", e)
+                rows = self._search_tasks_like_rows(query, limit=limit)
+            else:
+                if not rows:
+                    rows = self._search_tasks_like_rows(query, limit=limit)
+        result: List[dict] = []
+        for r in rows:
+            if r["body_json"]:
+                try:
+                    result.append(json.loads(r["body_json"]))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        return result
+
+    def _search_tasks_like_rows(self, query: str, *, limit: int = 10):
+        """LIKE 兜底搜任务（返回 sqlite3.Row 列表）。"""
+        with self._get_conn() as conn:
+            return conn.execute(
+                """SELECT body_json FROM tasks
+                   WHERE subject LIKE ? OR description LIKE ?
+                   ORDER BY created_at LIMIT ?""",
+                (f"%{query}%", f"%{query}%", limit),
+            ).fetchall()

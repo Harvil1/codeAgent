@@ -167,8 +167,18 @@ class RuntimeContext:
                 logger.error("加载声明式 hooks 失败: %s", e)
 
         # 1. 记忆系统
+        # 1a. 先建 SessionStore（memories/tasks 双写需要它注入）
+        if self.config.get("sessions", {}).get("auto_save", True):
+            db = self.config.get("sessions", {}).get("db_path")
+            db_path = Path(db) if db else sessions_db_path()
+            self.session_store = SessionStore(db_path)
+
+        # 1b. MemoryStore（注入 SessionStore 做双写）
         if self.config.get("memory", {}).get("enabled", True):
-            self.memory_store = MemoryStore(harvil_home=self.home)
+            self.memory_store = MemoryStore(
+                harvil_home=self.home,
+                sqlite_store=self.session_store,
+            )
             # batch2-T3: memory_manager 的 LLM client 在 agent 创建后注入
             # （因为需要和 aux_llm_router 共享）
             self.memory_manager = MemoryManager(self.memory_store)
@@ -181,11 +191,14 @@ class RuntimeContext:
             from agent.memory_retriever import retrieve_relevant
             self.memory_retriever = retrieve_relevant  # 函数引用
 
-        # 2. 会话存储
-        if self.config.get("sessions", {}).get("auto_save", True):
-            db = self.config.get("sessions", {}).get("db_path")
-            db_path = Path(db) if db else sessions_db_path()
-            self.session_store = SessionStore(db_path)
+        # 1c. TaskStore 全局单例也注入 SessionStore（双写）
+        if self.session_store is not None:
+            try:
+                from agent.task_store import get_task_store
+                ts = get_task_store(self.home)
+                ts.attach_sqlite(self.session_store)
+            except Exception as e:
+                logger.warning("TaskStore SQLite 注入失败: %s", e)
 
         # 3. 创建会话
         if self.session_store:
@@ -242,12 +255,16 @@ class RuntimeContext:
             )
             raise SystemExit(1)
 
-        # === batch2-T3: 创建 AuxLLMRouter ===
+        # === batch2-T3 + 07: 创建 AuxLLMRouter ===
         aux_llm_router = None
         aux_cfg = self.config.get("aux_model")
-        if aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model"):
+        # 07 NEW: 优先读 aux_llm.endpoints 列表
+        aux_llm_cfg = self.config.get("aux_llm", {})
+        endpoints_cfg = aux_llm_cfg.get("endpoints", []) if aux_llm_cfg else []
+
+        if endpoints_cfg or (aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model")):
             try:
-                from agent.aux_llm import AuxLLMRouter
+                from agent.aux_llm import AuxLLMRouter, LLMEndpoint
                 # 先创建一个临时的主 client 供 router 用
                 from agent.llm_client import create_llm_client
                 main_client = create_llm_client({
@@ -256,14 +273,38 @@ class RuntimeContext:
                     "api_key": api_key,
                     "model": model_cfg["name"],
                 })
+                # 07 NEW: endpoints 列表优先
+                endpoints = None
+                if endpoints_cfg:
+                    endpoints = [
+                        LLMEndpoint(
+                            name=ep_cfg["name"],
+                            base_url=ep_cfg["base_url"],
+                            api_key_env=ep_cfg.get("api_key_env", ""),
+                            api_key_default=ep_cfg.get("api_key_default", ""),
+                            model=ep_cfg["model"],
+                            priority=ep_cfg.get("priority", 100),
+                            enabled=ep_cfg.get("enabled", True),
+                            format=ep_cfg.get("format", "openai"),
+                        )
+                        for ep_cfg in endpoints_cfg
+                    ]
                 aux_llm_router = AuxLLMRouter(
                     main_client=main_client,
                     main_model=model_cfg["name"],
-                    aux_config=aux_cfg,
+                    aux_config=aux_cfg if not endpoints else None,
+                    endpoints=endpoints,
                 )
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
                 aux_llm_router = None
+
+        # === 04 NEW: 流式输出 callback ===
+        # config["streaming"]["enabled"] 默认 True（CLI 边生成边打印）
+        streaming_cfg = self.config.get("streaming", {})
+        stream_callback = None
+        if streaming_cfg.get("enabled", True):
+            stream_callback = _make_cli_stream_callback()
 
         # batch2-T3: 给 memory_manager 注入 LLM client（优先用 aux）
         if self.memory_manager:
@@ -298,6 +339,7 @@ class RuntimeContext:
             team_name="main",  # === P4a-T7 NEW ===
             aux_llm_router=aux_llm_router,  # === batch2-T3 NEW ===
             plan_approval_callback=cli_plan_approval_callback,  # === PlanMode NEW ===
+            stream_callback=stream_callback,  # === 04 NEW: 流式输出 ===
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
@@ -465,6 +507,32 @@ def _on_tool_call(name: str, args: dict):
         s = str(v)
         short_args[k] = s if len(s) <= 80 else s[:77] + "..."
     console.print(f"[dim]→ 调用工具: {name} {short_args}[/dim]")
+
+
+def _make_cli_stream_callback():
+    """构造 CLI 流式输出回调（04）。
+
+    每收到 LLM 内容增量就即时打印（end="", flush=True），
+    让用户看到边生成边显示，首字延迟 < 500ms。
+    工具调用开始时打印一行简短提示。
+    流结束时不打印（done 后由主流程打印换行）。
+    """
+    import sys
+
+    def cb(event: dict) -> None:
+        etype = event.get("type")
+        if etype == "content":
+            delta = event.get("delta") or ""
+            if delta:
+                sys.stdout.write(delta)
+                sys.stdout.flush()
+        elif etype == "tool_call_start":
+            # 内容流式过程中若切到工具调用，先换行收尾
+            print()  # noqa: T201
+            name = event.get("name", "?")
+            console.print(f"[dim]⟳ 准备调用 {name}...[/dim]")
+        # "done" 不打印：留给主流程处理换行
+    return cb
 
 
 # ---------------------------------------------------------------------------

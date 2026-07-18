@@ -21,6 +21,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List
 
 from tools.registry import registry
@@ -358,6 +359,18 @@ def _run_child(
         # 运行子代理
         result = child.chat(f"请执行任务: {goal}")
 
+        # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
+        try:
+            from agent.team.hallucination_check import verify_claims, append_warning
+            verification = verify_claims(
+                result,
+                task_store=kwargs.get("task_store"),
+                fs_cwd=kwargs.get("cwd") or Path.cwd(),
+            )
+            result = append_warning(result, verification)
+        except Exception as e:
+            logger.warning("幻觉检测失败（fail-open）: %s", e)
+
         # summary_only：超长结果用 LLM 生成摘要，节省父代理 context
         summary_only = kwargs.get("summary_only", True)
         if summary_only and len(result) > 500:
@@ -434,11 +447,41 @@ def _build_child_system_prompt(goal: str, context: str, role: str) -> str:
     return "\n".join(parts)
 
 
+def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
+    """根据运行时状态改 delegate_task schema description（03）。
+
+    让 LLM 看到当前剩余并发槽位，避免"试 spawn 被拒"浪费一轮。
+    """
+    agent = runtime_ctx.get("agent") if runtime_ctx else None
+    if agent is None:
+        return schema
+
+    active = len(getattr(agent, "_children", []) or [])
+    cfg = getattr(agent, "config", None) or {}
+    max_children = (
+        cfg.get("delegate", {}).get("max_concurrent_children", 5)
+        if isinstance(cfg, dict) else 5
+    )
+    remaining = max(0, max_children - active)
+
+    new_schema = dict(schema)
+    desc = new_schema.get("description", "")
+    status_line = (
+        f"\n\n[运行时状态] 当前活跃子代理: {active}/{max_children}，"
+        f"剩余可委派: {remaining}"
+    )
+    if remaining == 0:
+        status_line += "\n⚠️ 已达并发上限，再委派会被拒绝。"
+    new_schema["description"] = desc + status_line
+    return new_schema
+
+
 # 注册到 core 工具集（让 resolve("core") 能找到）
 registry.register(
     name="delegate_task",
     toolset="core",
     schema=DELEGATE_TASK_SCHEMA,
     handler=_handle_delegate_task,
+    schema_overrides_fn=_delegate_schema_overrides,
     emoji="🤝",
 )

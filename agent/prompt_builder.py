@@ -5,9 +5,15 @@
 2. 必须 byte-stable（同一会话内字节级不变）
 3. 记忆是 frozen 快照（本次会话不更新）
 4. 技能只列名字和描述，不包含正文
+
+05 升级：拆成 stable/context/volatile 三层，让 prompt cache 命中率最大化。
+- stable：跨会话不变（身份、指导）
+- context：单会话内不变（记忆、技能、CLAUDE.md）
+- volatile：每轮可变（todo、reminder）
 """
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -122,7 +128,127 @@ OUTPUT_CONVENTION_EN = (
 
 
 # ---------------------------------------------------------------------------
-# 主构建函数
+# 三层结构（05）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SystemPromptLayers:
+    """三层系统提示（05）。
+
+    - stable: 跨会话不变（身份、指导、工具文档）
+    - context: 单会话内不变（记忆索引、技能索引、CLAUDE.md）
+    - volatile: 每轮可变（todo、reminder、extra_instructions）
+
+    API 厂商 prompt cache 按"前缀哈希"匹配，分层能让 stable 跨会话命中、
+    context 单会话命中，整体命中率上去。
+    """
+    stable: str
+    context: str
+    volatile: str
+
+    def render_flat(self) -> str:
+        """合并成单个字符串（向后兼容老接口）。"""
+        parts = [self.stable, self.context, self.volatile]
+        return "\n\n".join(p for p in parts if p)
+
+
+# ---------------------------------------------------------------------------
+# 主构建函数（05 三层版）
+# ---------------------------------------------------------------------------
+
+def build_system_prompt_layers(
+    *,
+    memory_store=None,
+    memory_manager=None,
+    enabled_toolsets: Optional[List[str]] = None,
+    skills_dir: Optional[Path] = None,
+    context_files: Optional[List[Path]] = None,
+    extra_instructions: str = "",
+    include_guidance: bool = True,
+    language: str = "zh",
+    # volatile 来源（运行时传入）
+    todo_state: Optional[str] = None,
+    task_state: Optional[str] = None,
+    reminder: Optional[str] = None,
+) -> SystemPromptLayers:
+    """构建三层 system prompt（05）。
+
+    分层动机：
+      - stable：跨会话不变（同版本同一台机器，几乎 100% 命中 cache）
+      - context：单会话内不变（记忆/技能/CLAUDE.md，会话内 80%+ 命中）
+      - volatile：每轮可变（todo / reminder），不期望 cache 命中
+
+    language: "zh"（默认）或 "en"。只影响身份声明和输出约定。
+    """
+    # ---- stable 层 ----
+    stable_parts = []
+    if language == "en":
+        stable_parts.append(IDENTITY_EN)
+        stable_parts.append(OUTPUT_CONVENTION_EN)
+    else:
+        stable_parts.append(IDENTITY_ZH)
+        stable_parts.append(OUTPUT_CONVENTION_ZH)
+    if include_guidance:
+        stable_parts.extend([
+            MEMORY_GUIDANCE, SKILLS_GUIDANCE,
+            SESSION_SEARCH_GUIDANCE, TOOL_USAGE_GUIDANCE, TODO_GUIDANCE,
+        ])
+    stable = "\n\n".join(stable_parts)
+
+    # ---- context 层 ----
+    context_parts = []
+    if skills_dir is None:
+        try:
+            from constants import skills_dir as _sd
+            skills_dir = _sd()
+        except Exception:
+            skills_dir = None
+    if skills_dir:
+        skill_index = _build_skill_index(Path(skills_dir))
+        if skill_index:
+            context_parts.append(f"## 可用技能\n{skill_index}")
+    if memory_store:
+        try:
+            index_block = memory_store.snapshot_for_prompt()
+            if index_block:
+                context_parts.append(f"## 记忆索引\n{index_block}")
+        except Exception as e:
+            logger.warning("读取记忆索引失败: %s", e)
+    if memory_manager:
+        try:
+            ext_block = memory_manager.build_system_prompt()
+            if ext_block:
+                context_parts.append(ext_block)
+        except Exception:
+            pass
+    if context_files:
+        for cf in context_files:
+            cf = Path(cf)
+            if cf.exists():
+                try:
+                    content = cf.read_text(encoding="utf-8")
+                    context_parts.append(f"## 上下文文件: {cf.name}\n{content}")
+                except Exception as e:
+                    logger.warning("读取上下文文件失败 %s: %s", cf, e)
+    context = "\n\n".join(context_parts)
+
+    # ---- volatile 层 ----
+    volatile_parts = []
+    if todo_state:
+        volatile_parts.append(f"<todo_state>{todo_state}</todo_state>")
+    if task_state:
+        volatile_parts.append(f"<current_tasks>{task_state}</current_tasks>")
+    if reminder:
+        volatile_parts.append(reminder)
+    if extra_instructions:
+        volatile_parts.append(extra_instructions)
+    volatile = "\n\n".join(volatile_parts)
+
+    return SystemPromptLayers(stable=stable, context=context, volatile=volatile)
+
+
+# ---------------------------------------------------------------------------
+# 主构建函数（向后兼容旧接口）
 # ---------------------------------------------------------------------------
 
 def build_system_prompt(
@@ -136,83 +262,22 @@ def build_system_prompt(
     include_guidance: bool = True,
     language: str = "zh",
 ) -> str:
-    """组装 system prompt。
+    """组装 system prompt（向后兼容旧接口）。
 
-    这是一次性操作：结果会被 agent 缓存，本次会话不再重建。
-
-    language: "zh"（默认）或 "en"。只影响身份声明和输出约定；
-    其他指导段（记忆/技能/搜索等）目前仅中文，因为 LLM 能理解中文
-    指导即使输出英文。后续如需全量多语言可扩展。
+    内部走 build_system_prompt_layers 然后合并成单个字符串。
+    新代码应直接调 build_system_prompt_layers 拿三层。
     """
-    parts = []
-
-    # 1. 身份（按语言）
-    if language == "en":
-        parts.append(IDENTITY_EN)
-    else:
-        parts.append(IDENTITY_ZH)
-
-    # 2. 输出约定（按语言）
-    if language == "en":
-        parts.append(OUTPUT_CONVENTION_EN)
-    else:
-        parts.append(OUTPUT_CONVENTION_ZH)
-
-    # 3. 核心指导
-    if include_guidance:
-        parts.append(MEMORY_GUIDANCE)
-        parts.append(SKILLS_GUIDANCE)
-        parts.append(SESSION_SEARCH_GUIDANCE)
-        parts.append(TOOL_USAGE_GUIDANCE)
-        parts.append(TODO_GUIDANCE)
-
-    # 4. 技能索引（只列名字 + 描述，不包含正文）
-    if skills_dir is None:
-        try:
-            from constants import skills_dir as _sd
-            skills_dir = _sd()
-        except Exception:
-            skills_dir = None
-
-    if skills_dir:
-        skill_index = _build_skill_index(Path(skills_dir))
-        if skill_index:
-            parts.append(f"## 可用技能\n{skill_index}")
-
-    # 5. 记忆索引（多文件模式，Phase 5）
-    if memory_store:
-        try:
-            index_block = memory_store.snapshot_for_prompt()
-            if index_block:
-                parts.append(f"## 记忆索引\n{index_block}")
-        except Exception as e:
-            logger.warning("读取记忆索引失败: %s", e)
-
-    # 6. 外部 provider 的静态块
-    if memory_manager:
-        try:
-            ext_block = memory_manager.build_system_prompt()
-            if ext_block:
-                parts.append(ext_block)
-        except Exception:
-            pass
-
-    # 7. 上下文文件（CLAUDE.md / AGENTS.md 等）
-    if context_files:
-        for cf in context_files:
-            cf = Path(cf)
-            if cf.exists():
-                try:
-                    content = cf.read_text(encoding="utf-8")
-                    parts.append(f"## 上下文文件: {cf.name}\n{content}")
-                except Exception as e:
-                    logger.warning("读取上下文文件失败 %s: %s", cf, e)
-
-    # 8. 额外指令
-    if extra_instructions:
-        parts.append(extra_instructions)
-
-    return "\n\n".join(parts)
+    layers = build_system_prompt_layers(
+        memory_store=memory_store,
+        memory_manager=memory_manager,
+        enabled_toolsets=enabled_toolsets,
+        skills_dir=skills_dir,
+        context_files=context_files,
+        extra_instructions=extra_instructions,
+        include_guidance=include_guidance,
+        language=language,
+    )
+    return layers.render_flat()
 
 
 def _build_skill_index(skills_dir: Path) -> str:

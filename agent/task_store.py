@@ -21,7 +21,11 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
-VALID_STATUSES = {"pending", "in_progress", "completed", "deleted", "blocked"}
+VALID_STATUSES = {"pending", "in_progress", "completed", "deleted", "blocked", "triage"}
+
+# 06 NEW: 同 kind 阻塞达到阈值时升级到 triage（避免死循环重试）
+TRIAGE_THRESHOLD = 3
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
 
 def _now_iso() -> str:
@@ -45,8 +49,14 @@ def _tasks_dir(harvil_home=None) -> Path:
 class TaskStore:
     """持久化任务图。每个任务一个 JSON 文件。"""
 
-    def __init__(self, harvil_home=None):
+    def __init__(self, harvil_home=None, *, sqlite_store=None):
         self._dir = _tasks_dir(harvil_home)
+        # 可选 SQLite 双写
+        self._sqlite = sqlite_store
+
+    def attach_sqlite(self, sqlite_store) -> None:
+        """运行时注入 SQLite store（用于 cli.py 启动顺序解耦）。"""
+        self._sqlite = sqlite_store
 
     def _task_file(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
@@ -58,6 +68,22 @@ class TaskStore:
             json.dumps(task, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # SQLite 双写（失败不阻塞主流程）
+        if self._sqlite is not None:
+            try:
+                self._sqlite.save_task(
+                    id=task_id,
+                    subject=task.get("subject", ""),
+                    description=task.get("description", "") or "",
+                    status=task.get("status", "pending"),
+                    owner=task.get("owner"),
+                    created_at=task.get("created_at", _now_iso()),
+                    updated_at=task.get("updated_at", _now_iso()),
+                    blocked_by=task.get("blocked_by", []),
+                    body_json=json.dumps(task, ensure_ascii=False),
+                )
+            except Exception as e:
+                logger.warning("task SQLite 双写失败 %s: %s", task_id, e)
 
     # ------------------------------------------------------------------
     # CRUD
@@ -118,6 +144,68 @@ class TaskStore:
             return None
         return self.update(task_id, status=status)
 
+    # ------------------------------------------------------------------
+    # 06 NEW: 阻塞升级（mark_blocked + block_history）
+    # ------------------------------------------------------------------
+
+    def mark_blocked(
+        self,
+        task_id: str,
+        *,
+        kind: str = "transient",
+        reason: str = "",
+    ) -> dict:
+        """记录阻塞，自动升级重复阻塞到 triage。
+
+        同 kind 阻塞 >= TRIAGE_THRESHOLD 次时状态升级到 triage，
+        让 find_ready 不再选它，等人工或上级介入。
+
+        返回 {"status": "blocked"|"triage", "block_count": int, "kind": str}
+        """
+        if kind not in VALID_BLOCK_KINDS:
+            kind = "transient"
+
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+
+        history = task.setdefault("block_history", [])
+        counts = task.setdefault("block_count_by_kind", {})
+        counts[kind] = counts.get(kind, 0) + 1
+        history.append({
+            "kind": kind,
+            "reason": reason,
+            "at": _now_iso(),
+        })
+        # 限制历史长度（防无限增长，滚动覆盖）
+        if len(history) > 20:
+            del history[: len(history) - 20]
+
+        # 升级判定
+        new_status = "blocked"
+        triage_reason: Optional[str] = None
+        if counts[kind] >= TRIAGE_THRESHOLD:
+            new_status = "triage"
+            triage_reason = (
+                f"task 阻塞超过 {TRIAGE_THRESHOLD} 次（kind={kind}），"
+                f"已升级到 triage，等待人工或上级介入"
+            )
+
+        task["status"] = new_status
+        task["block_kind"] = kind
+        task["block_reason"] = triage_reason or reason
+        task["updated_at"] = _now_iso()
+        self._write(task_id, task)
+        logger.info(
+            "task %s 标记阻塞 kind=%s count=%d status=%s",
+            task_id, kind, counts[kind], new_status,
+        )
+        return {
+            "status": new_status,
+            "block_count": counts[kind],
+            "kind": kind,
+        }
+
     def claim(self, task_id: str, owner: str) -> Optional[dict]:
         """认领任务（设置 owner 并置为 in_progress）。"""
         return self.update(task_id, owner=owner, status="in_progress")
@@ -159,7 +247,10 @@ class TaskStore:
         return True
 
     def find_ready(self) -> List[dict]:
-        """找出所有 pending 且依赖已满足的任务（可认领）。"""
+        """找出所有 pending 且依赖已满足的任务（可认领）。
+
+        排除 triage 状态（已升级等待人工介入）。
+        """
         ready = []
         for t in self.list_all(status="pending"):
             if self.can_start(t["id"]):

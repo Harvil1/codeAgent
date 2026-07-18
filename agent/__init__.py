@@ -64,6 +64,7 @@ class AIAgent:
         spawn_depth: int = 0,    # === P4b-T2 NEW ===
         aux_llm_router=None,     # === batch2-T3 NEW ===
         plan_approval_callback=None,  # === PlanMode NEW ===
+        stream_callback=None,    # === 04 NEW: 流式输出回调 ===
     ):
         """
         参数：
@@ -136,6 +137,9 @@ class AIAgent:
         # 系统提示：会话开始时构建一次，后续缓存
         self._cached_system_prompt: Optional[str] = system_prompt_override
         self._system_prompt_built = system_prompt_override is not None
+        # 05 NEW: 三层结构缓存
+        self._stable_prompt: Optional[str] = system_prompt_override
+        self._context_prompt: Optional[str] = ""
 
         # 对话历史（不包含 system prompt，system 单独传）
         self.conversation_history: list = []
@@ -224,6 +228,12 @@ class AIAgent:
                 )
                 self.browser_session = None
 
+        # === 04 NEW: 流式输出回调 ===
+        # None 时走非流式（向后兼容老测试）；非 None 时每收到一个 LLM chunk 就调用。
+        # 回调签名：callback(event: dict) -> None
+        # event["type"]: "content" | "tool_call_start" | "done"
+        self._stream_callback = stream_callback
+
     def cleanup(self):
         """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
 
@@ -279,6 +289,160 @@ class AIAgent:
         except Exception as e:
             logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
 
+    # ------------------------------------------------------------------
+    # 04 NEW: 流式调用 LLM
+    # ------------------------------------------------------------------
+
+    def _call_llm_streaming(self, *, messages, tools):
+        """流式调用 LLM，每收到一个 chunk 调用 stream_callback。
+
+        流式失败时 fallback 到非流式重试（带备用 client）。
+        返回值与非流式路径完全兼容（SimpleNamespace 包装的 OpenAI 响应结构），
+        让 _record_llm_usage / hook / tool_calls 处理代码不用改。
+
+        stream_callback 事件类型：
+            {"type": "content", "delta": str, "accumulated": str}  # 文本增量
+            {"type": "tool_call_start", "name": str, "id": str}    # 工具调用开始
+            {"type": "done", "finish_reason": str}                  # 流结束
+        """
+        from types import SimpleNamespace
+        full_content = ""
+        tool_call_buffers: dict[int, dict] = {}  # idx → {id, name, arguments}
+        final_usage = None
+        finish_reason = "stop"
+
+        try:
+            for delta in self.llm_client.chat_completions_stream(
+                messages, tools=tools,
+            ):
+                # 内容流式
+                delta_text = delta.get("content") or ""
+                if delta_text:
+                    full_content += delta_text
+                    if self._stream_callback is not None:
+                        try:
+                            self._stream_callback({
+                                "type": "content",
+                                "delta": delta_text,
+                                "accumulated": full_content,
+                            })
+                        except Exception as cb_err:
+                            logger.warning(
+                                "stream_callback(content) 异常（忽略）: %s", cb_err
+                            )
+
+                # 工具调用增量累积
+                for tc in delta.get("tool_calls") or []:
+                    idx = getattr(tc, "index", 0)
+                    buf = tool_call_buffers.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        buf["id"] = tc_id
+                    func = getattr(tc, "function", None)
+                    if func is not None:
+                        fname = getattr(func, "name", None)
+                        if fname:
+                            buf["name"] = fname
+                        fargs = getattr(func, "arguments", None)
+                        if fargs:
+                            buf["arguments"] += fargs
+                    # 第一次拿到 name 时通知 callback
+                    if buf["name"] and not buf.get("_notified"):
+                        buf["_notified"] = True
+                        if self._stream_callback is not None:
+                            try:
+                                self._stream_callback({
+                                    "type": "tool_call_start",
+                                    "name": buf["name"],
+                                    "id": buf["id"],
+                                })
+                            except Exception as cb_err:
+                                logger.warning(
+                                    "stream_callback(tool_call_start) 异常: %s",
+                                    cb_err,
+                                )
+
+                # 最后一个 chunk 的 finish_reason / usage
+                if delta.get("finish_reason"):
+                    finish_reason = delta["finish_reason"]
+                if delta.get("usage"):
+                    final_usage = delta["usage"]
+        except Exception as stream_err:
+            # 流式失败：先通知 callback，再 fallback 到非流式重试
+            logger.warning(
+                "流式调用失败，fallback 到非流式重试: %s", stream_err
+            )
+            from agent.llm_retry import call_with_retry
+            response = call_with_retry(
+                self.llm_client,
+                messages,
+                tools=tools,
+                fallback_llm_client=self.fallback_llm_client,
+            )
+            # 流式回调已经错过，但至少把完整内容回放给 callback
+            choice_msg = response.choices[0].message
+            if choice_msg.content and self._stream_callback is not None:
+                try:
+                    self._stream_callback({
+                        "type": "content",
+                        "delta": choice_msg.content,
+                        "accumulated": choice_msg.content,
+                    })
+                except Exception:
+                    pass
+            return response
+
+        # 合成 tool_calls 列表（按 idx 排序，过滤掉没 name 的）
+        from types import SimpleNamespace
+        tool_calls_out = []
+        for idx in sorted(tool_call_buffers.keys()):
+            buf = tool_call_buffers[idx]
+            if not buf["name"]:
+                continue
+            tool_calls_out.append(SimpleNamespace(
+                id=buf["id"],
+                type="function",
+                function=SimpleNamespace(
+                    name=buf["name"],
+                    arguments=buf["arguments"] or "{}",
+                ),
+            ))
+
+        # 通知 done
+        if self._stream_callback is not None:
+            try:
+                self._stream_callback({
+                    "type": "done",
+                    "finish_reason": finish_reason,
+                })
+            except Exception:
+                pass
+
+        # 合成 OpenAI 兼容 response（让 _record_llm_usage / hook 等不用改）
+        message = SimpleNamespace(
+            content=full_content if full_content else None,
+            tool_calls=tool_calls_out if tool_calls_out else None,
+        )
+        usage_ns = None
+        if final_usage is not None:
+            usage_ns = SimpleNamespace(
+                prompt_tokens=final_usage.get("prompt_tokens", 0),
+                completion_tokens=final_usage.get("completion_tokens", 0),
+                prompt_cache_hit_tokens=final_usage.get("cache_read", 0),
+                cache_read_input_tokens=final_usage.get("cache_read", 0),
+                prompt_cache_miss_tokens=final_usage.get("cache_creation", 0),
+                cache_creation_input_tokens=final_usage.get("cache_creation", 0),
+            )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=message,
+                finish_reason=finish_reason,
+            )],
+            usage=usage_ns,
+        )
+
     @property
     def llm_usage_stats(self) -> dict:
         """只读视图（副本）用于 /usage 展示。"""
@@ -288,27 +452,54 @@ class AIAgent:
         """获取系统提示。第一次调用时构建，后续返回缓存。
 
         缓存是为了保护 LLM provider 的 prompt cache。
+
+        05 升级：分 stable/context 两层缓存，volatile 每次取最新。
+        - stable：跨会话不变（身份、指导），几乎 100% 命中 prompt cache
+        - context：单会话内不变（记忆/技能/CLAUDE.md）
+        - volatile：每轮可变（todo/reminder），不入缓存
         """
         if not self._system_prompt_built:
             # 从 config 读 language（默认 "zh"）
             language = (self.config or {}).get("language", "zh") if self.config else "zh"
-            self._cached_system_prompt = build_system_prompt(
+            from agent.prompt_builder import build_system_prompt_layers
+            layers = build_system_prompt_layers(
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
                 enabled_toolsets=self.enabled_toolsets,
                 language=language,
             )
+            # stable + context 缓存，volatile 即时取
+            self._stable_prompt = layers.stable
+            self._context_prompt = layers.context
+            # 兼容字段：合并结果（让旧代码用 _cached_system_prompt 的地方仍能读）
+            self._cached_system_prompt = layers.render_flat()
             self._system_prompt_built = True
         return self._cached_system_prompt
+
+    def _get_volatile_prompt(self) -> str:
+        """每轮重建的 volatile 部分（05）。
+
+        当前含：todo reminder（3 轮未更新时）、task 状态。
+        不入 stable/context 缓存——直接拼到 system prompt 末尾。
+        """
+        parts = []
+        if self.todo_manager and self.todo_manager.should_remind():
+            parts.append("<todo_reminder>3 轮未更新 todo</todo_reminder>")
+        # task_state 等可按需扩展
+        return "\n\n".join(parts)
 
     def invalidate_system_prompt(self):
         """使缓存的 system prompt 失效。
 
         警告：这会让 prompt cache 失效，增加成本。
         只在上下文压缩等极端场景使用。
+
+        05 优化：压缩后只重建 context 层（stable 不变，prompt cache 仍命中 stable 段）。
         """
+        self._context_prompt = None
         self._cached_system_prompt = None
         self._system_prompt_built = False
+        # _stable_prompt 保留（理论上整次会话内 stable 永不变）
 
     def run_conversation(self, user_message: str) -> str:
         """处理一条用户消息，返回助手最终响应。
@@ -560,7 +751,7 @@ class AIAgent:
             # 注意：必须在循环内每轮重算，让 plan_mode 中途切换（如审批通过）
             # 后能立即刷新工具集，否则 LLM 看到的还是 ['plan']，无法执行计划。
             effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
-            tool_schemas = get_tool_definitions(effective_toolsets)
+            tool_schemas = get_tool_definitions(effective_toolsets, agent=self)
 
             # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
             if (self.hooks_registry
@@ -574,13 +765,20 @@ class AIAgent:
 
             # 调用 LLM（带重试和备用 client）
             try:
-                from agent.llm_retry import call_with_retry
-                response = call_with_retry(
-                    self.llm_client,
-                    messages,
-                    tools=tool_schemas if tool_schemas else None,
-                    fallback_llm_client=self.fallback_llm_client,
-                )
+                # 04 NEW: 流式分支（stream_callback 设置时启用）
+                if self._stream_callback is not None:
+                    response = self._call_llm_streaming(
+                        messages=messages,
+                        tools=tool_schemas if tool_schemas else None,
+                    )
+                else:
+                    from agent.llm_retry import call_with_retry
+                    response = call_with_retry(
+                        self.llm_client,
+                        messages,
+                        tools=tool_schemas if tool_schemas else None,
+                        fallback_llm_client=self.fallback_llm_client,
+                    )
             except Exception as e:
                 # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
                 err_str = str(e).lower()

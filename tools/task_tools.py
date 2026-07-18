@@ -117,18 +117,34 @@ TASK_CREATE_SCHEMA = {
 
 TASK_UPDATE_SCHEMA = {
     "name": "task_update",
-    "description": "更新持久化任务的状态、所有者等字段。",
+    "description": (
+        "更新持久化任务的状态、所有者等字段。\n\n"
+        "阻塞场景：设 status='blocked' 时必填 block_kind 和 block_reason。\n"
+        "同 kind 阻塞 3 次会自动升级到 triage（让 orchestrator 介入），避免死循环。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "id": {"type": "string", "description": "任务 ID"},
             "status": {
                 "type": "string",
-                "enum": ["pending", "in_progress", "completed", "blocked"],
+                "enum": ["pending", "in_progress", "completed", "blocked", "triage"],
                 "description": "新状态",
             },
             "owner": {"type": "string", "description": "认领者"},
             "description": {"type": "string", "description": "更新描述"},
+            "block_kind": {
+                "type": "string",
+                "enum": ["dependency", "needs_input", "capability", "transient"],
+                "description": (
+                    "阻塞时必填。dependency=等任务、needs_input=等输入、"
+                    "capability=能力不足、transient=临时"
+                ),
+            },
+            "block_reason": {
+                "type": "string",
+                "description": "阻塞原因（自由文本）",
+            },
         },
         "required": ["id"],
     },
@@ -315,11 +331,38 @@ def _handle_task_create(args: dict, **kwargs) -> str:
 
 
 def _handle_task_update(args: dict, **kwargs) -> str:
-    """更新 task 字段（status / owner / description / subject）。"""
+    """更新 task 字段（status / owner / description / subject）。
+
+    06 NEW: status='blocked' 时走 mark_blocked（记录 block_history + 升级 triage）。
+    """
     task, err = _get_owned_task(args, kwargs)
     if err:
         return err
     store = _get_store(kwargs)
+
+    # 阻塞特殊路径：走 mark_blocked（自动升级）
+    if args.get("status") == "blocked":
+        try:
+            result = store.mark_blocked(
+                task["id"],
+                kind=args.get("block_kind", "transient"),
+                reason=args.get("block_reason", ""),
+            )
+        except KeyError as e:
+            return json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            )
+        return json.dumps({
+            "success": True,
+            "action": "block",
+            "id": task["id"],
+            "new_status": result["status"],
+            "block_count": result["block_count"],
+            "block_kind": result["kind"],
+            "upgraded_to_triage": result["status"] == "triage",
+        }, ensure_ascii=False)
+
+    # 普通更新路径
     fields = {}
     for key in ("status", "owner", "description", "subject"):
         if key in args and args[key] is not None:

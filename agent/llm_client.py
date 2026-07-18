@@ -39,6 +39,44 @@ class LLMClient:
         """
         raise NotImplementedError
 
+    def chat_completions_stream(
+        self,
+        messages: List[dict],
+        *,
+        tools: Optional[List[dict]] = None,
+        **kwargs,
+    ):
+        """流式调用 LLM，yield dict chunk。
+
+        每个 chunk 是 dict（不是 SDK 对象，避免上层处理多种 SDK 差异）：
+            {
+                "content": str,           # 本 chunk 增量文本（可空字符串）
+                "tool_calls": list,       # 本 chunk 增量工具调用（可空列表）
+                "finish_reason": str?,    # 仅最后一个 chunk 有
+                "usage": dict?,           # 仅最后一个 chunk 有（可选）
+            }
+
+        默认实现：调非流式接口后模拟一次性 yield（让无流式能力的 client 也能用）。
+        子类重写真流式。
+        """
+        resp = self.chat_completions(messages, tools=tools, **kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        usage_obj = getattr(resp, "usage", None)
+        usage_dict = None
+        if usage_obj is not None:
+            usage_dict = {
+                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+            }
+        yield {
+            "content": msg.content or "",
+            "tool_calls": list(msg.tool_calls or []),
+            "finish_reason": getattr(choice, "finish_reason", "stop"),
+            "usage": usage_dict,
+        }
+
 
 # ---------------------------------------------------------------------------
 # OpenAI 兼容 client（DeepSeek/OpenAI/OpenRouter/本地 Ollama 等）
@@ -61,6 +99,52 @@ class OpenAICompatClient(LLMClient):
             tools=tools if tools else None,
             **kwargs,
         )
+
+    def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+        """OpenAI SDK 原生流式：stream=True。
+
+        每个 chunk 是规范化后的 dict（见 LLMClient.chat_completions_stream 文档）。
+        tool_calls 的 delta 保留 SDK 原对象（含 index/id/function 字段），
+        上层负责按 index 累积。
+        """
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=tools if tools else None,
+            stream=True,
+            stream_options={"include_usage": True},
+            **kwargs,
+        )
+        for chunk in stream:
+            usage_obj = getattr(chunk, "usage", None)
+            usage_dict = None
+            if usage_obj is not None:
+                usage_dict = {
+                    "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+                    "cache_read": getattr(usage_obj, "prompt_cache_hit_tokens", 0)
+                        or getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
+                    "cache_creation": getattr(usage_obj, "prompt_cache_miss_tokens", 0)
+                        or getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+                }
+            if not chunk.choices:
+                # 最后一个 chunk 可能只有 usage
+                if usage_dict:
+                    yield {
+                        "content": "",
+                        "tool_calls": [],
+                        "finish_reason": None,
+                        "usage": usage_dict,
+                    }
+                continue
+            delta = chunk.choices[0].delta
+            yield {
+                "content": delta.content or "",
+                "tool_calls": list(delta.tool_calls or []),
+                "finish_reason": chunk.choices[0].finish_reason,
+                "usage": usage_dict,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +200,105 @@ class AnthropicClient(LLMClient):
 
         # 4. 包装成 OpenAI 兼容响应
         return self._wrap_response(response)
+
+    def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+        """Anthropic 原生流式：messages.stream。
+
+        把 Anthropic 的 text 事件转成 OpenAI delta 格式，
+        tool_use 事件累积后作为单个 chunk 的 tool_calls。
+        """
+        system_parts = []
+        conversation = []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                content = m.get("content", "")
+                if content:
+                    system_parts.append(content)
+            else:
+                conversation.append(self._convert_message(m))
+        system = "\n\n".join(system_parts) if system_parts else None
+        anthropic_tools = self._convert_tools(tools) if tools else None
+
+        # 累积 tool_use（Anthropic 流式按 block 增量，需要聚合 id+name+完整 input）
+        tool_buffers: Dict[int, Dict[str, Any]] = {}
+        current_tool_idx: Optional[int] = None
+
+        with self.client.messages.stream(
+            model=self.model,
+            system=system,
+            messages=conversation,
+            tools=anthropic_tools,
+            max_tokens=kwargs.get("max_tokens", 4096),
+        ) as stream:
+            for event in stream:
+                evt_type = getattr(event, "type", "")
+                if evt_type == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    if block is not None and getattr(block, "type", "") == "tool_use":
+                        # 新 tool_use 块开始
+                        idx = len(tool_buffers)
+                        tool_buffers[idx] = {
+                            "id": getattr(block, "id", ""),
+                            "name": getattr(block, "name", ""),
+                            "input_json": "",
+                        }
+                        current_tool_idx = idx
+                elif evt_type == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    if delta is None:
+                        continue
+                    delta_type = getattr(delta, "type", "")
+                    if delta_type == "text_delta":
+                        text = getattr(delta, "text", "") or ""
+                        if text:
+                            yield {
+                                "content": text,
+                                "tool_calls": [],
+                                "finish_reason": None,
+                                "usage": None,
+                            }
+                    elif delta_type == "input_json_delta":
+                        # 工具参数 JSON 分片累积
+                        partial = getattr(delta, "partial_json", "") or ""
+                        if current_tool_idx is not None and partial:
+                            tool_buffers[current_tool_idx]["input_json"] += partial
+                elif evt_type == "content_block_stop":
+                    current_tool_idx = None
+
+            # 流结束：聚合 tool_calls 一次性 yield
+            final_message = stream.get_final_message()
+            tool_calls_out = []
+            for idx in sorted(tool_buffers.keys()):
+                buf = tool_buffers[idx]
+                tool_calls_out.append(SimpleNamespace(
+                    id=buf["id"],
+                    index=idx,
+                    type="function",
+                    function=SimpleNamespace(
+                        name=buf["name"],
+                        arguments=buf["input_json"] or "{}",
+                    ),
+                ))
+            usage_obj = getattr(final_message, "usage", None)
+            usage_dict = None
+            if usage_obj is not None:
+                usage_dict = {
+                    "prompt_tokens": getattr(usage_obj, "input_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage_obj, "output_tokens", 0) or 0,
+                    "total_tokens": (
+                        (getattr(usage_obj, "input_tokens", 0) or 0)
+                        + (getattr(usage_obj, "output_tokens", 0) or 0)
+                    ),
+                    "cache_read": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
+                    "cache_creation": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+                }
+            yield {
+                "content": "",
+                "tool_calls": tool_calls_out,
+                "finish_reason": "tool_calls" if tool_calls_out else "stop",
+                "usage": usage_dict,
+            }
 
     def _convert_message(self, msg: dict) -> dict:
         """OpenAI 消息 → Anthropic 消息。"""

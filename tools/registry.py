@@ -94,10 +94,12 @@ class ToolEntry:
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
+        "schema_overrides_fn",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
-                 requires_env, is_async, description, emoji):
+                 requires_env, is_async, description, emoji,
+                 schema_overrides_fn=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -107,6 +109,10 @@ class ToolEntry:
         self.is_async = is_async
         self.description = description
         self.emoji = emoji
+        # 运行时 schema 覆盖函数：(schema_dict, runtime_ctx_dict) -> new_schema_dict
+        # 用于让 LLM 看到实时状态（剩余并发槽位、当前模式等）。
+        # None 时 schema 不变（向后兼容）。
+        self.schema_overrides_fn = schema_overrides_fn
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +184,7 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         override: bool = False,
+        schema_overrides_fn: Callable = None,
     ):
         """注册一个工具。通常在模块 import 时调用。
 
@@ -189,6 +196,9 @@ class ToolRegistry:
             check_fn: 可用性检查函数，返回 bool。None 表示总是可用
             requires_env: 依赖的环境变量列表（用于文档/UI 显示）
             override: 是否允许覆盖同名工具（插件场景）
+            schema_overrides_fn: 运行时 schema 覆盖函数
+                签名 (schema: dict, runtime_ctx: dict) -> dict | None
+                返回新 schema 或 None（不改）。失败会被 try/except，回退原 schema。
         """
         with self._lock:
             existing = self._tools.get(name)
@@ -207,6 +217,7 @@ class ToolRegistry:
                 is_async=is_async,
                 description=description or schema.get("description", ""),
                 emoji=emoji,
+                schema_overrides_fn=schema_overrides_fn,
             )
             self._generation += 1
 
@@ -246,13 +257,22 @@ class ToolRegistry:
         }, ensure_ascii=False)
 
     def get_definitions(
-        self, tool_names: List[str], *, quiet: bool = False
+        self,
+        tool_names: List[str],
+        *,
+        quiet: bool = False,
+        runtime_ctx: Optional[Dict] = None,
     ) -> List[dict]:
         """返回 OpenAI 格式的工具 schema 列表。
 
         只返回：
         1. 名字在 tool_names 中的工具
         2. check_fn 通过的工具（有 API key 等）
+
+        参数：
+            runtime_ctx: 运行时上下文 dict（如 {"agent": self}）。
+                schema_overrides_fn 会拿到它来动态改 schema。
+                None 时跳过覆盖（向后兼容，schema 不变）。
         """
         definitions = []
         with self._lock:
@@ -267,9 +287,23 @@ class ToolRegistry:
             if entry.check_fn and not _check_fn_cached(entry.check_fn):
                 continue  # 不可用，不暴露给 LLM
 
+            # 浅拷贝 schema，避免污染原 schema
+            schema = dict(entry.schema)
+            # 运行时覆盖（如剩余并发槽位）
+            if entry.schema_overrides_fn is not None and runtime_ctx:
+                try:
+                    overridden = entry.schema_overrides_fn(schema, runtime_ctx)
+                    if overridden:
+                        schema = overridden
+                except Exception as e:
+                    logger.warning(
+                        "schema_overrides_fn %s 失败（用原 schema）: %s",
+                        name, e,
+                    )
+
             definitions.append({
                 "type": "function",
-                "function": entry.schema,
+                "function": schema,
             })
 
         return definitions

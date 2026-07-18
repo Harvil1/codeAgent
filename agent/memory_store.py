@@ -21,6 +21,8 @@ from typing import List, Optional
 
 import yaml
 
+from agent.atomic_io import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 VALID_TYPES = {"user", "feedback", "project", "reference", "other"}
@@ -74,20 +76,26 @@ def _format_frontmatter(meta: dict) -> str:
 class MemoryStore:
     """多文件记忆存储。"""
 
-    def __init__(self, *, harvil_home: Path):
+    def __init__(self, *, harvil_home: Path, sqlite_store=None):
         self._home = Path(harvil_home)
         self._memory_dir = self._home / ".memory"
         self._index_path = self._home / "MEMORY.md"
         self._lock = threading.Lock()
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        # 可选 SQLite 双写（None 时纯文件模式，向后兼容）
+        self._sqlite = sqlite_store
         # 启动时迁移老格式（若存在）
         self._migrate_legacy_if_any()
         # 重建索引（保证一致）
         self._rebuild_index()
 
+    def attach_sqlite(self, sqlite_store) -> None:
+        """运行时注入 SQLite store（用于 cli.py 启动顺序解耦）。"""
+        self._sqlite = sqlite_store
+
     # ---- 内部：写 ----
     def _write_entry_file(self, entry: MemoryEntry) -> None:
-        """写单条 .md 文件。"""
+        """写单条 .md 文件 + 同步 SQLite。"""
         meta = {
             "name": entry.name,
             "description": entry.description,
@@ -97,7 +105,21 @@ class MemoryStore:
         }
         content = _format_frontmatter(meta) + entry.body
         path = self._memory_dir / f"{entry.id}.md"
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
+        # SQLite 双写（失败不阻塞主流程）
+        if self._sqlite is not None:
+            try:
+                self._sqlite.save_memory(
+                    id=entry.id,
+                    name=entry.name,
+                    description=entry.description,
+                    type=entry.type,
+                    body=entry.body,
+                    created_at=meta["created_at"],
+                    updated_at=meta["updated_at"],
+                )
+            except Exception as e:
+                logger.warning("memory SQLite 双写失败 %s: %s", entry.id, e)
 
     def _rebuild_index(self) -> None:
         """扫描 .memory/ 重建 MEMORY.md。"""
@@ -108,7 +130,7 @@ class MemoryStore:
             lines.append(
                 f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
             )
-        self._index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write_text(self._index_path, "\n".join(lines) + "\n")
 
     def _scan_all_entries(self) -> List[MemoryEntry]:
         """扫描 .memory/ 下所有 .md，解析为 MemoryEntry。失败的跳过。"""
@@ -273,6 +295,12 @@ class MemoryStore:
             archive_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(path), str(archive_dir / path.name))
             self._rebuild_index()
+            # SQLite 同步归档（失败不阻塞）
+            if self._sqlite is not None:
+                try:
+                    self._sqlite.archive_memory(memory_id)
+                except Exception as e:
+                    logger.warning("memory SQLite 归档失败 %s: %s", memory_id, e)
         return True
 
     # ---- 兼容旧接口（被 prompt_builder 等调用，留 stub 避免破坏） ----

@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.atomic_io import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,14 +186,6 @@ def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
     return matches
 
 
-def _atomic_write(path: Path, json_str: str) -> None:
-    """先写 .tmp 再 rename，避免半写文件。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(json_str, encoding="utf-8")
-    tmp_path.replace(path)
-
-
 # ---------------------------------------------------------------------------
 # HandoffStore
 # ---------------------------------------------------------------------------
@@ -271,7 +265,7 @@ class HandoffStore:
             )
 
         bundle_path = self._handoff_dir / f"{bundle_id}.json"
-        _atomic_write(bundle_path, json_str)
+        atomic_write_text(bundle_path, json_str)
         logger.info("handoff bundle 已保存: %s", bundle_id)
         return bundle_id
 
@@ -459,7 +453,7 @@ class HandoffStore:
         # 如果重新生成了 ID，需要重写 created_at？不，保留原 created_at 让用户知道源时间。
 
         bundle_path = self._handoff_dir / f"{new_id}.json"
-        _atomic_write(bundle_path, json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_text(bundle_path, json.dumps(data, ensure_ascii=False, indent=2))
         logger.info("bundle 已导入: %s (源: %s)", new_id, src)
         return new_id
 
@@ -472,5 +466,5 @@ class HandoffStore:
 
         data = json.loads(path.read_text(encoding="utf-8"))
         data["handoff_state"] = "completed"
-        _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
         logger.info("bundle %s 标记为 completed", full_id)

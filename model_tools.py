@@ -34,6 +34,7 @@ def get_tool_definitions(
     enabled_toolsets: List[str],
     *,
     disabled_tools: List[str] = None,
+    agent=None,
 ) -> List[dict]:
     """获取要发给 LLM 的工具 schema 列表。
 
@@ -42,6 +43,10 @@ def get_tool_definitions(
     2. 解析启用的工具集，得到工具名列表
     3. 减去显式禁用的工具
     4. 从 registry 获取定义（自动过滤 check_fn 不通过的）
+
+    参数：
+        agent: 当前 AIAgent 实例。传入时 schema_overrides_fn 会拿到它
+            （让工具 schema 反映运行时状态，如剩余并发槽位）。
     """
     ensure_tools_discovered()
 
@@ -68,7 +73,8 @@ def get_tool_definitions(
     _last_resolved_tool_names = tool_names
 
     # 从 registry 获取（check_fn 过滤）
-    return registry.get_definitions(tool_names, quiet=True)
+    runtime_ctx = {"agent": agent} if agent is not None else None
+    return registry.get_definitions(tool_names, quiet=True, runtime_ctx=runtime_ctx)
 
 
 def handle_function_call(
