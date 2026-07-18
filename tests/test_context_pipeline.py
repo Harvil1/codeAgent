@@ -67,6 +67,109 @@ def test_snip_idempotent_after_release():
     assert len(placeholders) == 1
 
 
+# ============ 成对保护测试（P0-2） ============
+
+def _mk_with_tool_pair_at_head_boundary():
+    """构造一个 head 切割点（keep_first=2）正好落在 tool_use/tool_result 对中间。
+
+    conv 序列（system 之后）：
+      idx=0 user
+      idx=1 assistant(tool_calls=call_X)   ← keep_first=2 时 head 到这里
+      idx=2 tool(tool_call_id=call_X)      ← 这条被切走，但 tool_call 在 head → 孤儿
+      idx=3..N 后续消息（凑到 > threshold）
+    """
+    msgs = [{"role": "system", "content": "s"}]
+    msgs.append({"role": "user", "content": "u0"})
+    msgs.append({
+        "role": "assistant",
+        "tool_calls": [{"id": "call_X", "function": {"name": "t", "arguments": "{}"}}],
+    })
+    msgs.append({
+        "role": "tool", "tool_call_id": "call_X", "name": "t",
+        "content": "result_X",
+    })
+    for i in range(1, 60):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    return msgs
+
+
+def test_snip_protects_tool_use_tool_result_pair():
+    """裁剪不能把 assistant(tool_call) 留在 head，把 tool(result) 切走。
+
+    没有成对保护 + keep_first=2 时：
+      head = [u0, assistant(tool_calls=call_X)]
+      切走 → tool(result_X) 落入省略区
+      → OpenAI 协议报 "no tool_result for tool_call call_X"。
+    成对保护后：head 应该往后挪一位把 tool result 也带上（变成 3 条）。
+    """
+    msgs = _mk_with_tool_pair_at_head_boundary()
+    out, changed = snip_compact(msgs, threshold=50, keep_first=2, keep_last=47)
+    assert changed is True
+
+    # 找占位前的 head 部分（system 之后到占位之前）
+    placeholder_idx = None
+    for i, m in enumerate(out):
+        if "snip_compact" in str(m.get("content", "")):
+            placeholder_idx = i
+            break
+    assert placeholder_idx is not None
+    head_part = out[1:placeholder_idx]  # 跳过 system
+
+    has_tool_call = any(
+        any(tc.get("id") == "call_X" for tc in (m.get("tool_calls") or []))
+        for m in head_part
+    )
+    has_tool_result = any(
+        m.get("tool_call_id") == "call_X"
+        for m in head_part
+    )
+    # 不能孤儿：要么都在 head，要么都不在
+    assert has_tool_call == has_tool_result, (
+        f"孤儿！has_tool_call={has_tool_call}, has_tool_result={has_tool_result}"
+    )
+
+
+def test_snip_protects_pair_when_tail_boundary_splits():
+    """tail 切割点同样不能落在 tool_use/tool_result 对中间。
+
+    构造：在 tail 切割点前正好是 tool_use，让 tail 取最后 47 条时丢掉了它的 result。
+    """
+    msgs = [{"role": "system", "content": "s"}]
+    for i in range(30):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    # 在中间偏后位置塞一对 tool_use/tool_result
+    msgs.append({"role": "user", "content": "trigger"})
+    msgs.append({
+        "role": "assistant",
+        "tool_calls": [{"id": "call_Y", "function": {"name": "t", "arguments": "{}"}}],
+    })
+    msgs.append({
+        "role": "tool", "tool_call_id": "call_Y", "name": "t",
+        "content": "result_Y",
+    })
+    # 尾部继续塞消息，让 tail 边界可能落在 tool_use/tool_result 中间
+    for i in range(40):
+        msgs.append({"role": "user", "content": f"tail_u{i}"})
+
+    out, changed = snip_compact(msgs, threshold=50, keep_first=3, keep_last=47)
+    assert changed is True
+
+    # 整个输出里不能有孤儿
+    all_tool_call_ids = set()
+    for m in out:
+        for tc in (m.get("tool_calls") or []):
+            tid = tc.get("id")
+            if tid:
+                all_tool_call_ids.add(tid)
+    all_tool_result_ids = {
+        m.get("tool_call_id") for m in out if m.get("role") == "tool"
+    }
+    orphans = all_tool_call_ids - all_tool_result_ids
+    assert not orphans, f"孤儿 tool_call: {orphans}"
+
+
 # ============ L2 micro_compact 测试 ============
 
 def _mk_with_tools(n_tools, recent=3):
@@ -388,3 +491,154 @@ def test_compress_triggers_l4_with_default_config_after_l1(tmp_path):
     )
     assert changed is True
     assert state.llm_compact_count >= 1  # L4 触发
+
+
+# ============ L2.5 output_offload 主动扫描测试（P1-2） ============
+
+from agent.context_pipeline import offload_large_tool_results
+
+
+def _mk_msgs_with_big_tool_results(sizes):
+    """构造带多个 tool 消息的对话，sizes 是每个 tool 消息 content 的字符数列表。
+
+    每条 tool 消息都配有对应的 assistant(tool_calls)。
+    """
+    msgs = [{"role": "system", "content": "s"}]
+    msgs.append({"role": "user", "content": "u0"})
+    for i, size in enumerate(sizes):
+        msgs.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_{i}",
+                            "function": {"name": "t", "arguments": "{}"}}],
+        })
+        msgs.append({
+            "role": "tool", "tool_call_id": f"call_{i}", "name": "t",
+            "content": "x" * size,
+        })
+    return msgs
+
+
+def test_offload_below_threshold_noop(tmp_path):
+    """tool 消息都小于阈值时，offload_large_tool_results 不动它们。"""
+    msgs = _mk_msgs_with_big_tool_results([100, 200, 300])
+    out, changed = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    assert changed is False
+    assert out == msgs
+
+
+def test_offload_drops_large_tool_results(tmp_path):
+    """超阈值的 tool 消息被落盘，content 替换为 JSON 预览+指针。"""
+    msgs = _mk_msgs_with_big_tool_results([100, 50000, 200])
+    out, changed = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    assert changed is True
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    # 第二个 tool 消息被 offload（50000 > 30000）
+    import json as _json
+    parsed = _json.loads(tool_msgs[1]["content"])
+    assert parsed.get("truncated") is True
+    assert "full_at" in parsed
+    assert "preview" in parsed
+    # 文件确实落盘了
+    from pathlib import Path
+    p = Path(parsed["full_at"])
+    assert p.exists()
+    assert len(p.read_text(encoding="utf-8")) == 50000
+
+
+def test_offload_skips_already_offloaded(tmp_path):
+    """已是占位 JSON（含 truncated 字段）的 tool 消息不再二次落盘。"""
+    import json as _json
+    already = _json.dumps({
+        "truncated": True, "preview": "x", "full_at": "/some/path",
+    })
+    msgs = _mk_msgs_with_big_tool_results([100, 50000, 200])
+    # 手动把第二个 tool 消息改成"已 offload"
+    tool_idx = [i for i, m in enumerate(msgs) if m.get("role") == "tool"][1]
+    msgs[tool_idx]["content"] = already
+    out, changed = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    assert changed is False  # 已是占位，不动
+
+
+def test_offload_preserves_non_tool_messages(tmp_path):
+    """非 tool 消息（user/assistant/system）一律不动，哪怕很长。"""
+    big = "y" * 100000
+    msgs = [
+        {"role": "system", "content": big},
+        {"role": "user", "content": big},
+        {"role": "assistant", "content": big},
+    ]
+    out, changed = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    assert changed is False
+    # 内容没变（虽然超长，但不是 tool 消息所以不动）
+    assert all(m.get("content") == big for m in msgs)
+
+
+def test_offload_preserves_tool_call_id_and_name(tmp_path):
+    """offload 只换 content，role/tool_call_id/name 不变。"""
+    msgs = _mk_msgs_with_big_tool_results([50000])
+    out, _ = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert tool_msgs[0]["tool_call_id"] == "call_0"
+    assert tool_msgs[0]["name"] == "t"
+    assert tool_msgs[0]["role"] == "tool"
+
+
+def test_offload_handles_missing_tool_call_id(tmp_path):
+    """没有 tool_call_id 的 tool 消息用 fallback 名（防 _sanitize 报错）。"""
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u"},
+        {"role": "assistant", "tool_calls": [{"id": "x",
+                                              "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "name": "t", "content": "z" * 50000},  # 没有 tool_call_id
+    ]
+    # 不抛异常
+    out, changed = offload_large_tool_results(
+        msgs, agent_home=tmp_path, threshold=30000,
+    )
+    assert changed is True
+
+
+def test_compress_runs_offload_before_micro(tmp_path):
+    """compress_if_needed 编排里，offload 应在 micro_compact 之前跑。
+
+    顺序理由：先落盘大内容（无损），再折叠旧的（有损但占位小）。
+    """
+    # 构造 5 个 tool 消息，每个 50000 字符
+    msgs = _mk_msgs_with_big_tool_results([50000] * 5)
+    # 加更多消息让 L1 触发
+    for i in range(60):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+
+    cfg = {**_DEFAULT_CFG, "output_offload_threshold": 30000}
+    state = CompressionSessionState()
+    out, changed = compress_if_needed(
+        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        config=cfg, session_state=state,
+        agent_home=tmp_path, session_id="s",
+    )
+    assert changed is True
+    # 至少有一个 tool 消息被 offload（content 是 JSON 含 truncated 字段）
+    import json as _json
+    offloaded_count = 0
+    for m in out:
+        if m.get("role") != "tool":
+            continue
+        try:
+            parsed = _json.loads(m["content"])
+            if parsed.get("truncated"):
+                offloaded_count += 1
+        except (ValueError, TypeError):
+            pass
+    assert offloaded_count >= 1, "没有任何 tool 消息被 offload"

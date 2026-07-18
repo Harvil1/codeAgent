@@ -4,11 +4,13 @@
   - 可重试错误（429 限流、5xx 服务器错误、连接错误）：指数退避重试
   - 不可重试错误（400 参数错、401 认证错）：立即抛出
   - 主模型重试耗尽后切换备用模型（如有配置）
+  - finish_reason=length（max_tokens 截断）：先升 max_tokens 重试，再发续写提示
 
 借鉴 Claude Code 的韧性机制。
 """
 
 import logging
+import random
 import time
 from typing import Optional
 
@@ -16,6 +18,29 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_INITIAL_BACKOFF = 1.0  # 秒，指数退避起点
+DEFAULT_JITTER_RATIO = 0.25    # 抖动比例：sleep = base + uniform(0, base*ratio)
+
+# max_tokens 升级默认值（P0-3）
+# initial=None 表示不显式传 max_tokens，让 provider SDK 用模型默认值
+# escalated=32768 覆盖绝大多数模型的默认上限（DeepSeek 8K、OpenAI 16K、Claude 8K-200K）
+DEFAULT_INITIAL_MAX_TOKENS: Optional[int] = None
+DEFAULT_ESCALATED_MAX_TOKENS = 32768
+
+# 529 连续失败阈值（P1-1）
+# Anthropic 过载（status 529）通常持续一段时间，达到阈值立即切 fallback，
+# 不在已知过载的 endpoint 上浪费重试次数（避免占用限流配额）。
+DEFAULT_CONSECUTIVE_529_THRESHOLD = 3
+
+
+def _error_status_code(error: Exception) -> Optional[int]:
+    """从异常提取 HTTP 状态码（兼容多种 SDK 形态）。"""
+    code = getattr(error, "status_code", None)
+    if code is not None:
+        return code
+    code = getattr(error, "status", None)
+    if code is not None:
+        return code
+    return None
 
 
 def is_retryable(error: Exception) -> bool:
@@ -70,13 +95,17 @@ def call_with_retry(
     max_retries: int = DEFAULT_MAX_RETRIES,
     initial_backoff: float = DEFAULT_INITIAL_BACKOFF,
     fallback_llm_client=None,
+    jitter_ratio: float = DEFAULT_JITTER_RATIO,
+    max_tokens: Optional[int] = None,
+    consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
 ):
     """带重试和备用 client 的 LLM 调用。
 
     流程：
-      1. 主 client 重试 max_retries 次（指数退避）
-      2. 全部失败后，如果有 fallback_llm_client，用备用 client 再试 1 次
-      3. 都失败则抛最后错误
+      1. 主 client 重试 max_retries 次（指数退避 + 抖动）
+      2. 连续 N 次 529（Anthropic 过载）→ 立即切 fallback（不等耗尽）
+      3. 全部失败后，如果有 fallback_llm_client，用备用 client 再试 1 次
+      4. 都失败则抛最后错误
 
     参数：
         llm_client: LLMClient 实例（实现 chat_completions 方法）
@@ -85,32 +114,158 @@ def call_with_retry(
         max_retries: 最大重试次数
         initial_backoff: 首次退避秒数
         fallback_llm_client: 备用 LLMClient（主 client 失败时切换）
+        jitter_ratio: 抖动比例（默认 0.25），sleep = base + uniform(0, base*ratio)。
+                      多实例并发遇到 429 时避免雷击；设 0 关闭抖动（向后兼容）。
+        max_tokens: 透传给 chat_completions 的 max_tokens（None 时不传，让 SDK 用默认）。
+                    主循环检测 finish_reason=length 后用 MaxTokensEscalator 升级此值。
+        consecutive_529_threshold: 连续 529 次数达阈值即切 fallback（默认 3）。
+                                   0 表示禁用提前切换，走完所有重试。
     """
     last_error: Optional[Exception] = None
+    # max_tokens=None 时不传该参数，避免某些 provider 把 None 当 0 处理
+    call_kwargs = {"tools": tools}
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+
+    consecutive_529 = 0  # 连续 529 计数器
 
     # 主 client 重试
     for attempt in range(max_retries):
         try:
-            return llm_client.chat_completions(messages, tools=tools)
+            return llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
             if not is_retryable(e):
                 raise
-            retry_after = get_retry_after(e)
-            backoff = retry_after if retry_after else initial_backoff * (2 ** attempt)
+
+            # P1-1: 529 连续失败精确切换
+            status = _error_status_code(e)
+            if status == 529:
+                consecutive_529 += 1
+            else:
+                consecutive_529 = 0  # 非 529 错误重置计数
+            if (
+                status == 529
+                and consecutive_529_threshold > 0
+                and consecutive_529 >= consecutive_529_threshold
+                and fallback_llm_client is not None
+            ):
+                logger.warning(
+                    "连续 %d 次 529（过载），立即切备用 client（不耗尽 %d 次重试）",
+                    consecutive_529, max_retries,
+                )
+                break  # 跳出主 client 重试，进入 fallback 路径
+
+            backoff = _compute_backoff(
+                attempt=attempt,
+                initial_backoff=initial_backoff,
+                retry_after=get_retry_after(e),
+                jitter_ratio=jitter_ratio,
+            )
             logger.warning(
                 "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
                 attempt + 1, max_retries, backoff, e,
             )
             time.sleep(backoff)
 
-    # 主 client 重试耗尽，尝试备用 client
+    # 主 client 重试耗尽（或被 529 阈值打断），尝试备用 client
     if fallback_llm_client is not None:
-        logger.warning("主 LLM client 重试耗尽，切换备用 client")
+        logger.warning("切换备用 LLM client")
         try:
-            return fallback_llm_client.chat_completions(messages, tools=tools)
+            return fallback_llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
             logger.error("备用 client 也失败: %s", e)
 
     raise last_error
+
+
+class MaxTokensEscalator:
+    """跟踪 max_tokens 升级状态（P0-3）。
+
+    策略：finish_reason=length（max_tokens 截断）时，先升级 max_tokens 重试一次，
+    升级后仍不够才发"请继续"续写消息。升级重试不打断思路，续写容易接歪。
+
+    用法：
+        esc = MaxTokensEscalator()
+        # 第一次调用：用 get_next_max_tokens()，None 表示用 SDK 默认
+        response = client.chat_completions(messages, max_tokens=esc.get_next_max_tokens())
+        if detect_length_finish(response) and not esc.has_escalated:
+            esc.escalate()
+            # 重试同一请求（不追加消息）
+            response = client.chat_completions(messages, max_tokens=esc.get_next_max_tokens())
+        # 升级后仍 length → 调用方发"请继续"
+
+    一个 AIAgent 实例持有一个 escalator，整个会话生命周期复用。
+    会话间 reset() 一次。
+    """
+
+    def __init__(
+        self,
+        *,
+        initial: Optional[int] = DEFAULT_INITIAL_MAX_TOKENS,
+        escalated: int = DEFAULT_ESCALATED_MAX_TOKENS,
+    ):
+        self._initial = initial
+        self._escalated = escalated
+        self.has_escalated = False
+
+    def get_next_max_tokens(self) -> Optional[int]:
+        """返回当前应使用的 max_tokens。
+
+        - 未升级：返回 initial（默认 None，表示不传给 SDK）
+        - 已升级：返回 escalated 值
+        """
+        return self._escalated if self.has_escalated else self._initial
+
+    def escalate(self) -> int:
+        """升级到 escalated 值。幂等：多次调用结果相同。
+
+        返回升级后的 max_tokens。
+        """
+        self.has_escalated = True
+        return self._escalated
+
+    def reset(self) -> None:
+        """重置到未升级状态（新会话用）。"""
+        self.has_escalated = False
+
+
+def detect_length_finish(response) -> bool:
+    """检测 LLM 响应是否因 max_tokens 截断。
+
+    finish_reason == "length" → True
+    其他（"stop" / "tool_calls" / None / 结构异常）→ False
+
+    fail-open：response 结构异常返回 False（不当截断处理，避免误升级）。
+    """
+    try:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            return False
+        first = choices[0]
+        return getattr(first, "finish_reason", None) == "length"
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
+def _compute_backoff(
+    *,
+    attempt: int,
+    initial_backoff: float,
+    retry_after: Optional[float],
+    jitter_ratio: float = DEFAULT_JITTER_RATIO,
+) -> float:
+    """计算退避秒数：base + jitter。
+
+    - base = retry_after（若有）或 initial_backoff * 2^attempt
+    - jitter = uniform(0, base * jitter_ratio)
+    - 返回 base + jitter
+
+    jitter_ratio=0 时返回纯 base（向后兼容）。
+    """
+    base = retry_after if retry_after else initial_backoff * (2 ** attempt)
+    if jitter_ratio <= 0:
+        return base
+    jitter = random.uniform(0, base * jitter_ratio)
+    return base + jitter

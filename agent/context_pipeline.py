@@ -29,6 +29,17 @@ def _reassemble(system: Optional[dict], conv: list) -> list:
     return [system, *conv] if system else conv
 
 
+def _has_tool_calls(msg: dict) -> bool:
+    """assistant 消息是否含 tool_calls。"""
+    tcs = msg.get("tool_calls")
+    return bool(tcs)
+
+
+def _is_tool_result(msg: dict) -> bool:
+    """是否为 tool 结果消息（role=='tool'）。"""
+    return msg.get("role") == "tool"
+
+
 def snip_compact(
     messages: list,
     *,
@@ -39,6 +50,8 @@ def snip_compact(
     """L1：消息数 > threshold 时裁中间，保留首 N + 尾 M + 占位。
 
     无损：占位消息提示 LLM 去 .transcripts/latest.jsonl 读回完整内容。
+    成对保护：head 边界遇到 assistant(tool_calls) 时往后扩到 tool result 结束，
+              避免把 tool_call 留在 head、tool result 切走，导致 OpenAI 协议报孤儿。
     返回 (新消息, 是否裁剪)。
     """
     system, conv = _split_system(messages)
@@ -51,9 +64,29 @@ def snip_compact(
     if len(conv) <= keep_first + keep_last:
         return messages, False
 
-    head = conv[:keep_first]
-    tail = conv[-keep_last:]
-    omitted = len(conv) - keep_first - keep_last
+    # head 边界成对保护：head 末尾是 assistant(tool_calls) 时，
+    # 把后续的 tool result 都带上（防止孤儿 tool_call）
+    head_end = keep_first
+    if head_end > 0 and head_end < len(conv) and _has_tool_calls(conv[head_end - 1]):
+        while head_end < len(conv) and _is_tool_result(conv[head_end]):
+            head_end += 1
+
+    # tail 边界成对保护：tail 开头是 tool result 但它的 tool_call 不在 tail 里时，
+    # tail_start 往后挪跳过这些孤儿 tool result（L1 无损，可读 transcript 找回）
+    tail_start = len(conv) - keep_last
+    while tail_start < len(conv) and _is_tool_result(conv[tail_start]) and tail_start > 0:
+        # 检查 tool_call 是否在 tail 内：往前找到的非 tool-result 消息应也是 tool_call 配对
+        # 简化：如果 tail_start 是 tool result，且它前面紧挨着的位置 < tail_start，
+        # 说明它的 tool_call 在 tail 之外 → 跳过这条孤儿 result
+        prev_idx = tail_start - 1
+        if prev_idx >= 0 and _has_tool_calls(conv[prev_idx]):
+            # 紧邻前一条是 tool_call → 这对完整在 tail 里，停止跳过
+            break
+        tail_start += 1
+
+    head = conv[:head_end]
+    tail = conv[tail_start:]
+    omitted = tail_start - head_end
     placeholder = {
         "role": "user",
         "content": (
@@ -63,8 +96,8 @@ def snip_compact(
     }
     new_conv = head + [placeholder] + tail
     new_messages = _reassemble(system, new_conv)
-    logger.info("L1 snip_compact: conv %d → %d (omitted %d)",
-                len(conv), len(new_conv), omitted)
+    logger.info("L1 snip_compact: conv %d → %d (omitted %d, head_end=%d, tail_start=%d)",
+                len(conv), len(new_conv), omitted, head_end, tail_start)
     return new_messages, True
 
 
@@ -121,6 +154,79 @@ def _already_micro_placeheld(msg: dict) -> bool:
         return bool(parsed.get("micro_compacted"))
     except (json.JSONDecodeError, TypeError):
         return False
+
+
+def _already_offloaded(msg: dict) -> bool:
+    """检测 tool 消息 content 是否已是 output_offload 占位（P1-2）。
+
+    output_offload 的占位 JSON 含 "truncated": true 和 "full_at" 字段，
+    不要再二次落盘。
+    """
+    if msg.get("role") != "tool":
+        return False
+    content = msg.get("content", "")
+    if not isinstance(content, str):
+        return False
+    try:
+        parsed = json.loads(content)
+        return bool(parsed.get("truncated")) and "full_at" in parsed
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def offload_large_tool_results(
+    messages: list,
+    *,
+    agent_home,
+    threshold: int = 30000,
+    preview_chars: int = 2000,
+) -> Tuple[list, bool]:
+    """L2.5：主动扫描所有 role=tool 消息，超阈值的落盘（P1-2）。
+
+    背景：terminal/file_ops 等工具自己调 maybe_offload（被动），
+    但 read_file/search_files/execute_code/bg_result 等没接。
+    如果一条 tool 消息 content 超 30K 字符就直接进 messages，爆 context。
+
+    本函数在 compress_if_needed 编排里跑，统一兜底：扫所有 tool 消息，
+    超阈值且不是占位的，主动调 maybe_offload 落盘。
+
+    返回 (新消息, 是否有变化)。消息结构除 content 外不变（保 tool_call_id/name 配对）。
+    """
+    from agent.output_offload import maybe_offload
+
+    changed = False
+    out = []
+    for m in messages:
+        if m.get("role") != "tool":
+            out.append(m)
+            continue
+        content = m.get("content", "")
+        if not isinstance(content, str) or len(content) <= threshold:
+            out.append(m)
+            continue
+        if _already_offloaded(m):
+            out.append(m)  # 已是占位，不二次落盘
+            continue
+
+        tool_call_id = m.get("tool_call_id") or f"orphan_{id(m)}"
+        new_content = maybe_offload(
+            content,
+            tool_call_id=tool_call_id,
+            agent_home=agent_home,
+            threshold=threshold,
+            preview_chars=preview_chars,
+        )
+        if new_content != content:
+            new_m = dict(m)
+            new_m["content"] = new_content
+            out.append(new_m)
+            changed = True
+        else:
+            out.append(m)
+
+    if changed:
+        logger.info("L2.5 offload_large_tool_results: 至少 1 条 tool 消息已落盘")
+    return out, changed
 
 
 def llm_compact(
@@ -258,6 +364,17 @@ def compress_if_needed(
         threshold=config.get("snip_message_threshold", 50),
     )
 
+    # L2.5 主动 offload 大 tool 结果（P1-2）
+    # 在 micro_compact 前跑：先把大内容无损落盘，再让 micro 折叠占位
+    offload_threshold = config.get("output_offload_threshold", 30000)
+    offload_preview = config.get("output_offload_preview", 2000)
+    messages, c25 = offload_large_tool_results(
+        messages,
+        agent_home=agent_home,
+        threshold=offload_threshold,
+        preview_chars=offload_preview,
+    )
+
     # L2 micro
     messages, c2 = micro_compact(
         messages,
@@ -318,7 +435,7 @@ def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c1 or c2 or c4
+    changed = c1 or c25 or c2 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)

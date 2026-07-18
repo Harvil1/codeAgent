@@ -313,3 +313,149 @@ def test_stream_callback_exception_does_not_break_main_flow():
     )
     # 不应该抛
     agent.run_conversation("hi")
+
+
+# ----------------------------------------------------------------------------
+# P0-3: max_tokens 升级机制集成测试
+# ----------------------------------------------------------------------------
+
+def test_max_tokens_escalates_on_length_finish():
+    """流式 finish_reason=length 时，自动升级 max_tokens 并用非流式重试。
+
+    场景：
+      第一次流式：流了部分内容后 finish_reason="length"（被 max_tokens 截断）
+      escalator 触发 → 调用 chat_completions（非流式）拿完整响应
+      最终：response 是重试的完整内容，finish_reason="stop"
+    """
+    # 第一次流式返回截断
+    stream_chunks = [
+        {"content": "前半段", "tool_calls": [], "finish_reason": None, "usage": None},
+        {"content": "", "tool_calls": [], "finish_reason": "length", "usage": None},
+    ]
+
+    class _EscClient(LLMClient):
+        def __init__(self):
+            self.non_stream_calls = 0
+            self.last_max_tokens = "not_set"
+
+        def chat_completions(self, messages, *, tools=None, **kwargs):
+            self.non_stream_calls += 1
+            self.last_max_tokens = kwargs.get("max_tokens", "not_set")
+            # 非流式返回完整响应
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="前半段+后半段（完整）", tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=20, total_tokens=30,
+                ),
+            )
+
+        def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+            for c in stream_chunks:
+                yield c
+
+    client = _EscClient()
+    events = []
+    agent = _build_minimal_agent(
+        stream_callback=lambda e: events.append(e),
+        llm_client=client,
+    )
+    agent.run_conversation("hi")
+
+    # 验证：触发了一次非流式调用
+    assert client.non_stream_calls >= 1
+    # 验证：传入了升级后的 max_tokens
+    assert client.last_max_tokens != "not_set"
+    assert client.last_max_tokens >= 16 * 1024  # 至少 16K
+    # 验证：escalator 状态已升级
+    assert agent._max_tokens_escalator.has_escalated is True
+    # 验证：callback 收到了完整内容（重试结果回放）
+    content_events = [e for e in events if e["type"] == "content"]
+    full_contents = [e["delta"] for e in content_events]
+    assert any("完整" in c for c in full_contents)
+
+
+def test_max_tokens_no_escalate_on_stop_finish():
+    """finish_reason=stop 时不触发升级（非流式路径）。"""
+    stream_chunks = [
+        {"content": "完整内容", "tool_calls": [], "finish_reason": None, "usage": None},
+        {"content": "", "tool_calls": [], "finish_reason": "stop",
+         "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10,
+                   "cache_read": 0, "cache_creation": 0}},
+    ]
+
+    non_stream_count = {"n": 0}
+
+    class _NoEscClient(LLMClient):
+        def chat_completions(self, messages, *, tools=None, **kwargs):
+            non_stream_count["n"] += 1
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="x", tool_calls=None),
+                    finish_reason="stop",
+                )],
+                usage=None,
+            )
+
+        def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+            for c in stream_chunks:
+                yield c
+
+    agent = _build_minimal_agent(llm_client=_NoEscClient())
+    agent.run_conversation("hi")
+
+    # 非流式只被调一次（没 escalate 重试）
+    assert non_stream_count["n"] == 1
+    assert agent._max_tokens_escalator.has_escalated is False
+
+
+def test_max_tokens_escalate_idempotent_within_session():
+    """一个 session 内最多升级一次（避免多轮循环重复升级）。
+
+    非流式路径：
+      第一轮：chat_completions 返回 length（截断）→ escalate → 重试返回 stop
+      第二轮：chat_completions 返回 length（截断）→ 已升级，不再重试
+    """
+    call_log = {"stream": 0, "non_stream": 0}
+
+    class _IdempotentClient(LLMClient):
+        def chat_completions(self, messages, *, tools=None, **kwargs):
+            call_log["non_stream"] += 1
+            # 第一次主调用：返回 length 截断
+            # 第二次重试（escalate 触发）：返回 stop
+            # 第三次主调用（第二轮 run）：返回 length 截断
+            if call_log["non_stream"] in (1, 3):
+                finish = "length"
+            else:
+                finish = "stop"
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=None),
+                    finish_reason=finish,
+                )],
+                usage=None,
+            )
+
+        def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+            call_log["stream"] += 1
+            yield {"content": "partial", "tool_calls": [],
+                   "finish_reason": None, "usage": None}
+            yield {"content": "", "tool_calls": [],
+                   "finish_reason": "length", "usage": None}
+
+    agent = _build_minimal_agent(llm_client=_IdempotentClient())
+    agent.run_conversation("round 1")
+
+    # 第一轮：1 次主调用（length）+ 1 次 escalate 重试（stop）= 2 次
+    assert call_log["non_stream"] == 2
+    assert agent._max_tokens_escalator.has_escalated is True
+
+    # 第二轮：再调一次主调用（length），但不再升级（已升过）
+    agent.run_conversation("round 2")
+    # 第二轮只有 1 次主调用（length），没 escalate 重试
+    assert call_log["non_stream"] == 3
+    assert agent._max_tokens_escalator.has_escalated is True  # 仍 True（幂等）

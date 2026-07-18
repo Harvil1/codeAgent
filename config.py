@@ -110,6 +110,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "notification_stdout_cap": 500,         # 通知里 stdout 字符上限
         "result_stdout_cap": 5000,              # bg_result 返回的 stdout 字符上限
         "default_detach": False,                # bg_start 默认 detach
+        "stall_timeout": 45.0,                  # P1-3: 停滞看门狗（秒）。0=禁用，>0 启用：连续 N 秒 stdout 无新增 → push 通知让 LLM 决定
     },
 
     # Cron 调度（Phase 2c）

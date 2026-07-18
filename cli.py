@@ -81,6 +81,7 @@ class RuntimeContext:
             notification_stdout_cap=bg_cfg.get("notification_stdout_cap", 500),
             result_stdout_cap=bg_cfg.get("result_stdout_cap", 5000),
             default_timeout=bg_cfg.get("default_timeout", 600),
+            stall_timeout=bg_cfg.get("stall_timeout", 45.0),  # P1-3: 停滞看门狗（45s 无 stdout 新增 → 通知）
         )
 
         # === P2c-T5 NEW: Cron 调度器 ===

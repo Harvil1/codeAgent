@@ -4,6 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目本质
 
+本项目后期会做成win电脑的软件安装包（现在不做）。
 HarvilAgent 是基于 `D:\project\hermes-agent-main\replication-guide\` 复刻指南实现的自学习 AI Agent，并借鉴 Claude Code 的工程实践做了取长补短。**"越用越聪明" 不是一个营销词，它是由三个独立子系统 + 后台维护工人支撑的工程闭环**：
 
 ```
@@ -109,14 +110,17 @@ terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提�
 
 ⚠️ **不要为了"方便"绕过这些检查**。如果某工具确实需要写到 cwd 外，通过 `kwargs` 接收 `harvil_home` 并在 safe_path 的 `allowed_roots` 里显式声明。
 
-## 韧性机制（重试 + 备用模型）
+## 韧性机制（重试 + 备用模型 + max_tokens 升级 + 529 早切）
 
 `agent/llm_retry.py:call_with_retry` 被 `AIAgent.run_conversation` 用于每次 LLM 调用：
 
 - 可重试错误（429 限流、5xx 服务器错误、连接/超时）：指数退避重试 5 次（1s → 2s → 4s → 8s → 16s），尊重 `Retry-After` header
+- **退避加抖动（P0-1）**：每次 sleep = base + uniform(0, base × 0.25)，多实例并发遇到 429 时避免雷击。`jitter_ratio=0` 关闭抖动（向后兼容）
+- **529 连续失败早切（P1-1）**：连续 `consecutive_529_threshold`（默认 3）次 529 立即切备用 client，不浪费剩余重试次数（Anthropic 过载通常持续一段时间）
 - 不可重试错误（400 参数、401 认证、403 权限）：立即抛
 - 主模型重试耗尽后，如果配置了 `fallback_model`，用备用模型再试一次
 - AIAgent 构造参数：`AIAgent(..., fallback_model="deepseek-reasoner")`
+- **max_tokens 升级（P0-3）**：LLM 返回 `finish_reason="length"`（max_tokens 截断）时，先升 `max_tokens` 到 32768 用非流式重试一次（不打断思路），升级后仍不够才让主循环走续写路径。`MaxTokensEscalator` 整个会话幂等（最多升 1 次）。入口：流式 `agent/__init__.py:_call_llm_streaming` 末尾 + 非流式 `agent/__init__.py:run_conversation` 非流式分支
 
 ## 任务追踪（两层）
 
@@ -190,7 +194,8 @@ uv sync                                 # 同步已声明依赖
 | 上下文压缩（唯一可改 system prompt 的场景） | `agent/context_pipeline.py:compress_if_needed` + 主循环 `agent/__init__.py` 压缩后注入 `<post_compress_brief>` |
 | 命令权限闸门 | `agent/permission.py:PermissionChecker.check` |
 | 路径白名单 | `agent/permission.py:safe_path` |
-| LLM 重试/备用模型 | `agent/llm_retry.py:call_with_retry` |
+| LLM 重试/备用模型/退避抖动/529 早切 | `agent/llm_retry.py:call_with_retry` + `_compute_backoff`（抖动）+ 连续 529 计数 |
+| max_tokens 升级（finish_reason=length 自动重试） | `agent/llm_retry.py:MaxTokensEscalator` + `detect_length_finish`；入口 `agent/__init__.py:_call_llm_streaming`（流式）和 `run_conversation` 非流式分支 |
 | TodoWrite reminder 注入 | `agent/__init__.py`（搜 `should_remind`） |
 | 工具注册模式（添加新工具看这个） | `tools/terminal_tool.py`（含权限集成） |
 | 工具集可见性控制 | `toolsets.py:TOOLSETS` + `model_tools.py:get_tool_definitions` |
@@ -203,6 +208,9 @@ uv sync                                 # 同步已声明依赖
 | Vision/Image 工具 | `tools/image_tool.py`（image_analyze / image_ocr，复用 safe_path） |
 | Plan Mode（计划模式 + 审批） | `agent/__init__.py`（plan_mode 字段 + 主循环三处分支）+ `tools/plan_mode_tool.py` + `cli.py`（/plan 命令） |
 | Cron 调度（一次性 + 7 天过期） | `agent/cron.py:CronScheduler`（`_tick` 含过期/一次性 disable） |
+| snip 成对保护（L1 裁剪不拆散 tool_call/result） | `agent/context_pipeline.py:snip_compact`（`_has_tool_calls` / `_is_tool_result` 辅助） |
+| 主动 output_offload（L2.5 大 tool 结果落盘） | `agent/context_pipeline.py:offload_large_tool_results`（`compress_if_needed` 编排里调） |
+| 后台任务停滞看门狗（stall_timeout 秒无输出 → 通知） | `agent/background.py:BackgroundManager._watch_with_stall`（默认 45s，`config.bg_task.stall_timeout` 配置） |
 
 ## 已知约束（设计如此，不是 bug）
 

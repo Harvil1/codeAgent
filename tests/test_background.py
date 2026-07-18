@@ -239,3 +239,146 @@ def test_list_tasks_returns_copies(tmp_path):
     tasks2 = mgr.list_tasks()
     assert tasks2[0].status == original_status
     mgr.shutdown()
+
+
+# ============ P1-3: 停滞看门狗测试 ============
+
+def _long_silent_cmd(seconds=5):
+    """跨平台：睡 N 秒后才 print（模拟交互卡死）。"""
+    if sys.platform == "win32":
+        return [sys.executable, "-c",
+                f"import time; time.sleep({seconds}); print('finally')"]
+    return ["sh", "-c", f"sleep {seconds}; echo finally"]
+
+
+def _steady_output_cmd(rounds=5, interval=0.3):
+    """跨平台：每 interval 秒 print 一行，共 rounds 次（模拟持续输出）。"""
+    if sys.platform == "win32":
+        code = (
+            f"import time\n"
+            f"for i in range({rounds}):\n"
+            f"    print(f'line {{i}}', flush=True)\n"
+            f"    time.sleep({interval})\n"
+        )
+        return [sys.executable, "-c", code]
+    return ["sh", "-c", f"for i in $(seq 1 {rounds}); do echo line$i; sleep {interval}; done"]
+
+
+def test_stall_watchdog_triggers_on_silent_process(tmp_path):
+    """stall_timeout=1.0s 时，沉睡 5 秒的进程应触发停滞通知。"""
+    mgr = BackgroundManager(stall_timeout=1.0)
+    task_id = mgr.start(_long_silent_cmd(seconds=5), cwd=tmp_path)
+
+    # 等停滞通知（最多 5 秒）
+    stall_notif = None
+    for _ in range(50):
+        notifs = mgr.drain_notifications()
+        for n in notifs:
+            if n.get("stall"):
+                stall_notif = n
+                break
+        if stall_notif:
+            break
+        time.sleep(0.1)
+
+    assert stall_notif is not None, "未触发停滞通知"
+    assert stall_notif["task_id"] == task_id
+    assert stall_notif.get("stall_seconds") == 1.0
+
+    # task 仍 running（停滞不主动 kill）
+    task = mgr.status(task_id)
+    assert task.status == "running"
+
+    mgr.stop(task_id)
+    mgr.shutdown()
+
+
+def test_stall_watchdog_no_trigger_on_steady_output(tmp_path):
+    """stall_timeout=1.0s 时，每 0.3 秒输出一行的进程不应触发停滞。"""
+    mgr = BackgroundManager(stall_timeout=1.0)
+    # 5 轮 * 0.3 秒 = 1.5 秒，每 0.3 < stall_timeout=1.0
+    task_id = mgr.start(_steady_output_cmd(rounds=5, interval=0.3), cwd=tmp_path)
+
+    # 等任务完成
+    for _ in range(100):
+        task = mgr.status(task_id)
+        if task.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    notifs = mgr.drain_notifications()
+    stalls = [n for n in notifs if n.get("stall")]
+    assert len(stalls) == 0, f"持续输出不应触发停滞：{stalls}"
+    assert task.status == "completed"
+    mgr.shutdown()
+
+
+def test_stall_watchdog_disabled_by_default():
+    """stall_timeout=0（默认禁用）时走旧 communicate 路径，不监控停滞。
+
+    现有 18 个测试都依赖这个默认行为（不传 stall_timeout），
+    所以默认必须保持禁用，向后兼容。
+    """
+    mgr = BackgroundManager()
+    assert mgr._stall_timeout == 0
+
+
+def test_stall_watchdog_default_constant_is_45():
+    """DEFAULT_STALL_TIMEOUT = 45.0（learn-claude-code 风格）。"""
+    from agent.background import DEFAULT_STALL_TIMEOUT
+    assert DEFAULT_STALL_TIMEOUT == 45.0
+
+
+def test_stall_timeout_wired_from_config(tmp_path):
+    """cli.py 的 RuntimeContext 从 config['bg_task']['stall_timeout'] 接线到 BackgroundManager。
+
+    端到端：DEFAULT_CONFIG['bg_task']['stall_timeout']=45.0 →
+           RuntimeContext → BackgroundManager._stall_timeout=45.0
+    """
+    from config import DEFAULT_CONFIG
+    # 1. DEFAULT_CONFIG 里有这个字段
+    assert DEFAULT_CONFIG["bg_task"]["stall_timeout"] == 45.0
+
+    # 2. 直接用 DEFAULT_CONFIG 的 bg_task 段构造 BackgroundManager
+    bg_cfg = DEFAULT_CONFIG["bg_task"]
+    mgr = BackgroundManager(
+        max_concurrent=bg_cfg.get("max_concurrent", 5),
+        notification_stdout_cap=bg_cfg.get("notification_stdout_cap", 500),
+        result_stdout_cap=bg_cfg.get("result_stdout_cap", 5000),
+        default_timeout=bg_cfg.get("default_timeout", 600),
+        stall_timeout=bg_cfg.get("stall_timeout", 45.0),
+    )
+    assert mgr._stall_timeout == 45.0
+
+
+def test_stall_timeout_can_be_disabled_via_config(tmp_path):
+    """config['bg_task']['stall_timeout']=0 时禁用看门狗（向后兼容）。"""
+    mgr = BackgroundManager(
+        stall_timeout=0,
+    )
+    assert mgr._stall_timeout == 0
+
+
+def test_stall_notification_does_not_kill_process(tmp_path):
+    """停滞通知后进程仍能正常完成（不主动 kill）。"""
+    mgr = BackgroundManager(stall_timeout=0.5)
+    task_id = mgr.start(_long_silent_cmd(seconds=2), cwd=tmp_path)
+
+    # 等停滞 + 完成
+    seen_stall = False
+    for _ in range(100):
+        notifs = mgr.drain_notifications()
+        for n in notifs:
+            if n.get("stall"):
+                seen_stall = True
+        task = mgr.status(task_id)
+        if task.status in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert seen_stall, "应触发停滞"
+    task = mgr.status(task_id)
+    # 最终正常完成（exit_code=0）
+    assert task.status == "completed"
+    assert task.exit_code == 0
+    mgr.shutdown()

@@ -7,15 +7,18 @@
 - 主循环每轮 drain_notifications 清空
 - 默认非 detach（agent 退出清理）；detach=True 用 start_new_session/CREATE_NEW_PROCESS_GROUP
 - 并发上限默认 5
+- P1-3: stall_timeout > 0 时启用停滞看门狗（45 秒无 stdout 增长 → 通知 LLM）
 
 跨平台：subprocess 必须 text=True, encoding="utf-8"（CLAUDE.md 强制）。
 """
 import copy
 import logging
+import queue
 import secrets
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +26,10 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# P1-3: 默认停滞超时（秒）。连续 stall_timeout 内 stdout 无新增字节判定为"可能卡交互"。
+# 0 表示禁用（向后兼容）；BackgroundManager 构造时显式传 45.0 才启用。
+DEFAULT_STALL_TIMEOUT = 45.0
 
 
 @dataclass
@@ -52,6 +59,7 @@ class BackgroundManager:
         notification_stdout_cap: int = 500,
         result_stdout_cap: int = 5000,
         default_timeout: float = 600.0,
+        stall_timeout: float = 0.0,
     ):
         self._tasks: dict = {}
         self._lock = threading.Lock()
@@ -60,6 +68,9 @@ class BackgroundManager:
         self._notification_stdout_cap = notification_stdout_cap
         self._result_stdout_cap = result_stdout_cap
         self._default_timeout = default_timeout
+        # P1-3: 停滞看门狗超时。0=禁用（向后兼容，走 communicate 单次阻塞路径）
+        # >0 启用：用 reader 线程 + 主线程轮询，stall_timeout 秒无 stdout 新增则 push 通知。
+        self._stall_timeout = stall_timeout
 
     # ---- 启动 ----
     def start(
@@ -135,14 +146,35 @@ class BackgroundManager:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         t = threading.Thread(
             target=self._watch,
-            args=(task_id, proc, effective_timeout),
+            args=(task_id, proc, effective_timeout, self._stall_timeout),
             daemon=True,
         )
         t.start()
         return task_id
 
-    def _watch(self, task_id: str, proc: subprocess.Popen, timeout: float):
-        """daemon thread：读 stdout/stderr、wait、push 通知。"""
+    def _watch(
+        self,
+        task_id: str,
+        proc: subprocess.Popen,
+        timeout: float,
+        stall_timeout: float = 0.0,
+    ):
+        """daemon thread：读 stdout/stderr、wait、push 通知。
+
+        stall_timeout > 0 时启用停滞看门狗（P1-3）：
+          - 用 reader 子线程读 stdout/stderr 到 queue
+          - 主线程轮询：proc.poll() / stall 检测 / 总 timeout
+          - stall_timeout 秒无 stdout 新增 → push 停滞通知（不 kill，让 LLM 决定）
+        stall_timeout == 0 时走旧 communicate 单次阻塞路径（向后兼容）。
+        """
+        if stall_timeout > 0:
+            return self._watch_with_stall(task_id, proc, timeout, stall_timeout)
+        return self._watch_classic(task_id, proc, timeout)
+
+    def _watch_classic(
+        self, task_id: str, proc: subprocess.Popen, timeout: float,
+    ):
+        """旧路径：communicate(timeout) 阻塞等待（向后兼容）。"""
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             exit_code = proc.returncode
@@ -175,6 +207,179 @@ class BackgroundManager:
                 self._push_notification_locked(task)
         except Exception as e:
             logger.warning("bg task %s watcher 异常: %s", task_id, e)
+            with self._lock:
+                task = self._tasks.get(task_id)
+                if task is None or task.status != "running":
+                    return
+                task.status = "failed"
+                task.ended_at = datetime.now()
+                task.exit_code = -1
+                task.stderr = str(e)[: self._result_stdout_cap]
+                self._push_notification_locked(task)
+
+    def _watch_with_stall(
+        self,
+        task_id: str,
+        proc: subprocess.Popen,
+        timeout: float,
+        stall_timeout: float,
+    ):
+        """P1-3: reader 线程 + 主线程轮询，支持停滞看门狗。
+
+        流程：
+          1. 启动两个 reader daemon 线程读 stdout/stderr → queue
+          2. 主线程每 0.5 秒轮询：
+             - drain queue → append 到 parts
+             - 有新输出 → 重置 last_output_time
+             - proc.poll() not None → 进程结束，drain 剩余，push 最终通知
+             - 总 timeout 到 → kill + push failed
+             - stall_timeout 秒无新输出 → push 停滞通知（task 仍 running）
+        """
+        stdout_q: queue.Queue = queue.Queue()
+        stderr_q: queue.Queue = queue.Queue()
+
+        def _reader(stream, q: queue.Queue):
+            try:
+                for line in iter(stream.readline, ""):
+                    q.put(line)
+            except Exception:
+                pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        t_out = threading.Thread(
+            target=_reader, args=(proc.stdout, stdout_q), daemon=True,
+        )
+        t_err = threading.Thread(
+            target=_reader, args=(proc.stderr, stderr_q), daemon=True,
+        )
+        t_out.start()
+        t_err.start()
+
+        stdout_parts: list = []
+        stderr_parts: list = []
+        last_output_time = time.monotonic()
+        stall_notified = False
+        deadline = time.monotonic() + timeout
+
+        try:
+            while True:
+                # I-3: stop() 已介入则退出
+                with self._lock:
+                    task = self._tasks.get(task_id)
+                    if task is None or task.status != "running":
+                        return
+
+                # drain queue（非阻塞）
+                got_new = False
+                try:
+                    while True:
+                        stdout_parts.append(stdout_q.get_nowait())
+                        got_new = True
+                except queue.Empty:
+                    pass
+                try:
+                    while True:
+                        stderr_parts.append(stderr_q.get_nowait())
+                        got_new = True
+                except queue.Empty:
+                    pass
+                if got_new:
+                    last_output_time = time.monotonic()
+                    stall_notified = False
+
+                # 进程结束？
+                rc = proc.poll()
+                if rc is not None:
+                    # 等 reader 线程读完剩余
+                    t_out.join(timeout=1.0)
+                    t_err.join(timeout=1.0)
+                    try:
+                        while True:
+                            stdout_parts.append(stdout_q.get_nowait())
+                    except queue.Empty:
+                        pass
+                    try:
+                        while True:
+                            stderr_parts.append(stderr_q.get_nowait())
+                    except queue.Empty:
+                        pass
+                    stdout = "".join(stdout_parts)
+                    stderr = "".join(stderr_parts)
+                    with self._lock:
+                        task = self._tasks.get(task_id)
+                        if task is None or task.status != "running":
+                            return
+                        task.stdout = stdout[: self._result_stdout_cap]
+                        task.stderr = stderr[: self._result_stdout_cap]
+                        task.exit_code = rc
+                        task.ended_at = datetime.now()
+                        task.status = "completed" if rc == 0 else "failed"
+                        self._push_notification_locked(task)
+                    return
+
+                now = time.monotonic()
+                # 总 timeout 到？
+                if now >= deadline:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                    with self._lock:
+                        task = self._tasks.get(task_id)
+                        if task is None or task.status != "running":
+                            return
+                        task.stdout = "".join(stdout_parts)[: self._result_stdout_cap]
+                        task.stderr = "".join(stderr_parts)[: self._result_stdout_cap]
+                        task.exit_code = -1
+                        task.ended_at = datetime.now()
+                        task.status = "failed"
+                        self._push_notification_locked(task)
+                    return
+
+                # 停滞检测
+                if (
+                    not stall_notified
+                    and (now - last_output_time) >= stall_timeout
+                ):
+                    with self._lock:
+                        task = self._tasks.get(task_id)
+                        if task is not None and task.status == "running":
+                            # push 停滞通知（task 状态不变）
+                            self._notifications.append({
+                                "task_id": task_id,
+                                "status": "running",
+                                "stall": True,
+                                "stall_seconds": stall_timeout,
+                                "stdout": "".join(stdout_parts)[
+                                    : self._notification_stdout_cap
+                                ],
+                                "stderr": "".join(stderr_parts)[
+                                    : self._notification_stdout_cap
+                                ],
+                                "command": task.command,
+                                "hint": (
+                                    f"任务已 {stall_timeout:.0f}s 无 stdout 输出，"
+                                    "可能卡在交互提示或死锁。可用 bg_stop 终止。"
+                                ),
+                            })
+                    stall_notified = True
+                    logger.info(
+                        "bg task %s stall detected (%.1fs 无输出)",
+                        task_id, stall_timeout,
+                    )
+
+                time.sleep(0.5)  # 轮询间隔
+        except Exception as e:
+            logger.warning("bg task %s stall watcher 异常: %s", task_id, e)
+            try:
+                proc.kill()
+            except Exception:
+                pass
             with self._lock:
                 task = self._tasks.get(task_id)
                 if task is None or task.status != "running":

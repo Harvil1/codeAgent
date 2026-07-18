@@ -234,6 +234,12 @@ class AIAgent:
         # event["type"]: "content" | "tool_call_start" | "done"
         self._stream_callback = stream_callback
 
+        # === P0-3 NEW: max_tokens 升级机制 ===
+        # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
+        # 整个会话复用；升级是幂等的（最多升一次）。
+        from agent.llm_retry import MaxTokensEscalator
+        self._max_tokens_escalator = MaxTokensEscalator()
+
     def cleanup(self):
         """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
 
@@ -409,6 +415,67 @@ class AIAgent:
                     arguments=buf["arguments"] or "{}",
                 ),
             ))
+
+        # === P0-3 NEW: max_tokens 升级重试 ===
+        # finish_reason=length 表示输出被 max_tokens 截断。
+        # 策略：先升级 max_tokens 重试（非流式，避免重复发 partial content），
+        # 升级后仍 length 才放弃，让主循环处理（如续写提示）。
+        if (
+            finish_reason == "length"
+            and self._max_tokens_escalator is not None
+            and not self._max_tokens_escalator.has_escalated
+        ):
+            new_max = self._max_tokens_escalator.escalate()
+            logger.info(
+                "max_tokens 截断（finish_reason=length），升级到 %d 重试", new_max
+            )
+            try:
+                from agent.llm_retry import call_with_retry
+                retried = call_with_retry(
+                    self.llm_client,
+                    messages,
+                    tools=tools,
+                    fallback_llm_client=self.fallback_llm_client,
+                    max_tokens=new_max,
+                )
+                retried_choice = retried.choices[0]
+                retried_msg = retried_choice.message
+                # 用重试结果覆盖（重试是完整响应）
+                finish_reason = (
+                    getattr(retried_choice, "finish_reason", None) or "stop"
+                )
+                full_content = retried_msg.content or ""
+                if getattr(retried_msg, "tool_calls", None):
+                    tool_calls_out = list(retried_msg.tool_calls)
+                # 重试结果回放给 callback（同 fallback 路径模式）
+                if retried_msg.content and self._stream_callback is not None:
+                    try:
+                        self._stream_callback({
+                            "type": "content",
+                            "delta": retried_msg.content,
+                            "accumulated": retried_msg.content,
+                        })
+                    except Exception:
+                        pass
+                # 更新 usage
+                if getattr(retried, "usage", None) is not None:
+                    u = retried.usage
+                    final_usage = {
+                        "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                        "completion_tokens": getattr(u, "completion_tokens", 0),
+                        "cache_read": (
+                            getattr(u, "cache_read_input_tokens", 0)
+                            or getattr(u, "prompt_cache_hit_tokens", 0)
+                        ),
+                        "cache_creation": (
+                            getattr(u, "cache_creation_input_tokens", 0)
+                            or getattr(u, "prompt_cache_miss_tokens", 0)
+                        ),
+                    }
+            except Exception as esc_err:
+                logger.warning(
+                    "max_tokens 升级重试失败（沿用截断响应）: %s", esc_err
+                )
 
         # 通知 done
         if self._stream_callback is not None:
@@ -772,13 +839,37 @@ class AIAgent:
                         tools=tool_schemas if tool_schemas else None,
                     )
                 else:
-                    from agent.llm_retry import call_with_retry
+                    from agent.llm_retry import call_with_retry, detect_length_finish
                     response = call_with_retry(
                         self.llm_client,
                         messages,
                         tools=tool_schemas if tool_schemas else None,
                         fallback_llm_client=self.fallback_llm_client,
                     )
+                    # === P0-3: 非流式路径也支持 max_tokens 升级 ===
+                    # finish_reason=length 时升级重试一次（与流式路径行为对齐）
+                    if (
+                        detect_length_finish(response)
+                        and self._max_tokens_escalator is not None
+                        and not self._max_tokens_escalator.has_escalated
+                    ):
+                        new_max = self._max_tokens_escalator.escalate()
+                        logger.info(
+                            "max_tokens 截断（非流式），升级到 %d 重试", new_max
+                        )
+                        try:
+                            response = call_with_retry(
+                                self.llm_client,
+                                messages,
+                                tools=tool_schemas if tool_schemas else None,
+                                fallback_llm_client=self.fallback_llm_client,
+                                max_tokens=new_max,
+                            )
+                        except Exception as esc_err:
+                            logger.warning(
+                                "max_tokens 升级重试失败（沿用截断响应）: %s",
+                                esc_err,
+                            )
             except Exception as e:
                 # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
                 err_str = str(e).lower()
