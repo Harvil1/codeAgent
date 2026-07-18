@@ -524,6 +524,37 @@ class AIAgent:
                     self.invalidate_system_prompt()
                     system_prompt = self._get_system_prompt()
                     self._compression_attempts += 1
+                    # === PostCompressReanchor NEW: 重新锚定当前工作上下文 ===
+                    # 压缩后 LLM 看到的是"刚醒来"状态，可能丢失：
+                    # - 当前 todo 进度（在内存但不在 conversation_history）
+                    # - plan_mode 状态（虽然有每轮 reminder 但压缩打断节奏）
+                    # 注入一条临时消息到当轮 messages 末尾，不进 conversation_history。
+                    brief_parts = [
+                        "你刚经历了上下文压缩，历史已被总结。"
+                        "身份和 system prompt 不变。"
+                    ]
+                    if self.todo_manager:
+                        try:
+                            todo_brief = self.todo_manager.format_for_reminder()
+                            if todo_brief:
+                                brief_parts.append(f"当前任务清单：\n{todo_brief}")
+                        except Exception as e:
+                            logger.warning("读取 todo 摘要失败（brief 跳过 todo 行）: %s", e)
+                    mode_text = (
+                        "计划模式（只能调研，不能修改）"
+                        if self.plan_mode
+                        else "正常执行模式"
+                    )
+                    brief_parts.append(f"当前模式：{mode_text}")
+                    brief_parts.append("请继续之前的工作。")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "<post_compress_brief>\n"
+                            + "\n".join(brief_parts)
+                            + "\n</post_compress_brief>"
+                        ),
+                    })
 
             # === PlanMode: plan_mode 下强制切到 plan 工具集（只读）===
             # 注意：必须在循环内每轮重算，让 plan_mode 中途切换（如审批通过）
