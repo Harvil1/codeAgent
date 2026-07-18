@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "post_tool_use": [
+      {
+        "name": "secrets-redactor",
+        "command": ["python", "hooks/secrets_redactor.py"],
+        "timeout": 5.0
+      },
+      {
+        "name": "audit-log",
+        "command": ["python", "hooks/audit_log.py"],
+        "timeout": 2.0,
+        "env": {
+          "AUDIT_LOG_PATH": "~/.agent/.audit.log"
+        }
+      }
+    ],
+    "user_prompt_submit": [
+      {
+        "name": "audit-log",
+        "command": ["python", "hooks/audit_log.py"],
+        "timeout": 2.0,
+        "env": {
+          "AUDIT_LOG_PATH": "~/.agent/.audit.log"
+        }
+      }
+    ],
+    "pre_tool_use": [
+      {
+        "name": "python-syntax-check",
+        "command": ["python", "hooks/python_syntax_check.py"],
+        "timeout": 3.0
+      },
+      {
+        "name": "block-large-writes",
+        "command": ["python", "hooks/block_large_writes.py"],
+        "timeout": 2.0,
+        "env": {
+          "MAX_WRITE_BYTES": "5242880"
+        }
+      }
+    ]
+  }
+}
