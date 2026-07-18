@@ -473,12 +473,29 @@ def _handle_browser_vision(args: dict, **kwargs) -> str:
     if session is None:
         return _err("browser_session 未初始化", "browser_unavailable")
     agent = kwargs.get("agent_ref")
-    client = getattr(agent, "_browser_vision_client", None) if agent else None
+    # 三层回退（Task 3）：_vision_client → _browser_vision_client → llm_client
+    client = None
+    model_name = None
+    if agent:
+        client = getattr(agent, "_vision_client", None)
+        if client is not None:
+            model_name = getattr(client, "model", None)
+        if client is None:
+            client = getattr(agent, "_browser_vision_client", None)
+            if client is not None:
+                model_name = getattr(client, "model", None)
+        if client is None:
+            client = getattr(agent, "llm_client", None)
+            if client is not None:
+                cfg = getattr(agent, "config", {}) or {}
+                model_name = cfg.get("model", {}).get("name")
     if client is None:
         return _err(
-            "vision LLM client 未配置（agent._browser_vision_client 为 None）",
+            "vision LLM client 未配置（_vision_client / _browser_vision_client / llm_client 都为 None）",
             "vision_unavailable",
         )
+    if not model_name:
+        model_name = "vision-model"
     try:
         page = session.get_page()
         png_bytes = page.screenshot()
@@ -486,7 +503,7 @@ def _handle_browser_vision(args: dict, **kwargs) -> str:
         b64 = base64.b64encode(png_bytes).decode("ascii")
         # OpenAI 兼容 vision API
         response = client.chat.completions.create(
-            model=kwargs.get("config", {}).get("model", {}).get("name", "deepseek-chat"),
+            model=model_name,
             messages=[
                 {
                     "role": "user",

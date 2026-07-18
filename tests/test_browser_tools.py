@@ -419,12 +419,15 @@ def test_vision_success():
     fake_session.get_page.return_value = fake_page
 
     fake_agent = _make_agent_with_session(fake_session)
+    # Task 3：显式置 _vision_client=None，确保走 _browser_vision_client 路径（兼容旧测试意图）
+    fake_agent._vision_client = None
     # mock LLM client（agent 持有的 openai client）
     fake_client = MagicMock()
     fake_response = MagicMock()
     fake_response.choices = [MagicMock(message=MagicMock(content="A simple page"))]
     fake_client.chat.completions.create.return_value = fake_response
     fake_agent._browser_vision_client = fake_client  # 注入
+    fake_agent.llm_client = None  # 防止 MagicMock 自动生成
 
     result = _handle_browser_vision(
         {"query": "describe"},
@@ -443,7 +446,10 @@ def test_vision_no_api_key():
     fake_session.get_page.return_value = fake_page
 
     fake_agent = _make_agent_with_session(fake_session)
+    # Task 3：三层 client 全部 None
+    fake_agent._vision_client = None
     fake_agent._browser_vision_client = None
+    fake_agent.llm_client = None
 
     result = _handle_browser_vision(
         {"query": "describe"}, agent_ref=fake_agent,
@@ -504,3 +510,87 @@ def test_cdp_browser_unavailable():
     )
     data = json.loads(result)
     assert data["error_type"] == "browser_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (image feature): browser_vision 三层回退
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_page():
+    """mock Playwright page，screenshot 返 bytes。"""
+    page = MagicMock()
+    page.screenshot.return_value = b"fake-png-bytes"
+    return page
+
+
+def test_browser_vision_falls_back_to_vision_client(fake_page, monkeypatch):
+    """browser_vision 优先用 _vision_client（Task 3 三层回退）。"""
+    import json
+    from unittest.mock import MagicMock
+    from tools.browser_tool import _handle_browser_vision
+
+    # 构造 mock agent：_vision_client 有，_browser_vision_client 无，llm_client 有
+    vision_client = MagicMock()
+    msg = MagicMock()
+    msg.message.content = "from _vision_client"
+    resp = MagicMock()
+    resp.choices = [msg]
+    vision_client.chat.completions.create.return_value = resp
+
+    main_client = MagicMock()
+    main_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="from llm_client"))]
+    )
+
+    fake_agent = MagicMock()
+    fake_agent._vision_client = vision_client  # 优先
+    fake_agent._browser_vision_client = "should-not-be-used"  # MagicMock 自动有，显式标记
+    fake_agent.llm_client = main_client  # 不应被调用
+    fake_agent.config = {"model": {"name": "test"}}
+
+    # mock BrowserSession：_get_session 从 agent_ref.browser_session 取
+    fake_session = MagicMock()
+    fake_session.get_page.return_value = fake_page
+    fake_agent.browser_session = fake_session
+
+    result = _handle_browser_vision(
+        {"query": "describe"},
+        agent_ref=fake_agent,
+    )
+    data = json.loads(result)
+    assert data.get("description") == "from _vision_client"
+    # 主 client 不应被调用
+    main_client.chat.completions.create.assert_not_called()
+
+
+def test_browser_vision_falls_back_to_llm_client(fake_page):
+    """三层都不存在 _vision_client 和 _browser_vision_client 时用 llm_client。"""
+    import json
+    from unittest.mock import MagicMock
+    from tools.browser_tool import _handle_browser_vision
+
+    main_client = MagicMock()
+    msg = MagicMock()
+    msg.message.content = "from llm_client"
+    resp = MagicMock()
+    resp.choices = [msg]
+    main_client.chat.completions.create.return_value = resp
+
+    fake_agent = MagicMock()
+    fake_agent._vision_client = None
+    # 让 getattr(fake_agent, "_browser_vision_client", None) 返回 None
+    fake_agent._browser_vision_client = None
+    fake_agent.llm_client = main_client
+    fake_agent.config = {"model": {"name": "test-model"}}
+    fake_session = MagicMock()
+    fake_session.get_page.return_value = fake_page
+    fake_agent.browser_session = fake_session
+
+    result = _handle_browser_vision(
+        {"query": "describe"},
+        agent_ref=fake_agent,
+    )
+    data = json.loads(result)
+    assert data.get("description") == "from llm_client"
