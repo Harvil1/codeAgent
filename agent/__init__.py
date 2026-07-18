@@ -414,7 +414,9 @@ class AIAgent:
         # 3. 获取工具定义（过滤启用的工具集 + check_fn）
         # 延迟导入避免循环依赖
         from model_tools import get_tool_definitions, handle_function_call
-        tool_schemas = get_tool_definitions(self.enabled_toolsets)
+        # === PlanMode: plan_mode 下强制切到 plan 工具集（只读）===
+        effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
+        tool_schemas = get_tool_definitions(effective_toolsets)
 
         # 4. 主循环
         api_call_count = 0

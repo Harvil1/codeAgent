@@ -149,3 +149,59 @@ def test_agent_accepts_plan_approval_callback():
 
     agent = _make_minimal_agent(plan_approval_callback=cb)
     assert agent.plan_approval_callback is cb
+
+
+# ============================================================================
+# Task 4: 工具集切换
+# ============================================================================
+
+def test_plan_mode_switches_toolset_to_plan():
+    """plan_mode=True 时下一轮 run_conversation 用 ["plan"] 工具集。"""
+    agent = _make_minimal_agent()
+    agent.plan_mode = True
+
+    captured_toolsets = []
+    original_get = None
+
+    def fake_get_tool_definitions(enabled_toolsets, *args, **kwargs):
+        captured_toolsets.append(list(enabled_toolsets))
+        return []  # 空 schema，LLM 没工具可调 → 直接出最终响应
+
+    with patch("model_tools.get_tool_definitions", side_effect=fake_get_tool_definitions):
+        with patch("agent.llm_retry.call_with_retry") as mock_llm:
+            mock_resp = MagicMock()
+            mock_resp.choices = [MagicMock()]
+            mock_resp.choices[0].message.content = "done"
+            mock_resp.choices[0].message.tool_calls = None
+            mock_llm.return_value = mock_resp
+
+            agent.run_conversation("test")
+
+    assert captured_toolsets, "get_tool_definitions 未被调用"
+    assert captured_toolsets[0] == ["plan"], (
+        f"plan_mode=True 时应传 ['plan']，实际 {captured_toolsets[0]}"
+    )
+
+
+def test_normal_mode_uses_enabled_toolsets():
+    """plan_mode=False 时用 self.enabled_toolsets。"""
+    agent = _make_minimal_agent(enabled_toolsets=["core", "browser"])
+    assert agent.plan_mode is False
+
+    captured_toolsets = []
+
+    def fake_get_tool_definitions(enabled_toolsets, *args, **kwargs):
+        captured_toolsets.append(list(enabled_toolsets))
+        return []
+
+    with patch("model_tools.get_tool_definitions", side_effect=fake_get_tool_definitions):
+        with patch("agent.llm_retry.call_with_retry") as mock_llm:
+            mock_resp = MagicMock()
+            mock_resp.choices = [MagicMock()]
+            mock_resp.choices[0].message.content = "done"
+            mock_resp.choices[0].message.tool_calls = None
+            mock_llm.return_value = mock_resp
+
+            agent.run_conversation("test")
+
+    assert captured_toolsets[0] == ["core", "browser"]
