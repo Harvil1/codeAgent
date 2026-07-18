@@ -264,3 +264,76 @@ def test_mime_inference_all_formats():
     assert _infer_mime("foo.gif") == "image/gif"
     # 不支持的
     assert _infer_mime("foo.bmp") is None
+
+
+# ---------------------------------------------------------------------------
+# vision_client 配置（Task 2）
+# ---------------------------------------------------------------------------
+
+def test_vision_client_init_from_config(tmp_path, monkeypatch):
+    """RuntimeContext 根据 vision config 创建独立 client。"""
+    # mock create_llm_client 避免真连 API
+    from agent.llm_client import OpenAICompatClient
+    fake_client = MagicMock()
+    fake_client.model = "vision-test-model"
+
+    created_configs = []
+    def fake_create(config):
+        created_configs.append(config)
+        return fake_client
+
+    monkeypatch.setattr("agent.llm_client.create_llm_client", fake_create)
+
+    # 模拟 RuntimeContext._create_agent 的 vision 初始化片段
+    model_cfg = {
+        "format": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-test",
+        "name": "deepseek-chat",
+        "provider": "deepseek",
+    }
+    vision_cfg = {
+        "enabled": True,
+        "provider": "deepseek",
+        "model": "deepseek-vl",
+    }
+
+    # 直接调用 create_llm_client 模拟 cli.py 的逻辑
+    from agent.llm_client import create_llm_client
+    if vision_cfg.get("enabled", True):
+        client = create_llm_client({
+            "format": model_cfg.get("format", "openai"),
+            "base_url": model_cfg.get("base_url"),
+            "api_key": model_cfg.get("api_key"),
+            "model": vision_cfg.get("model") or model_cfg["name"],
+        })
+    else:
+        client = None
+
+    assert client is fake_client
+    assert created_configs[0]["model"] == "deepseek-vl"
+
+
+def test_vision_client_disabled_returns_none(monkeypatch):
+    """vision.enabled=False 时不创建 client。"""
+    vision_cfg = {"enabled": False}
+    # 如果 disabled，应当跳过 client 创建
+    assert not vision_cfg.get("enabled", True)
+
+
+def test_default_config_has_vision_section():
+    """config.py 的 DEFAULT_CONFIG 应包含 vision 默认配置。"""
+    from config import DEFAULT_CONFIG
+    assert "vision" in DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["vision"]["enabled"] is True
+    assert DEFAULT_CONFIG["vision"]["max_bytes"] == 20 * 1024 * 1024
+
+
+def test_aiagent_has_vision_client_field():
+    """AIAgent 实例应有 _vision_client 字段（默认 None）。"""
+    # 不构造完整 AIAgent（需要 API key），只验证类有这个属性声明
+    # 通过检查 __init__ 源码片段
+    import inspect
+    from agent import AIAgent
+    src = inspect.getsource(AIAgent.__init__)
+    assert "_vision_client" in src

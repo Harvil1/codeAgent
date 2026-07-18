@@ -47,6 +47,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 未配置（None）时 fallback 到主 model 配置
     "aux_model": None,
 
+    # B1 NEW: vision/image 工具配置（image_analyze / image_ocr / browser_vision）
+    "vision": {
+        "enabled": True,
+        "provider": "",          # 空字符串 = 用主 provider
+        "model": "",             # 空字符串 = 用主 model（假设支持 vision）
+        "max_bytes": 20 * 1024 * 1024,  # 20 MB
+    },
+
     # Agent 行为
     "agent": {
         "max_iterations": 90,

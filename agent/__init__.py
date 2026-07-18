@@ -177,6 +177,10 @@ class AIAgent:
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
 
+        # === B1 NEW: vision client（image_analyze / image_ocr / browser_vision 共用） ===
+        # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。
+        self._vision_client = None
+
         # === batch1-T2 NEW: LLM 用量统计（prompt cache 记账）===
         self._llm_usage_stats = {
             "total_calls": 0,

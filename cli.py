@@ -303,6 +303,27 @@ class RuntimeContext:
             self.memory_manager._llm_client = agent.llm_client
             self.memory_manager._llm_model = agent.model
 
+        # === B1 NEW: 初始化 vision_client（image_analyze / image_ocr / browser_vision 共用） ===
+        vision_cfg = self.config.get("vision", {}) or {}
+        if vision_cfg.get("enabled", True):
+            try:
+                from agent.llm_client import create_llm_client
+                vision_provider = vision_cfg.get("provider") or ""
+                vision_model = vision_cfg.get("model") or ""
+                # 如果 vision.model 为空，不创建独立 client（让工具回退到 llm_client）
+                if vision_model:
+                    agent._vision_client = create_llm_client({
+                        "format": model_cfg.get("format", "openai"),
+                        "base_url": model_cfg.get("base_url"),
+                        "api_key": api_key,
+                        "model": vision_model,
+                    })
+                    logger.info("vision_client 已初始化（model=%s）", vision_model)
+                # 否则 agent._vision_client 保持 None，工具回退 llm_client
+            except Exception as e:
+                logger.warning("vision_client 初始化失败（用主 client 回退）: %s", e)
+                agent._vision_client = None
+
         return agent
 
     def _maybe_trigger_curator(self):
