@@ -216,6 +216,8 @@ uv sync                                 # 同步已声明依赖
 | 团队 request-response 协议 | `agent/team/bus.py:MessageBus.send_request`/`send_response`/`find_response`（response 强制配 request_id） |
 | session fork | `agent/session_store.py:SessionStore.fork_session`（消息全复制到新 id） |
 | MCP 多传输 + OAuth | `agent/mcp_client.py:MCPTransport` 抽象 + `StdioTransport`/`HTTPTransport`（含 OAuth refresh） |
+| 记忆三级粒度（L0/L1/L2） | `agent/memory_store.py:MemoryEntry.summary`（L1 摘要层）；索引行追加 summary，retriever 拿到的 index 自动含 L1 |
+| 任务级反思引擎 | `agent/reflection.py:apply_reflection`（aux_llm 从轨迹提炼 user/feedback/project 三类经验，自动 memory_save）；入口 `agent/__init__.py:AIAgent._trigger_reflection_async`（run_conversation 末尾异步触发） |
 
 ## 已知约束（设计如此，不是 bug）
 

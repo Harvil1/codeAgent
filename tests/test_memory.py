@@ -234,3 +234,129 @@ def test_memory_tool_save_invalid_type(tmp_path: Path):
     parsed = _run("save", store, name="t", description="d",
                   type="invalid_kind", body="")
     assert parsed["success"] is False
+
+
+# ============ CCALS-P0-1: L1 摘要层（三级粒度）测试 ============
+
+def test_save_with_summary_persists_to_frontmatter(tmp_path: Path):
+    """save 传 summary 时写入 frontmatter（L1 摘要层）。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="用户偏好简洁回复",
+        description="用尽量少的字数回答",
+        type="user",
+        body="用户多次要求简短直接回复，不喜欢长篇大论..." * 5,
+        summary="用户偏好≤3 句话的简洁回复，避免长篇解释",
+    )
+    entry = store.get(mid)
+    assert entry.summary == "用户偏好≤3 句话的简洁回复，避免长篇解释"
+
+
+def test_save_without_summary_defaults_empty(tmp_path: Path):
+    """不传 summary 时默认空串（向后兼容）。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(name="x", description="y", type="other", body="z")
+    entry = store.get(mid)
+    assert entry.summary == ""
+
+
+def test_legacy_file_without_summary_loads_as_empty(tmp_path: Path):
+    """老格式记忆文件（frontmatter 无 summary 字段）兼容读为空。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    # 手工构造一个无 summary 的老文件
+    legacy_file = tmp_path / ".memory" / "legacy.md"
+    legacy_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_file.write_text(
+        "---\n"
+        "name: 老记忆\ndescription: 老格式无 summary\ntype: user\n"
+        "created_at: 2026-01-01T00:00:00\nupdated_at: 2026-01-01T00:00:00\n"
+        "---\n\n老 body 内容",
+        encoding="utf-8",
+    )
+    # 触发一次扫描
+    entries = store.list_all()
+    legacy = [e for e in entries if e.id == "legacy"][0]
+    assert legacy.summary == ""
+    assert legacy.body == "老 body 内容"
+
+
+def test_update_summary(tmp_path: Path):
+    """update 能修改 summary 字段。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="x", description="y", type="user", body="z",
+        summary="旧摘要",
+    )
+    store.update(mid, summary="新摘要")
+    entry = store.get(mid)
+    assert entry.summary == "新摘要"
+
+
+def test_snapshot_for_prompt_includes_summary(tmp_path: Path):
+    """MEMORY.md 索引包含 summary（让 retriever 拿到的 index 自动含 L1）。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    store.save(
+        name="用户偏好简洁", description="简短回复",
+        type="user", body="...",
+        summary="用户偏好≤3 句话的简洁回复",
+    )
+    snapshot = store.snapshot_for_prompt()
+    # 索引行里应该能看到 summary
+    assert "用户偏好≤3 句话的简洁回复" in snapshot
+
+
+def test_snapshot_for_prompt_legacy_without_summary_still_works(tmp_path: Path):
+    """老文件无 summary 时索引不崩（snapshot 仍可读）。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    legacy_file = tmp_path / ".memory" / "legacy.md"
+    legacy_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_file.write_text(
+        "---\nname: 老\ndescription: 老描述\ntype: user\n"
+        "created_at: 2026-01-01T00:00:00\nupdated_at: 2026-01-01T00:00:00\n---\n\nbody",
+        encoding="utf-8",
+    )
+    # legacy 文件在 store init 后建，需手工重建索引
+    store.build_index_text()
+    snapshot = store.snapshot_for_prompt()
+    assert "老描述" in snapshot
+
+
+def test_memory_tool_save_with_summary(tmp_path: Path):
+    """memory_save 工具支持 summary 参数。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    parsed = _run(
+        "save", store,
+        name="t", description="d", type="user", body="b",
+        summary="L1 摘要内容",
+    )
+    assert parsed["success"] is True
+    entry = store.get(parsed["id"])
+    assert entry.summary == "L1 摘要内容"
+
+
+def test_memory_tool_load_returns_summary(tmp_path: Path):
+    """memory load 工具返回 summary 字段。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    mid = store.save(
+        name="t", description="d", type="user", body="b",
+        summary="测试摘要",
+    )
+    parsed = _run("load", store, id=mid)
+    assert parsed["success"] is True
+    assert parsed["summary"] == "测试摘要"
+
+
+def test_memory_tool_list_returns_summary(tmp_path: Path):
+    """memory list 工具返回每条的 summary。"""
+    store = MemoryStore(harvil_home=tmp_path)
+    store.save(
+        name="t1", description="d1", type="user", body="b",
+        summary="摘要 1",
+    )
+    store.save(name="t2", description="d2", type="user", body="b")  # 无 summary
+    parsed = _run("list", store)
+    assert parsed["success"] is True
+    summaries = [m.get("summary", "MISSING") for m in parsed["memories"]]
+    assert "摘要 1" in summaries
+    # 无 summary 的也应能返回（值为空串而不是缺字段）
+    assert "" in summaries

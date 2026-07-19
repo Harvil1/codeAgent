@@ -26,7 +26,12 @@ MEMORY_SCHEMA = {
         "  - delete: 软删除（必需 id）\n"
         "  - load: 读完整 body（必需 id）\n"
         "  - list: 列出所有记忆\n\n"
-        "type 可选值: user / feedback / project / reference / other"
+        "type 可选值: user / feedback / project / reference / other\n\n"
+        "CCALS 三级粒度：\n"
+        "  - name: L0 标题层（索引定位用）\n"
+        "  - description: L0.5 一句话钩子（索引行展示）\n"
+        "  - summary: L1 摘要层（80-100 字符，判断相关性用，避免读全文）\n"
+        "  - body: L2 全文层（完整内容，load 时返回）"
     ),
     "parameters": {
         "type": "object",
@@ -38,6 +43,10 @@ MEMORY_SCHEMA = {
             "id": {"type": "string", "description": "update/delete/load 时必需"},
             "name": {"type": "string", "description": "save 时必需；update 可选"},
             "description": {"type": "string", "description": "save 时必需；update 可选"},
+            "summary": {
+                "type": "string",
+                "description": "L1 摘要层（80-100 字符）；save 可选，update 可选",
+            },
             "type": {
                 "type": "string",
                 "enum": ["user", "feedback", "project", "reference", "other"],
@@ -66,6 +75,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
                 description=args.get("description", ""),
                 type=args.get("type", "other"),
                 body=args.get("body", ""),
+                summary=args.get("summary", ""),
             )
             return json.dumps({
                 "success": True, "action": "save", "id": mid,
@@ -80,12 +90,13 @@ def _handle_memory(args: dict, **kwargs) -> str:
                 description=args.get("description"),
                 type=args.get("type"),
                 body=args.get("body"),
+                summary=args.get("summary"),
             )
             return json.dumps({
                 "success": True, "action": "update", "id": mid,
                 "entry": {
                     "name": entry.name, "description": entry.description,
-                    "type": entry.type,
+                    "type": entry.type, "summary": entry.summary,
                 },
             }, ensure_ascii=False)
 
@@ -112,6 +123,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
                 "success": True, "id": mid,
                 "name": entry.name, "description": entry.description,
                 "type": entry.type, "body": entry.body,
+                "summary": entry.summary,  # CCALS-P0-1
                 "created_at": entry.created_at.isoformat(timespec="seconds"),
                 "updated_at": entry.updated_at.isoformat(timespec="seconds"),
             }, ensure_ascii=False)
@@ -119,7 +131,10 @@ def _handle_memory(args: dict, **kwargs) -> str:
         if action == "list":
             entries = store.list_all()
             summaries = [
-                {"id": e.id, "name": e.name, "description": e.description, "type": e.type}
+                {
+                    "id": e.id, "name": e.name, "description": e.description,
+                    "type": e.type, "summary": e.summary,  # CCALS-P0-1
+                }
                 for e in entries
             ]
             return json.dumps({

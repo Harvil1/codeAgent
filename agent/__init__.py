@@ -240,6 +240,13 @@ class AIAgent:
         from agent.llm_retry import MaxTokensEscalator
         self._max_tokens_escalator = MaxTokensEscalator()
 
+        # === CCALS-P0-2 NEW: 任务级反思引擎 ===
+        # 每次任务正常结束时异步触发：用 aux_llm 从轨迹提炼 3 类经验写入 memory_store。
+        # aux_llm 不可用时降级跳过；config["reflection"]["enabled"]=False 可关闭。
+        self._reflection_enabled = (
+            (config or {}).get("reflection", {}).get("enabled", True)
+        )
+
     def cleanup(self):
         """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
 
@@ -1076,6 +1083,13 @@ class AIAgent:
                         })
                         continue  # 跳回 while，不 return
 
+                # === CCALS-P0-2 NEW: 任务级反思（异步，不阻塞返回）===
+                if self._reflection_enabled:
+                    try:
+                        self._trigger_reflection_async()
+                    except Exception as e:
+                        logger.warning("触发反思失败（不影响主流程）: %s", e)
+
                 return final_content
 
         # 循环结束（预算耗尽或中断）
@@ -1108,3 +1122,36 @@ class AIAgent:
             self.memory_manager.sync_all(user_message, assistant_message)
         except Exception as e:
             logger.debug("memory_manager.sync_all 失败: %s", e)
+
+    def _trigger_reflection_async(self) -> None:
+        """CCALS-P0-2: 异步触发任务级反思（不阻塞返回 final_content）。
+
+        策略：
+        - 启动 daemon thread 跑 apply_reflection
+        - aux_llm_router 优先用（便宜模型），fallback 到主 llm_client
+        - memory_store 不可用时 no-op
+        - 反思针对当前会话最近 N 条消息（含本轮用户消息+最终响应+中间过程）
+        """
+        import threading
+        # 拷贝引用（thread 启动后 conversation_history 可能继续变化）
+        store = self.memory_store
+        if store is None:
+            return
+        # 优先 aux_llm（便宜模型）
+        llm_for_reflection = self.aux_llm_router or self.llm_client
+        # 快照最近 20 条消息（避免 thread 启动后被改）
+        messages_snapshot = list(self.conversation_history[-20:])
+
+        def _bg():
+            try:
+                from agent.reflection import apply_reflection
+                apply_reflection(
+                    messages=messages_snapshot,
+                    memory_store=store,
+                    llm_client=llm_for_reflection,
+                )
+            except Exception as e:
+                logger.debug("反思后台任务异常: %s", e)
+
+        t = threading.Thread(target=_bg, daemon=True, name="reflection")
+        t.start()

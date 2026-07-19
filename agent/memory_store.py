@@ -38,6 +38,9 @@ class MemoryEntry:
     body: str
     created_at: datetime
     updated_at: datetime
+    # CCALS-P0-1: L1 摘要层（80-100 字符，比 description 更详细）
+    # 老文件无此字段时兼容读为空串
+    summary: str = ""
 
 
 def _generate_id() -> str:
@@ -103,6 +106,9 @@ class MemoryStore:
             "created_at": entry.created_at.isoformat(timespec="seconds"),
             "updated_at": entry.updated_at.isoformat(timespec="seconds"),
         }
+        # CCALS-P0-1: summary 非空时才写入 frontmatter（避免老格式文件多出空字段）
+        if entry.summary:
+            meta["summary"] = entry.summary
         content = _format_frontmatter(meta) + entry.body
         path = self._memory_dir / f"{entry.id}.md"
         atomic_write_text(path, content)
@@ -122,14 +128,25 @@ class MemoryStore:
                 logger.warning("memory SQLite 双写失败 %s: %s", entry.id, e)
 
     def _rebuild_index(self) -> None:
-        """扫描 .memory/ 重建 MEMORY.md。"""
+        """扫描 .memory/ 重建 MEMORY.md。
+
+        CCALS-P0-1: 索引行包含 summary（若有），让 retriever 拿到的
+        index 自动含 L1 摘要层，无需读全文就能判断更细的相关性。
+        """
         lines = ["# Memory Index", ""]
         lines.append("自动生成，请勿手动编辑。每行：`- [name](.memory/{id}.md) — description`")
         lines.append("")
         for entry in self._scan_all_entries():
-            lines.append(
-                f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
-            )
+            if entry.summary:
+                # 带 L1 摘要的行：description 后跟 summary
+                lines.append(
+                    f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
+                    f" | 摘要：{entry.summary}"
+                )
+            else:
+                lines.append(
+                    f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
+                )
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
 
     def _scan_all_entries(self) -> List[MemoryEntry]:
@@ -148,8 +165,9 @@ class MemoryStore:
                     description=meta.get("description", ""),
                     type=meta.get("type", "other"),
                     body=body,
-                    created_at=datetime.fromisoformat(meta.get("created_at", _now_iso())),
-                    updated_at=datetime.fromisoformat(meta.get("updated_at", _now_iso())),
+                    created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
+                    updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
+                    summary=meta.get("summary", "") or "",  # CCALS-P0-1: 兼容老文件
                 )
                 entries.append(entry)
             except (ValueError, TypeError) as e:
@@ -197,8 +215,9 @@ class MemoryStore:
             description=meta.get("description", ""),
             type=meta.get("type", "other"),
             body=body,
-            created_at=datetime.fromisoformat(meta.get("created_at", _now_iso())),
-            updated_at=datetime.fromisoformat(meta.get("updated_at", _now_iso())),
+            created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
+            updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
+            summary=meta.get("summary", "") or "",  # CCALS-P0-1
         )
 
     def list_all(self) -> List[MemoryEntry]:
@@ -237,6 +256,7 @@ class MemoryStore:
         description: str,
         type: str,
         body: str = "",
+        summary: str = "",  # CCALS-P0-1: L1 摘要层
     ) -> str:
         """创建新记忆。返回 memory_id。"""
         if not name or not description:
@@ -248,7 +268,7 @@ class MemoryStore:
             mid = _generate_id()
             entry = MemoryEntry(
                 id=mid, name=name, description=description,
-                type=type, body=body,
+                type=type, body=body, summary=summary,
                 created_at=now, updated_at=now,
             )
             self._write_entry_file(entry)
@@ -263,6 +283,7 @@ class MemoryStore:
         description: Optional[str] = None,
         type: Optional[str] = None,
         body: Optional[str] = None,
+        summary: Optional[str] = None,  # CCALS-P0-1
     ) -> MemoryEntry:
         """更新字段。不存在的 id 抛 KeyError。"""
         if type is not None and type not in VALID_TYPES:
@@ -279,6 +300,8 @@ class MemoryStore:
                 entry.type = type
             if body is not None:
                 entry.body = body
+            if summary is not None:
+                entry.summary = summary
             entry.updated_at = datetime.now()
             self._write_entry_file(entry)
             self._rebuild_index()
