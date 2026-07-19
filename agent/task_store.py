@@ -62,12 +62,9 @@ class TaskStore:
         return self._dir / f"{task_id}.json"
 
     def _write(self, task_id: str, task: dict) -> None:
+        from agent.atomic_io import atomic_write_text
         f = self._task_file(task_id)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(
-            json.dumps(task, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(f, json.dumps(task, ensure_ascii=False, indent=2))
         # SQLite 双写（失败不阻塞主流程）
         if self._sqlite is not None:
             try:

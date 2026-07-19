@@ -22,6 +22,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from constants import config_path as _config_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -269,22 +271,13 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
 # 路径辅助
 # ---------------------------------------------------------------------------
 
-def get_agent_home() -> Path:
-    """获取 agent home 目录（支持 AGENT_HOME 环境变量）。"""
-    home_env = __import__("os").environ.get("AGENT_HOME")
-    if home_env:
-        return Path(home_env).expanduser()
-    return Path.home() / ".agent"
-
+# 注：路径函数（get_agent_home / config_path / env_file）已统一收敛到 constants.py，
+# 此处保留 config_path alias 仅为本模块内部调用便利（外部请直接 import constants）。
 
 def config_path() -> Path:
-    """配置文件路径。"""
-    return get_agent_home() / "config.yaml"
+    """配置文件路径（委托给 constants.config_path）。"""
+    return _config_path()
 
-
-def env_path() -> Path:
-    """.env 文件路径（只放密钥）。"""
-    return get_agent_home() / ".env"
 
 
 # ---------------------------------------------------------------------------

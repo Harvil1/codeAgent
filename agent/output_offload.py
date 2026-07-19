@@ -105,3 +105,28 @@ def _write_atomically(path: Path, content: str) -> None:
         tmp.write(content)
         tmp_path = Path(tmp.name)
     tmp_path.replace(path)  # 原子 rename
+
+
+def finalize_tool_output(
+    result_content: str,
+    tool_call_id,
+    agent_home,
+    config: dict | None = None,
+) -> str:
+    """工具 handler 通用收尾：超阈值内容走 offload（落盘 + 预览）。
+
+    - 若 ``tool_call_id`` 或 ``agent_home`` 缺失：原样返回（不 offload）
+    - 否则委托给 :func:`maybe_offload`，阈值/预览长度从 ``config["context"]`` 读取
+
+    所有工具 handler 在返回前调这个函数即可，避免每个 tool 模块各写一份。
+    """
+    if not tool_call_id or not agent_home:
+        return result_content
+    cfg = (config or {}).get("context", {})
+    return maybe_offload(
+        result_content,
+        tool_call_id=tool_call_id,
+        agent_home=Path(agent_home),
+        threshold=cfg.get("output_offload_threshold", DEFAULT_THRESHOLD),
+        preview_chars=cfg.get("output_offload_preview", DEFAULT_PREVIEW_CHARS),
+    )

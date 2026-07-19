@@ -53,23 +53,11 @@ class TeamCoordinator:
 
     def _save_registry(self, registry: dict) -> None:
         """写入 registry（不加锁——调用者负责持锁）。原子写。"""
-        import os
-        import tempfile
-        content = json.dumps(registry, ensure_ascii=False, indent=2)
-        # 写临时文件 + os.replace 原子替换
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self._registry_path.parent), suffix=".tmp",
+        from agent.atomic_io import atomic_write_text
+        atomic_write_text(
+            self._registry_path,
+            json.dumps(registry, ensure_ascii=False, indent=2),
         )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-            os.replace(tmp_path, str(self._registry_path))
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
 
     def _max_members(self) -> int:
         return self._config.get("team", {}).get("max_members", 10)

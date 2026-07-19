@@ -10,31 +10,9 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import safe_path
 from tools.registry import registry
-
-
-def _finalize_output(
-    result_content: str,
-    tool_call_id: Optional[str],
-    harvil_home,
-    config: Optional[dict],
-) -> str:
-    """超阈值内容走 offload（落盘 + 预览）。
-
-    Phase 1 Commit 7 后：原 ``use_new_pipeline`` 开关已移除，offload 始终启用。
-    若调用方需要关闭 offload，直接不传 ``tool_call_id`` 或 ``harvil_home`` 即可。
-    """
-    if not tool_call_id or not harvil_home:
-        return result_content
-    from agent.output_offload import maybe_offload
-    return maybe_offload(
-        result_content,
-        tool_call_id=tool_call_id,
-        agent_home=Path(harvil_home),
-        threshold=(config or {}).get("context", {}).get("output_offload_threshold", 30000),
-        preview_chars=(config or {}).get("context", {}).get("output_offload_preview", 2000),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,11 +154,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # 必须指定 encoding
-        mode = "a" if append else "w"
-        path.write_text(content if not append else content + "\n",
-                        encoding="utf-8") if mode == "w" else None
-
-        if mode == "a":
+        if append:
             with path.open("a", encoding="utf-8") as f:
                 f.write(content + "\n")
         else:
@@ -225,10 +199,35 @@ SEARCH_FILES_SCHEMA = {
                 "description": "最大匹配数（默认 50）",
                 "default": 50,
             },
+            "include_hidden": {
+                "type": "boolean",
+                "description": "是否搜索隐藏目录和依赖目录（.git/.venv/__pycache__/node_modules 等），默认 False",
+                "default": False,
+            },
         },
         "required": ["pattern"],
     },
 }
+
+# 默认排除的目录（依赖、缓存、版本控制——不是用户代码）
+_DEFAULT_EXCLUDED_DIRS = {
+    ".git", ".hg", ".svn",
+    ".venv", "venv", "env",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "node_modules", "bower_components",
+    ".idea", ".vscode",
+    "dist", "build", ".eggs",
+    ".codegraph",
+}
+
+
+def _is_in_excluded_dir(file_path: Path, search_root: Path) -> bool:
+    """文件是否落在 search_root 下的某个被排除目录里。"""
+    try:
+        rel = file_path.relative_to(search_root)
+    except ValueError:
+        return False
+    return any(part in _DEFAULT_EXCLUDED_DIRS for part in rel.parts)
 
 
 def _handle_search_files(args: dict, **kwargs) -> str:
@@ -236,6 +235,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     search_path = Path(args.get("path") or ".").expanduser()
     file_glob = args.get("glob") or "**/*"
     max_matches = int(args.get("max_matches", 50))
+    include_hidden = bool(args.get("include_hidden", False))
 
     if not pattern:
         return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
@@ -250,9 +250,14 @@ def _handle_search_files(args: dict, **kwargs) -> str:
 
     matches = []
     files_searched = 0
+    files_skipped = 0
     try:
         for file_path in search_path.glob(file_glob):
             if not file_path.is_file():
+                continue
+            # 默认跳过 .git/.venv/__pycache__/node_modules 等
+            if not include_hidden and _is_in_excluded_dir(file_path, search_path):
+                files_skipped += 1
                 continue
             # 跳过二进制/大文件
             if file_path.stat().st_size > 1_000_000:
@@ -275,6 +280,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
                             "matches": matches,
                             "truncated": True,
                             "files_searched": files_searched,
+                            "files_skipped_hidden": files_skipped,
                         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -283,6 +289,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
         "matches": matches,
         "match_count": len(matches),
         "files_searched": files_searched,
+        "files_skipped_hidden": files_skipped,
     }, ensure_ascii=False)
 
 

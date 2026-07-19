@@ -23,6 +23,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -329,7 +330,7 @@ class RuntimeContext:
             memory_manager=self.memory_manager,
             session_store=self.session_store,
             harvil_home=self.home,
-            on_tool_call=_on_tool_call,
+            on_tool_call=_make_tool_call_callback(self.config),
             config=self.config,
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
             bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
@@ -428,17 +429,7 @@ class RuntimeContext:
         # 显示最近几条消息让用户看到上下文（不显示 tool 消息，太碎）
         recent = [m for m in msgs[-6:] if (m.get("content") or "").strip()]
         if recent:
-            console.print(f"\n[cyan]最近 {len(recent)} 条历史消息：[/cyan]\n")
-            for m in recent:
-                role = m.get("role")
-                content = (m.get("content") or "").strip()
-                if len(content) > 300:
-                    content = content[:297] + "..."
-                if role == "user":
-                    console.print(f"[bold cyan]你:[/bold cyan] {content}")
-                elif role == "assistant":
-                    console.print(f"[bold green]AI:[/bold green] {content}")
-            console.print()
+            _print_message_list(recent, char_limit=300, header=f"最近 {len(recent)} 条历史消息：")
 
         return True
 
@@ -449,6 +440,13 @@ class RuntimeContext:
                 self.bg_manager.shutdown()
             except Exception as e:
                 logger.warning("bg_manager shutdown 失败: %s", e)
+
+        # 关闭 session_store 持久连接（Windows 上不关会锁文件）
+        if hasattr(self, "session_store") and self.session_store:
+            try:
+                self.session_store.close()
+            except Exception as e:
+                logger.warning("session_store close 失败: %s", e)
 
         if hasattr(self, "cron_scheduler") and self.cron_scheduler:
             try:
@@ -499,8 +497,26 @@ def _make_approval_callback():
     return callback
 
 
+def _make_tool_call_callback(config: dict):
+    """构造工具调用回调，闭包缓存 show_tool_progress，避免每次工具调用都重读 settings.json。"""
+    show = (config or {}).get("display", {}).get("show_tool_progress", True)
+
+    def callback(name: str, args: dict):
+        """工具调用时的回调（打印进度）。"""
+        if not show:
+            return
+        short_args = {}
+        for k, v in (args or {}).items():
+            s = str(v)
+            short_args[k] = s if len(s) <= 80 else s[:77] + "..."
+        console.print(f"[dim]→ 调用工具: {name} {short_args}[/dim]")
+
+    return callback
+
+
+# 向后兼容：模块级函数仍可用，但每次调用都重读 config（不推荐）
 def _on_tool_call(name: str, args: dict):
-    """工具调用时的回调（打印进度）。"""
+    """工具调用时的回调（打印进度）。每次重读 config（保留向后兼容，新代码请用 _make_tool_call_callback）。"""
     if not load_config().get("display", {}).get("show_tool_progress", True):
         return
     short_args = {}
@@ -655,16 +671,7 @@ def _handle_handoff_command(args: str, rt) -> bool:
         # 显示最近 6 条
         recent = bundle.transcript[-6:]
         if recent:
-            console.print("\n[cyan]最近消息：[/cyan]")
-            for m in recent:
-                role = m.get("role")
-                content = (m.get("content") or "").strip()
-                if len(content) > 200:
-                    content = content[:197] + "..."
-                if role == "user":
-                    console.print(f"[bold cyan]你:[/bold cyan] {content}")
-                elif role == "assistant":
-                    console.print(f"[bold green]AI:[/bold green] {content}")
+            _print_message_list(recent, char_limit=200, header="最近消息：")
         return True
 
     if sub == "load":
@@ -1523,6 +1530,29 @@ def _show_stats(rt: RuntimeContext):
                 logger.debug("stats 成本估算失败: %s", e)
 # ---------------------------------------------------------------------------
 
+def _print_message_list(msgs, *, char_limit: int = 300, header: Optional[str] = None):
+    """把消息列表按 user/assistant 不同颜色打印出来（tool 消息跳过）。
+
+    用于恢复会话、handoff show 等多处场景的统一回放。
+    """
+    if not msgs:
+        return
+    if header:
+        console.print(f"\n[cyan]{header}[/cyan]\n")
+    for msg in msgs:
+        role = msg.get("role")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > char_limit:
+            content = content[: char_limit - 3] + "..."
+        if role == "user":
+            console.print(f"[bold cyan]你:[/bold cyan] {content}")
+        elif role == "assistant":
+            console.print(f"[bold green]AI:[/bold green] {content}")
+    console.print()
+
+
 def _show_history_messages(rt: RuntimeContext, limit: int = 6):
     """恢复会话后，回放最近 N 条消息让用户看到上下文。"""
     if not rt.session_store or not rt.session_id:
@@ -1530,23 +1560,7 @@ def _show_history_messages(rt: RuntimeContext, limit: int = 6):
     msgs = rt.session_store.get_messages(rt.session_id, limit=limit)
     if not msgs:
         return
-
-    console.print(f"\n[cyan]最近 {len(msgs)} 条历史消息：[/cyan]\n")
-    for msg in msgs:
-        role = msg.get("role")
-        content = (msg.get("content") or "").strip()
-        if not content:
-            continue
-        # 截断长消息
-        if len(content) > 300:
-            content = content[:297] + "..."
-
-        if role == "user":
-            console.print(f"[bold cyan]你:[/bold cyan] {content}")
-        elif role == "assistant":
-            console.print(f"[bold green]AI:[/bold green] {content}")
-        # tool 消息跳过（太长太碎）
-    console.print()
+    _print_message_list(msgs, char_limit=300, header=f"最近 {len(msgs)} 条历史消息：")
 
 
 def _auto_resume_last(rt: RuntimeContext):

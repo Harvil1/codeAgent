@@ -147,7 +147,12 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
         return json.dumps({"error": "goal 不能为空"}, ensure_ascii=False)
 
     # 检查角色权限（orchestrator 受深度限制）
-    current_depth = int(os.environ.get("_SPAWN_DEPTH", "0"))
+    # 深度优先从父 agent 字段读（线程安全的私份），fallback 到 kwargs 或 0
+    parent_agent = kwargs.get("agent_ref")
+    if parent_agent is not None and hasattr(parent_agent, "spawn_depth"):
+        current_depth = parent_agent.spawn_depth
+    else:
+        current_depth = int(kwargs.get("spawn_depth", 0))
     max_depth = kwargs.get("max_spawn_depth", 2)
 
     if role == "orchestrator" and current_depth >= max_depth:
@@ -310,9 +315,13 @@ def _run_child(
     # 构造子代理的 system prompt
     system_prompt = _build_child_system_prompt(goal, context, role)
 
-    # 设置环境（深度 +1，通过环境变量传递）
-    current_depth = int(os.environ.get("_SPAWN_DEPTH", "0"))
-    os.environ["_SPAWN_DEPTH"] = str(current_depth + 1)
+    # 计算子代理的 spawn 深度（线程安全：参数传递，不写 os.environ）
+    parent_agent = kwargs.get("agent_ref")
+    if parent_agent is not None and hasattr(parent_agent, "spawn_depth"):
+        parent_depth = parent_agent.spawn_depth
+    else:
+        parent_depth = int(kwargs.get("spawn_depth", 0))
+    child_spawn_depth = parent_depth + 1
 
     # 可选：隔离工作区
     isolated = kwargs.get("isolated_workspace", False)
@@ -347,6 +356,7 @@ def _run_child(
             max_iterations=kwargs.get("child_max_iterations", 50),
             enabled_toolsets=child_toolsets,
             system_prompt_override=system_prompt,
+            spawn_depth=child_spawn_depth,
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）
@@ -408,8 +418,6 @@ def _run_child(
             except Exception:
                 pass
             workspace_cleanup()
-        # 恢复环境
-        os.environ["_SPAWN_DEPTH"] = str(current_depth)
 
 
 def _summarize_child_result(result: str, client, model: str) -> str:

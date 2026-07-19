@@ -27,6 +27,7 @@ from typing import Optional
 from openai import OpenAI
 
 from agent.budget import IterationBudget
+from agent.context_pipeline import CompressionSessionState
 from agent.prompt_builder import build_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,6 @@ class AIAgent:
         self._budget_grace_call = False
 
         # 系统提示：会话开始时构建一次，后续缓存
-        self._cached_system_prompt: Optional[str] = system_prompt_override
         self._system_prompt_built = system_prompt_override is not None
         # 05 NEW: 三层结构缓存
         self._stable_prompt: Optional[str] = system_prompt_override
@@ -178,6 +178,9 @@ class AIAgent:
         # === P4b-T2 NEW: idle 标志 + spawn 深度 ===
         self._idle_requested = False
         self.spawn_depth = spawn_depth
+
+        # 上下文压缩会话状态（每实例一份，跨轮次追踪 L4 cooldown/计数）
+        self._compress_session_state = CompressionSessionState()
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
@@ -245,6 +248,15 @@ class AIAgent:
         # aux_llm 不可用时降级跳过；config["reflection"]["enabled"]=False 可关闭。
         self._reflection_enabled = (
             (config or {}).get("reflection", {}).get("enabled", True)
+        )
+        # CCALS-P0-2 节流：避免连续对话起 N 个反思线程烧 token
+        # - 任意时刻最多 1 个反思在跑（_active_reflections）
+        # - 距上次启动不足 N 轮时跳过（_last_reflection_turn + cooldown_turns）
+        self._reflection_lock = __import__("threading").Lock()
+        self._active_reflections = 0
+        self._last_reflection_turn = -1
+        self._reflection_cooldown_turns = int(
+            (config or {}).get("reflection", {}).get("cooldown_turns", 3)
         )
 
     def cleanup(self):
@@ -408,7 +420,6 @@ class AIAgent:
             return response
 
         # 合成 tool_calls 列表（按 idx 排序，过滤掉没 name 的）
-        from types import SimpleNamespace
         tool_calls_out = []
         for idx in sorted(tool_call_buffers.keys()):
             buf = tool_call_buffers[idx]
@@ -545,10 +556,8 @@ class AIAgent:
             # stable + context 缓存，volatile 即时取
             self._stable_prompt = layers.stable
             self._context_prompt = layers.context
-            # 兼容字段：合并结果（让旧代码用 _cached_system_prompt 的地方仍能读）
-            self._cached_system_prompt = layers.render_flat()
             self._system_prompt_built = True
-        return self._cached_system_prompt
+        return "\n\n".join(p for p in (self._stable_prompt, self._context_prompt) if p)
 
     def _get_volatile_prompt(self) -> str:
         """每轮重建的 volatile 部分（05）。
@@ -571,7 +580,6 @@ class AIAgent:
         05 优化：压缩后只重建 context 层（stable 不变，prompt cache 仍命中 stable 段）。
         """
         self._context_prompt = None
-        self._cached_system_prompt = None
         self._system_prompt_built = False
         # _stable_prompt 保留（理论上整次会话内 stable 永不变）
 
@@ -763,9 +771,6 @@ class AIAgent:
             # 上下文压缩（接近 token 上限时触发）
             # Phase 1 Commit 7：双轨期结束，直接走新管线
             if self.compression_enabled:
-                if not hasattr(self, "_compress_session_state"):
-                    from agent.context_pipeline import CompressionSessionState
-                    self._compress_session_state = CompressionSessionState()
                 from agent.context_pipeline import compress_if_needed
                 ctx_cfg = self.config.get("context", {})
                 messages, compressed = compress_if_needed(
@@ -888,9 +893,6 @@ class AIAgent:
                 if (is_prompt_too_long
                         and not getattr(self, "_reacted", False)):
                     from agent.context_pipeline import reactive_compact
-                    if not hasattr(self, "_compress_session_state"):
-                        from agent.context_pipeline import CompressionSessionState
-                        self._compress_session_state = CompressionSessionState()
                     messages, _ = reactive_compact(
                         messages,
                         session_state=self._compress_session_state,
@@ -929,9 +931,6 @@ class AIAgent:
             if self.todo_manager:
                 self.todo_manager.increment_round()
             # C1 修复：同步递增压缩会话状态轮次，L4 cooldown 依赖此值
-            if not hasattr(self, "_compress_session_state"):
-                from agent.context_pipeline import CompressionSessionState
-                self._compress_session_state = CompressionSessionState()
             self._compress_session_state.increment_turn()
             assistant_msg = response.choices[0].message
 
@@ -1131,12 +1130,26 @@ class AIAgent:
         - aux_llm_router 优先用（便宜模型），fallback 到主 llm_client
         - memory_store 不可用时 no-op
         - 反思针对当前会话最近 N 条消息（含本轮用户消息+最终响应+中间过程）
+        - 节流：任意时刻最多 1 个反思在跑 + 距上次启动不足 cooldown_turns 轮时跳过
         """
         import threading
         # 拷贝引用（thread 启动后 conversation_history 可能继续变化）
         store = self.memory_store
         if store is None:
             return
+
+        # 节流 1：已经有反思在跑 → 跳过（防连问烧 token）
+        # 节流 2：距上次启动不足 cooldown_turns 轮 → 跳过
+        with self._reflection_lock:
+            current_turn = self._last_reflection_turn + 1  # 本轮的"逻辑序号"
+            if self._active_reflections >= 1:
+                return
+            if (self._last_reflection_turn >= 0
+                    and current_turn - self._last_reflection_turn < self._reflection_cooldown_turns):
+                return
+            self._active_reflections += 1
+            self._last_reflection_turn = current_turn
+
         # 优先 aux_llm（便宜模型）
         llm_for_reflection = self.aux_llm_router or self.llm_client
         # 快照最近 20 条消息（避免 thread 启动后被改）
@@ -1152,6 +1165,9 @@ class AIAgent:
                 )
             except Exception as e:
                 logger.debug("反思后台任务异常: %s", e)
+            finally:
+                with self._reflection_lock:
+                    self._active_reflections -= 1
 
         t = threading.Thread(target=_bg, daemon=True, name="reflection")
         t.start()

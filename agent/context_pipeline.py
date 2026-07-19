@@ -340,7 +340,6 @@ def reactive_compact(
 def compress_if_needed(
     messages: list,
     *,
-    attempt_count: Optional[int] = None,
     llm_client,
     model: Optional[str],
     config: dict,
@@ -353,8 +352,7 @@ def compress_if_needed(
     顺序：L1 snip → L2 micro → (条件) transcript 快照 → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
 
-    C2 修复：attempt_count 已废弃（仅向后兼容保留），L4 预算改用
-    session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
+    L4 预算用 session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
     """
     # L1 snip
     messages, c1 = snip_compact(
@@ -382,7 +380,6 @@ def compress_if_needed(
     )
 
     # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
-    # C2 修复：用 session_state.llm_compact_count 替代 attempt_count
     c4 = False
     max_attempts = config.get("max_compress_attempts", 3)
     cooldown = config.get("llm_compact_cooldown_turns", 5)

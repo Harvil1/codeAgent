@@ -372,7 +372,7 @@ def test_compress_runs_l1_only_for_medium_conv(tmp_path):
     msgs = _mk_msgs(40)  # 81 条，触发 L1，不触发 L4
     state = CompressionSessionState()
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
@@ -387,7 +387,7 @@ def test_compress_runs_l4_for_huge_conv(tmp_path):
     msgs = _mk_msgs(80)  # 161 条
     state = CompressionSessionState()
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
@@ -426,7 +426,7 @@ def test_compress_respects_cooldown(tmp_path):
     state.current_turn = 12      # 只过了 2 轮 < 5
 
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
@@ -439,7 +439,7 @@ def test_compress_no_change_when_small(tmp_path):
     msgs = _mk_msgs(10)
     state = CompressionSessionState()
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
@@ -453,7 +453,7 @@ def test_compress_writes_transcript_before_l4(tmp_path):
     msgs = _mk_msgs(80)
     state = CompressionSessionState()
     compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="sess_t",
     )
@@ -485,7 +485,7 @@ def test_compress_triggers_l4_with_default_config_after_l1(tmp_path):
     msgs = _mk_big_msgs(60, chars_per_msg=8000)  # 1 + 120 = 121 条
     state = CompressionSessionState()
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
@@ -624,7 +624,7 @@ def test_compress_runs_offload_before_micro(tmp_path):
     cfg = {**_DEFAULT_CFG, "output_offload_threshold": 30000}
     state = CompressionSessionState()
     out, changed = compress_if_needed(
-        msgs, attempt_count=0, llm_client=_FakeLLM(), model="x",
+        msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
     )

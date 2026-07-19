@@ -85,13 +85,10 @@ def load_state(skills_dir: Path) -> dict:
 
 
 def save_state(skills_dir: Path, state: dict) -> None:
-    """保存 curator 状态。"""
+    """保存 curator 状态（原子写）。"""
+    from agent.atomic_io import atomic_write_text
     path = _state_file(skills_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _parse_iso(value) -> Optional[datetime]:

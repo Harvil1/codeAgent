@@ -72,11 +72,11 @@ def test_delegate_no_goal_no_tasks():
 
 def test_delegate_orchestrator_depth_limit(monkeypatch):
     """orchestrator 达到深度上限时拒绝。"""
-    monkeypatch.setenv("_SPAWN_DEPTH", "2")
     result = registry.dispatch(
         "delegate_task",
         {"goal": "test", "role": "orchestrator"},
         max_spawn_depth=2,
+        spawn_depth=2,
     )
     data = json.loads(result)
     assert "error" in data
@@ -85,13 +85,13 @@ def test_delegate_orchestrator_depth_limit(monkeypatch):
 
 def test_delegate_depth_limit_allows_within_range(monkeypatch):
     """orchestrator 在深度范围内允许。"""
-    monkeypatch.setenv("_SPAWN_DEPTH", "1")
     # mock _run_child 避免真创建子代理
     with patch("tools.delegate_tool._run_child", return_value="子代理结果"):
         result = registry.dispatch(
             "delegate_task",
             {"goal": "test", "role": "orchestrator"},
             max_spawn_depth=2,
+            spawn_depth=1,
         )
     data = json.loads(result)
     # 不应该有深度错误

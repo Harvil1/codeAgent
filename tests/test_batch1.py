@@ -587,7 +587,6 @@ class TestInterruptPropagation:
         with patch("agent.AIAgent", return_value=mock_child):
             with patch.dict("os.environ", {
                 "DEEPSEEK_API_KEY": "fake",
-                "_SPAWN_DEPTH": "0",
             }):
                 with patch("config.load_config", return_value={
                     "model": {

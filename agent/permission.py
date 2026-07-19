@@ -66,6 +66,11 @@ _DENY_COMMAND_PATTERNS: List[Tuple[str, str]] = [
     (r"\bgit\s+push\b.*(?:--force|-f)\b.*\b(?:main|master)\b", "强推主分支"),
     (r"\bgit\s+push\b.*\b(?:main|master)\b.*(?:--force|-f)\b", "强推主分支"),
 ]
+# 模块加载时预编译（避免每次 check 都查 re._cache）
+_DENY_COMMAND_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
+    (re.compile(pat, re.IGNORECASE), desc)
+    for pat, desc in _DENY_COMMAND_PATTERNS
+]
 
 
 def check_command_deny(command: str) -> Optional[str]:
@@ -73,8 +78,8 @@ def check_command_deny(command: str) -> Optional[str]:
 
     返回匹配的说明（拒绝原因），未命中返回 None。
     """
-    for pattern, desc in _DENY_COMMAND_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
+    for pattern, desc in _DENY_COMMAND_PATTERNS_COMPILED:
+        if pattern.search(command):
             return desc
     return None
 
@@ -96,6 +101,10 @@ _DESTRUCTIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"\bgit\s+reset\s+--hard", "git reset --hard 丢弃改动"),
     (r"\bgit\s+clean\s+-[fxd]", "git clean 删未跟踪文件"),
 ]
+_DESTRUCTIVE_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
+    (re.compile(pat, re.IGNORECASE), desc)
+    for pat, desc in _DESTRUCTIVE_PATTERNS
+]
 
 
 def check_destructive(command: str) -> Optional[str]:
@@ -103,8 +112,8 @@ def check_destructive(command: str) -> Optional[str]:
 
     返回匹配的说明，未命中返回 None。
     """
-    for pattern, desc in _DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
+    for pattern, desc in _DESTRUCTIVE_PATTERNS_COMPILED:
+        if pattern.search(command):
             return desc
     return None
 
@@ -136,6 +145,14 @@ _PROTECTED_PATHS = [
     "C:\\Program Files",
     "C:\\Program Files (x86)",
 ]
+# 模块加载时预计算（避免每次 safe_path 都 14× resolve）
+_PROTECTED_PATHS_RESOLVED: List[Tuple[Path, str]] = []
+for _p in _PROTECTED_PATHS:
+    try:
+        _PROTECTED_PATHS_RESOLVED.append((Path(_p).expanduser().resolve(), _p))
+    except (OSError, ValueError):
+        # 解析失败的条目跳过（极少数环境下可能发生）
+        continue
 
 
 def is_protected_path(path) -> Optional[str]:
@@ -148,18 +165,14 @@ def is_protected_path(path) -> Optional[str]:
     except (OSError, ValueError):
         return None
 
-    for protected in _PROTECTED_PATHS:
+    for prot, orig in _PROTECTED_PATHS_RESOLVED:
+        if resolved == prot:
+            return orig
+        # path 在 protected 下
         try:
-            prot = Path(protected).expanduser().resolve()
-            if resolved == prot:
-                return protected
-            # path 在 protected 下
-            try:
-                resolved.relative_to(prot)
-                return protected
-            except ValueError:
-                continue
-        except (OSError, ValueError):
+            resolved.relative_to(prot)
+            return orig
+        except ValueError:
             continue
     return None
 
@@ -277,21 +290,21 @@ class PermissionChecker:
             logger.debug("加载白名单失败: %s", e)
 
     def _save_whitelist(self):
-        """保存持久化白名单。"""
+        """保存持久化白名单（原子写）。"""
         if not self._whitelist_file:
             return
         try:
             import json
             from pathlib import Path
+            from agent.atomic_io import atomic_write_text
             path = Path(self._whitelist_file)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
+            atomic_write_text(
+                path,
                 json.dumps(
                     {"commands": sorted(self._persistent_whitelist)},
                     ensure_ascii=False,
                     indent=2,
                 ),
-                encoding="utf-8",
             )
         except Exception as e:
             logger.debug("保存白名单失败: %s", e)

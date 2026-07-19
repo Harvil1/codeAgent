@@ -19,8 +19,6 @@ curator 读取活动时间戳决定生命周期转换。
 
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -54,21 +52,9 @@ def load_usage(skills_dir: Path) -> Dict[str, Dict[str, Any]]:
 
 def save_usage(skills_dir: Path, data: Dict[str, Dict[str, Any]]) -> None:
     """原子写入使用统计。"""
+    from agent.atomic_io import atomic_write_text
     path = _usage_file(skills_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 原子写入：先写临时文件，再 rename
-    fd, temp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(temp, path)
-    except Exception:
-        try:
-            os.unlink(temp)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _ensure_record(data: Dict, skill_name: str) -> Dict:

@@ -285,25 +285,14 @@ def _handle_image_ocr(args: dict, **kwargs) -> str:
 
 
 # ---------------------------------------------------------------------------
-# check_fn + 注册
+# 注册
 # ---------------------------------------------------------------------------
-
-def _check_vision_available() -> bool:
-    """check_fn：仅当 agent 能取到 vision client 时才暴露工具。
-
-    注意：注册时无法访问 agent 实例，所以这里走"宽松暴露"策略——
-    让工具始终对 LLM 可见，运行时（handler 内）再校验 client。
-    隐藏策略放在 RuntimeContext 启动时根据 config 决定（见 Task 2）。
-    """
-    return True
-
 
 registry.register(
     name="image_analyze",
     toolset="core",
     schema=IMAGE_ANALYZE_SCHEMA,
     handler=_handle_image_analyze,
-    check_fn=_check_vision_available,
     emoji="🖼️",
 )
 
@@ -312,6 +301,5 @@ registry.register(
     toolset="core",
     schema=IMAGE_OCR_SCHEMA,
     handler=_handle_image_ocr,
-    check_fn=_check_vision_available,
     emoji="📝",
 )

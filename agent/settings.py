@@ -117,13 +117,10 @@ def load_settings() -> Dict[str, Any]:
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
-    """保存 settings.json。"""
+    """保存 settings.json（原子写）。"""
+    from agent.atomic_io import atomic_write_text
     path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(settings, ensure_ascii=False, indent=2))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

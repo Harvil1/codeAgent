@@ -38,6 +38,7 @@ class SimpleProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, **kwargs) -> None:
         """异步写入一轮对话。"""
+        from agent.atomic_io import atomic_write_text
         self._turns.append({
             "session_id": self._session_id,
             "timestamp": datetime.now().isoformat(),
@@ -46,10 +47,9 @@ class SimpleProvider(MemoryProvider):
         })
         # 只保留最近 1000 轮
         self._turns = self._turns[-1000:]
-        self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        self._store_path.write_text(
+        atomic_write_text(
+            self._store_path,
             json.dumps(self._turns, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def prefetch(self, query: str, **kwargs) -> str:

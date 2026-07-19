@@ -341,11 +341,8 @@ class CronScheduler:
 
         调用方必须已持 _lock（方法名 _unlocked 提示）。
         失败时 log warning 不抛——不能让持久化失败杀掉调度线程。
-
-        原子写：tmp 文件 + os.replace，避免半写文件。
         """
-        import os
-        import tempfile
+        from agent.atomic_io import atomic_write_text
         try:
             data = {
                 "jobs": [
@@ -363,19 +360,6 @@ class CronScheduler:
                 ]
             }
             content = json.dumps(data, ensure_ascii=False, indent=2)
-            fd, tmp_path = tempfile.mkstemp(
-                dir=str(self._jobs_path.parent), suffix=".tmp",
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(content)
-                os.replace(tmp_path, str(self._jobs_path))
-            except Exception:
-                # 清理残留 tmp 文件
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            atomic_write_text(self._jobs_path, content)
         except Exception as e:
             logger.warning("cron jobs 持久化失败（不阻塞调度）: %s", e)

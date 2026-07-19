@@ -175,17 +175,20 @@ def test_session_search_tool():
 
     with tempfile.TemporaryDirectory() as tmp:
         store = SessionStore(Path(tmp) / "s.db")
-        sid = store.create_session()
-        store.append_message(sid, "user", "测试关键词 Python")
-        store.append_message(sid, "assistant", "好的")
+        try:
+            sid = store.create_session()
+            store.append_message(sid, "user", "测试关键词 Python")
+            store.append_message(sid, "assistant", "好的")
 
-        result = registry.dispatch(
-            "session_search",
-            {"query": "Python"},
-            session_store=store,
-        )
-        data = json.loads(result)
-        assert data["total"] > 0
+            result = registry.dispatch(
+                "session_search",
+                {"query": "Python"},
+                session_store=store,
+            )
+            data = json.loads(result)
+            assert data["total"] > 0
+        finally:
+            store.close()
 
 
 def test_session_search_tool_no_store():

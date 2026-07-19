@@ -10,36 +10,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import get_default_checker
 from tools.registry import registry
 
 
 # 输出截断阈值（防止爆 context）
 MAX_OUTPUT_CHARS = 50000
-
-
-def _finalize_output(
-    result_content: str,
-    tool_call_id: Optional[str],
-    harvil_home,
-    config: Optional[dict],
-) -> str:
-    """超阈值内容走 offload（落盘 + 预览）。
-
-    Phase 1 Commit 7 后：原 ``use_new_pipeline`` 开关已移除，offload 始终启用。
-    若调用方需要关闭 offload，直接不传 ``tool_call_id`` 或 ``harvil_home`` 即可。
-    """
-    # offload 需要 tool_call_id 和 harvil_home
-    if not tool_call_id or not harvil_home:
-        return result_content
-    from agent.output_offload import maybe_offload
-    return maybe_offload(
-        result_content,
-        tool_call_id=tool_call_id,
-        agent_home=Path(harvil_home),
-        threshold=(config or {}).get("context", {}).get("output_offload_threshold", 30000),
-        preview_chars=(config or {}).get("context", {}).get("output_offload_preview", 2000),
-    )
 
 
 def check_terminal_requirements() -> bool:
