@@ -175,11 +175,10 @@ class RuntimeContext:
             db_path = Path(db) if db else sessions_db_path()
             self.session_store = SessionStore(db_path)
 
-        # 1b. MemoryStore（注入 SessionStore 做双写）
+        # 1b. MemoryStore（纯文件存储，无 SQLite 双写）
         if self.config.get("memory", {}).get("enabled", True):
             self.memory_store = MemoryStore(
                 harvil_home=self.home,
-                sqlite_store=self.session_store,
             )
             # batch2-T3: memory_manager 的 LLM client 在 agent 创建后注入
             # （因为需要和 aux_llm_router 共享）
@@ -193,14 +192,12 @@ class RuntimeContext:
             from agent.memory_retriever import retrieve_relevant
             self.memory_retriever = retrieve_relevant  # 函数引用
 
-        # 1c. TaskStore 全局单例也注入 SessionStore（双写）
-        if self.session_store is not None:
-            try:
-                from agent.task_store import get_task_store
-                ts = get_task_store(self.home)
-                ts.attach_sqlite(self.session_store)
-            except Exception as e:
-                logger.warning("TaskStore SQLite 注入失败: %s", e)
+        # 1c. TaskStore 全局单例（纯文件存储）
+        try:
+            from agent.task_store import get_task_store
+            get_task_store(self.home)
+        except Exception as e:
+            logger.warning("TaskStore 初始化失败: %s", e)
 
         # 3. 创建会话
         if self.session_store:

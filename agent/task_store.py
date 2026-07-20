@@ -49,14 +49,8 @@ def _tasks_dir(harvil_home=None) -> Path:
 class TaskStore:
     """持久化任务图。每个任务一个 JSON 文件。"""
 
-    def __init__(self, harvil_home=None, *, sqlite_store=None):
+    def __init__(self, harvil_home=None):
         self._dir = _tasks_dir(harvil_home)
-        # 可选 SQLite 双写
-        self._sqlite = sqlite_store
-
-    def attach_sqlite(self, sqlite_store) -> None:
-        """运行时注入 SQLite store（用于 cli.py 启动顺序解耦）。"""
-        self._sqlite = sqlite_store
 
     def _task_file(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
@@ -65,22 +59,6 @@ class TaskStore:
         from agent.atomic_io import atomic_write_text
         f = self._task_file(task_id)
         atomic_write_text(f, json.dumps(task, ensure_ascii=False, indent=2))
-        # SQLite 双写（失败不阻塞主流程）
-        if self._sqlite is not None:
-            try:
-                self._sqlite.save_task(
-                    id=task_id,
-                    subject=task.get("subject", ""),
-                    description=task.get("description", "") or "",
-                    status=task.get("status", "pending"),
-                    owner=task.get("owner"),
-                    created_at=task.get("created_at", _now_iso()),
-                    updated_at=task.get("updated_at", _now_iso()),
-                    blocked_by=task.get("blocked_by", []),
-                    body_json=json.dumps(task, ensure_ascii=False),
-                )
-            except Exception as e:
-                logger.warning("task SQLite 双写失败 %s: %s", task_id, e)
 
     # ------------------------------------------------------------------
     # CRUD
