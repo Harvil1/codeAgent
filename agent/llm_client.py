@@ -18,6 +18,51 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# usage 抽取（OpenAI / Anthropic SDK 字段名不同，统一为标准化 dict）
+# ---------------------------------------------------------------------------
+
+def _extract_openai_usage(usage_obj) -> Optional[dict]:
+    """从 OpenAI 兼容 SDK 的 usage 对象提取标准化 token dict。
+
+    返回 None 表示无 usage 对象。返回 dict 含 5 字段：
+    prompt_tokens / completion_tokens / total_tokens /
+    cache_read / cache_creation（DeepSeek/OpenAI 各自命名都做兜底）。
+
+    被 LLMClient/OpenAICompatClient 的流式路径共用，避免字段提取逻辑重复。
+    """
+    if usage_obj is None:
+        return None
+    return {
+        "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+        "cache_read": getattr(usage_obj, "prompt_cache_hit_tokens", 0)
+            or getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
+        "cache_creation": getattr(usage_obj, "prompt_cache_miss_tokens", 0)
+            or getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+    }
+
+
+def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
+    """从 Anthropic SDK 的 usage 对象提取标准化 token dict。
+
+    Anthropic 用 input_tokens/output_tokens 命名；映射回 OpenAI 标准。
+    total_tokens 由 input+output 计算（Anthropic 不直接给 total）。
+    """
+    if usage_obj is None:
+        return None
+    input_t = getattr(usage_obj, "input_tokens", 0) or 0
+    output_t = getattr(usage_obj, "output_tokens", 0) or 0
+    return {
+        "prompt_tokens": input_t,
+        "completion_tokens": output_t,
+        "total_tokens": input_t + output_t,
+        "cache_read": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
+        "cache_creation": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 基类
 # ---------------------------------------------------------------------------
 
@@ -62,14 +107,7 @@ class LLMClient:
         resp = self.chat_completions(messages, tools=tools, **kwargs)
         choice = resp.choices[0]
         msg = choice.message
-        usage_obj = getattr(resp, "usage", None)
-        usage_dict = None
-        if usage_obj is not None:
-            usage_dict = {
-                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
-            }
+        usage_dict = _extract_openai_usage(getattr(resp, "usage", None))
         yield {
             "content": msg.content or "",
             "tool_calls": list(msg.tool_calls or []),
@@ -116,18 +154,7 @@ class OpenAICompatClient(LLMClient):
             **kwargs,
         )
         for chunk in stream:
-            usage_obj = getattr(chunk, "usage", None)
-            usage_dict = None
-            if usage_obj is not None:
-                usage_dict = {
-                    "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
-                    "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
-                    "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
-                    "cache_read": getattr(usage_obj, "prompt_cache_hit_tokens", 0)
-                        or getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
-                    "cache_creation": getattr(usage_obj, "prompt_cache_miss_tokens", 0)
-                        or getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
-                }
+            usage_dict = _extract_openai_usage(getattr(chunk, "usage", None))
             if not chunk.choices:
                 # 最后一个 chunk 可能只有 usage
                 if usage_dict:
@@ -280,19 +307,7 @@ class AnthropicClient(LLMClient):
                         arguments=buf["input_json"] or "{}",
                     ),
                 ))
-            usage_obj = getattr(final_message, "usage", None)
-            usage_dict = None
-            if usage_obj is not None:
-                usage_dict = {
-                    "prompt_tokens": getattr(usage_obj, "input_tokens", 0) or 0,
-                    "completion_tokens": getattr(usage_obj, "output_tokens", 0) or 0,
-                    "total_tokens": (
-                        (getattr(usage_obj, "input_tokens", 0) or 0)
-                        + (getattr(usage_obj, "output_tokens", 0) or 0)
-                    ),
-                    "cache_read": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
-                    "cache_creation": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
-                }
+            usage_dict = _extract_anthropic_usage(getattr(final_message, "usage", None))
             yield {
                 "content": "",
                 "tool_calls": tool_calls_out,

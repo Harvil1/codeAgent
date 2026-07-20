@@ -111,7 +111,16 @@ def _fix_tool_call_pairs(messages: list) -> list:
             fixed.append(msg)
 
     # 如果有未配对的 tool_call，补一条 tool 结果
+    # 上限保护：恶意/异常输入可能导致大量未配对 tool_call，全量补全会让 messages 暴涨。
+    # 超过阈值截断 + 记日志，便于排查。
+    MAX_PENDING_REPAIR = 100
     if pending_tool_calls:
+        if len(pending_tool_calls) > MAX_PENDING_REPAIR:
+            logger.warning(
+                "_fix_tool_call_pairs: 未配对 tool_call 数 %d 超过上限 %d，仅补全前 %d 条",
+                len(pending_tool_calls), MAX_PENDING_REPAIR, MAX_PENDING_REPAIR,
+            )
+            pending_tool_calls = dict(list(pending_tool_calls.items())[:MAX_PENDING_REPAIR])
         for call_id, name in pending_tool_calls.items():
             fixed.append({
                 "role": "tool",
@@ -133,7 +142,16 @@ def estimate_message_tokens(messages: list) -> int:
     total_chars = 0
     for msg in messages:
         content = msg.get("content", "") or ""
-        total_chars += len(str(content))
+        # 高频路径优化：content 多为 str，直接 len() 避免 str() 转换开销
+        if isinstance(content, str):
+            total_chars += len(content)
+        else:
+            # list/其他结构（多模态消息）降级处理
+            total_chars += len(str(content))
         for tc in msg.get("tool_calls", []) or []:
-            total_chars += len(str(tc.get("function", {}).get("arguments", "")))
+            args = tc.get("function", {}).get("arguments", "")
+            if isinstance(args, str):
+                total_chars += len(args)
+            else:
+                total_chars += len(str(args))
     return total_chars // 3

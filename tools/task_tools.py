@@ -11,6 +11,7 @@
   task_list(status)                              列出任务
 """
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,24 @@ def _get_owned_task(args: dict, kwargs: dict):
             {"error": f"任务不存在: {task_id}"}, ensure_ascii=False,
         )
     return task, None
+
+
+def with_owned_task(fn):
+    """装饰器：自动过 ownership 门控并注入已校验的 task 对象。
+
+    7 个 task_* 写工具（update/complete/heartbeat/comment/artifacts/block/unblock）
+    都要先做 empty-id + ownership + existence 三步检查，逻辑完全一致。
+    抽出来用装饰器消除 ~21 行重复代码。
+
+    handler 签名变为 ``fn(args, task, **kwargs)``，task 已保证存在且通过 ownership。
+    """
+    @functools.wraps(fn)
+    def wrapped(args, **kwargs):
+        task, err = _get_owned_task(args, kwargs)
+        if err:
+            return err
+        return fn(args, task, **kwargs)
+    return wrapped
 
 
 def _infer_author(kwargs: dict) -> str:
@@ -330,14 +349,12 @@ def _handle_task_create(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": task}, ensure_ascii=False)
 
 
-def _handle_task_update(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_update(args: dict, task, **kwargs) -> str:
     """更新 task 字段（status / owner / description / subject）。
 
     06 NEW: status='blocked' 时走 mark_blocked（记录 block_history + 升级 triage）。
     """
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     store = _get_store(kwargs)
 
     # 阻塞特殊路径：走 mark_blocked（自动升级）
@@ -376,11 +393,9 @@ def _handle_task_update(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
-def _handle_task_complete(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_complete(args: dict, task, **kwargs) -> str:
     """标记完成。可选 artifacts 一次性提交（先验证，原子性）。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     # 新增：先验证 artifacts，再 complete（任一失败 → 整个调用不变）
     artifacts: List[str] = args.get("artifacts") or []
     store = _get_store(kwargs)
@@ -418,11 +433,9 @@ def _handle_task_list(args: dict, **kwargs) -> str:
     }, ensure_ascii=False)
 
 
-def _handle_task_heartbeat(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_heartbeat(args: dict, task, **kwargs) -> str:
     """更新 last_heartbeat_at；note 非空时附加为 comment。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     note = args.get("note")
     store = _get_store(kwargs)
     if note:
@@ -432,11 +445,9 @@ def _handle_task_heartbeat(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
-def _handle_task_comment(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_comment(args: dict, task, **kwargs) -> str:
     """追加 comment 到 task.comments。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     content = (args.get("content") or "").strip()
     if not content:
         return json.dumps(
@@ -448,11 +459,9 @@ def _handle_task_comment(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
-def _handle_task_artifacts(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_artifacts(args: dict, task, **kwargs) -> str:
     """管理 task.artifacts 列表（add / remove）。原子性：批量 add 任一失败整批拒绝。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     add_paths: List[str] = args.get("add") or []
     remove_paths: List[str] = args.get("remove") or []
     store = _get_store(kwargs)
@@ -474,11 +483,9 @@ def _handle_task_artifacts(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
-def _handle_task_block(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_block(args: dict, task, **kwargs) -> str:
     """task_block: status=blocked + block_reason + block_kind。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     reason = (args.get("reason") or "").strip()
     if not reason:
         return json.dumps(
@@ -501,11 +508,9 @@ def _handle_task_block(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
-def _handle_task_unblock(args: dict, **kwargs) -> str:
+@with_owned_task
+def _handle_task_unblock(args: dict, task, **kwargs) -> str:
     """task_unblock: 解除 blocked，清空 block_reason/block_kind。"""
-    task, err = _get_owned_task(args, kwargs)
-    if err:
-        return err
     new_status = args.get("new_status") or "pending"
     if new_status not in ("pending", "in_progress"):
         return json.dumps(

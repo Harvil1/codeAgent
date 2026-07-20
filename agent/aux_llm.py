@@ -134,38 +134,6 @@ class AuxLLMRouter:
         """是否配置了至少一个辅助 endpoint。"""
         return bool(self._endpoints)
 
-    def _get_client(self, ep: LLMEndpoint) -> Optional[Any]:
-        """懒创建 client，并缓存。返回 None 表示此 endpoint 不可用。"""
-        if ep.name in self._client_cache:
-            return self._client_cache[ep.name]
-
-        # 解析 api_key
-        if ep.name == "legacy_aux" and self._legacy_aux_api_key:
-            api_key = self._legacy_aux_api_key
-        elif ep.api_key_env:
-            api_key = os.environ.get(ep.api_key_env, "") or ep.api_key_default
-            if not api_key:
-                logger.debug(
-                    "endpoint %s 未配置 api_key env %s", ep.name, ep.api_key_env,
-                )
-                return None
-        else:
-            api_key = ep.api_key_default
-
-        try:
-            from agent.llm_client import create_llm_client
-            client = create_llm_client({
-                "format": ep.format,
-                "base_url": ep.base_url,
-                "api_key": api_key,
-                "model": ep.model,
-            })
-            self._client_cache[ep.name] = client
-            return client
-        except Exception as e:
-            logger.warning("创建 endpoint %s 的 client 失败: %s", ep.name, e)
-            return None
-
     def chat_completions(self, messages: list, **kwargs):
         """依次尝试 endpoints，第一个成功就返回。
 

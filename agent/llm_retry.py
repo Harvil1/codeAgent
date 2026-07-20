@@ -139,11 +139,18 @@ def call_with_retry(
                 raise
 
             # P1-1: 529 连续失败精确切换
+            # 过载往往持续一段时间，期间可能反复抛 529 / 5xx。把 5xx 都计入过载计数，
+            # 避免出现"529→500→529"导致计数清零、永远到不了阈值的场景。
+            # 仅当遇到非过载错误（429 限流、连接错误、超时）时才清零。
             status = _error_status_code(e)
-            if status == 529:
+            if status is not None and status >= 500:
                 consecutive_529 += 1
+            elif status is None:
+                # 无状态码（连接/超时类）→ 视为本轮过载无关，重置
+                consecutive_529 = 0
+            # status < 500（如 429）→ 重置
             else:
-                consecutive_529 = 0  # 非 529 错误重置计数
+                consecutive_529 = 0
             if (
                 status == 529
                 and consecutive_529_threshold > 0

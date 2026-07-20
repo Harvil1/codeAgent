@@ -94,17 +94,30 @@ def _resolve_unique_path(offload_dir: Path, tool_call_id: str) -> Path:
 
 
 def _write_atomically(path: Path, content: str) -> None:
-    """原子写入：先写临时文件再 replace，防半写状态。"""
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=path.parent,
-        encoding="utf-8",
-        delete=False,
-        suffix=".tmp",
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)  # 原子 rename
+    """原子写入：先写临时文件再 replace，防半写状态。
+
+    异常路径下（replace 失败、权限拒绝等）清理临时文件，避免 .tmp 垃圾堆积。
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=path.parent,
+            encoding="utf-8",
+            delete=False,
+            suffix=".tmp",
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)  # 原子 rename
+    except Exception:
+        # replace 抛异常时清理临时文件，避免磁盘上留下 *.tmp 垃圾
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def finalize_tool_output(

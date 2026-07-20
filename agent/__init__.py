@@ -243,6 +243,11 @@ class AIAgent:
         from agent.llm_retry import MaxTokensEscalator
         self._max_tokens_escalator = MaxTokensEscalator()
 
+        # === 韧性状态：reactive_compact 已触发标记 ===
+        # True 表示本会话已经做过一次紧急压缩，下次 prompt_too_long 不再重试。
+        # 显式初始化避免依赖 getattr 默认值（可读性 + 子类安全）。
+        self._reacted: bool = False
+
         # === CCALS-P0-2 NEW: 任务级反思引擎 ===
         # 每次任务正常结束时异步触发：用 aux_llm 从轨迹提炼 3 类经验写入 memory_store。
         # aux_llm 不可用时降级跳过；config["reflection"]["enabled"]=False 可关闭。

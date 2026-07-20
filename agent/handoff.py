@@ -159,30 +159,49 @@ def _compute_checksum(transcript: List[dict]) -> str:
 # 密钥扫描（Task 3）
 # ---------------------------------------------------------------------------
 
+# 合并为单个正则 + 命名捕获组：一次扫描即可覆盖全部 5 类密钥模式，
+# 性能从 5×N 次降到 N 次（N = 消息数 × 内容长度）。
+# 命名组同时让错误信息更可读（"命中：<openai>" 而不是裸正则）。
+SECRET_PATTERN = re.compile(
+    r"(?P<openai>sk-[A-Za-z0-9]{20,})"
+    r"|(?P<bearer>Bearer\s+[A-Za-z0-9_\-\.]{20,})"
+    r"|(?P<api_key>api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
+    r"|(?P<token>token[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
+    r"|(?P<pem>-----BEGIN [A-Z ]+PRIVATE KEY-----)"
+)
+
+# 向后兼容别名（无外部依赖，但保留以防 plugins/ 未来用）
 SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),                          # OpenAI/DeepSeek
-    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{20,}"),               # Bearer token
-    re.compile(r"api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),       # api_key=XXX
-    re.compile(r"token[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),         # token=XXX
-    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),            # PEM 私钥
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{20,}"),
+    re.compile(r"api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),
+    re.compile(r"token[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),
+    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
 ]
 
 
 def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
-    """扫描 transcript 找密钥模式。返回命中列表。"""
+    """扫描 transcript 找密钥模式。返回命中列表。
+
+    用合并正则一次扫描；命中后通过命名组反查模式类型。
+    """
     matches: List[Dict[str, Any]] = []
     for idx, msg in enumerate(transcript):
         content = msg.get("content")
         if not isinstance(content, str):
             continue
-        for pat in SECRET_PATTERNS:
-            for m in pat.finditer(content):
-                matches.append({
-                    "message_index": idx,
-                    "role": msg.get("role", "?"),
-                    "pattern": pat.pattern,
-                    "snippet": m.group(0)[:50],  # 截断防再次暴露
-                })
+        for m in SECRET_PATTERN.finditer(content):
+            # 反查命中的命名组（key→value 非空的那组）
+            kind = next(
+                (k for k, v in m.groupdict().items() if v),
+                "unknown",
+            )
+            matches.append({
+                "message_index": idx,
+                "role": msg.get("role", "?"),
+                "pattern": f"<{kind}>",
+                "snippet": m.group(0)[:50],  # 截断防再次暴露
+            })
     return matches
 
 

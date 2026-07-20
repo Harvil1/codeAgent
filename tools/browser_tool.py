@@ -3,6 +3,7 @@
 基于 Playwright sync API。所有工具通过 agent_ref.browser_session 操作浏览器。
 playwright 未装时 check_fn 返 False，工具自动隐藏。
 """
+import functools
 import json
 import logging
 from typing import List, Optional, Tuple
@@ -68,6 +69,24 @@ def _err(msg: str, error_type: Optional[str] = None) -> str:
     if error_type:
         d["error_type"] = error_type
     return json.dumps(d, ensure_ascii=False)
+
+
+def with_browser_session(fn):
+    """装饰器：自动从 kwargs 提取 browser_session 并注入 handler。
+
+    13 个 browser_* handler 都需要先做 session 可用性检查，逻辑完全一致。
+    抽出来用装饰器消除 ~40 行重复代码。
+
+    handler 签名变为 ``fn(args, session, **kwargs)``，session 已保证非 None。
+    session 为 None 时直接返回 browser_unavailable 错误。
+    """
+    @functools.wraps(fn)
+    def wrapped(args, **kwargs):
+        session = _get_session(kwargs)
+        if session is None:
+            return _err("browser_session 未初始化", "browser_unavailable")
+        return fn(args, session, **kwargs)
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -238,16 +257,14 @@ BROWSER_CDP_SCHEMA = {
 # handler
 # ---------------------------------------------------------------------------
 
-def _handle_browser_navigate(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_navigate(args: dict, session, **kwargs) -> str:
     url = (args.get("url") or "").strip()
     if not url:
         return _err("url 不能为空")
     safe, reason = _is_safe_url(url)
     if not safe:
         return _err(f"URL 不安全: {reason}", "unsafe_url")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     try:
         page = session.get_page()
         response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -264,10 +281,8 @@ def _handle_browser_navigate(args: dict, **kwargs) -> str:
         return _err(f"导航失败: {e}", "navigation_error")
 
 
-def _handle_browser_close(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_close(args: dict, session, **kwargs) -> str:
     try:
         session.cleanup()
         return json.dumps({"success": True}, ensure_ascii=False)
@@ -275,10 +290,8 @@ def _handle_browser_close(args: dict, **kwargs) -> str:
         return _err(f"关闭失败: {e}", "close_error")
 
 
-def _handle_browser_snapshot(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_snapshot(args: dict, session, **kwargs) -> str:
     max_chars = args.get("max_chars", 8000)
     try:
         result = session.snapshot(max_chars)
@@ -290,13 +303,11 @@ def _handle_browser_snapshot(args: dict, **kwargs) -> str:
         return _err(f"snapshot 失败: {e}", "snapshot_error")
 
 
-def _handle_browser_click(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_click(args: dict, session, **kwargs) -> str:
     ref = (args.get("ref") or "").strip()
     if not ref:
         return _err("ref 不能为空")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     try:
         selector = session.resolve_ref(ref)
         if selector is None:
@@ -311,16 +322,14 @@ def _handle_browser_click(args: dict, **kwargs) -> str:
         return _err(f"点击失败: {e}", "click_error")
 
 
-def _handle_browser_type(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_type(args: dict, session, **kwargs) -> str:
     ref = (args.get("ref") or "").strip()
     text = args.get("text", "")
     if not ref:
         return _err("ref 不能为空")
     if text is None:
         return _err("text 不能为空")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     try:
         selector = session.resolve_ref(ref)
         if selector is None:
@@ -340,10 +349,8 @@ def _handle_browser_type(args: dict, **kwargs) -> str:
         return _err(f"输入失败: {e}", "type_error")
 
 
-def _handle_browser_scroll(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_scroll(args: dict, session, **kwargs) -> str:
     direction = args.get("direction", "down")
     amount = args.get("amount", 1)
     ref = args.get("ref")
@@ -366,13 +373,11 @@ def _handle_browser_scroll(args: dict, **kwargs) -> str:
         return _err(f"滚动失败: {e}", "scroll_error")
 
 
-def _handle_browser_press_key(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_press_key(args: dict, session, **kwargs) -> str:
     key = (args.get("key") or "").strip()
     if not key:
         return _err("key 不能为空")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     try:
         page = session.get_page()
         page.press("body", key)
@@ -381,10 +386,8 @@ def _handle_browser_press_key(args: dict, **kwargs) -> str:
         return _err(f"按键失败: {e}", "press_key_error")
 
 
-def _handle_browser_back(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_back(args: dict, session, **kwargs) -> str:
     try:
         page = session.get_page()
         page.go_back(wait_until="domcontentloaded", timeout=30000)
@@ -393,10 +396,8 @@ def _handle_browser_back(args: dict, **kwargs) -> str:
         return _err(f"后退失败: {e}", "navigation_error")
 
 
-def _handle_browser_forward(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_forward(args: dict, session, **kwargs) -> str:
     try:
         page = session.get_page()
         page.go_forward(wait_until="domcontentloaded", timeout=30000)
@@ -405,10 +406,8 @@ def _handle_browser_forward(args: dict, **kwargs) -> str:
         return _err(f"前进失败: {e}", "navigation_error")
 
 
-def _handle_browser_get_images(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_get_images(args: dict, session, **kwargs) -> str:
     min_w = args.get("min_width", 100)
     min_h = args.get("min_height", 100)
     try:
@@ -443,10 +442,8 @@ def _handle_browser_get_images(args: dict, **kwargs) -> str:
 _CONSOLE_LEVELS = {"log": 0, "info": 1, "warning": 2, "error": 3}
 
 
-def _handle_browser_console(args: dict, **kwargs) -> str:
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
+@with_browser_session
+def _handle_browser_console(args: dict, session, **kwargs) -> str:
     level = args.get("level", "log")
     try:
         page = session.get_page()
@@ -465,13 +462,11 @@ def _handle_browser_console(args: dict, **kwargs) -> str:
         return _err(f"读取 console 失败: {e}", "console_error")
 
 
-def _handle_browser_vision(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_vision(args: dict, session, **kwargs) -> str:
     query = (args.get("query") or "").strip()
     if not query:
         return _err("query 不能为空")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     agent = kwargs.get("agent_ref")
     # 三层回退（Task 3）：_vision_client → _browser_vision_client → llm_client
     client = None
@@ -530,13 +525,11 @@ def _handle_browser_vision(args: dict, **kwargs) -> str:
         return _err(f"vision 调用失败: {e}", "vision_error")
 
 
-def _handle_browser_cdp(args: dict, **kwargs) -> str:
+@with_browser_session
+def _handle_browser_cdp(args: dict, session, **kwargs) -> str:
     command = (args.get("command") or "").strip()
     if not command:
         return _err("command 不能为空")
-    session = _get_session(kwargs)
-    if session is None:
-        return _err("browser_session 未初始化", "browser_unavailable")
     try:
         cdp_args = args.get("args") or {}
         page = session.get_page()
