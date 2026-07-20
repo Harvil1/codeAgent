@@ -131,6 +131,10 @@ class OpenAICompatClient(LLMClient):
 
     def chat_completions(self, messages, *, tools=None, **kwargs):
         """直接转发到 OpenAI SDK。返回原生的 OpenAI 响应对象。"""
+        # 防御：上层（memory_manager / reflection / retriever）习惯在 kwargs 里
+        # 传 model=xxx，但 self.model 已经是 client 的属性，重复传会让 OpenAI SDK
+        # 报 "got multiple values for keyword argument 'model'"。这里 pop 掉。
+        kwargs.pop("model", None)
         return self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -145,6 +149,8 @@ class OpenAICompatClient(LLMClient):
         tool_calls 的 delta 保留 SDK 原对象（含 index/id/function 字段），
         上层负责按 index 累积。
         """
+        # 同 chat_completions，防御 kwargs 里的 model 重复
+        kwargs.pop("model", None)
         stream = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
