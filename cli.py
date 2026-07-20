@@ -145,10 +145,11 @@ class RuntimeContext:
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
         try:
             from agent.permission import set_default_checker, PermissionChecker
-            from agent.settings import approved_commands_path
+            from agent.settings import approved_commands_path, approved_paths_path
             set_default_checker(PermissionChecker(
                 approval_callback=_make_approval_callback(),
                 whitelist_file=str(approved_commands_path()),
+                paths_whitelist_file=str(approved_paths_path()),
             ))
         except Exception as e:
             logger.debug("权限检查器初始化失败（用默认）: %s", e)
@@ -475,17 +476,28 @@ class RuntimeContext:
 # ---------------------------------------------------------------------------
 
 def _make_approval_callback():
-    """创建命令审批 callback（破坏性命令触发时询问用户 y/n）。
+    """创建审批 callback（破坏性命令 + 写入路径都用这个）。
 
-    同意后自动加入持久化白名单（~/.agent/approved_commands.json），
-    跨会话不再询问同样命令。用 /approved 命令管理白名单。
+    callback 接收字符串,根据内容自动判断是命令还是路径,显示不同 prompt。
+    同意后:
+    - 命令 → 加入 ~/.agent/approved_commands.json
+    - 路径 → 加入 ~/.agent/approved_paths.json
+    跨会话不再询问相同项。
     """
-    def callback(command: str) -> bool:
-        console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
-        console.print(f"[bold]{command}[/bold]")
+    def callback(item: str) -> bool:
+        # 启发式判断:含路径分隔符或 ~ 开头 → 路径,否则 → 命令
+        is_path = (
+            "/" in item or "\\" in item or item.startswith("~")
+            or item[1:3] == ":\\" if len(item) >= 3 else False
+        )
+        if is_path:
+            console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
+        else:
+            console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
+        console.print(f"[bold]{item}[/bold]")
         try:
             answer = console.input(
-                "[bold]允许执行？(y/N):[/bold] [dim]（同意后此命令不再询问）[/dim] ",
+                "[bold]允许？(y/N):[/bold] [dim]（同意后此项不再询问）[/dim] ",
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print()

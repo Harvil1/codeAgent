@@ -139,8 +139,15 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     if not path_str:
         return json.dumps({"error": "path 不能为空"}, ensure_ascii=False)
 
-    # 路径白名单检查（写操作）：受保护路径 + 工作目录外拒绝
-    perm = safe_path(path_str, write=True)
+    # 路径权限检查（write=True）：
+    #   - 受保护路径（~/.ssh / /etc 等）→ 硬拒
+    #   - 在 cwd 或 ~/.agent 白名单 → 通过
+    #   - 不在白名单 → 调 approval_callback 问用户（同意后加入持久化白名单）
+    # 优先用注入的 permission_checker（cli.py 注入带 callback 的），
+    # 没有则用全局默认（无 callback，白名单外路径会拒绝）。
+    from agent.permission import get_default_checker
+    checker = kwargs.get("permission_checker") or get_default_checker()
+    perm = checker.check_path(path_str, write=True)
     if not perm.allowed:
         return json.dumps(
             {"error": f"路径拒绝: {perm.reason}", "error_type": "permission_denied"},

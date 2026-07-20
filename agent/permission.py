@@ -261,18 +261,28 @@ class PermissionChecker:
         self,
         approval_callback: Optional[Callable[[str], bool]] = None,
         whitelist_file=None,
+        paths_whitelist_file=None,
     ):
         """
         参数：
-            approval_callback: fn(command: str) -> bool，破坏性命令审批。
+            approval_callback: fn(command: str) -> bool，破坏性命令 / 路径审批。
+                              callback 内部可根据字符串内容判断是命令还是路径
+                              （含 / 或 \\ 或 ~ 开头 → 路径）。
             whitelist_file: 持久化白名单 JSON 路径（如 ~/.agent/approved_commands.json）。
+            paths_whitelist_file: 路径白名单 JSON（如 ~/.agent/approved_paths.json）。
+                                  用户批准过的写入路径，跨会话不再询问。
         """
         self.approval_callback = approval_callback
-        self._approved = set()  # 会话内缓存
+        self._approved = set()  # 会话内缓存（命令）
         self._whitelist_file = whitelist_file
         self._persistent_whitelist = set()
         if whitelist_file:
             self._load_whitelist()
+        # 路径白名单（write_file 等场景，用户批准过的写入路径）
+        self._paths_whitelist_file = paths_whitelist_file
+        self._approved_paths = set()
+        if paths_whitelist_file:
+            self._load_paths_whitelist()
 
     def _load_whitelist(self):
         """加载持久化白名单。"""
@@ -308,6 +318,41 @@ class PermissionChecker:
             )
         except Exception as e:
             logger.debug("保存白名单失败: %s", e)
+
+    def _load_paths_whitelist(self):
+        """加载路径白名单。"""
+        if not self._paths_whitelist_file:
+            return
+        try:
+            import json
+            from pathlib import Path
+            path = Path(self._paths_whitelist_file)
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self._approved_paths = set(data.get("paths", []))
+                logger.info("加载 %d 条已批准写入路径", len(self._approved_paths))
+        except Exception as e:
+            logger.debug("加载路径白名单失败: %s", e)
+
+    def _save_paths_whitelist(self):
+        """保存路径白名单（原子写）。"""
+        if not self._paths_whitelist_file:
+            return
+        try:
+            import json
+            from pathlib import Path
+            from agent.atomic_io import atomic_write_text
+            path = Path(self._paths_whitelist_file)
+            atomic_write_text(
+                path,
+                json.dumps(
+                    {"paths": sorted(self._approved_paths)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+        except Exception as e:
+            logger.debug("保存路径白名单失败: %s", e)
 
     def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
         """检查命令是否允许执行。"""
@@ -348,6 +393,84 @@ class PermissionChecker:
 
         # 闸门 3：默认通过
         return PermissionResult(True, "ok", "ok")
+
+    def check_path(
+        self,
+        path,
+        *,
+        write: bool = False,
+        allowed_roots: Optional[List] = None,
+    ) -> PermissionResult:
+        """检查文件路径是否可访问（带审批能力）。
+
+        - 读：受保护路径拒绝，其他都允许
+        - 写：
+          闸门 1：受保护路径（~/.ssh / /etc / C:\\Windows 等）→ 硬拒
+          闸门 2：allowed_roots（默认 cwd + ~/.agent）→ 直接通过
+          闸门 3：用户批准过的路径（_approved_paths）→ 通过
+                  含父目录匹配（批准了 D:\\foo 就允许 D:\\foo\\bar）
+          闸门 4：调 approval_callback 问用户，同意 → 加入 _approved_paths 持久化
+                  拒绝/无 callback → 拒绝
+
+        返回 PermissionResult。
+        """
+        # 闸门 1：受保护路径硬拒
+        prot = is_protected_path(path)
+        if prot:
+            return PermissionResult(False, f"受保护路径: {prot}", "protected")
+
+        if not write:
+            return PermissionResult(True, "ok", "ok")
+
+        # 解析路径
+        if allowed_roots is None:
+            allowed_roots = default_allowed_roots()
+        allowed_roots = [Path(p).resolve() for p in allowed_roots]
+
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, ValueError) as e:
+            return PermissionResult(False, f"路径解析失败: {e}", "protected")
+
+        # 闸门 2：allowed_roots 内
+        for root in allowed_roots:
+            try:
+                if resolved == root or resolved.relative_to(root) is not None:
+                    return PermissionResult(True, "白名单内", "ok")
+            except ValueError:
+                continue
+            except (OSError, ValueError):
+                continue
+
+        # 闸门 3：用户已批准的路径（含父目录匹配）
+        for approved in self._approved_paths:
+            try:
+                approved_path = Path(approved).resolve()
+                if resolved == approved_path or resolved.relative_to(approved_path) is not None:
+                    return PermissionResult(True, "已批准（路径白名单）", "approval")
+            except (ValueError, OSError):
+                continue
+
+        # 闸门 4：问用户
+        if self.approval_callback is None:
+            return PermissionResult(
+                False,
+                f"写入路径不在白名单且无审批 callback: {resolved}",
+                "protected",
+            )
+
+        try:
+            approved = bool(self.approval_callback(str(resolved)))
+        except Exception:
+            approved = False
+
+        if not approved:
+            return PermissionResult(False, "用户拒绝写入路径", "approval")
+
+        # 批准：加白名单（持久化 + 会话缓存）
+        self._approved_paths.add(str(resolved))
+        self._save_paths_whitelist()
+        return PermissionResult(True, "已批准", "approval")
 
     def add_to_whitelist(self, command: str):
         """手动加入持久化白名单。"""

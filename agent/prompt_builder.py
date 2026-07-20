@@ -73,7 +73,20 @@ TOOL_USAGE_GUIDANCE = (
     "\"micro_compacted\" / [紧急上下文压缩] 这类占位消息，且需要更早的"
     "上下文时，从占位消息里给的路径（通常是 .transcripts/latest.jsonl "
     "或 .task_outputs/tool-results/ 下的文件）用 read_file 读回。"
-    "这些路径在 agent_home 下，默认安全。"
+    "这些路径在 agent_home 下，默认安全。\n"
+    "- **写入路径白名单**：write_file 默认只允许写入当前工作目录和 ~/.agent。"
+    "写入其他位置（如用户桌面、D:\\ 等）会触发用户审批，"
+    "用户同意后该路径会加入持久化白名单，下次不再询问。"
+    "不要绕过审批——如果用户拒绝，换个在白名单内的位置写。\n"
+    "- **依赖安装策略**（重要）：装 Python 包时区分场景：\n"
+    "  • 给**本项目** HermesAgent 自己用 → `uv add <pkg>`（写进 pyproject.toml）\n"
+    "  • 给**用户脚本**临时用（如生成 PPT、跑数据处理）→ 不要装到项目 venv！\n"
+    "    优先用 `uv tool install <pkg>`（装成全局 CLI 工具），\n"
+    "    或创建独立 venv：`uv venv /tmp/user-script-env && uv pip install <pkg>`，\n"
+    "    或用 `pipx install <pkg>`。\n"
+    "  • 检测现有环境：`which python` / `pip show <pkg>` 先看装没装，\n"
+    "    不要重复安装。装完用同一个 Python 跑脚本（系统 Python 或独立 venv）。\n"
+    "  • 反复安装失败（>2 次）→ 停下来问用户用哪个 Python 环境，不要陷入死循环。"
 )
 
 

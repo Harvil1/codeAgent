@@ -82,6 +82,12 @@ def approved_commands_path() -> Path:
     return get_agent_home() / "approved_commands.json"
 
 
+def approved_paths_path() -> Path:
+    """写入路径审批白名单 JSON（用户批准过的写入路径）。"""
+    from constants import get_agent_home
+    return get_agent_home() / "approved_paths.json"
+
+
 def mcp_config_path() -> Path:
     """旧 .mcp.json 路径（迁移用）。"""
     from constants import get_agent_home
