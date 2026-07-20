@@ -22,10 +22,11 @@ harvilagent = "main:main"
 py-modules = ["main", "config", "constants", "model_tools", "toolsets", "env_loader", "cli", "agent_profile", "curator_cli"]
 
 [tool.setuptools.packages.find]
-include = ["agent*", "tools*", "plugins*"]
+include = ["agent*", "tools*", "plugins*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 preview = true
