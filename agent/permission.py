@@ -467,10 +467,13 @@ class PermissionChecker:
         if not approved:
             return PermissionResult(False, "用户拒绝写入路径", "approval")
 
-        # 批准：加白名单（持久化 + 会话缓存）
-        self._approved_paths.add(str(resolved))
+        # 批准：加父目录到白名单（而不是具体文件）
+        # 用户意图是"允许 agent 在这个目录工作"，下次同目录其他文件不再问
+        # （类似 VSCode 信任工作区 = 信任整个文件夹）
+        parent_dir = str(resolved.parent)
+        self._approved_paths.add(parent_dir)
         self._save_paths_whitelist()
-        return PermissionResult(True, "已批准", "approval")
+        return PermissionResult(True, "已批准（含父目录）", "approval")
 
     def add_to_whitelist(self, command: str):
         """手动加入持久化白名单。"""

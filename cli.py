@@ -492,17 +492,26 @@ def _make_approval_callback():
         )
         if is_path:
             console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
+            console.print(f"[bold]{item}[/bold]")
+            try:
+                answer = console.input(
+                    "[bold]允许？(y/N):[/bold] [dim]（同意后整个父目录不再询问）[/dim] ",
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return False
+            return answer in ("y", "yes")
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
-        console.print(f"[bold]{item}[/bold]")
-        try:
-            answer = console.input(
-                "[bold]允许？(y/N):[/bold] [dim]（同意后此项不再询问）[/dim] ",
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return False
-        return answer in ("y", "yes")
+            console.print(f"[bold]{item}[/bold]")
+            try:
+                answer = console.input(
+                    "[bold]允许执行？(y/N):[/bold] [dim]（同意后此命令不再询问）[/dim] ",
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return False
+            return answer in ("y", "yes")
     return callback
 
 
