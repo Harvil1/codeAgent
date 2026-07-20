@@ -1,3 +1,13 @@
 # 不纳入版本控制
 docs/
 tests/
+
+# Python 构建产物
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# pytest / ruff 缓存
+.pytest_cache/
+.ruff_cache/
