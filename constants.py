@@ -3,52 +3,33 @@
 无依赖的底层模块，提供 agent home 等路径解析。
 支持 AGENT_HOME 环境变量覆盖默认路径（测试/开发用）。
 
-Windows 桌面应用定位：
-  - 数据目录：%APPDATA%\\HermesAgent\\（用户配置、数据库、记忆）
-  - 日志目录：%LOCALAPPDATA%\\HermesAgent\\logs\\（可重建、可清理）
-  - 老目录（~/.agent）首次启动时自动迁移（Windows 上）
+所有数据（API key、记忆、工具、技能、会话、任务）统一在 ~/.agent/ 下：
+  - Linux/macOS: ~/.agent/
+  - Windows:     C:\\Users\\<user>\\.agent\\
 
-Linux/macOS：
-  - 数据目录：~/.agent/
-  - 日志目录：~/.agent/logs/
+设计原则：跨平台目录一致，避免自动迁移带来的路径漂移。
+未来若做成 Windows 安装包，可重新启用 AppData 定位 + 一次性迁移。
 """
 
 import os
-import sys
 from pathlib import Path
 
 
 def _default_agent_home() -> Path:
-    """根据平台返回默认数据目录。
+    """返回默认数据目录。
 
     优先级：
       1. AGENT_HOME 环境变量（覆盖默认，测试/开发用）
-      2. Windows: %APPDATA%\\HermesAgent\\
-      3. Linux/macOS: ~/.agent/
+      2. ~/.agent/（跨平台一致）
     """
     env_override = os.environ.get("AGENT_HOME")
     if env_override:
         return Path(env_override).expanduser()
-
-    if sys.platform == "win32":
-        # %APPDATA% = C:\\Users\\<user>\\AppData\\Roaming
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "HermesAgent"
-        # 兜底（APPDATA 罕见缺失，但 Python 启动时若被刻意清空 env 会用到）
-        return Path.home() / "AppData" / "Roaming" / "HermesAgent"
-
-    # Linux/macOS 保持旧行为
     return Path.home() / ".agent"
 
 
 def _default_logs_dir() -> Path:
-    """日志目录（Windows 独立到 LOCALAPPDATA，便于卸载清理）。"""
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            return Path(local) / "HermesAgent" / "logs"
-        return Path.home() / "AppData" / "Local" / "HermesAgent" / "logs"
+    """日志目录（统一在 agent home 下，便于排查）。"""
     return _default_agent_home() / "logs"
 
 

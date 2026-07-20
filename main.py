@@ -9,17 +9,7 @@
 
 import sys
 
-# Windows 首次启动：把 ~/.agent/ 老数据迁移到 %APPDATA%\HermesAgent\
-# 必须在 import constants 之后、mkdir 之前调用
 from constants import get_agent_home, skills_dir, logs_dir
-
-try:
-    from scripts.migrate_to_appdata import needs_migration, migrate
-    if needs_migration():
-        migrate()
-except Exception as e:
-    import logging
-    logging.getLogger(__name__).warning("数据迁移检查失败（可忽略）: %s", e)
 
 # 启动前确保 agent home 目录结构存在
 get_agent_home().mkdir(parents=True, exist_ok=True)
