@@ -52,7 +52,7 @@ def skills_dir() -> Path:
 
 
 def logs_dir() -> Path:
-    """日志目录（Windows 上独立到 LOCALAPPDATA）。"""
+    """日志目录（统一在 ~/.agent/logs 下）。"""
     return _default_logs_dir()
 
 
