@@ -171,6 +171,9 @@ def _handle_execute_code(args: dict, **kwargs) -> str:
     cwd = ec_config.get("cwd")
 
     try:
+        # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防用户代码泄漏
+        from agent.sandbox_env import build_safe_env
+        safe_env = build_safe_env()
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
@@ -179,6 +182,7 @@ def _handle_execute_code(args: dict, **kwargs) -> str:
             errors="replace",
             timeout=actual_timeout,
             cwd=cwd,
+            env=safe_env,
         )
         stdout_truncated = _truncate_output(result.stdout or "")
         stderr_truncated = _truncate_output(result.stderr or "")

@@ -239,6 +239,17 @@ def build_system_prompt_layers(
                 context_parts.append(ext_block)
         except Exception:
             pass
+
+    # MCP routing hints(借鉴 DeerFlow):用户配 .mcp.json 时可加 keywords 字段,
+    # 帮助 LLM 看到关键词就知道用哪个 MCP server。如:
+    #   "postgres": {"keywords": ["订单", "数据库", "SQL"]}
+    try:
+        from agent.mcp_client import collect_routing_hints
+        hints_block = collect_routing_hints()
+        if hints_block:
+            context_parts.append(hints_block)
+    except Exception as e:
+        logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
     if context_files:
         for cf in context_files:
             cf = Path(cf)

@@ -92,6 +92,9 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     try:
+        # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防泄漏给子进程
+        from agent.sandbox_env import build_safe_env
+        safe_env = build_safe_env()
         result = subprocess.run(
             command,
             shell=True,
@@ -99,6 +102,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             text=True,
             timeout=timeout,
             cwd=cwd,
+            env=safe_env,
             encoding="utf-8",
             errors="replace",
         )

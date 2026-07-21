@@ -1,10 +1,12 @@
-"""文件操作工具：read_file / write_file / search_files。
+"""文件操作工具：read_file / write_file / search_files / str_replace。
 
-read_file：读文件，带行号返回，方便 LLM 引用
-write_file：写文件（覆盖）
+read_file：读文件，带行号返回，方便 LLM 引用(返回 content_hash 用于 write_file 防盲写)
+write_file：写文件（覆盖）,支持 read-before-write hash 校验
 search_files：在文件内容中搜索（类似 grep）
+str_replace：子串替换(单次/全部),避免 read 整个文件再 write 整个文件
 """
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -13,6 +15,11 @@ from typing import Optional
 from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import safe_path
 from tools.registry import registry
+
+
+def _content_hash(text: str) -> str:
+    """计算文本的短 hash(sha256 前 16 位),用于 read-before-write 校验。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +99,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         return json.dumps({
             "path": str(path),
             "content": final_content,
+            "content_hash": _content_hash(content),  # 给 write_file 做 read-before-write 校验用
             "content_offloaded": content_offloaded,
             "total_lines": len(lines),
             "shown_lines": f"{offset + 1}-{offset + len(selected)}",
@@ -108,7 +116,11 @@ def _handle_read_file(args: dict, **kwargs) -> str:
 
 WRITE_FILE_SCHEMA = {
     "name": "write_file",
-    "description": "写入文件（覆盖）。目录不存在会自动创建。",
+    "description": (
+        "写入文件（覆盖）。目录不存在会自动创建。"
+        "**read-before-write 保护**:如果传了 expected_hash,会校验文件当前 hash 是否匹配,"
+        "不匹配说明文件被外部修改过,会拒绝写入(需重新 read_file)。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -125,6 +137,14 @@ WRITE_FILE_SCHEMA = {
                 "description": "是否追加（默认 False，覆盖）",
                 "default": False,
             },
+            "expected_hash": {
+                "type": "string",
+                "description": (
+                    "可选。read_file 返回的 content_hash。"
+                    "传入则做 read-before-write 校验:文件当前 hash 不匹配时拒绝写入,"
+                    "防止覆盖外部修改。不传 = 不校验(向后兼容)。"
+                ),
+            },
         },
         "required": ["path", "content"],
     },
@@ -135,6 +155,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     path_str = args.get("path", "")
     content = args.get("content", "")
     append = bool(args.get("append", False))
+    expected_hash = args.get("expected_hash")
 
     if not path_str:
         return json.dumps({"error": "path 不能为空"}, ensure_ascii=False)
@@ -156,6 +177,25 @@ def _handle_write_file(args: dict, **kwargs) -> str:
 
     path = Path(path_str).expanduser()
 
+    # read-before-write hash 校验(仅覆盖模式,且传了 expected_hash)
+    if expected_hash and not append and path.exists():
+        try:
+            current = path.read_text(encoding="utf-8")
+            current_hash = _content_hash(current)
+            if current_hash != expected_hash:
+                return json.dumps({
+                    "error": (
+                        f"read-before-write 校验失败:文件已被外部修改"
+                        f"(expected={expected_hash}, current={current_hash})。"
+                        f"请重新调 read_file 拿最新内容再 write。"
+                    ),
+                    "error_type": "stale_hash",
+                    "current_hash": current_hash,
+                }, ensure_ascii=False)
+        except UnicodeDecodeError:
+            # 二进制文件,跳过 hash 校验(向后兼容)
+            pass
+
     try:
         # 自动创建父目录
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +211,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             "path": str(path),
             "bytes": len(content.encode("utf-8")),
             "appended": append,
+            "content_hash": _content_hash(content) if not append else None,
         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -326,4 +367,127 @@ registry.register(
     schema=SEARCH_FILES_SCHEMA,
     handler=_handle_search_files,
     emoji="🔍",
+)
+
+
+# ---------------------------------------------------------------------------
+# str_replace
+# ---------------------------------------------------------------------------
+
+STR_REPLACE_SCHEMA = {
+    "name": "str_replace",
+    "description": (
+        "在文件里做子串替换(单次或全部)。比 read+write 高效——"
+        "改 1 行不用 read 整个文件再 write 整个文件。"
+        "支持 read-before-write hash 校验(传 expected_hash)。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "文件路径"},
+            "old_str": {"type": "string", "description": "要被替换的子串(必须能匹配到)"},
+            "new_str": {"type": "string", "description": "替换成的内容"},
+            "replace_all": {
+                "type": "boolean", "default": False,
+                "description": "True=全部替换;False=只替换第一处(默认)",
+            },
+            "expected_hash": {
+                "type": "string",
+                "description": "可选。read_file 返回的 content_hash,做 read-before-write 校验。",
+            },
+        },
+        "required": ["path", "old_str", "new_str"],
+    },
+}
+
+
+def _handle_str_replace(args: dict, **kwargs) -> str:
+    path_str = args.get("path", "")
+    old_str = args.get("old_str")
+    new_str = args.get("new_str")
+    replace_all = bool(args.get("replace_all", False))
+    expected_hash = args.get("expected_hash")
+
+    if not path_str:
+        return json.dumps({"error": "path 不能为空"}, ensure_ascii=False)
+    if old_str is None or old_str == "":
+        return json.dumps({"error": "old_str 不能为空"}, ensure_ascii=False)
+    if new_str is None:
+        return json.dumps({"error": "new_str 不能为空(用空串表示删除)"}, ensure_ascii=False)
+
+    # 路径权限检查(走 write 审批)
+    from agent.permission import get_default_checker
+    checker = kwargs.get("permission_checker") or get_default_checker()
+    perm = checker.check_path(path_str, write=True)
+    if not perm.allowed:
+        return json.dumps(
+            {"error": f"路径拒绝: {perm.reason}", "error_type": "permission_denied"},
+            ensure_ascii=False,
+        )
+
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
+    if not path.is_file():
+        return json.dumps({"error": f"不是文件: {path}"}, ensure_ascii=False)
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return json.dumps({"error": "无法解码为文本(可能是二进制文件)"}, ensure_ascii=False)
+
+    # read-before-write 校验
+    current_hash = _content_hash(content)
+    if expected_hash and expected_hash != current_hash:
+        return json.dumps({
+            "error": (
+                f"read-before-write 校验失败:文件已被外部修改"
+                f"(expected={expected_hash}, current={current_hash})。"
+                f"请重新调 read_file 拿最新内容再 str_replace。"
+            ),
+            "error_type": "stale_hash",
+            "current_hash": current_hash,
+        }, ensure_ascii=False)
+
+    # 检查 old_str 是否存在
+    occurrences = content.count(old_str)
+    if occurrences == 0:
+        return json.dumps({
+            "error": "old_str 在文件里找不到。请检查拼写或重新 read_file。",
+            "error_type": "old_str_not_found",
+        }, ensure_ascii=False)
+    if not replace_all and occurrences > 1:
+        return json.dumps({
+            "error": f"old_str 在文件里有 {occurrences} 处匹配,不唯一。"
+                     f"传 replace_all=true 全部替换,或把 old_str 写得更具体。",
+            "error_type": "ambiguous_match",
+            "occurrences": occurrences,
+        }, ensure_ascii=False)
+
+    # 执行替换
+    if replace_all:
+        new_content = content.replace(old_str, new_str)
+        replaced = occurrences
+    else:
+        new_content = content.replace(old_str, new_str, 1)
+        replaced = 1
+
+    try:
+        path.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    return json.dumps({
+        "path": str(path),
+        "replaced": replaced,
+        "content_hash": _content_hash(new_content),
+    }, ensure_ascii=False)
+
+
+registry.register(
+    name="str_replace",
+    toolset="core",
+    schema=STR_REPLACE_SCHEMA,
+    handler=_handle_str_replace,
+    emoji="🔄",
 )

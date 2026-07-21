@@ -41,6 +41,12 @@ class MemoryEntry:
     # CCALS-P0-1: L1 摘要层（80-100 字符，比 description 更详细）
     # 老文件无此字段时兼容读为空串
     summary: str = ""
+    # confidence + expected_valid_days(借鉴 DeerFlow DeerMem):
+    # confidence: LLM 给的信心分 0.0-1.0,低于阈值的候选不写入
+    # expected_valid_days: 预期有效期(天),到期后进 staleness 评审
+    # 老文件无这俩字段时兼容读为默认值(1.0 / 365 天)
+    confidence: float = 1.0
+    expected_valid_days: int = 365
 
 
 def _generate_id() -> str:
@@ -92,7 +98,7 @@ class MemoryStore:
 
     # ---- 内部：写 ----
     def _write_entry_file(self, entry: MemoryEntry) -> None:
-        """写单条 .md 文件 + 同步 SQLite。"""
+        """写单条 .md 文件。"""
         meta = {
             "name": entry.name,
             "description": entry.description,
@@ -103,6 +109,11 @@ class MemoryStore:
         # CCALS-P0-1: summary 非空时才写入 frontmatter（避免老格式文件多出空字段）
         if entry.summary:
             meta["summary"] = entry.summary
+        # confidence / expected_valid_days:非默认值才写(老文件兼容)
+        if entry.confidence != 1.0:
+            meta["confidence"] = entry.confidence
+        if entry.expected_valid_days != 365:
+            meta["expected_valid_days"] = entry.expected_valid_days
         content = _format_frontmatter(meta) + entry.body
         path = self._memory_dir / f"{entry.id}.md"
         atomic_write_text(path, content)
@@ -112,20 +123,40 @@ class MemoryStore:
 
         CCALS-P0-1: 索引行包含 summary（若有），让 retriever 拿到的
         index 自动含 L1 摘要层，无需读全文就能判断更细的相关性。
+
+        correction 优先注入(借鉴 DeerFlow guaranteed_categories):
+        - feedback 类型(用户纠正过的)排最前面 + 加 ⭐ 标记
+        - 让 LLM 看到 system prompt 时优先注意到纠正类记忆
+        - 防止"用户说不要用 pip,但 agent 又用 pip"这种重复纠正
         """
-        lines = ["# Memory Index", ""]
-        lines.append("自动生成，请勿手动编辑。每行：`- [name](.memory/{id}.md) — description`")
-        lines.append("")
-        for entry in self._scan_all_entries():
+        # type 优先级:feedback(纠正) 最优先,然后 user/project,最后 other
+        type_priority = {"feedback": 0, "user": 1, "project": 2, "reference": 3, "other": 4}
+        # 三步稳定排序(从最细粒度到最粗粒度,利用 Python sorted 稳定性):
+        # 1. updated_at 倒序(新的在前)
+        # 2. confidence 倒序(高在前)
+        # 3. type_priority 升序(feedback=0 最前)
+        # 最终顺序:feedback 优先 → 同 type 内 confidence 高的 → 同 confidence 内最新的
+        entries = self._scan_all_entries()
+        entries.sort(key=lambda e: str(e.updated_at), reverse=True)
+        entries.sort(key=lambda e: e.confidence, reverse=True)
+        entries.sort(key=lambda e: type_priority.get(e.type, 99))
+
+        lines = [
+            "# Memory Index",
+            "",
+            "自动生成，请勿手动编辑。⭐ 表示 feedback 类(用户纠正过的),永远优先显示。",
+            "",
+        ]
+        for entry in entries:
+            marker = "⭐ " if entry.type == "feedback" else ""
             if entry.summary:
-                # 带 L1 摘要的行：description 后跟 summary
                 lines.append(
-                    f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
+                    f"- {marker}[{entry.name}](.memory/{entry.id}.md) — {entry.description}"
                     f" | 摘要：{entry.summary}"
                 )
             else:
                 lines.append(
-                    f"- [{entry.name}](.memory/{entry.id}.md) — {entry.description}"
+                    f"- {marker}[{entry.name}](.memory/{entry.id}.md) — {entry.description}"
                 )
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
 
@@ -148,6 +179,8 @@ class MemoryStore:
                     created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
                     updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
                     summary=meta.get("summary", "") or "",  # CCALS-P0-1: 兼容老文件
+                    confidence=float(meta.get("confidence", 1.0) or 1.0),  # 兼容老文件
+                    expected_valid_days=int(meta.get("expected_valid_days", 365) or 365),
                 )
                 entries.append(entry)
             except (ValueError, TypeError) as e:
@@ -237,6 +270,8 @@ class MemoryStore:
         type: str,
         body: str = "",
         summary: str = "",  # CCALS-P0-1: L1 摘要层
+        confidence: float = 1.0,  # 0.0-1.0,LLM 给的信心分
+        expected_valid_days: int = 365,  # 预期有效期(天),到期进 staleness 评审
     ) -> str:
         """创建新记忆。返回 memory_id。"""
         if not name or not description:
@@ -250,6 +285,8 @@ class MemoryStore:
                 id=mid, name=name, description=description,
                 type=type, body=body, summary=summary,
                 created_at=now, updated_at=now,
+                confidence=float(confidence),
+                expected_valid_days=int(expected_valid_days),
             )
             self._write_entry_file(entry)
             self._rebuild_index()

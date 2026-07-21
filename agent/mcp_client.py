@@ -661,6 +661,44 @@ def is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__")
 
 
+def collect_routing_hints(config_path=None) -> str:
+    """从 .mcp.json 收集 keywords,生成给 system prompt 用的 routing hints 块。
+
+    借鉴 DeerFlow:用户在 .mcp.json 配 server 时可加 keywords 字段:
+        "postgres": {
+            "command": "...",
+            "keywords": ["订单", "数据库", "SQL", "查询"],
+            "description": "数据库查询"
+        }
+
+    本函数扫描配置,有 keywords 的 server 集合生成一个提示块,
+    让 LLM 看到用户提到"查订单"时立刻知道用 postgres server。
+
+    返回空串表示无 routing hints(没配 keywords 的场景)。
+    """
+    config = load_mcp_config(config_path)
+    if not config:
+        return ""
+    lines = []
+    for name, cfg in config.items():
+        keywords = cfg.get("keywords") or []
+        if not keywords:
+            continue
+        description = cfg.get("description", "")
+        kw_str = " / ".join(str(k) for k in keywords)
+        line = f"- 提到 [{kw_str}] → 优先用 `{name}`"
+        if description:
+            line += f"（{description}）"
+        lines.append(line)
+    if not lines:
+        return ""
+    return (
+        "## MCP 工具路由提示\n"
+        "当用户消息涉及以下关键词时,优先用对应的 MCP server 工具:\n"
+        + "\n".join(lines)
+    )
+
+
 def filter_tool_name(
     tool_name: str,
     include: Optional[List[str]] = None,
