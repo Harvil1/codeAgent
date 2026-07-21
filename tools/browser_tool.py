@@ -462,28 +462,36 @@ def _handle_browser_console(args: dict, session, **kwargs) -> str:
         return _err(f"读取 console 失败: {e}", "console_error")
 
 
+def _get_vision_client(agent):
+    """从 agent 取 vision client,三层回退。
+
+    返回 (client, model_name)。client 为 None 表示未配置。
+
+    回退顺序:_vision_client → _browser_vision_client → llm_client。
+    前两者用 client.model 取模型名;llm_client 用 agent.config["model"]["name"]。
+    """
+    if not agent:
+        return None, None
+    # _vision_client / _browser_vision_client 用自身 model 属性
+    for attr in ("_vision_client", "_browser_vision_client"):
+        client = getattr(agent, attr, None)
+        if client is not None:
+            return client, getattr(client, "model", None)
+    # 最后 fallback 到主 llm_client
+    client = getattr(agent, "llm_client", None)
+    if client is not None:
+        cfg = getattr(agent, "config", {}) or {}
+        return client, cfg.get("model", {}).get("name")
+    return None, None
+
+
 @with_browser_session
 def _handle_browser_vision(args: dict, session, **kwargs) -> str:
     query = (args.get("query") or "").strip()
     if not query:
         return _err("query 不能为空")
     agent = kwargs.get("agent_ref")
-    # 三层回退（Task 3）：_vision_client → _browser_vision_client → llm_client
-    client = None
-    model_name = None
-    if agent:
-        client = getattr(agent, "_vision_client", None)
-        if client is not None:
-            model_name = getattr(client, "model", None)
-        if client is None:
-            client = getattr(agent, "_browser_vision_client", None)
-            if client is not None:
-                model_name = getattr(client, "model", None)
-        if client is None:
-            client = getattr(agent, "llm_client", None)
-            if client is not None:
-                cfg = getattr(agent, "config", {}) or {}
-                model_name = cfg.get("model", {}).get("name")
+    client, model_name = _get_vision_client(agent)
     if client is None:
         return _err(
             "vision LLM client 未配置（_vision_client / _browser_vision_client / llm_client 都为 None）",

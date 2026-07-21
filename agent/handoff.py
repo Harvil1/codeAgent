@@ -131,17 +131,9 @@ def _now_iso() -> str:
 
 
 def _parse_iso(s: str) -> datetime:
-    """解析 ISO8601（容错：处理带/不带 Z、毫秒）。"""
-    s2 = s.rstrip("Z")
-    try:
-        dt = datetime.fromisoformat(s2)
-        # fromisoformat 可能返回 naive datetime（无时区），统一加 UTC
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        # 退而求其次：返回当前 UTC 时间（timezone-aware，避免 utcnow 弃用警告）
-        return datetime.now(timezone.utc)
+    """解析 ISO8601(委托给 agent.utils.parse_iso,失败时返回当前 UTC 时间)。"""
+    from agent.utils import parse_iso
+    return parse_iso(s, failure_factory=lambda: datetime.now(timezone.utc))
 
 
 def _compute_checksum(transcript: List[dict]) -> str:
@@ -169,15 +161,6 @@ SECRET_PATTERN = re.compile(
     r"|(?P<token>token[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
     r"|(?P<pem>-----BEGIN [A-Z ]+PRIVATE KEY-----)"
 )
-
-# 向后兼容别名（无外部依赖，但保留以防 plugins/ 未来用）
-SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]{20,}"),
-    re.compile(r"api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),
-    re.compile(r"token[\"\s:=]+[\"']?[A-Za-z0-9]{16,}"),
-    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
-]
 
 
 def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:

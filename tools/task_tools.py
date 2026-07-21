@@ -532,6 +532,20 @@ def _handle_task_unblock(args: dict, task, **kwargs) -> str:
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
+def _assert_dual_ownership(parent_id: str, child_id: str) -> Optional[str]:
+    """双 id 的 ownership 门控(task_link 等用)。
+
+    parent_id 和 child_id 都要过 assert_owned。
+    返回 None=通过,返回 str=给客户端的 JSON 错误(permission_denied)。
+    """
+    try:
+        assert_owned(parent_id)
+        assert_owned(child_id)
+    except TaskOwnershipError as e:
+        return _ownership_denied(str(e))
+    return None
+
+
 def _handle_task_link(args: dict, **kwargs) -> str:
     """task_link: 加 child 依赖 parent 的边（含 cycle+self-link 检测，双重 ownership 门控）。"""
     parent_id = (args.get("parent_id") or "").strip()
@@ -540,12 +554,10 @@ def _handle_task_link(args: dict, **kwargs) -> str:
         return json.dumps(
             {"error": "parent_id 和 child_id 必需"}, ensure_ascii=False,
         )
-    # 双重 ownership 门控：parent 和 child 都要过
-    try:
-        assert_owned(parent_id)
-        assert_owned(child_id)
-    except TaskOwnershipError as e:
-        return _ownership_denied(str(e))
+    # 双重 ownership 门控:parent 和 child 都要过
+    deny = _assert_dual_ownership(parent_id, child_id)
+    if deny:
+        return deny
     store = _get_store(kwargs)
     try:
         updated = store.add_dependency(child_id, parent_id, validate=True)

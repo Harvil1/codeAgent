@@ -92,16 +92,9 @@ def save_state(skills_dir: Path, state: dict) -> None:
 
 
 def _parse_iso(value) -> Optional[datetime]:
-    """解析 ISO 时间戳。"""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-    except (TypeError, ValueError):
-        return None
+    """解析 ISO 时间戳(委托给 agent.utils.parse_iso,保留 None 兜底)。"""
+    from agent.utils import parse_iso
+    return parse_iso(value, on_failure=None)
 
 
 # ---------------------------------------------------------------------------
