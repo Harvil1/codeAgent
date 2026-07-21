@@ -304,13 +304,22 @@ def _run_child(
             if not model:
                 model = config["model"]["name"]
             if not api_key:
-                api_key_env = config["model"]["api_key_env"]
-                api_key = os.environ.get(api_key_env)
+                # 新 settings.json:api_key 直接存在 config["model"]["api_key"]
+                # 老 config.yaml:用 api_key_env 指向环境变量
+                # 两种都试,优先直接存的
+                api_key = config["model"].get("api_key") or ""
+                if not api_key:
+                    api_key_env = config["model"].get("api_key_env") or ""
+                    if api_key_env:
+                        api_key = os.environ.get(api_key_env) or ""
         except Exception as e:
             raise RuntimeError(f"子代理无法获取 LLM 配置: {e}")
 
     if not api_key:
-        raise RuntimeError("子代理无法获取 API key（未设置环境变量）")
+        raise RuntimeError(
+            "子代理无法获取 API key（settings.json 的 models.<name>.api_key 为空，"
+            "且未设置环境变量）"
+        )
 
     # 构造子代理的 system prompt
     system_prompt = _build_child_system_prompt(goal, context, role)
