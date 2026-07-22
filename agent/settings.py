@@ -38,7 +38,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
 
     "agent": {
-        "max_iterations": 90,
+        "max_iterations": 200,
         "compression_enabled": True,
     },
     "memory": {

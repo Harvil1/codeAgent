@@ -63,7 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
     # Agent 行为
     "agent": {
-        "max_iterations": 90,
+        "max_iterations": 200,
         "compression_enabled": True,
         "system_prompt": None,
     },
@@ -81,7 +81,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # L2 micro
         "micro_keep_recent_results": 3,
         # L4 llm
-        "llm_compact_token_threshold": 100000,
+        # 注:DeepSeek/OpenAI 等大多数模型 context 上限 64K,
+        # 100K 阈值会让 API 先报 prompt_too_long 走紧急压缩(reactive_compact),
+        # 而不是 L4 优雅总结。改成 50K 让 L4 早些触发。
+        "llm_compact_token_threshold": 50000,
         "llm_compact_message_threshold": 100,
         "llm_compact_keep_recent": 10,
         "llm_compact_cooldown_turns": 5,

@@ -44,7 +44,7 @@ class AIAgent:
         model: str = "deepseek-chat",
         model_format: str = "openai",      # openai / anthropic
         fallback_model: str = None,
-        max_iterations: int = 90,
+        max_iterations: int = 200,
         enabled_toolsets: list = None,
         session_id: str = None,
         system_prompt_override: str = None,
