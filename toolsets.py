@@ -32,6 +32,8 @@ _CORE_TOOLS = [
     "execute_code",
     # Vision/Image 分析（B1：本地图片分析 + OCR）
     "image_analyze", "image_ocr",
+    # 主动上下文压缩(借鉴 learn-claude-code s08,LLM 自己管理 context)
+    "compact",
 ]
 
 TOOLSETS: Dict[str, dict] = {
