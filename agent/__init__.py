@@ -345,6 +345,8 @@ class AIAgent:
         tool_call_buffers: dict[int, dict] = {}  # idx → {id, name, arguments}
         final_usage = None
         finish_reason = "stop"
+        reasoning_content = None   # DeepSeek thinking(工具调用回传需要)
+        thinking_signature = None
 
         try:
             for delta in self.llm_client.chat_completions_stream(
@@ -399,11 +401,16 @@ class AIAgent:
                                     cb_err,
                                 )
 
-                # 最后一个 chunk 的 finish_reason / usage
+                # 最后一个 chunk 的 finish_reason / usage / thinking
                 if delta.get("finish_reason"):
                     finish_reason = delta["finish_reason"]
                 if delta.get("usage"):
                     final_usage = delta["usage"]
+                # DeepSeek thinking 提取(工具调用时后续请求需回传)
+                if delta.get("reasoning_content"):
+                    reasoning_content = delta["reasoning_content"]
+                if delta.get("thinking_signature"):
+                    thinking_signature = delta["thinking_signature"]
         except Exception as stream_err:
             # 流式失败：先通知 callback，再 fallback 到非流式重试
             logger.warning(
@@ -519,6 +526,8 @@ class AIAgent:
         message = SimpleNamespace(
             content=full_content if full_content else None,
             tool_calls=tool_calls_out if tool_calls_out else None,
+            reasoning_content=reasoning_content,
+            thinking_signature=thinking_signature,
         )
         usage_ns = None
         if final_usage is not None:
@@ -947,7 +956,8 @@ class AIAgent:
             # 处理工具调用
             if assistant_msg.tool_calls:
                 # 先把 assistant 消息（带 tool_calls）追加到历史
-                self.conversation_history.append({
+                # 保留 reasoning_content + thinking_signature(DeepSeek 工具调用回传要求)
+                assistant_entry = {
                     "role": "assistant",
                     "content": assistant_msg.content,
                     "tool_calls": [
@@ -961,7 +971,15 @@ class AIAgent:
                         }
                         for tc in assistant_msg.tool_calls
                     ],
-                })
+                }
+                # 工具调用时 DeepSeek 要求回传 thinking(否则 400)
+                rc = getattr(assistant_msg, "reasoning_content", None)
+                sig = getattr(assistant_msg, "thinking_signature", None)
+                if rc:
+                    assistant_entry["reasoning_content"] = rc
+                if sig:
+                    assistant_entry["thinking_signature"] = sig
+                self.conversation_history.append(assistant_entry)
 
                 # 执行每个工具调用
                 for tc in assistant_msg.tool_calls:

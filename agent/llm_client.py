@@ -231,26 +231,31 @@ class AnthropicClient(LLMClient):
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
 
-    # effort_level → 思考预算占比
-    _EFFORT_BUDGETS = {"max": 0.85, "high": 0.50, "medium": 0.25}
-    _MIN_THINKING_BUDGET = 1024
+    # effort_level → 思考参数(DeepSeek 格式)
+    # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+    # DeepSeek 的 Anthropic 端点不用 Anthropic 原生的 budget_tokens,
+    # 而是用 output_config.effort 控制思考强度。
 
-    def _build_thinking_config(self, max_tokens: int):
-        """根据 effort_level 构造 Anthropic thinking 参数。"""
-        if not self.effort_level:
+    def _build_thinking_config(self):
+        """返回 DeepSeek 思考模式开关参数。
+
+        DeepSeek 默认思考模式 enabled。
+        effort_level=low 时显式关闭,其余都 enabled。
+        """
+        if not self.effort_level or self.effort_level == "low":
             return None
-        ratio = self._EFFORT_BUDGETS.get(self.effort_level, 0)
-        if ratio == 0:
+        return {"type": "enabled"}
+
+    def _build_output_config(self):
+        """返回 DeepSeek 思考强度(output_config.effort)。
+
+        DeepSeek Anthropic 格式:output_config={"effort": "max"/"high"}。
+        medium 映射为 high(DeepSeek 兼容策略)。
+        """
+        if not self.effort_level or self.effort_level == "low":
             return None
-        budget = int(max_tokens * ratio)
-        if budget < self._MIN_THINKING_BUDGET:
-            logger.debug(
-                "max_tokens=%d 太小,effect_level=%s 需要 >= %d,跳过 thinking",
-                max_tokens, self.effort_level,
-                int(self._MIN_THINKING_BUDGET / ratio),
-            )
-            return None
-        return {"type": "enabled", "budget_tokens": budget}
+        effort_map = {"max": "max", "high": "high", "medium": "high"}
+        return {"effort": effort_map.get(self.effort_level, "high")}
 
     def chat_completions(self, messages, *, tools=None, **kwargs):
         """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
@@ -281,10 +286,17 @@ class AnthropicClient(LLMClient):
         }
         if anthropic_tools:
             create_kwargs["tools"] = anthropic_tools
-        # effort_level:加 thinking 参数(类 Claude Code 的 CLAUDE_CODE_EFFORT_LEVEL=max)
-        thinking = self._build_thinking_config(max_tokens)
+        # effort_level:思考模式(DeepSeek 格式:thinking 开关 + output_config 强度)
+        thinking = self._build_thinking_config()
+        output_config = self._build_output_config()
         if thinking:
             create_kwargs["thinking"] = thinking
+        # output_config 是 DeepSeek 扩展参数,用 extra_body 传(不在 Anthropic SDK 标准字段里)
+        extra_body = {}
+        if output_config:
+            extra_body["output_config"] = output_config
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
 
         # 4. 调用 Anthropic
         response = self.client.messages.create(**create_kwargs)
@@ -325,10 +337,16 @@ class AnthropicClient(LLMClient):
         }
         if anthropic_tools:
             stream_kwargs["tools"] = anthropic_tools
-        # effort_level:加 thinking 参数
-        thinking = self._build_thinking_config(max_tokens)
+        # effort_level:思考模式(DeepSeek 格式)
+        thinking = self._build_thinking_config()
+        output_config = self._build_output_config()
         if thinking:
             stream_kwargs["thinking"] = thinking
+        extra_body = {}
+        if output_config:
+            extra_body["output_config"] = output_config
+        if extra_body:
+            stream_kwargs["extra_body"] = extra_body
 
         with self.client.messages.stream(**stream_kwargs) as stream:
             for event in stream:
@@ -381,37 +399,57 @@ class AnthropicClient(LLMClient):
                     ),
                 ))
             usage_dict = _extract_anthropic_usage(getattr(final_message, "usage", None))
+            # 从 final_message 提取 thinking(DeepSeek 工具调用回传需要)
+            thinking_text = ""
+            thinking_sig = ""
+            for block in getattr(final_message, "content", []):
+                if getattr(block, "type", "") == "thinking":
+                    thinking_text += getattr(block, "thinking", "")
+                    thinking_sig = getattr(block, "signature", "") or thinking_sig
             yield {
                 "content": "",
                 "tool_calls": tool_calls_out,
                 "finish_reason": "tool_calls" if tool_calls_out else "stop",
                 "usage": usage_dict,
+                "reasoning_content": thinking_text or None,
+                "thinking_signature": thinking_sig or None,
             }
 
     def _convert_message(self, msg: dict) -> dict:
-        """OpenAI 消息 → Anthropic 消息。"""
+        """OpenAI 消息 → Anthropic 消息。
+
+        工具调用轮次回传 thinking block(DeepSeek 要求)。
+        """
         role = msg.get("role")
         content = msg.get("content")
 
-        if role == "assistant" and msg.get("tool_calls"):
-            # assistant 带工具调用：转成 content blocks
+        if role == "assistant":
             blocks = []
-            if content:
-                blocks.append({"type": "text", "text": content})
-            for tc in msg["tool_calls"]:
-                try:
-                    args = tc["function"]["arguments"]
-                    if isinstance(args, str):
-                        args = json.loads(args)
-                except (json.JSONDecodeError, KeyError):
-                    args = {}
-                blocks.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": tc["function"]["name"],
-                    "input": args,
-                })
-            return {"role": "assistant", "content": blocks}
+            # 工具调用时必须回传 thinking(DeepSeek 思考模式要求)
+            rc = msg.get("reasoning_content")
+            sig = msg.get("thinking_signature")
+            if rc and sig:
+                blocks.append({"type": "thinking", "thinking": rc, "signature": sig})
+
+            has_tool_calls = bool(msg.get("tool_calls"))
+            if has_tool_calls or blocks:
+                # 有 tool_calls 或 thinking → 用 blocks 格式
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                for tc in (msg.get("tool_calls") or []):
+                    try:
+                        args = tc.get("function", {}).get("arguments", "{}")
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                    except (json.JSONDecodeError, KeyError):
+                        args = {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "input": args,
+                    })
+                return {"role": "assistant", "content": blocks}
 
         if role == "tool":
             # tool 结果：Anthropic 用 user 角色 + tool_result block
@@ -444,12 +482,21 @@ class AnthropicClient(LLMClient):
         return anthropic_tools
 
     def _wrap_response(self, anthropic_response):
-        """把 Anthropic 响应包装成 OpenAI 兼容格式（SimpleNamespace）。"""
+        """把 Anthropic 响应包装成 OpenAI 兼容格式(SimpleNamespace)。
+
+        保留 thinking 块的 reasoning_content + signature(DeepSeek 工具调用回传需要)。
+        """
         content_text = ""
         tool_calls = None
+        reasoning_content = ""
+        thinking_signature = ""
 
         for block in anthropic_response.content:
-            if block.type == "text":
+            if block.type == "thinking":
+                # DeepSeek 思考模式:thinking 块含思维链 + signature
+                reasoning_content += getattr(block, "thinking", "")
+                thinking_signature = getattr(block, "signature", "") or thinking_signature
+            elif block.type == "text":
                 content_text += block.text
             elif block.type == "tool_use":
                 if tool_calls is None:
@@ -466,6 +513,9 @@ class AnthropicClient(LLMClient):
         message = SimpleNamespace(
             content=content_text if content_text else None,
             tool_calls=tool_calls,
+            # 工具调用时,后续请求必须回传 thinking(DeepSeek 要求)
+            reasoning_content=reasoning_content or None,
+            thinking_signature=thinking_signature or None,
         )
 
         return SimpleNamespace(
