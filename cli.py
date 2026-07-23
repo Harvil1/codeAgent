@@ -1360,7 +1360,7 @@ def _switch_model(rt: RuntimeContext, args: str):
 
     models = list_models()
     if not models:
-        console.print("[yellow]未配置任何模型。在 settings.json 的 models 段添加。[/yellow]")
+        console.print("[yellow]未配置任何模型。在 settings.json 的 llm 段或 models 段添加。[/yellow]")
         return
 
     current = get_current_model_config().get("name")
@@ -1370,9 +1370,9 @@ def _switch_model(rt: RuntimeContext, args: str):
         console.print("[bold]可用模型：[/bold]")
         for name, cfg in models.items():
             mark = "[green]*[/green]" if name == current else " "
-            fmt = cfg.get("format", "openai")
+            fmt = cfg.get("format", "anthropic")
             model_id = cfg.get("model", "?")
-            has_key = "✓" if cfg.get("api_key") else "[red]无 key[/red]"
+            has_key = "✓" if (cfg.get("api_key") or cfg.get("auth_token")) else "[red]无 key[/red]"
             console.print(
                 f"  {mark} [cyan]{name}[/cyan] "
                 f"({fmt}/{model_id}) {has_key}"

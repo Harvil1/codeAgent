@@ -329,20 +329,57 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
 
 
 def list_models(settings: Optional[Dict] = None) -> Dict[str, Dict]:
-    """列出所有配置的模型。"""
+    """列出所有配置的模型。
+
+    支持两种配置模式:
+    - 新模式(llm 段):从 opus_model/sonnet_model/haiku_model 构造
+    - 老模式(models 嵌套):直接返回
+    """
     if settings is None:
         settings = load_settings()
+
+    # 新模式:llm 段
+    llm_cfg = settings.get("llm", {})
+    if llm_cfg:
+        models = {}
+        for tier in ("opus", "sonnet", "haiku"):
+            model_name = llm_cfg.get(f"{tier}_model")
+            if model_name:
+                models[tier] = {
+                    "format": "anthropic",
+                    "base_url": llm_cfg.get("base_url"),
+                    "auth_token": llm_cfg.get("auth_token", ""),
+                    "model": model_name,
+                    "effort_level": llm_cfg.get("effort_level", "") if tier != "haiku" else "",
+                }
+        return models
+
+    # 老模式:models 嵌套
     return settings.get("models", {})
 
 
 def set_default_model(name: str) -> bool:
-    """切换默认模型并持久化。"""
+    """切换默认模型并持久化。
+
+    新模式下 name 是 opus/sonnet/haiku。
+    """
     settings = load_settings()
-    if name not in settings.get("models", {}):
+
+    # 新模式:检查 llm 段有没有对应模型
+    llm_cfg = settings.get("llm", {})
+    if llm_cfg:
+        if llm_cfg.get(f"{name}_model"):
+            settings["default_model"] = name
+            save_settings(settings)
+            return True
         return False
-    settings["default_model"] = name
-    save_settings(settings)
-    return True
+
+    # 老模式:检查 models 段
+    if name in settings.get("models", {}):
+        settings["default_model"] = name
+        save_settings(settings)
+        return True
+    return False
 
 
 def add_model(name: str, config: Dict[str, Any]) -> bool:
