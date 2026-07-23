@@ -28,15 +28,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # LLM 配置(扁平模式,类环境变量风格,去品牌前缀)
     # 所有模型共享同一个 base_url + auth_token,只区分模型名
     "llm": {
-        "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "base_url": "https://api.deepseek.com/anthropic",
         "auth_token": "",                             # 填 API token
         "api_timeout_ms": 3000000,                    # 50 分钟超时(复杂思考任务)
         "effort_level": "max",                        # 思考强度:max/high/medium/low
         "auto_compact_window": 1000000,               # 1M 上下文自动压缩窗口
         # 模型分层(按角色选模型名)
-        "opus_model": "glm-5.2",                       # 强模型(主对话/复杂推理)
-        "sonnet_model": "glm-5.2",                     # 标准模型
-        "haiku_model": "glm-4.7",                      # 轻量模型(子代理/辅助)
+        "opus_model": "deepseek-v4-pro[1m]",          # 强模型(主对话/复杂推理)
+        "sonnet_model": "deepseek-v4-pro[1m]",        # 标准模型
+        "haiku_model": "deepseek-v4-flash",           # 轻量模型(子代理/辅助)
     },
     "default_model": "opus",                          # 主对话用 opus 级
     "default_haiku_model": "haiku",                   # 子代理/辅助任务用 haiku 级
