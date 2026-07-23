@@ -91,7 +91,7 @@ TOOL_USAGE_GUIDANCE = (
     "不要绕过审批——如果用户拒绝，换个在白名单内的位置写。\n"
     "- **依赖安装策略**（重要）：\n"
     "  agent 运行中需要装 Python 依赖时,**统一装到本项目虚拟环境**:\n"
-    "    `uv pip install <pkg>` 或 `.venv/Scripts/python -m pip install <pkg>`\n"
+    "    `uv add <pkg>`(写入 pyproject.toml,同步到 .venv)\n"
     "  不要用 `uv tool install`(那只适合 CLI 工具如 ruff/black,对库无效)。\n"
     "  不要用 `uv run --with`(那只是临时跑,不持久)。\n"
     "  • 检测现有环境:`pip show <pkg>` / `.venv/Scripts/python -c \"import pkg\"` 先看装没装。\n"
