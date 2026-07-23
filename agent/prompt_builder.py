@@ -228,12 +228,12 @@ def build_system_prompt_layers(
     context_parts = []
     if skills_dir is None:
         try:
-            from constants import skills_dir as _sd
-            skills_dir = _sd()
+            from constants import all_skills_dirs as _asd
+            skills_dir = _asd()  # 内置 + 用户两个目录
         except Exception:
             skills_dir = None
     if skills_dir:
-        skill_index = _build_skill_index(Path(skills_dir))
+        skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
     if memory_store:
@@ -320,27 +320,43 @@ def build_system_prompt(
     return layers.render_flat()
 
 
-def _build_skill_index(skills_dir: Path) -> str:
-    """构建技能索引（名字 + 描述）。
+def _build_skill_index(skills_dirs) -> str:
+    """构建技能索引(名字 + 描述),支持多目录(内置 + 用户)。
 
-    只列出 active 状态的技能，跳过归档的。
+    只列出 active 状态的技能,跳过归档的。
+    多目录场景:按列表顺序扫描,后者覆盖前者(用户目录优先)。
     """
     import json
 
+    # 兼容单目录输入
+    if isinstance(skills_dirs, (str, Path)):
+        skills_dirs = [skills_dirs]
+
     lines = ["使用 /技能名 触发对应技能。"]
 
-    # 读取使用统计（获取状态）
-    usage_path = skills_dir / ".usage.json"
+    # 收集所有目录的 .usage.json(用户目录的覆盖内置的)
     usage = {}
-    if usage_path.exists():
-        try:
-            usage = json.loads(usage_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    for skills_dir in skills_dirs:
+        skills_dir = Path(skills_dir)
+        usage_path = skills_dir / ".usage.json"
+        if usage_path.exists():
+            try:
+                usage.update(json.loads(usage_path.read_text(encoding="utf-8")))
+            except Exception:
+                pass
 
-    # 扫描技能
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        name = skill_md.parent.name
+    # 扫描所有目录的技能,后者覆盖前者
+    seen = {}  # name → skill_md 路径
+    for skills_dir in skills_dirs:
+        skills_dir = Path(skills_dir)
+        if not skills_dir.exists():
+            continue
+        for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+            name = skill_md.parent.name
+            seen[name] = skill_md  # 后扫的覆盖先扫的
+
+    for name in sorted(seen.keys()):
+        skill_md = seen[name]
         rec = usage.get(name, {})
 
         # 跳过归档的

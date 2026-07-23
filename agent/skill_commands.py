@@ -19,43 +19,51 @@ logger = logging.getLogger(__name__)
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 
 
-def scan_skill_commands(skills_dir: Path) -> Dict[str, dict]:
-    """扫描技能目录，返回 {command_name: skill_info}。
+def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
+    """扫描技能目录(支持单目录或多目录列表),返回 {command_name: skill_info}。
 
-    skill_info 包含：
+    多目录场景(内置 + 用户):按列表顺序扫描,**后者覆盖前者**。
+    典型用法:scan_skill_commands([builtin_dir, user_dir])
+    → 同名时 user_dir 的技能覆盖 builtin_dir(用户能改内置)。
+
+    skill_info 包含:
       - name: 技能名
       - description: 描述
       - skill_md_path: SKILL.md 路径
       - skill_dir: 技能目录
     """
+    # 兼容单目录输入(Path 或 str)
+    if isinstance(skills_dirs, (str, Path)):
+        skills_dirs = [skills_dirs]
+
     commands = {}
-    skills_dir = Path(skills_dir)
+    for skills_dir in skills_dirs:
+        skills_dir = Path(skills_dir)
+        if not skills_dir.exists():
+            continue
 
-    if not skills_dir.exists():
-        return commands
+        for skill_md in skills_dir.glob("*/SKILL.md"):
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+                frontmatter, body = parse_frontmatter(content)
 
-    for skill_md in skills_dir.glob("*/SKILL.md"):
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-            frontmatter, body = parse_frontmatter(content)
+                name = frontmatter.get("name", skill_md.parent.name)
 
-            name = frontmatter.get("name", skill_md.parent.name)
+                # 标准化命令名：小写、连字符
+                cmd_name = name.lower().replace(" ", "-").replace("_", "-")
+                cmd_name = _SKILL_INVALID_CHARS.sub("", cmd_name)
 
-            # 标准化命令名：小写、连字符
-            cmd_name = name.lower().replace(" ", "-").replace("_", "-")
-            cmd_name = _SKILL_INVALID_CHARS.sub("", cmd_name)
+                if not cmd_name:
+                    continue
 
-            if not cmd_name:
-                continue
-
-            commands[f"/{cmd_name}"] = {
-                "name": name,
-                "description": frontmatter.get("description", ""),
-                "skill_md_path": str(skill_md),
-                "skill_dir": str(skill_md.parent),
-            }
-        except Exception as e:
-            logger.warning("解析技能失败 %s: %s", skill_md, e)
+                commands[f"/{cmd_name}"] = {
+                    "name": name,
+                    "description": frontmatter.get("description", ""),
+                    "skill_md_path": str(skill_md),
+                    "skill_dir": str(skill_md.parent),
+                }
+            except Exception as e:
+                logger.warning("解析技能失败 %s: %s", skill_md, e)
 
     return commands
 

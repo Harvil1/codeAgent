@@ -37,7 +37,7 @@ from agent.skill_commands import scan_skill_commands, execute_skill, scan_bundle
 from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
 from config import load_config
-from constants import get_agent_home, skills_dir, sessions_db_path
+from constants import get_agent_home, skills_dir, sessions_db_path, all_skills_dirs
 from tools.skill_usage import bump_use, load_usage
 from agent.handoff import (
     HandoffStore,
@@ -210,9 +210,9 @@ class RuntimeContext:
         # 4. 创建 agent
         self.agent = self._create_agent()
 
-        # 5. 扫描技能命令
-        self.skill_commands = scan_skill_commands(skills_dir())
-        # batch1-T3: 扫描技能束命令
+        # 5. 扫描技能命令(内置 + 用户两个目录,用户优先)
+        self.skill_commands = scan_skill_commands(all_skills_dirs())
+        # batch1-T3: 扫描技能束命令(只在用户目录,不扫内置)
         self.bundle_commands = scan_bundle_commands(skills_dir())
 
         # 7. Handoff 存储

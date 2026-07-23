@@ -47,8 +47,32 @@ def display_agent_home() -> str:
 
 
 def skills_dir() -> Path:
-    """技能库根目录（每个子目录是一个技能）。"""
+    """用户技能库根目录(每个子目录是一个技能)。
+
+    用户自己创建/agent 自动创建的技能放这里。跨机器需 rsync 跟随用户数据。
+    """
     return get_agent_home() / "skills"
+
+
+def builtin_skills_dir() -> Path:
+    """内置技能目录(项目代码自带,跟 git 走)。
+
+    内置技能跟用户数据分离:
+    - 内置:本项目 skills/ 目录(开发者维护,装哪台机器都一样)
+    - 用户:~/.agent/skills/(用户/agent 维护,跨机器要 rsync)
+
+    同名时用户目录优先(用户可覆盖内置)。
+    """
+    # 项目根 = constants.py 的父目录(constants.py 在项目根)
+    return Path(__file__).resolve().parent / "skills"
+
+
+def all_skills_dirs() -> list:
+    """所有技能扫描目录(内置 + 用户,顺序决定优先级)。
+
+    返回 [builtin, user],扫描时后者覆盖前者(用户优先)。
+    """
+    return [builtin_skills_dir(), skills_dir()]
 
 
 def logs_dir() -> Path:
