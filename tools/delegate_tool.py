@@ -292,32 +292,47 @@ def _run_child(
     # 从 kwargs 或 config 获取 LLM 配置
     base_url = kwargs.get("base_url")
     api_key = kwargs.get("api_key")
+    auth_token = kwargs.get("auth_token")
     model = kwargs.get("model")
+    model_format = kwargs.get("model_format")
 
-    if not api_key or not model:
+    if not (api_key or auth_token) or not model:
         # 从 config 读取
         try:
             from config import load_config
             config = load_config()
+
+            # 子代理优先用轻量模型(default_haiku_model),省 token
+            # 类 Claude Code 模式:主对话用 opus,子代理用 haiku
+            haiku_name = config.get("default_haiku_model", "")
+            models_cfg = config.get("models", {})
+            if haiku_name and haiku_name in models_cfg:
+                sub_cfg = models_cfg[haiku_name]
+            else:
+                # fallback 到主模型兼容段
+                sub_cfg = config.get("model", {})
+
             if not base_url:
-                base_url = config["model"].get("base_url")
+                base_url = sub_cfg.get("base_url")
             if not model:
-                model = config["model"]["name"]
+                model = sub_cfg.get("model") or sub_cfg.get("name")
             if not api_key:
-                # 新 settings.json:api_key 直接存在 config["model"]["api_key"]
-                # 老 config.yaml:用 api_key_env 指向环境变量
-                # 两种都试,优先直接存的
-                api_key = config["model"].get("api_key") or ""
-                if not api_key:
-                    api_key_env = config["model"].get("api_key_env") or ""
-                    if api_key_env:
-                        api_key = os.environ.get(api_key_env) or ""
+                api_key = sub_cfg.get("api_key") or ""
+            if not auth_token:
+                auth_token = sub_cfg.get("auth_token") or ""
+            # 向后兼容:api_key_env 指向环境变量(老 config.yaml 格式)
+            if not api_key and not auth_token:
+                api_key_env = sub_cfg.get("api_key_env") or ""
+                if api_key_env:
+                    api_key = os.environ.get(api_key_env) or ""
+            if not model_format:
+                model_format = sub_cfg.get("format", "anthropic")
         except Exception as e:
             raise RuntimeError(f"子代理无法获取 LLM 配置: {e}")
 
-    if not api_key:
+    if not api_key and not auth_token:
         raise RuntimeError(
-            "子代理无法获取 API key（settings.json 的 models.<name>.api_key 为空，"
+            "子代理无法获取 API key（settings.json 的 models 配置为空，"
             "且未设置环境变量）"
         )
 
@@ -360,8 +375,10 @@ def _run_child(
 
         child = AIAgent(
             base_url=base_url,
-            api_key=api_key,
+            api_key=api_key or None,
+            auth_token=auth_token or None,
             model=model,
+            model_format=model_format or "anthropic",
             max_iterations=kwargs.get("child_max_iterations", 50),
             enabled_toolsets=child_toolsets,
             system_prompt_override=system_prompt,

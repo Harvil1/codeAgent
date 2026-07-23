@@ -26,14 +26,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "models": {
+        # 主模型(强,用于主对话/复杂任务)
         "deepseek": {
-            "format": "openai",                       # openai / anthropic
-            "base_url": "https://api.deepseek.com/v1",
-            "api_key": "",                            # 直接存（用户要求）
-            "model": "deepseek-chat",
+            "format": "anthropic",
+            "base_url": "https://api.deepseek.com/anthropic",
+            "auth_token": "",                         # 填 DeepSeek API Key
+            "model": "deepseek-v4-pro[1m]",
+        },
+        # 轻量模型(便宜/快,用于子代理/反思/记忆检索)
+        "deepseek-flash": {
+            "format": "anthropic",
+            "base_url": "https://api.deepseek.com/anthropic",
+            "auth_token": "",                         # 跟主模型共用同一个 key
+            "model": "deepseek-v4-flash",
         },
     },
-    "default_model": "deepseek",
+    "default_model": "deepseek",                      # 主对话用
+    "default_haiku_model": "deepseek-flash",          # 子代理/辅助任务用
 
     "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
 
