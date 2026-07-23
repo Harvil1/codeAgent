@@ -1695,9 +1695,13 @@ def run_interactive(resume_last: bool = False):
 
         # 4. 调用 agent
         try:
-            response = rt.agent.run_conversation(user_input)
+            # 先打 AI: 前缀,让流式输出在这个前缀之后显示
             console.print("[bold green]AI:[/bold green]")
-            console.print(response)
+            response = rt.agent.run_conversation(user_input)
+            # 流式模式(stream_callback 已设)的内容已经在 run_conversation 过程中显示,
+            # 不再重复 print。非流式模式(无 callback)才 print response。
+            if not getattr(rt.agent, "_stream_callback", None):
+                console.print(response)
 
             # 5. 保存助手响应到 session
             if rt.session_store and rt.session_id:
