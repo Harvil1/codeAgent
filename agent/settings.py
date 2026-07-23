@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "base_url": "https://api.deepseek.com/anthropic",
             "auth_token": "",                         # 填 DeepSeek API Key
             "model": "deepseek-v4-pro[1m]",
+            "effort_level": "max",                    # 思考强度:max/high/medium/low
         },
         # 轻量模型(便宜/快,用于子代理/反思/记忆检索)
         "deepseek-flash": {

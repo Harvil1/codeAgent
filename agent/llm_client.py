@@ -202,6 +202,7 @@ class AnthropicClient(LLMClient):
         base_url: str = None,
         *,
         auth_token: str = None,
+        effort_level: str = None,
     ):
         """创建 Anthropic client。
 
@@ -209,8 +210,11 @@ class AnthropicClient(LLMClient):
         - api_key:用 x-api-key header(Anthropic 官方)
         - auth_token:用 Authorization: Bearer header(DeepSeek Anthropic 端点)
 
-        DeepSeek 的 /anthropic 端点要求 Bearer 认证,
-        所以接入 DeepSeek 时配 auth_token 而非 api_key。
+        effort_level(思考强度,类 Claude Code 的 CLAUDE_CODE_EFFORT_LEVEL):
+        - "max": 85% 的 max_tokens 给思考预算(最强推理)
+        - "high": 50% 给思考
+        - "medium": 25% 给思考
+        - "low" / None: 不思考(直接回答)
         """
         import anthropic
         kwargs = {}
@@ -225,6 +229,28 @@ class AnthropicClient(LLMClient):
             raise ValueError("AnthropicClient 需要 api_key 或 auth_token")
         self.client = anthropic.Anthropic(**kwargs)
         self.model = model
+        self.effort_level = (effort_level or "").lower() or None
+
+    # effort_level → 思考预算占比
+    _EFFORT_BUDGETS = {"max": 0.85, "high": 0.50, "medium": 0.25}
+    _MIN_THINKING_BUDGET = 1024
+
+    def _build_thinking_config(self, max_tokens: int):
+        """根据 effort_level 构造 Anthropic thinking 参数。"""
+        if not self.effort_level:
+            return None
+        ratio = self._EFFORT_BUDGETS.get(self.effort_level, 0)
+        if ratio == 0:
+            return None
+        budget = int(max_tokens * ratio)
+        if budget < self._MIN_THINKING_BUDGET:
+            logger.debug(
+                "max_tokens=%d 太小,effect_level=%s 需要 >= %d,跳过 thinking",
+                max_tokens, self.effort_level,
+                int(self._MIN_THINKING_BUDGET / ratio),
+            )
+            return None
+        return {"type": "enabled", "budget_tokens": budget}
 
     def chat_completions(self, messages, *, tools=None, **kwargs):
         """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
@@ -245,16 +271,25 @@ class AnthropicClient(LLMClient):
         # 2. 转换工具格式
         anthropic_tools = self._convert_tools(tools) if tools else None
 
-        # 3. 调用 Anthropic
-        response = self.client.messages.create(
-            model=self.model,
-            system=system,
-            messages=conversation,
-            tools=anthropic_tools,
-            max_tokens=kwargs.get("max_tokens", 4096),
-        )
+        # 3. 构造调用参数
+        max_tokens = kwargs.get("max_tokens", 4096)
+        create_kwargs = {
+            "model": self.model,
+            "system": system,
+            "messages": conversation,
+            "max_tokens": max_tokens,
+        }
+        if anthropic_tools:
+            create_kwargs["tools"] = anthropic_tools
+        # effort_level:加 thinking 参数(类 Claude Code 的 CLAUDE_CODE_EFFORT_LEVEL=max)
+        thinking = self._build_thinking_config(max_tokens)
+        if thinking:
+            create_kwargs["thinking"] = thinking
 
-        # 4. 包装成 OpenAI 兼容响应
+        # 4. 调用 Anthropic
+        response = self.client.messages.create(**create_kwargs)
+
+        # 5. 包装成 OpenAI 兼容响应
         return self._wrap_response(response)
 
     def chat_completions_stream(self, messages, *, tools=None, **kwargs):
@@ -280,13 +315,22 @@ class AnthropicClient(LLMClient):
         tool_buffers: Dict[int, Dict[str, Any]] = {}
         current_tool_idx: Optional[int] = None
 
-        with self.client.messages.stream(
-            model=self.model,
-            system=system,
-            messages=conversation,
-            tools=anthropic_tools,
-            max_tokens=kwargs.get("max_tokens", 4096),
-        ) as stream:
+        # 构造 stream 参数
+        max_tokens = kwargs.get("max_tokens", 4096)
+        stream_kwargs = {
+            "model": self.model,
+            "system": system,
+            "messages": conversation,
+            "max_tokens": max_tokens,
+        }
+        if anthropic_tools:
+            stream_kwargs["tools"] = anthropic_tools
+        # effort_level:加 thinking 参数
+        thinking = self._build_thinking_config(max_tokens)
+        if thinking:
+            stream_kwargs["thinking"] = thinking
+
+        with self.client.messages.stream(**stream_kwargs) as stream:
             for event in stream:
                 evt_type = getattr(event, "type", "")
                 if evt_type == "content_block_start":
@@ -456,11 +500,13 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
     if fmt == "anthropic":
         # auth_token 用于 DeepSeek 等 Anthropic 兼容端点(Bearer 认证)
         auth_token = model_config.get("auth_token") or ""
+        effort_level = model_config.get("effort_level") or ""
         return AnthropicClient(
             api_key=api_key or None,
             auth_token=auth_token or None,
             model=model,
             base_url=base_url,
+            effort_level=effort_level or None,
         )
 
     # 默认 openai 兼容

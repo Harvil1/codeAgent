@@ -317,9 +317,10 @@ def load_config(
                 "name": model_cfg.get("model", "deepseek-chat"),
                 "base_url": model_cfg.get("base_url"),
                 "api_key": model_cfg.get("api_key", ""),
-                "auth_token": model_cfg.get("auth_token", ""),  # DeepSeek Anthropic 端点用
-                "api_key_env": "",                  # 已废弃（key 直接存 JSON）
-                "format": model_cfg.get("format", "openai"),
+                "auth_token": model_cfg.get("auth_token", ""),
+                "api_key_env": "",
+                "format": model_cfg.get("format", "anthropic"),
+                "effort_level": model_cfg.get("effort_level", ""),
             }
 
             if cli_overrides:

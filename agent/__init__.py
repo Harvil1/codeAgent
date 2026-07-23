@@ -42,6 +42,7 @@ class AIAgent:
         base_url: str = None,
         api_key: str = None,
         auth_token: str = None,            # DeepSeek Anthropic 端点用 Bearer 认证
+        effort_level: str = None,          # 思考强度: max / high / medium / low
         model: str = "deepseek-chat",
         model_format: str = "openai",      # openai / anthropic
         fallback_model: str = None,
@@ -87,7 +88,8 @@ class AIAgent:
             "format": model_format,
             "base_url": base_url,
             "api_key": api_key,
-            "auth_token": auth_token,  # DeepSeek Anthropic 端点用 Bearer 认证
+            "auth_token": auth_token,
+            "effort_level": effort_level,
             "model": model,
         }
         self.llm_client = create_llm_client(model_config)
