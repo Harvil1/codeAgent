@@ -41,6 +41,7 @@ class AIAgent:
         *,
         base_url: str = None,
         api_key: str = None,
+        auth_token: str = None,            # DeepSeek Anthropic 端点用 Bearer 认证
         model: str = "deepseek-chat",
         model_format: str = "openai",      # openai / anthropic
         fallback_model: str = None,
@@ -86,11 +87,13 @@ class AIAgent:
             "format": model_format,
             "base_url": base_url,
             "api_key": api_key,
+            "auth_token": auth_token,  # DeepSeek Anthropic 端点用 Bearer 认证
             "model": model,
         }
         self.llm_client = create_llm_client(model_config)
         self.base_url = base_url
         self.api_key = api_key
+        self.auth_token = auth_token
         self.model = model
         self.model_format = model_format
         self.fallback_model = fallback_model

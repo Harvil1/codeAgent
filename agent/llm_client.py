@@ -195,12 +195,35 @@ class AnthropicClient(LLMClient):
     这里做双向转换，对外暴露 OpenAI 兼容接口。
     """
 
-    def __init__(self, api_key: str, model: str, base_url: str = None):
+    def __init__(
+        self,
+        api_key: str = None,
+        model: str = "",
+        base_url: str = None,
+        *,
+        auth_token: str = None,
+    ):
+        """创建 Anthropic client。
+
+        认证方式(二选一):
+        - api_key:用 x-api-key header(Anthropic 官方)
+        - auth_token:用 Authorization: Bearer header(DeepSeek Anthropic 端点)
+
+        DeepSeek 的 /anthropic 端点要求 Bearer 认证,
+        所以接入 DeepSeek 时配 auth_token 而非 api_key。
+        """
         import anthropic
+        kwargs = {}
         if base_url:
-            self.client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
+            kwargs["base_url"] = base_url
+        # auth_token 优先(DeepSeek 等 Anthropic 兼容端点用 Bearer)
+        if auth_token:
+            kwargs["auth_token"] = auth_token
+        elif api_key:
+            kwargs["api_key"] = api_key
         else:
-            self.client = anthropic.Anthropic(api_key=api_key)
+            raise ValueError("AnthropicClient 需要 api_key 或 auth_token")
+        self.client = anthropic.Anthropic(**kwargs)
         self.model = model
 
     def chat_completions(self, messages, *, tools=None, **kwargs):
@@ -431,7 +454,14 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
     base_url = model_config.get("base_url")
 
     if fmt == "anthropic":
-        return AnthropicClient(api_key=api_key, model=model, base_url=base_url)
+        # auth_token 用于 DeepSeek 等 Anthropic 兼容端点(Bearer 认证)
+        auth_token = model_config.get("auth_token") or ""
+        return AnthropicClient(
+            api_key=api_key or None,
+            auth_token=auth_token or None,
+            model=model,
+            base_url=base_url,
+        )
 
     # 默认 openai 兼容
     return OpenAICompatClient(base_url=base_url, api_key=api_key, model=model)

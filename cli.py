@@ -232,10 +232,13 @@ class RuntimeContext:
         优先用 settings.json 里的 api_key 字段；为空时 fallback 到环境变量。
         """
         model_cfg = self.config.get("model", {})
+        # api_key 和 auth_token 分别取(不混用)
+        # DeepSeek Anthropic 端点用 auth_token(Bearer),用 api_key(x-api-key)会被拒
         api_key = model_cfg.get("api_key") or ""
+        auth_token = model_cfg.get("auth_token") or ""
 
         # Fallback：JSON 里没填 key 时，尝试 provider 专属环境变量
-        if not api_key:
+        if not api_key and not auth_token:
             provider = (model_cfg.get("provider") or "").upper()
             api_key_env = model_cfg.get("api_key_env") or ""
             candidates = [
@@ -247,11 +250,11 @@ class RuntimeContext:
                     api_key = os.environ.get(cand)
                     break
 
-        if not api_key:
+        if not api_key and not auth_token:
             console.print("[red]未设置 API key！[/red]")
             console.print(
                 f"请在 [bold]{self.home / 'settings.json'}[/bold] 的 "
-                f"models.<name>.api_key 填入，或设置环境变量。"
+                f"models.<name>.api_key 或 auth_token 填入，或设置环境变量。"
             )
             raise SystemExit(1)
 
@@ -320,8 +323,10 @@ class RuntimeContext:
         agent = AIAgent(
             base_url=model_cfg.get("base_url"),
             api_key=api_key,
+            auth_token=auth_token,
             model=model_cfg["name"],
-            max_iterations=self.config.get("agent", {}).get("max_iterations", 90),
+            model_format=model_cfg.get("format", "openai"),
+            max_iterations=self.config.get("agent", {}).get("max_iterations", 200),
             enabled_toolsets=self.config.get("enabled_toolsets", ["core"]),
             session_id=self.session_id,
             memory_store=self.memory_store,
@@ -1394,8 +1399,8 @@ def _switch_model(rt: RuntimeContext, args: str):
     try:
         from agent.llm_client import create_llm_client
         model_cfg = get_current_model_config()
-        if not model_cfg.get("api_key"):
-            console.print(f"[red]{target} 未配置 api_key[/red]")
+        if not (model_cfg.get("api_key") or model_cfg.get("auth_token")):
+            console.print(f"[red]{target} 未配置 api_key 或 auth_token[/red]")
             return
         rt.agent.llm_client = create_llm_client(model_cfg)
         rt.agent.model = model_cfg.get("model", target)
