@@ -305,9 +305,13 @@ def _run_child(
             # 子代理优先用轻量模型(default_haiku_model),省 token
             # 类 Claude Code 模式:主对话用 opus,子代理用 haiku
             haiku_name = config.get("default_haiku_model", "")
-            models_cfg = config.get("models", {})
-            if haiku_name and haiku_name in models_cfg:
-                sub_cfg = models_cfg[haiku_name]
+            # 新模式:config["haiku_model"](llm 段注入的)
+            haiku_cfg = config.get("haiku_model")
+            if haiku_cfg:
+                sub_cfg = haiku_cfg
+            elif haiku_name and haiku_name in config.get("models", {}):
+                # 老模式:config["models"][haiku_name]
+                sub_cfg = config["models"][haiku_name]
             else:
                 # fallback 到主模型兼容段
                 sub_cfg = config.get("model", {})

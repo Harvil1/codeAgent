@@ -313,15 +313,29 @@ def load_config(
             config = dict(settings)
             # 构造兼容 model 段（旧代码用 config["model"]["name"] 等）
             config["model"] = {
-                "provider": model_cfg.get("name", "deepseek"),
-                "name": model_cfg.get("model", "deepseek-chat"),
+                "provider": model_cfg.get("name", "opus"),
+                "name": model_cfg.get("model", ""),
                 "base_url": model_cfg.get("base_url"),
                 "api_key": model_cfg.get("api_key", ""),
                 "auth_token": model_cfg.get("auth_token", ""),
                 "api_key_env": "",
                 "format": model_cfg.get("format", "anthropic"),
                 "effort_level": model_cfg.get("effort_level", ""),
+                "api_timeout_ms": model_cfg.get("api_timeout_ms"),
             }
+
+            # 新模式(llm 段):注入 haiku_model 配置,让 delegate_tool 能读到
+            llm_cfg = settings.get("llm", {})
+            if llm_cfg:
+                haiku_name = settings.get("default_haiku_model", "haiku")
+                haiku_model_name = llm_cfg.get(f"{haiku_name}_model")
+                if haiku_model_name:
+                    config["haiku_model"] = {
+                        "format": "anthropic",
+                        "base_url": llm_cfg.get("base_url"),
+                        "auth_token": llm_cfg.get("auth_token", ""),
+                        "model": haiku_model_name,
+                    }
 
             if cli_overrides:
                 config = _deep_merge(config, cli_overrides)

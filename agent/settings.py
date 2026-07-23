@@ -25,25 +25,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "models": {
-        # 主模型(强,用于主对话/复杂任务)
-        "deepseek": {
-            "format": "anthropic",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "auth_token": "",                         # 填 DeepSeek API Key
-            "model": "deepseek-v4-pro[1m]",
-            "effort_level": "max",                    # 思考强度:max/high/medium/low
-        },
-        # 轻量模型(便宜/快,用于子代理/反思/记忆检索)
-        "deepseek-flash": {
-            "format": "anthropic",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "auth_token": "",                         # 跟主模型共用同一个 key
-            "model": "deepseek-v4-flash",
-        },
+    # LLM 配置(扁平模式,类环境变量风格,去品牌前缀)
+    # 所有模型共享同一个 base_url + auth_token,只区分模型名
+    "llm": {
+        "base_url": "https://open.bigmodel.cn/api/anthropic",
+        "auth_token": "",                             # 填 API token
+        "api_timeout_ms": 3000000,                    # 50 分钟超时(复杂思考任务)
+        "effort_level": "max",                        # 思考强度:max/high/medium/low
+        "auto_compact_window": 1000000,               # 1M 上下文自动压缩窗口
+        # 模型分层(按角色选模型名)
+        "opus_model": "glm-5.2",                       # 强模型(主对话/复杂推理)
+        "sonnet_model": "glm-5.2",                     # 标准模型
+        "haiku_model": "glm-4.7",                      # 轻量模型(子代理/辅助)
     },
-    "default_model": "deepseek",                      # 主对话用
-    "default_haiku_model": "deepseek-flash",          # 子代理/辅助任务用
+    "default_model": "opus",                          # 主对话用 opus 级
+    "default_haiku_model": "haiku",                   # 子代理/辅助任务用 haiku 级
+
+    "mcpServers": {},
+
+    "agent": {
+        "max_iterations": 200,
+        "compression_enabled": True,
+    },
 
     "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
 
@@ -279,24 +282,48 @@ def migrate_from_legacy() -> bool:
 # ---------------------------------------------------------------------------
 
 def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
-    """获取当前激活模型的完整配置（含 name/format/api_key/base_url/model）。"""
+    """获取当前激活模型的完整配置。
+
+    支持两种配置模式:
+    1. 新模式(推荐):llm 段扁平配置(base_url/auth_token 共享 + opus_model/haiku_model)
+    2. 老模式(向后兼容):models 嵌套(每个模型独立配 base_url/auth_token)
+    """
     if settings is None:
         settings = load_settings()
 
-    name = settings.get("default_model", "")
-    models = settings.get("models", {})
+    name = settings.get("default_model", "opus")
 
+    # 新模式:llm 段扁平配置
+    llm_cfg = settings.get("llm", {})
+    if llm_cfg:
+        model_name = llm_cfg.get(f"{name}_model")
+        if model_name:
+            return {
+                "name": name,
+                "format": "anthropic",
+                "base_url": llm_cfg.get("base_url"),
+                "auth_token": llm_cfg.get("auth_token", ""),
+                "model": model_name,
+                "effort_level": llm_cfg.get("effort_level", ""),
+                "api_timeout_ms": llm_cfg.get("api_timeout_ms"),
+            }
+
+    # 老模式:models 嵌套(向后兼容)
+    models = settings.get("models", {})
     if name not in models:
         if models:
             name = next(iter(models))
         else:
-            return {"name": "none", "format": "openai", "api_key": "", "model": ""}
+            return {"name": "none", "format": "anthropic", "auth_token": "", "model": ""}
 
-    cfg = json.loads(json.dumps(models[name]))  # 深拷贝
+    cfg = json.loads(json.dumps(models[name]))
     cfg["name"] = name
-    cfg.setdefault("format", "openai")
+    cfg.setdefault("format", "anthropic")
+    cfg.setdefault("auth_token", "")
     cfg.setdefault("api_key", "")
     cfg.setdefault("base_url", None)
+    cfg.setdefault("model", name)
+    return cfg
     cfg.setdefault("model", name)
     return cfg
 
