@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -77,7 +78,11 @@ def _handle_terminal(args: dict, **kwargs) -> str:
     if not command:
         return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
 
-    timeout = args.get("timeout", 120)
+    # timeout 强制转 float(LLM 常传字符串 '10' 导致 subprocess 忽略)
+    try:
+        timeout = float(args.get("timeout", 120) or 120)
+    except (TypeError, ValueError):
+        timeout = 120.0
     cwd = args.get("cwd") or os.getcwd()
 
     # 权限检查（闸门 1/2/3）
@@ -95,17 +100,49 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防泄漏给子进程
         from agent.sandbox_env import build_safe_env
         safe_env = build_safe_env()
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=safe_env,
-            encoding="utf-8",
-            errors="replace",
+
+        # 检测 GUI 程序启动命令(start / Chrome / 浏览器等)
+        # GUI 程序不退出 → subprocess 管道永远等 → 卡死
+        # 修复:不创建管道(DEVNULL),start 命令立即返回
+        is_gui_launch = bool(re.match(
+            r'^\s*start\s', command, re.IGNORECASE
+        )) or any(
+            kw in command.lower() for kw in [
+                'chrome.exe', 'firefox.exe', 'msedge.exe',
+                'notepad.exe', 'explorer.exe',
+            ]
         )
+
+        if is_gui_launch:
+            # GUI 命令:不创建管道,避免子进程继承管道导致卡死
+            result = subprocess.run(
+                command,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                cwd=cwd,
+                env=safe_env,
+            )
+            return json.dumps({
+                "stdout": "(GUI 程序已启动)",
+                "stderr": "",
+                "exit_code": result.returncode,
+                "command": command,
+                "cwd": cwd,
+            }, ensure_ascii=False)
+        else:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=safe_env,
+                encoding="utf-8",
+                errors="replace",
+            )
         # 截断（防止爆 context）
         stdout_truncated_raw = _truncate_output(result.stdout)
         stderr_truncated_raw = _truncate_output(result.stderr)
