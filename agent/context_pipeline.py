@@ -442,8 +442,14 @@ def compress_if_needed(
     llm_compact_count = session_state.llm_compact_count
     conv_len = len(_split_system(messages)[1])
     est_tokens = estimate_message_tokens(messages)
+
+    # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 500K,减少不必要压缩)
+    token_threshold = config.get("llm_compact_token_threshold", 100000)
+    if model and "[1m]" in str(model):
+        token_threshold = max(token_threshold, 500000)
+
     over_threshold = (
-        est_tokens > config.get("llm_compact_token_threshold", 100000)
+        est_tokens > token_threshold
         or conv_len > config.get("llm_compact_message_threshold", 100)
     )
     cooldown_ok = session_state.cooldown_ok(cooldown)
@@ -474,9 +480,9 @@ def compress_if_needed(
             llm_client=llm_client,
             model=model,
             keep_recent=config.get("llm_compact_keep_recent", 10),
-            token_threshold=config.get("llm_compact_token_threshold", 100000),
+            token_threshold=token_threshold,  # 自适应阈值
             msg_threshold=config.get("llm_compact_message_threshold", 100),
-            precomputed_tokens=est_tokens,  # 复用 compress_if_needed 顶部算的值
+            precomputed_tokens=est_tokens,
         )
         if c4:
             session_state.record_llm_compact()

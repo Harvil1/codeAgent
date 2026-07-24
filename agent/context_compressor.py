@@ -50,13 +50,19 @@ def _summarize_conversation(
     dialog = "\n\n".join(formatted)
 
     prompt = (
-        "请把以下对话总结成关键信息，保留：\n"
+        "请把以下对话总结成关键信息。\n\n"
+        "**必须逐字保留(不能省略/改写)**:\n"
+        "- 文件路径(如 D:/project/xxx.py、~/.agent/workspace/xxx)\n"
+        "- 命令(如 uv add、pip install、taskkill、netstat、browser-use)\n"
+        "- 用户明确的要求/约束(如\"不要加注释\"\"用 uv 不用 pip\")\n"
+        "- 关键决策(如\"选方案 A 因为 B\"\"Chrome 需要 taskkill 后重启\")\n"
+        "- 错误关键词(如\"PYTHONHOME 冲突\"\"9222 端口未监听\"\"API key 错误\")\n"
+        "- 端口号、IP 地址、版本号(如 9222、3.12、0.13.6)\n\n"
+        "另外保留:\n"
         "1. 用户的核心需求\n"
         "2. 已完成的工作\n"
-        "3. 关键的决策和发现\n"
-        "4. 待办的事项\n"
-        "5. 重要的文件路径、命令、配置\n\n"
-        "用简洁的要点格式，不要超过 800 字。\n\n"
+        "3. 待办的事项\n\n"
+        "用简洁的要点格式,不要超过 800 字。\n\n"
         f"对话内容:\n{dialog}"
     )
 
