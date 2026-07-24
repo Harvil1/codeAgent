@@ -253,6 +253,12 @@ class AIAgent:
         # 显式初始化避免依赖 getattr 默认值（可读性 + 子类安全）。
         self._reacted: bool = False
 
+        # === 失败重试检测 ===
+        # 连续 N 次工具调用失败 → 注入提醒,防止死循环
+        self._tool_failure_streak: int = 0
+        self._last_tool_error: str = ""
+        self._failure_threshold: int = 3
+
         # === CCALS-P0-2 NEW: 任务级反思引擎 ===
         # 每次任务正常结束时异步触发：用 aux_llm 从轨迹提炼 3 类经验写入 memory_store。
         # aux_llm 不可用时降级跳过；config["reflection"]["enabled"]=False 可关闭。
@@ -851,6 +857,24 @@ class AIAgent:
             effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
             tool_schemas = get_tool_definitions(effective_toolsets, agent=self)
 
+            # === 失败重试检测:连续 N 次工具失败 → 注入提醒 ===
+            if self._tool_failure_streak >= self._failure_threshold:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"<retry_warning>\n"
+                        f"你已连续 {self._tool_failure_streak} 次工具调用失败。\n"
+                        f"最近错误: {self._last_tool_error}\n\n"
+                        f"**不要用完全相同的方式重试**。建议:\n"
+                        f"1. 分析错误根因(看 stderr / error 字段)\n"
+                        f"2. 换一种方法(改命令 / 改路径 / 改参数)\n"
+                        f"3. 如果是环境问题(路径冲突 / 权限 / 版本不兼容),"
+                        f"**停下来告诉用户**具体问题和解决建议\n"
+                        f"</retry_warning>"
+                    ),
+                })
+                self._tool_failure_streak = 0  # 重置(提醒一次就够,不反复唠叨)
+
             # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
             if (self.hooks_registry
                     and self.config.get("hooks", {}).get("enabled", True)):
@@ -1061,6 +1085,22 @@ class AIAgent:
                             "name": tool_name,
                             "content": result,  # JSON 字符串
                         })
+
+                        # === 失败重试检测 ===
+                        try:
+                            rd = json.loads(result) if isinstance(result, str) else {}
+                            is_error = bool(rd.get("error")) or rd.get("exit_code", 0) != 0
+                        except (json.JSONDecodeError, TypeError):
+                            is_error = False
+                        if is_error:
+                            self._tool_failure_streak += 1
+                            err_snippet = (
+                                rd.get("error", "") or str(rd.get("stderr", ""))[:200]
+                                if isinstance(rd, dict) else ""
+                            )
+                            self._last_tool_error = str(err_snippet)[:200]
+                        else:
+                            self._tool_failure_streak = 0
 
                 # === P4b-T2 NEW: idle 标志检查 ===
                 if self._idle_requested:
