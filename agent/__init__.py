@@ -275,6 +275,45 @@ class AIAgent:
             (config or {}).get("reflection", {}).get("cooldown_turns", 3)
         )
 
+    def _retrieve_relevant_memories(self, query: str) -> str:
+        """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情。
+
+        返回格式化文本(多条记忆的 name + description + summary)。
+        fail-open:任何异常返回空串(不影响主循环)。
+        只在 conversation_history 末尾是 user 消息时调用(每个用户输入 1 次)。
+        """
+        if not self.memory_store or not self.aux_llm_router:
+            return ""
+        try:
+            index_text = self.memory_store.snapshot_for_prompt()
+            if not index_text or len(index_text.strip()) < 50:
+                return ""  # 记忆太少不值得检索
+
+            from agent.memory_retriever import retrieve_relevant
+            ids = retrieve_relevant(
+                query=query,
+                index_text=index_text,
+                llm_client=self.aux_llm_router,
+                model=None,  # aux_llm_router 内部选模型(haiku/flash)
+                max_results=3,
+            )
+            if not ids:
+                return ""
+
+            # 加载详情(name + description + summary)
+            parts = []
+            for mid in ids[:3]:
+                entry = self.memory_store.get(mid)
+                if entry:
+                    line = f"- **{entry.name}**({entry.type}): {entry.description}"
+                    if entry.summary:
+                        line += f" | {entry.summary}"
+                    parts.append(line)
+            return "\n".join(parts) if parts else ""
+        except Exception as e:
+            logger.debug("动态记忆检索失败(fail-open): %s", e)
+            return ""
+
     def cleanup(self):
         """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
 
@@ -874,6 +913,19 @@ class AIAgent:
                     ),
                 })
                 self._tool_failure_streak = 0  # 重置(提醒一次就够,不反复唠叨)
+
+            # === 动态记忆检索(用 aux_llm 轻量模型,只在新用户输入时触发)===
+            if (self.aux_llm_router and self.memory_store
+                    and self.conversation_history
+                    and self.conversation_history[-1].get("role") == "user"):
+                relevant = self._retrieve_relevant_memories(
+                    self.conversation_history[-1].get("content", "")
+                )
+                if relevant:
+                    messages.append({
+                        "role": "user",
+                        "content": f"<relevant_memories>\n{relevant}\n</relevant_memories>",
+                    })
 
             # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
             if (self.hooks_registry
