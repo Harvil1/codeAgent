@@ -364,7 +364,7 @@ def compress_if_needed(
 
     # L2.5 主动 offload 大 tool 结果（P1-2）
     # 在 micro_compact 前跑：先把大内容无损落盘，再让 micro 折叠占位
-    offload_threshold = config.get("output_offload_threshold", 30000)
+    offload_threshold = config.get("output_offload_threshold", 10000)
     offload_preview = config.get("output_offload_preview", 2000)
     messages, c25 = offload_large_tool_results(
         messages,
@@ -372,6 +372,38 @@ def compress_if_needed(
         threshold=offload_threshold,
         preview_chars=offload_preview,
     )
+
+    # L2.6 tool 结果总量预算(借鉴 learn-claude-code tool_result_budget)
+    # 所有 tool 消息总字符超 200KB → 最大的先 offload,防大输出任务撑爆 context
+    TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
+    tool_msgs = [(i, m) for i, m in enumerate(messages) if m.get("role") == "tool"]
+    tool_total = sum(len(str(m.get("content", ""))) for _, m in tool_msgs)
+    if tool_total > TOTAL_TOOL_BUDGET:
+        from agent.output_offload import maybe_offload
+        # 按大小排序,最大的先 offload
+        tool_msgs.sort(key=lambda x: len(str(x[1].get("content", ""))), reverse=True)
+        for idx, msg in tool_msgs:
+            if tool_total <= TOTAL_TOOL_BUDGET:
+                break
+            content = msg.get("content", "")
+            if not isinstance(content, str) or len(content) <= offload_threshold:
+                continue
+            new_content = maybe_offload(
+                content,
+                tool_call_id=msg.get("tool_call_id") or f"budget_{idx}",
+                agent_home=agent_home,
+                threshold=offload_threshold,
+                preview_chars=offload_preview,
+            )
+            if new_content != content:
+                messages[idx] = dict(msg)
+                messages[idx]["content"] = new_content
+                tool_total -= len(content) - len(new_content)
+                logger.info(
+                    "L2.6 总量预算 offload: tool 消息 %d %d→%d 字符(总量 %d→%d)",
+                    idx, len(content), len(new_content),
+                    tool_total + len(content), tool_total,
+                )
 
     # L2 micro
     messages, c2 = micro_compact(

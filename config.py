@@ -71,7 +71,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 上下文压缩管线（Phase 1）
     "context": {
         # L3 offload
-        "output_offload_threshold": 30000,
+        "output_offload_threshold": 10000,
         "output_offload_preview": 2000,
         # L1 snip
         "snip_message_threshold": 50,
@@ -81,10 +81,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # L2 micro
         "micro_keep_recent_results": 3,
         # L4 llm
-        # 注:DeepSeek/OpenAI 等大多数模型 context 上限 64K,
-        # 100K 阈值会让 API 先报 prompt_too_long 走紧急压缩(reactive_compact),
-        # 而不是 L4 优雅总结。改成 50K 让 L4 早些触发。
-        "llm_compact_token_threshold": 50000,
+        # 100K tokens ≈ 300K 字符。DeepSeek/OpenAI context 上限 64K-128K。
+        # thinking 模式下每轮占 ~5K tokens,100K 阈值约 20 轮后触发。
+        "llm_compact_token_threshold": 100000,
         "llm_compact_message_threshold": 100,
         "llm_compact_keep_recent": 10,
         "llm_compact_cooldown_turns": 5,
