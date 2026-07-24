@@ -85,6 +85,41 @@ def check_command_deny(command: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 项目保护：禁止修改项目依赖（uv add / 项目目录 pip install）
+# ---------------------------------------------------------------------------
+
+def check_project_modification(command: str, cwd: Optional[str] = None) -> Optional[str]:
+    """闸门 0:检查命令是否试图修改项目代码/依赖。
+
+    - uv add 任何地方都拒绝(写 pyproject.toml)
+    - pip install 在项目目录执行(可能装到项目 venv)
+
+    返回拒绝原因,未命中返回 None。
+    """
+    # uv add 任何地方都拒绝
+    if re.search(r'\buv\s+add\b', command, re.IGNORECASE):
+        return "uv add 会修改项目依赖(pyproject.toml),禁止 agent 操作"
+
+    # pip install 在项目目录执行
+    if cwd and re.search(r'\bpip\d?\s+install\b', command, re.IGNORECASE):
+        try:
+            from constants import project_root
+            root = project_root().resolve()
+            cwd_resolved = Path(cwd).resolve()
+            if cwd_resolved == root:
+                return "在项目目录 pip install 会污染项目 venv,禁止"
+            try:
+                cwd_resolved.relative_to(root)
+                return "在项目目录 pip install 会污染项目 venv,禁止"
+            except ValueError:
+                pass
+        except Exception:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 闸门 2：破坏性命令模式（需用户审批才能执行）
 # ---------------------------------------------------------------------------
 
@@ -178,6 +213,39 @@ def is_protected_path(path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 写保护路径（只禁写,允许读——agent 可以读项目代码,但不能改）
+# ---------------------------------------------------------------------------
+
+_WRITE_PROTECTED_PATHS: List[Tuple[Path, str]] = []
+try:
+    from constants import project_root
+    _WRITE_PROTECTED_PATHS.append((project_root().resolve(), "项目代码目录"))
+except Exception:
+    pass
+
+
+def is_write_protected_path(path) -> Optional[str]:
+    """检查路径是否在写保护列表(只禁写,不禁读)。
+
+    用于防止 agent 修改项目自身的代码。
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return None
+
+    for prot, orig in _WRITE_PROTECTED_PATHS:
+        if resolved == prot:
+            return orig
+        try:
+            resolved.relative_to(prot)
+            return orig
+        except ValueError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 路径白名单（写操作检查）
 # ---------------------------------------------------------------------------
 
@@ -212,6 +280,15 @@ def safe_path(
 
     if not write:
         return PermissionResult(True, "ok", "ok")
+
+    # 写保护路径(只禁写:项目代码目录)
+    wprot = is_write_protected_path(path)
+    if wprot:
+        return PermissionResult(
+            False,
+            f"写保护(项目代码保护,不允许修改): {wprot}",
+            "protected",
+        )
 
     # 写操作检查白名单
     if allowed_roots is None:
@@ -356,6 +433,11 @@ class PermissionChecker:
 
     def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
         """检查命令是否允许执行。"""
+        # 闸门 0:项目保护(禁止 uv add / 项目目录 pip install)
+        proj_violation = check_project_modification(command, cwd)
+        if proj_violation:
+            return PermissionResult(False, f"项目保护: {proj_violation}", "deny")
+
         # 闸门 1：硬拒绝
         deny = check_command_deny(command)
         if deny:

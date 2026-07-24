@@ -67,6 +67,14 @@ def builtin_skills_dir() -> Path:
     return Path(__file__).resolve().parent / "skills"
 
 
+def project_root() -> Path:
+    """项目根目录(constants.py 所在目录)。
+
+    用于写保护:agent 不能修改项目自身的代码。
+    """
+    return Path(__file__).resolve().parent
+
+
 def all_skills_dirs() -> list:
     """所有技能扫描目录(内置 + 用户,顺序决定优先级)。
 

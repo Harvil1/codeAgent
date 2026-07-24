@@ -167,8 +167,16 @@ def _handle_execute_code(args: dict, **kwargs) -> str:
         if deny_result is not None:
             return deny_result
 
-    # 工作目录：config.cwd → 继承 terminal 的 cwd
+    # 工作目录:默认 ~/.agent/workspace/(沙箱隔离,不污染项目)
     cwd = ec_config.get("cwd")
+    if not cwd:
+        try:
+            from constants import get_agent_home
+            workspace = get_agent_home() / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            cwd = str(workspace)
+        except Exception:
+            cwd = None
 
     try:
         # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防用户代码泄漏
