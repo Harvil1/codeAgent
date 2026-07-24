@@ -483,20 +483,16 @@ class PermissionChecker:
         write: bool = False,
         allowed_roots: Optional[List] = None,
     ) -> PermissionResult:
-        """检查文件路径是否可访问（带审批能力）。
+        """检查文件路径是否可访问。
 
-        - 读：受保护路径拒绝，其他都允许
-        - 写：
-          闸门 1：受保护路径（~/.ssh / /etc / C:\\Windows 等）→ 硬拒
-          闸门 2：allowed_roots（默认 cwd + ~/.agent）→ 直接通过
-          闸门 3：用户批准过的路径（_approved_paths）→ 通过
-                  含父目录匹配（批准了 D:\\foo 就允许 D:\\foo\\bar）
-          闸门 4：调 approval_callback 问用户，同意 → 加入 _approved_paths 持久化
-                  拒绝/无 callback → 拒绝
-
-        返回 PermissionResult。
+        规则(用户授权:除了项目代码,其他都可以改):
+        - 读:受保护路径(~/.ssh 等)拒,其他允许
+        - 写:
+          闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线)
+          闸门 2:写保护路径(项目代码目录)→ 硬拒(防入侵)
+          闸门 3:其他全通过(用户已授权)
         """
-        # 闸门 1：受保护路径硬拒
+        # 闸门 1:受保护路径硬拒
         prot = is_protected_path(path)
         if prot:
             return PermissionResult(False, f"受保护路径: {prot}", "protected")
@@ -504,58 +500,17 @@ class PermissionChecker:
         if not write:
             return PermissionResult(True, "ok", "ok")
 
-        # 解析路径
-        if allowed_roots is None:
-            allowed_roots = default_allowed_roots()
-        allowed_roots = [Path(p).resolve() for p in allowed_roots]
-
-        try:
-            resolved = Path(path).expanduser().resolve()
-        except (OSError, ValueError) as e:
-            return PermissionResult(False, f"路径解析失败: {e}", "protected")
-
-        # 闸门 2：allowed_roots 内
-        for root in allowed_roots:
-            try:
-                if resolved == root or resolved.relative_to(root) is not None:
-                    return PermissionResult(True, "白名单内", "ok")
-            except ValueError:
-                continue
-            except (OSError, ValueError):
-                continue
-
-        # 闸门 3：用户已批准的路径（含父目录匹配）
-        for approved in self._approved_paths:
-            try:
-                approved_path = Path(approved).resolve()
-                if resolved == approved_path or resolved.relative_to(approved_path) is not None:
-                    return PermissionResult(True, "已批准（路径白名单）", "approval")
-            except (ValueError, OSError):
-                continue
-
-        # 闸门 4：问用户
-        if self.approval_callback is None:
+        # 闸门 2:写保护路径(项目代码目录)→ 拒
+        wprot = is_write_protected_path(path)
+        if wprot:
             return PermissionResult(
                 False,
-                f"写入路径不在白名单且无审批 callback: {resolved}",
+                f"写保护(项目代码): {wprot}",
                 "protected",
             )
 
-        try:
-            approved = bool(self.approval_callback(str(resolved)))
-        except Exception:
-            approved = False
-
-        if not approved:
-            return PermissionResult(False, "用户拒绝写入路径", "approval")
-
-        # 批准：加父目录到白名单（而不是具体文件）
-        # 用户意图是"允许 agent 在这个目录工作"，下次同目录其他文件不再问
-        # （类似 VSCode 信任工作区 = 信任整个文件夹）
-        parent_dir = str(resolved.parent)
-        self._approved_paths.add(parent_dir)
-        self._save_paths_whitelist()
-        return PermissionResult(True, "已批准（含父目录）", "approval")
+        # 闸门 3:其他全通过(用户授权)
+        return PermissionResult(True, "ok", "ok")
 
     def add_to_whitelist(self, command: str):
         """手动加入持久化白名单。"""
