@@ -259,17 +259,14 @@ class AnthropicClient(LLMClient):
 
     def chat_completions(self, messages, *, tools=None, **kwargs):
         """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
-        # 1. 分离 system 消息
+        # 1. 分离 system 消息 + 合并连续 tool 消息(Anthropic 要求)
         system_parts = []
-        conversation = []
+        conversation = self._convert_messages_to_anthropic(messages)
         for m in messages:
-            role = m.get("role")
-            if role == "system":
+            if m.get("role") == "system":
                 content = m.get("content", "")
                 if content:
                     system_parts.append(content)
-            else:
-                conversation.append(self._convert_message(m))
 
         system = "\n\n".join(system_parts) if system_parts else None
 
@@ -305,21 +302,14 @@ class AnthropicClient(LLMClient):
         return self._wrap_response(response)
 
     def chat_completions_stream(self, messages, *, tools=None, **kwargs):
-        """Anthropic 原生流式：messages.stream。
-
-        把 Anthropic 的 text 事件转成 OpenAI delta 格式，
-        tool_use 事件累积后作为单个 chunk 的 tool_calls。
-        """
+        """Anthropic 原生流式：messages.stream。"""
         system_parts = []
-        conversation = []
+        conversation = self._convert_messages_to_anthropic(messages)
         for m in messages:
-            role = m.get("role")
-            if role == "system":
+            if m.get("role") == "system":
                 content = m.get("content", "")
                 if content:
                     system_parts.append(content)
-            else:
-                conversation.append(self._convert_message(m))
         system = "\n\n".join(system_parts) if system_parts else None
         anthropic_tools = self._convert_tools(tools) if tools else None
 
@@ -414,6 +404,40 @@ class AnthropicClient(LLMClient):
                 "reasoning_content": thinking_text or None,
                 "thinking_signature": thinking_sig or None,
             }
+
+    def _convert_messages_to_anthropic(self, messages: list) -> list:
+        """把 OpenAI 格式的消息列表转成 Anthropic 格式。
+
+        关键:合并连续的 tool 消息成一个 user(tool_result × N)。
+        Anthropic 协议要求所有 tool_results 在同一个 user 消息里,
+        不允许连续多个 user 消息(OpenAI 允许每个 tool_result 独立)。
+        """
+        conversation = []
+        i = 0
+        while i < len(messages):
+            m = messages[i]
+            role = m.get("role")
+
+            if role == "system":
+                i += 1
+                continue
+
+            if role == "tool":
+                # 合并连续的 tool 消息成一个 user(tool_result × N)
+                tool_results = []
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": messages[i].get("tool_call_id", ""),
+                        "content": messages[i].get("content") or "",
+                    })
+                    i += 1
+                conversation.append({"role": "user", "content": tool_results})
+            else:
+                conversation.append(self._convert_message(m))
+                i += 1
+
+        return conversation
 
     def _convert_message(self, msg: dict) -> dict:
         """OpenAI 消息 → Anthropic 消息。
