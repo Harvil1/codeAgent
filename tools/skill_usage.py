@@ -39,22 +39,49 @@ def _usage_file(skills_dir: Path) -> Path:
     return Path(skills_dir) / ".usage.json"
 
 
+# 内存缓存 + lazy flush(避免每次 bump 都全量读写 .usage.json)
+_usage_cache: Dict[str, dict] = {}
+
+
 def load_usage(skills_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """加载使用统计。"""
-    path = _usage_file(skills_dir)
+    """加载使用统计(有内存缓存,首次加载后不再读盘)。"""
+    key = str(skills_dir)
+    if key in _usage_cache:
+        return _usage_cache[key]["data"]
+    path = _usage_file(Path(skills_dir))
     if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        data = {}
+    else:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    _usage_cache[key] = {"data": data, "dirty": False}
+    return data
 
 
 def save_usage(skills_dir: Path, data: Dict[str, Dict[str, Any]]) -> None:
-    """原子写入使用统计。"""
+    """更新使用统计(写内存缓存 + 标记 dirty,不立即写盘)。"""
+    _usage_cache[str(skills_dir)] = {"data": data, "dirty": True}
+
+
+def flush_usage(skills_dir: Path = None) -> None:
+    """把脏数据写盘。skills_dir=None 时 flush 所有目录。
+
+    在 agent shutdown / 每轮对话结束时调用。
+    """
     from agent.atomic_io import atomic_write_text
-    path = _usage_file(skills_dir)
-    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+    for key, entry in _usage_cache.items():
+        if not entry["dirty"]:
+            continue
+        if skills_dir and key != str(skills_dir):
+            continue
+        try:
+            path = _usage_file(Path(key))
+            atomic_write_text(path, json.dumps(entry["data"], ensure_ascii=False, indent=2))
+            entry["dirty"] = False
+        except Exception as e:
+            logger.debug("flush_usage 失败 %s: %s", key, e)
 
 
 def _ensure_record(data: Dict, skill_name: str) -> Dict:

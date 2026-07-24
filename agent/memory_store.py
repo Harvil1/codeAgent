@@ -91,6 +91,7 @@ class MemoryStore:
         self._index_path = self._home / "MEMORY.md"
         self._lock = threading.Lock()
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        self._cached_snapshot: str = ""  # P1-5: snapshot_for_prompt 缓存
         # 启动时迁移老格式（若存在）
         self._migrate_legacy_if_any()
         # 重建索引（保证一致）
@@ -159,6 +160,8 @@ class MemoryStore:
                     f"- {marker}[{entry.name}](.memory/{entry.id}.md) — {entry.description}"
                 )
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
+        # P1-5: 缓存 snapshot(跳过前 4 行头)
+        self._cached_snapshot = "\n".join(lines[4:]) if len(lines) > 4 else ""
 
     def _scan_all_entries(self) -> List[MemoryEntry]:
         """扫描 .memory/ 下所有 .md，解析为 MemoryEntry。失败的跳过。"""
@@ -246,14 +249,11 @@ class MemoryStore:
         return entry.body if entry else None
 
     def snapshot_for_prompt(self) -> str:
-        """返回索引文本（frozen，会话内不变）。"""
-        # 读当前 MEMORY.md 内容（仅索引行，跳过头部 3 行）
-        if not self._index_path.exists():
-            return ""
-        text = self._index_path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        # 跳过前 3 行（标题 + 空 + 说明）和第 4 行空行
-        return "\n".join(lines[4:]) if len(lines) > 4 else ""
+        """返回索引文本(frozen,会话内不变)。
+
+        P1-5: 从内存缓存返回(_rebuild_index 时更新),避免每次 read_text + splitlines。
+        """
+        return self._cached_snapshot
 
     def build_index_text(self) -> str:
         """重建并返回索引（启动时用）。"""

@@ -439,6 +439,13 @@ class RuntimeContext:
 
     def shutdown(self):
         """清理资源：终止后台任务等（P2b-T6 + P2c-T5）。"""
+        # flush 技能使用统计(内存缓存 → 磁盘)
+        try:
+            from tools.skill_usage import flush_usage
+            flush_usage()
+        except Exception:
+            pass
+
         if hasattr(self, "bg_manager") and self.bg_manager:
             try:
                 self.bg_manager.shutdown()

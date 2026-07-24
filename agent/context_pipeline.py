@@ -237,14 +237,17 @@ def llm_compact(
     keep_recent: int = 10,
     token_threshold: int = 100000,
     msg_threshold: int = 100,
+    precomputed_tokens: Optional[int] = None,
 ) -> Tuple[list, bool]:
     """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话。
 
-    有损：用 1 次 API 调用换上下文空间。调用方应先 transcript.snapshot_if_needed(force=True)。
-    沿用现有 _summarize_conversation（含 _rule_based_summary 降级）和 _fix_tool_call_pairs。
+    precomputed_tokens: 调用方预算的 token 数(避免重复遍历)。None 时内部算。
     """
     system, conv = _split_system(messages)
-    over_token = estimate_message_tokens(messages) > token_threshold
+    if precomputed_tokens is not None:
+        over_token = precomputed_tokens > token_threshold
+    else:
+        over_token = estimate_message_tokens(messages) > token_threshold
     over_msg = len(conv) > msg_threshold
     if not (over_token or over_msg):
         return messages, False
@@ -362,48 +365,69 @@ def compress_if_needed(
         threshold=config.get("snip_message_threshold", 50),
     )
 
-    # L2.5 主动 offload 大 tool 结果（P1-2）
-    # 在 micro_compact 前跑：先把大内容无损落盘，再让 micro 折叠占位
+    # L2.5 + L2.6 合并:一次遍历 tool 消息,同时检查单条阈值 + 总量预算
     offload_threshold = config.get("output_offload_threshold", 10000)
     offload_preview = config.get("output_offload_preview", 2000)
-    messages, c25 = offload_large_tool_results(
-        messages,
-        agent_home=agent_home,
-        threshold=offload_threshold,
-        preview_chars=offload_preview,
-    )
-
-    # L2.6 tool 结果总量预算(借鉴 learn-claude-code tool_result_budget)
-    # 所有 tool 消息总字符超 200KB → 最大的先 offload,防大输出任务撑爆 context
     TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
-    tool_msgs = [(i, m) for i, m in enumerate(messages) if m.get("role") == "tool"]
-    tool_total = sum(len(str(m.get("content", ""))) for _, m in tool_msgs)
-    if tool_total > TOTAL_TOOL_BUDGET:
-        from agent.output_offload import maybe_offload
-        # 按大小排序,最大的先 offload
-        tool_msgs.sort(key=lambda x: len(str(x[1].get("content", ""))), reverse=True)
-        for idx, msg in tool_msgs:
-            if tool_total <= TOTAL_TOOL_BUDGET:
-                break
-            content = msg.get("content", "")
-            if not isinstance(content, str) or len(content) <= offload_threshold:
-                continue
+    from agent.output_offload import maybe_offload
+
+    c25 = False
+    # 第 1 趟:单条 offload(L2.5) + 收集索引
+    tool_indices = []
+    for i, m in enumerate(messages):
+        if m.get("role") != "tool":
+            continue
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            continue
+        tool_indices.append(i)
+        if len(content) > offload_threshold:
             new_content = maybe_offload(
                 content,
-                tool_call_id=msg.get("tool_call_id") or f"budget_{idx}",
+                tool_call_id=m.get("tool_call_id") or f"orphan_{i}",
                 agent_home=agent_home,
                 threshold=offload_threshold,
                 preview_chars=offload_preview,
             )
             if new_content != content:
-                messages[idx] = dict(msg)
-                messages[idx]["content"] = new_content
-                tool_total -= len(content) - len(new_content)
-                logger.info(
-                    "L2.6 总量预算 offload: tool 消息 %d %d→%d 字符(总量 %d→%d)",
-                    idx, len(content), len(new_content),
-                    tool_total + len(content), tool_total,
+                messages[i] = dict(m)
+                messages[i]["content"] = new_content
+                c25 = True
+
+    # 第 2 趟:总量预算(L2.6),用 offload 后的新长度
+    if tool_indices:
+        tool_total = sum(
+            len(str(messages[i].get("content", ""))) for i in tool_indices
+        )
+        if tool_total > TOTAL_TOOL_BUDGET:
+            # 按当前长度排序,最大的先 offload
+            sorted_indices = sorted(
+                tool_indices,
+                key=lambda i: len(str(messages[i].get("content", ""))),
+                reverse=True,
+            )
+            for i in sorted_indices:
+                if tool_total <= TOTAL_TOOL_BUDGET:
+                    break
+                content = messages[i].get("content", "")
+                if not isinstance(content, str) or len(content) <= offload_threshold:
+                    continue
+                new_content = maybe_offload(
+                    content,
+                    tool_call_id=messages[i].get("tool_call_id") or f"budget_{i}",
+                    agent_home=agent_home,
+                    threshold=offload_threshold,
+                    preview_chars=offload_preview,
                 )
+                if new_content != content:
+                    messages[i] = dict(messages[i])
+                    messages[i]["content"] = new_content
+                    tool_total -= len(content) - len(new_content)
+                    c25 = True
+                    logger.info(
+                        "L2.6 总量预算 offload: tool 消息 %d %d→%d",
+                        i, len(content), len(new_content),
+                    )
 
     # L2 micro
     messages, c2 = micro_compact(
@@ -452,6 +476,7 @@ def compress_if_needed(
             keep_recent=config.get("llm_compact_keep_recent", 10),
             token_threshold=config.get("llm_compact_token_threshold", 100000),
             msg_threshold=config.get("llm_compact_message_threshold", 100),
+            precomputed_tokens=est_tokens,  # 复用 compress_if_needed 顶部算的值
         )
         if c4:
             session_state.record_llm_compact()
