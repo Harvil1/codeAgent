@@ -28,10 +28,8 @@ def _main(page: ft.Page):
     # ── 页面配置 ──
     page.title = "HarvilAgent"
     page.theme_mode = ft.ThemeMode.DARK
-    page.window.width = 900
-    page.window.height = 700
-    page.window.min_width = 600
-    page.window.min_height = 500
+    page.width = 900
+    page.height = 700
     page.padding = 0
 
     # ── 初始化 RuntimeContext(复用 cli.py) ──
@@ -100,7 +98,7 @@ def _main(page: ft.Page):
         on_submit=lambda e: _on_send(e, page, chat_list, input_field, send_btn, status_text, state),
     )
 
-    send_btn = ft.ElevatedButton(
+    send_btn = ft.Button(
         "发送",
         icon=ft.Icons.SEND,
         on_click=lambda e: _on_send(e, page, chat_list, input_field, send_btn, status_text, state),
@@ -149,7 +147,7 @@ def _main(page: ft.Page):
                 ]
             ),
         ],
-        bgcolor=ft.Colors.SURFACE_VARIANT,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
     )
 
     # ── 快捷命令按钮 ──
@@ -192,7 +190,7 @@ def _main(page: ft.Page):
                 ft.Container(
                     content=status_text,
                     padding=ft.Padding.symmetric(horizontal=15, vertical=5),
-                    bgcolor=ft.Colors.SURFACE_VARIANT,
+                    bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
                 ),
             ],
             spacing=0,
@@ -236,7 +234,6 @@ def _add_user_bubble(chat_list: ft.ListView, page: ft.Page, text: str):
                     bgcolor=ft.Colors.BLUE_700,
                     border_radius=12,
                     padding=ft.Padding.all(12),
-                    max_width=600,
                 )
             ],
             alignment=ft.MainAxisAlignment.END,
@@ -255,10 +252,9 @@ def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
     )
     container = ft.Container(
         content=md,
-        bgcolor=ft.Colors.SURFACE_VARIANT,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
         border_radius=12,
         padding=ft.Padding.all(12),
-        max_width=650,
     )
     chat_list.controls.append(
         ft.Row(
@@ -348,7 +344,7 @@ def _update_status(status_text: ft.Text, page: ft.Page, state: dict):
 # ---------------------------------------------------------------------------
 
 def _on_send(e, page: ft.Page, chat_list: ft.ListView,
-             input_field: ft.TextField, send_btn: ft.ElevatedButton,
+             input_field: ft.TextField, send_btn: ft.Button,
              status_text: ft.Text, state: dict):
     """发送消息。"""
     if state["busy"]:
@@ -420,7 +416,7 @@ def _handle_slash_command(cmd: str, page: ft.Page, chat_list: ft.ListView,
         from cli import _handle_command
         handled = _handle_command(cmd, rt)
         if not handled and cmd.strip() in ("/quit", "/exit"):
-            page.window_close()
+            page.exit()
     except Exception as e:
         _add_system_message(chat_list, page, f"命令错误: {e}")
 
@@ -428,7 +424,7 @@ def _handle_slash_command(cmd: str, page: ft.Page, chat_list: ft.ListView,
 
 
 def _quick_cmd(cmd: str, page: ft.Page, chat_list: ft.ListView,
-               input_field: ft.TextField, send_btn: ft.ElevatedButton,
+               input_field: ft.TextField, send_btn: ft.Button,
                status_text: ft.Text, state: dict):
     """快捷命令按钮触发。"""
     _handle_slash_command(cmd, page, chat_list, status_text, state)
