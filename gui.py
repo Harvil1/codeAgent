@@ -42,7 +42,6 @@ def _build_theme():
             primary_container=_PRIMARY_LIGHT,
             surface=_BG,
             on_surface=_TEXT,
-            background=_BG,
         ),
     )
 
