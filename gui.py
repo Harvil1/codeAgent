@@ -47,7 +47,7 @@ def _main(page: ft.Page):
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
-            bgcolor=ft.colors.with_opacity(0.9, ft.colors.BLACK),
+            bgcolor=ft.Colors.with_opacity(0.9, ft.Colors.BLACK),
         )
     )
     page.update()
@@ -62,7 +62,7 @@ def _main(page: ft.Page):
             ft.Container(
                 content=ft.Text(
                     "初始化失败:请在 settings.json 配置 API key",
-                    color=ft.colors.RED,
+                    color=ft.Colors.RED,
                     size=16,
                 ),
                 alignment=ft.Alignment(0, 0),
@@ -86,7 +86,7 @@ def _main(page: ft.Page):
     chat_list = ft.ListView(
         expand=True,
         spacing=10,
-        padding=ft.padding.all(20),
+        padding=ft.Padding.all(20),
         auto_scroll=True,
     )
 
@@ -102,54 +102,54 @@ def _main(page: ft.Page):
 
     send_btn = ft.ElevatedButton(
         "发送",
-        icon=ft.icons.SEND,
+        icon=ft.Icons.SEND,
         on_click=lambda e: _on_send(e, page, chat_list, input_field, send_btn, status_text, state),
     )
 
     status_text = ft.Text(
         size=12,
-        color=ft.colors.GREY,
+        color=ft.Colors.GREY,
     )
 
     # ── AppBar ──
     model_name = rt.config.get("model", {}).get("name", "?")
     app_bar = ft.AppBar(
-        leading=ft.Icon(ft.icons.SMART_TOY),
+        leading=ft.Icon(ft.Icons.SMART_TOY),
         leading_width=40,
         title=ft.Text("HarvilAgent", weight=ft.FontWeight.BOLD),
         actions=[
-            ft.Text(f"模型: {model_name}", size=12, color=ft.colors.GREY_400),
+            ft.Text(f"模型: {model_name}", size=12, color=ft.Colors.GREY_400),
             ft.PopupMenuButton(
                 items=[
                     ft.PopupMenuItem(
                         text="新对话",
-                        icon=ft.icons.ADD_COMMENT,
+                        icon=ft.Icons.ADD_COMMENT,
                         on_click=lambda e: _new_session(page, chat_list, status_text, state),
                     ),
                     ft.PopupMenuItem(
                         text="历史会话",
-                        icon=ft.icons.HISTORY,
+                        icon=ft.Icons.HISTORY,
                         on_click=lambda e: _show_sessions(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
                         text="记忆",
-                        icon=ft.icons.PSYCHOLOGY,
+                        icon=ft.Icons.PSYCHOLOGY,
                         on_click=lambda e: _show_memory(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
                         text="技能",
-                        icon=ft.icons.BUILD,
+                        icon=ft.Icons.BUILD,
                         on_click=lambda e: _show_skills(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
                         text="用量统计",
-                        icon=ft.icons.ANALYTICS,
+                        icon=ft.Icons.ANALYTICS,
                         on_click=lambda e: _show_usage(page, chat_list, state),
                     ),
                 ]
             ),
         ],
-        bgcolor=ft.colors.SURFACE_VARIANT,
+        bgcolor=ft.Colors.SURFACE_VARIANT,
     )
 
     # ── 快捷命令按钮 ──
@@ -178,7 +178,7 @@ def _main(page: ft.Page):
                 # 快捷命令
                 ft.Container(
                     content=quick_cmds,
-                    padding=ft.padding.symmetric(horizontal=10, vertical=2),
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=2),
                 ),
                 # 输入区
                 ft.Container(
@@ -186,13 +186,13 @@ def _main(page: ft.Page):
                         [input_field, send_btn],
                         spacing=10,
                     ),
-                    padding=ft.padding.all(10),
+                    padding=ft.Padding.all(10),
                 ),
                 # 状态栏
                 ft.Container(
                     content=status_text,
-                    padding=ft.padding.symmetric(horizontal=15, vertical=5),
-                    bgcolor=ft.colors.SURFACE_VARIANT,
+                    padding=ft.Padding.symmetric(horizontal=15, vertical=5),
+                    bgcolor=ft.Colors.SURFACE_VARIANT,
                 ),
             ],
             spacing=0,
@@ -232,10 +232,10 @@ def _add_user_bubble(chat_list: ft.ListView, page: ft.Page, text: str):
         ft.Row(
             [
                 ft.Container(
-                    content=ft.Text(text, color=ft.colors.WHITE),
-                    bgcolor=ft.colors.BLUE_700,
+                    content=ft.Text(text, color=ft.Colors.WHITE),
+                    bgcolor=ft.Colors.BLUE_700,
                     border_radius=12,
-                    padding=ft.padding.all(12),
+                    padding=ft.Padding.all(12),
                     max_width=600,
                 )
             ],
@@ -255,9 +255,9 @@ def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
     )
     container = ft.Container(
         content=md,
-        bgcolor=ft.colors.SURFACE_VARIANT,
+        bgcolor=ft.Colors.SURFACE_VARIANT,
         border_radius=12,
-        padding=ft.padding.all(12),
+        padding=ft.Padding.all(12),
         max_width=650,
     )
     chat_list.controls.append(
@@ -278,10 +278,10 @@ def _add_tool_progress(chat_list: ft.ListView, page: ft.Page, name: str, args: d
             content=ft.Text(
                 f"⟳ {name} {args_str}",
                 size=12,
-                color=ft.colors.GREY_500,
+                color=ft.Colors.GREY_500,
                 selectable=True,
             ),
-            padding=ft.padding.only(left=20),
+            padding=ft.Padding.only(left=20),
         )
     )
     page.update()
@@ -291,9 +291,9 @@ def _add_system_message(chat_list: ft.ListView, page: ft.Page, text: str):
     """添加系统消息(居中,灰色)。"""
     chat_list.controls.append(
         ft.Container(
-            content=ft.Text(text, size=13, color=ft.colors.GREY_600, italic=True),
+            content=ft.Text(text, size=13, color=ft.Colors.GREY_600, italic=True),
             alignment=ft.Alignment(0, 0),
-            padding=ft.padding.all(10),
+            padding=ft.Padding.all(10),
         )
     )
     page.update()
