@@ -35,7 +35,7 @@ def _main(page: ft.Page):
     page.padding = 0
 
     # ── 初始化 RuntimeContext(复用 cli.py) ──
-    page.overlay.append(
+    page.add(
         ft.Container(
             content=ft.Column(
                 [
@@ -73,7 +73,7 @@ def _main(page: ft.Page):
         return
 
     # 移除加载遮罩
-    page.overlays.clear()
+    page.controls.clear()
 
     # ── 状态变量 ──
     state = {
