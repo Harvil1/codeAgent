@@ -2,7 +2,6 @@
 
 用法：
     python main.py                 # 交互模式（启动时提示恢复历史）
-    python main.py --gui           # GUI 模式（Flet 桌面应用）
     python main.py -c              # 自动恢复最近会话（continue）
     python main.py --continue      # 同上
     python main.py chat <msg>      # 非交互模式（一次性问答）
@@ -37,12 +36,6 @@ except Exception as e:
 def main():
     """主入口。"""
     args = sys.argv[1:]
-
-    # GUI 模式：python main.py --gui
-    if "--gui" in args:
-        from gui import run_gui
-        run_gui()
-        return
 
     # 非交互模式：python main.py chat "你好"
     if args and args[0] == "chat":

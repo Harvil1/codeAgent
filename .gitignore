@@ -7,7 +7,18 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 
 # pytest / ruff 缓存
 .pytest_cache/
 .ruff_cache/
+
+# IDE 配置
+.idea/
+
+# codegraph 运行时
+.codegraph/daemon.log
+.codegraph/daemon.pid
+
+# superpowers 插件数据
+.superpowers/

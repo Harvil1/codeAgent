@@ -1,7 +1,0 @@
-openai<2,>=1.0.0
-prompt-toolkit==3.0.48
-python-docx>=1.2.0
-python-dotenv==1.0.1
-pyyaml==6.0.2
-rich==13.9.4
-tenacity<10,>=9.0.0
