@@ -443,10 +443,11 @@ def compress_if_needed(
     conv_len = len(_split_system(messages)[1])
     est_tokens = estimate_message_tokens(messages)
 
-    # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 500K,减少不必要压缩)
+    # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 700K)
+    # 1M 窗口留 30% 给输出(300K),70% 给输入(700K)
     token_threshold = config.get("llm_compact_token_threshold", 100000)
     if model and "[1m]" in str(model):
-        token_threshold = max(token_threshold, 500000)
+        token_threshold = max(token_threshold, 700000)
 
     over_threshold = (
         est_tokens > token_threshold
