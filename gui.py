@@ -17,17 +17,43 @@ import flet as ft
 
 logger = logging.getLogger(__name__)
 
+# ── 主题色 ──
+_PRIMARY = ft.Colors.BLUE
+_PRIMARY_LIGHT = ft.Colors.BLUE_50
+_PRIMARY_DARK = ft.Colors.BLUE_700
+_BG = ft.Colors.WHITE
+_SURFACE = ft.Colors.GREY_50
+_TEXT = ft.Colors.GREY_900
+_TEXT_HINT = ft.Colors.GREY_500
+_DIVIDER = ft.Colors.GREY_300
+
 
 def run_gui():
     """启动 Flet GUI 应用。"""
     ft.app(target=_main, view=ft.AppView.FLET_APP)
 
 
+def _build_theme():
+    """构建蓝色亮色主题。"""
+    return ft.Theme(
+        color_scheme=ft.ColorScheme(
+            primary=_PRIMARY,
+            on_primary=ft.Colors.WHITE,
+            primary_container=_PRIMARY_LIGHT,
+            surface=_BG,
+            on_surface=_TEXT,
+            background=_BG,
+        ),
+    )
+
+
 def _main(page: ft.Page):
     """Flet 主页面(每个窗口一个实例)。"""
     # ── 页面配置 ──
     page.title = "HarvilAgent"
-    page.theme_mode = ft.ThemeMode.DARK
+    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme = _build_theme()
+    page.bgcolor = _BG
     page.width = 900
     page.height = 700
     page.padding = 0
@@ -37,15 +63,15 @@ def _main(page: ft.Page):
         ft.Container(
             content=ft.Column(
                 [
-                    ft.ProgressRing(width=40, height=40),
-                    ft.Text("正在初始化 HarvilAgent...", size=16),
+                    ft.ProgressRing(width=40, height=40, color=_PRIMARY),
+                    ft.Text("正在初始化 HarvilAgent...", size=16, color=_TEXT),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
-            bgcolor=ft.Colors.with_opacity(0.9, ft.Colors.BLACK),
+            bgcolor=_BG,
         )
     )
     page.update()
@@ -70,13 +96,13 @@ def _main(page: ft.Page):
         page.update()
         return
 
-    # 移除加载遮罩
+    # 初始化完成,清空加载页
     page.controls.clear()
 
     # ── 状态变量 ──
     state = {
-        "busy": False,            # agent 正在思考
-        "current_md": None,       # 当前 AI Markdown 组件(流式追加)
+        "busy": False,
+        "current_md": None,
         "rt": rt,
     }
 
@@ -90,8 +116,11 @@ def _main(page: ft.Page):
 
     input_field = ft.TextField(
         hint_text="输入消息,/help 查看命令...",
+        hint_style=ft.TextStyle(color=_TEXT_HINT),
         expand=True,
         border_radius=10,
+        border_color=_DIVIDER,
+        focused_border_color=_PRIMARY,
         max_lines=5,
         min_lines=1,
         shift_enter=True,
@@ -102,52 +131,74 @@ def _main(page: ft.Page):
         "发送",
         icon=ft.Icons.SEND,
         on_click=lambda e: _on_send(e, page, chat_list, input_field, send_btn, status_text, state),
+        style=ft.ButtonStyle(bgcolor=_PRIMARY, color=ft.Colors.WHITE),
     )
 
     status_text = ft.Text(
         size=12,
-        color=ft.Colors.GREY,
+        color=_TEXT_HINT,
+    )
+
+    # ── 模型显示 + 配置入口 ──
+    model_name = rt.config.get("model", {}).get("name", "?")
+    effort = rt.config.get("model", {}).get("effort_level", "")
+
+    model_display = ft.Text(
+        f"模型: {model_name}" + (f" ({effort})" if effort else ""),
+        size=12,
+        color=_TEXT_HINT,
     )
 
     # ── AppBar ──
-    model_name = rt.config.get("model", {}).get("name", "?")
     app_bar = ft.AppBar(
-        leading=ft.Icon(ft.Icons.SMART_TOY),
+        leading=ft.Icon(ft.Icons.SMART_TOY, color=_PRIMARY),
         leading_width=40,
-        title=ft.Text("HarvilAgent", weight=ft.FontWeight.BOLD),
+        title=ft.Text("HarvilAgent", weight=ft.FontWeight.BOLD, color=_PRIMARY),
         actions=[
-            ft.Text(f"模型: {model_name}", size=12, color=ft.Colors.GREY_400),
+            model_display,
             ft.PopupMenuButton(
+                icon=ft.Icons.SETTINGS,
                 items=[
                     ft.PopupMenuItem(
-                        content=ft.Text("新对话"),
+                        content=ft.Text("切换模型", color=_TEXT),
+                        icon=ft.Icons.SWAP_HORIZ,
+                        on_click=lambda e: _show_model_config(page, chat_list, state, model_display),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("思考强度", color=_TEXT),
+                        icon=ft.Icons.PSYCHOLOGY,
+                        on_click=lambda e: _show_effort_config(page, chat_list, state, model_display),
+                    ),
+                    ft.PopupMenuItem(),  # 分割线
+                    ft.PopupMenuItem(
+                        content=ft.Text("新对话", color=_TEXT),
                         icon=ft.Icons.ADD_COMMENT,
                         on_click=lambda e: _new_session(page, chat_list, status_text, state),
                     ),
                     ft.PopupMenuItem(
-                        content=ft.Text("历史会话"),
+                        content=ft.Text("历史会话", color=_TEXT),
                         icon=ft.Icons.HISTORY,
                         on_click=lambda e: _show_sessions(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        content=ft.Text("记忆"),
-                        icon=ft.Icons.PSYCHOLOGY,
+                        content=ft.Text("记忆", color=_TEXT),
+                        icon=ft.Icons.BOOK,
                         on_click=lambda e: _show_memory(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        content=ft.Text("技能"),
+                        content=ft.Text("技能", color=_TEXT),
                         icon=ft.Icons.BUILD,
                         on_click=lambda e: _show_skills(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        content=ft.Text("用量统计"),
+                        content=ft.Text("用量统计", color=_TEXT),
                         icon=ft.Icons.ANALYTICS,
                         on_click=lambda e: _show_usage(page, chat_list, state),
                     ),
                 ]
             ),
         ],
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        bgcolor=_SURFACE,
     )
 
     # ── 快捷命令按钮 ──
@@ -170,13 +221,15 @@ def _main(page: ft.Page):
                 ft.Container(
                     content=chat_list,
                     expand=True,
+                    bgcolor=_BG,
                 ),
                 # 分割线
-                ft.Divider(height=1),
+                ft.Divider(height=1, color=_DIVIDER),
                 # 快捷命令
                 ft.Container(
                     content=quick_cmds,
                     padding=ft.Padding.symmetric(horizontal=10, vertical=2),
+                    bgcolor=_BG,
                 ),
                 # 输入区
                 ft.Container(
@@ -185,12 +238,13 @@ def _main(page: ft.Page):
                         spacing=10,
                     ),
                     padding=ft.Padding.all(10),
+                    bgcolor=_BG,
                 ),
                 # 状态栏
                 ft.Container(
                     content=status_text,
                     padding=ft.Padding.symmetric(horizontal=15, vertical=5),
-                    bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+                    bgcolor=_SURFACE,
                 ),
             ],
             spacing=0,
@@ -225,13 +279,13 @@ def _main(page: ft.Page):
 # ---------------------------------------------------------------------------
 
 def _add_user_bubble(chat_list: ft.ListView, page: ft.Page, text: str):
-    """添加用户消息气泡(右对齐)。"""
+    """添加用户消息气泡(右对齐,蓝色背景)。"""
     chat_list.controls.append(
         ft.Row(
             [
                 ft.Container(
                     content=ft.Text(text, color=ft.Colors.WHITE),
-                    bgcolor=ft.Colors.BLUE_700,
+                    bgcolor=_PRIMARY_DARK,
                     border_radius=12,
                     padding=ft.Padding.all(12),
                 )
@@ -243,7 +297,7 @@ def _add_user_bubble(chat_list: ft.ListView, page: ft.Page, text: str):
 
 
 def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
-    """添加 AI 消息气泡(左对齐,Markdown 渲染)。"""
+    """添加 AI 消息气泡(左对齐,浅灰背景,Markdown 渲染)。"""
     md = ft.Markdown(
         value=text,
         selectable=True,
@@ -251,9 +305,10 @@ def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
     )
     container = ft.Container(
         content=md,
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        bgcolor=_SURFACE,
         border_radius=12,
         padding=ft.Padding.all(12),
+        border=ft.Border.all(1, _DIVIDER),
     )
     chat_list.controls.append(
         ft.Row(
@@ -262,18 +317,18 @@ def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
         )
     )
     page.update()
-    return md  # 返回 md 组件(供流式追加)
+    return md
 
 
 def _add_tool_progress(chat_list: ft.ListView, page: ft.Page, name: str, args: dict):
-    """添加工具调用进度(灰色小字)。"""
+    """添加工具调用进度(蓝色小字)。"""
     args_str = json.dumps(args, ensure_ascii=False)[:100]
     chat_list.controls.append(
         ft.Container(
             content=ft.Text(
                 f"⟳ {name} {args_str}",
                 size=12,
-                color=ft.Colors.GREY_500,
+                color=_PRIMARY,
                 selectable=True,
             ),
             padding=ft.Padding.only(left=20),
@@ -283,10 +338,10 @@ def _add_tool_progress(chat_list: ft.ListView, page: ft.Page, name: str, args: d
 
 
 def _add_system_message(chat_list: ft.ListView, page: ft.Page, text: str):
-    """添加系统消息(居中,灰色)。"""
+    """添加系统消息(居中,灰色斜体)。"""
     chat_list.controls.append(
         ft.Container(
-            content=ft.Text(text, size=13, color=ft.Colors.GREY_600, italic=True),
+            content=ft.Text(text, size=13, color=_TEXT_HINT, italic=True),
             alignment=ft.Alignment(0, 0),
             padding=ft.Padding.all(10),
         )
@@ -302,15 +357,12 @@ def _on_stream_event(event: dict, chat_list: ft.ListView, page: ft.Page, state: 
         delta = event.get("delta", "")
         if delta:
             if state["current_md"] is None:
-                # 创建新的 AI 气泡
                 state["current_md"] = _add_ai_bubble(chat_list, page, delta)
             else:
-                # 追加到现有气泡
                 state["current_md"].value += delta
                 page.update()
 
     elif etype == "tool_call_start":
-        # 工具调用开始(换行收尾)
         state["current_md"] = None
 
     elif etype == "done":
@@ -336,6 +388,57 @@ def _update_status(status_text: ft.Text, page: ft.Page, state: dict):
         + (" | 思考中..." if state["busy"] else "")
     )
     page.update()
+
+
+# ---------------------------------------------------------------------------
+# 模型配置界面
+# ---------------------------------------------------------------------------
+
+def _show_model_config(page: ft.Page, chat_list: ft.ListView, state: dict, model_display: ft.Text):
+    """显示模型切换对话框。"""
+    rt = state["rt"]
+    try:
+        from agent.settings import list_models, get_current_model_config
+        models = list_models()
+        current = get_current_model_config().get("name", "")
+
+        if not models:
+            _add_system_message(chat_list, page, "未配置任何模型。在 settings.json 的 llm 段添加。")
+            return
+
+        # 构建选项文本
+        lines = ["## 模型配置\n\n当前可用模型:\n"]
+        for name, cfg in models.items():
+            mark = "← **当前**" if name == current else ""
+            model_id = cfg.get("model", "?")
+            has_key = "✓" if (cfg.get("api_key") or cfg.get("auth_token")) else "❌ 无key"
+            lines.append(f"- **{name}** ({model_id}) {has_key} {mark}")
+
+        lines.append("\n\n输入 `/model <name>` 切换模型(如 `/model opus`)")
+
+        _add_ai_bubble(chat_list, page, "\n".join(lines))
+    except Exception as e:
+        _add_system_message(chat_list, page, f"读取模型配置失败: {e}")
+
+
+def _show_effort_config(page: ft.Page, chat_list: ft.ListView, state: dict, model_display: ft.Text):
+    """显示思考强度配置。"""
+    rt = state["rt"]
+    current_effort = rt.config.get("model", {}).get("effort_level", "")
+
+    lines = [
+        "## 思考强度配置\n",
+        f"当前: **{current_effort or '(未设置,默认 high)'}**\n",
+        "可选值:\n",
+        "- **max** — 最强推理(慢,10-30秒/轮)",
+        "- **high** — 标准推理(推荐,3-8秒/轮)",
+        "- **medium** — 轻量思考(1-3秒/轮)",
+        "- **low** — 不思考(最快)",
+        "\n\n修改方法: 编辑 `~/.agent/settings.json` 的 `llm.effort_level` 字段",
+        f"\n\n当前文件路径: `{rt.home}/settings.json`",
+    ]
+
+    _add_ai_bubble(chat_list, page, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +493,6 @@ def _on_send(e, page: ft.Page, chat_list: ft.ListView,
     def _run():
         try:
             response = rt.agent.run_conversation(user_input)
-            # 保存助手响应
             if rt.session_store and rt.session_id:
                 rt.session_store.append_message(rt.session_id, "assistant", response)
         except Exception as ex:
