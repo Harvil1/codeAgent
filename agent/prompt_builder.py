@@ -43,7 +43,12 @@ MEMORY_GUIDANCE = (
     "  ✅ '用户偏好简洁回复'\n"
     "  ❌ '必须简洁回复'\n"
     "  ✅ '项目使用 pytest + xdist'\n"
-    "  ❌ '用 pytest -n 4 跑测试'"
+    "  ❌ '用 pytest -n 4 跑测试'\n\n"
+    "### 主动学习(批次 E)\n"
+    "如果你在对话中**反复观察到某种模式**(如用户连续 3 次用 uv 而非 pip),\n"
+    "但不确定是否是长期偏好,**主动问用户确认**:\n"
+    "  '我注意到你习惯用 uv,以后我都用 uv 管理依赖吗?'\n"
+    "用户确认后 → 调 memory 工具保存(type=feedback, confidence=1.0)。"
 )
 
 SESSION_SEARCH_GUIDANCE = (
@@ -243,6 +248,17 @@ def build_system_prompt_layers(
                 context_parts.append(ext_block)
         except Exception:
             pass
+
+    # 用户画像(自动归纳,每 5 次反思后更新)
+    try:
+        from constants import get_agent_home
+        profile_path = get_agent_home() / "USER_PROFILE.md"
+        if profile_path.exists():
+            profile_text = profile_path.read_text(encoding="utf-8").strip()
+            if profile_text:
+                context_parts.append(profile_text)
+    except Exception:
+        pass
 
     # MCP routing hints(借鉴 DeerFlow):用户配 .mcp.json 时可加 keywords 字段,
     # 帮助 LLM 看到关键词就知道用哪个 MCP server。如:

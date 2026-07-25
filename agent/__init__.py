@@ -1282,7 +1282,20 @@ class AIAgent:
                     messages=messages_snapshot,
                     memory_store=store,
                     llm_client=llm_for_reflection,
+                    session_id=self.session_id or "",
                 )
+
+                # 批次 C: 用户画像更新(每 5 次反思后)
+                try:
+                    from agent.user_profile import should_update_profile, build_and_save_profile
+                    if should_update_profile() and self.aux_llm_router:
+                        build_and_save_profile(
+                            memory_store=store,
+                            aux_llm=self.aux_llm_router,
+                            agent_home=self.harvil_home,
+                        )
+                except Exception as e:
+                    logger.debug("用户画像更新失败(fail-open): %s", e)
             except Exception as e:
                 logger.debug("反思后台任务异常: %s", e)
             finally:

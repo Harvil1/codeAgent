@@ -26,29 +26,48 @@ REFLECTION_PROMPT_TEMPLATE = """你是经验提炼助手。从以下对话轨迹
 {trajectory}
 </trajectory>
 
-请提炼 0-5 条**值得长期记住**的经验，分三类：
-- user：用户偏好、习惯、输出要求（例："用户喜欢简洁回复，不超过 3 句话"）
-- feedback：有效策略、需避开的坑、工具组合技巧（例："用 delegate_task 并行处理多个文件比串行快 3 倍"）
-- project：项目规则、技术栈决策、业务逻辑（例："本项目用 uv 不用 pip 管理依赖"）
+<existing_memories>
+{existing_memories}
+</existing_memories>
 
-要求：
-1. 只输出真正非平凡的、跨会话有用的经验（不要记琐碎细节）
-2. 没有值得记的就返回 []
-3. 每条字段：
+请提炼 0-5 条**值得长期记住**的经验,分三类:
+- user：用户偏好、习惯、输出要求
+- feedback：有效策略、需避开的坑、工具组合技巧
+- project：项目规则、技术栈决策、业务逻辑
+
+要求:
+1. 只输出真正非平凡的、跨会话有用的经验
+2. **跟 existing_memories 语义重复的不要输出**(避免碎片化)
+3. 没有值得记的就返回 []
+4. 如果新经验**推翻/修正**已有记忆(如"改用 pip"推翻"用 uv"),加字段:
+   - supersedes: 被推翻的旧记忆 name
+   - confidence: 1.0(最新观察覆盖旧观察)
+5. 每条字段:
    - type: user / feedback / project 之一
-   - name: ≤20 字标题（L0）
-   - description: ≤40 字索引钩子（L0.5）
-   - summary: 80-100 字摘要层（L1）
-   - body: 完整说明（L2，可选）
+   - name: ≤20 字标题(L0)
+   - description: ≤40 字索引钩子(L0.5)
+   - summary: 80-100 字摘要层(L1)
+   - body: 完整说明(L2,可选)
+   - confidence: 0.0-1.0(信心分,默认 0.8)
 
-输出格式：JSON 数组，不要其他文本。示例：
+输出格式: JSON 数组,不要其他文本。示例:
 [
   {{
     "type": "user",
     "name": "偏好简洁回复",
     "description": "用户喜欢≤3 句话回复",
-    "summary": "用户多次要求简短直接回复，不喜欢长篇解释。回答时优先给结论，展开用列表。",
-    "body": ""
+    "summary": "用户多次要求简短直接回复...",
+    "body": "",
+    "confidence": 0.9
+  }},
+  {{
+    "type": "project",
+    "name": "改用 pip",
+    "description": "项目改用 pip 管理依赖",
+    "summary": "用户说项目从 uv 迁移到 pip...",
+    "body": "",
+    "confidence": 1.0,
+    "supersedes": "用 uv 不用 pip"
   }}
 ]
 """
@@ -90,6 +109,7 @@ def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
 def run_reflection(
     *,
     messages: List[dict],
+    memory_store=None,
     llm_client,
     model: Optional[str] = None,
 ) -> List[dict]:
@@ -102,7 +122,21 @@ def run_reflection(
     if not trajectory.strip():
         return []
 
-    prompt = REFLECTION_PROMPT_TEMPLATE.format(trajectory=trajectory)
+    # 批次 B: 传入已有记忆(让 LLM 避免重复 + 检测矛盾)
+    try:
+        existing = memory_store.list_all()
+        existing_memories = "\n".join(
+            f"- [{e.type}] {e.name}: {e.description}"
+            + (f" | {e.summary}" if e.summary else "")
+            for e in existing[:50]  # 最多 50 条,避免 prompt 太长
+        )
+    except Exception:
+        existing_memories = "(无法读取已有记忆)"
+
+    prompt = REFLECTION_PROMPT_TEMPLATE.format(
+        trajectory=trajectory,
+        existing_memories=existing_memories or "(暂无已有记忆)",
+    )
     try:
         kwargs = {}
         if model:
@@ -169,7 +203,7 @@ def apply_reflection(
         return 0
 
     insights = run_reflection(
-        messages=messages, llm_client=llm_client, model=model,
+        messages=messages, memory_store=memory_store, llm_client=llm_client, model=model,
     )
     if not insights:
         return 0
@@ -182,7 +216,7 @@ def apply_reflection(
     for ins in insights:
         key = (ins["type"], ins["name"])
         if key in existing_keys:
-            continue  # 同类同名跳过
+            continue
         try:
             memory_store.save(
                 name=ins["name"],
@@ -193,8 +227,27 @@ def apply_reflection(
                 confidence=ins.get("confidence", 0.8),
                 source_session_id=session_id or "",
             )
-            existing_keys.add(key)  # 防同批多次重复
+            existing_keys.add(key)
             written += 1
+
+            # 批次 D: 处理矛盾(supersedes)— 降低被推翻的旧记忆 confidence
+            supersedes = ins.get("supersedes")
+            if supersedes:
+                for old_entry in existing:
+                    if old_entry.name == supersedes:
+                        try:
+                            memory_store.update(
+                                old_entry.id,
+                                confidence=0.1,
+                                body=f"[已被 '{ins['name']}' 推翻] " + (old_entry.body or ""),
+                            )
+                            logger.info(
+                                "记忆 '%s' 被 '%s' 推翻,confidence 降到 0.1",
+                                supersedes, ins["name"],
+                            )
+                        except Exception:
+                            pass
+                        break
         except Exception as e:
             logger.warning("反思写入 memory 失败（跳过）: %s", e)
 
