@@ -45,7 +45,7 @@ def _main(page: ft.Page):
                 alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             expand=True,
             bgcolor=ft.colors.with_opacity(0.9, ft.colors.BLACK),
         )
@@ -65,7 +65,7 @@ def _main(page: ft.Page):
                     color=ft.colors.RED,
                     size=16,
                 ),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment(0, 0),
                 expand=True,
             )
         )
@@ -292,7 +292,7 @@ def _add_system_message(chat_list: ft.ListView, page: ft.Page, text: str):
     chat_list.controls.append(
         ft.Container(
             content=ft.Text(text, size=13, color=ft.colors.GREY_600, italic=True),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             padding=ft.padding.all(10),
         )
     )
