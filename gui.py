@@ -248,7 +248,6 @@ def _add_ai_bubble(chat_list: ft.ListView, page: ft.Page, text: str = ""):
         value=text,
         selectable=True,
         extension_set="github",
-        on_link_error=lambda e: None,
     )
     container = ft.Container(
         content=md,
