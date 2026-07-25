@@ -159,6 +159,7 @@ def apply_reflection(
     memory_store,
     llm_client,
     model: Optional[str] = None,
+    session_id: str = "",
 ) -> int:
     """端到端：跑反思 + 写入 memory_store。返回写入条数。
 
@@ -189,6 +190,8 @@ def apply_reflection(
                 type=ins["type"],
                 body=ins["body"],
                 summary=ins["summary"],
+                confidence=ins.get("confidence", 0.8),
+                source_session_id=session_id or "",
             )
             existing_keys.add(key)  # 防同批多次重复
             written += 1

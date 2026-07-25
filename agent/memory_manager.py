@@ -151,6 +151,7 @@ class MemoryManager:
                     description=description[:200],
                     type=ftype,
                     body=body,
+                    source_session_id=self._session_id or "",
                 )
                 saved += 1
             except Exception as e:

@@ -47,6 +47,8 @@ class MemoryEntry:
     # 老文件无这俩字段时兼容读为默认值(1.0 / 365 天)
     confidence: float = 1.0
     expected_valid_days: int = 365
+    # 来源追溯:这条记忆来自哪次对话(便于回溯原始上下文)
+    source_session_id: str = ""
 
 
 def _generate_id() -> str:
@@ -115,6 +117,8 @@ class MemoryStore:
             meta["confidence"] = entry.confidence
         if entry.expected_valid_days != 365:
             meta["expected_valid_days"] = entry.expected_valid_days
+        if entry.source_session_id:
+            meta["source_session_id"] = entry.source_session_id
         content = _format_frontmatter(meta) + entry.body
         path = self._memory_dir / f"{entry.id}.md"
         atomic_write_text(path, content)
@@ -182,8 +186,9 @@ class MemoryStore:
                     created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
                     updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
                     summary=meta.get("summary", "") or "",  # CCALS-P0-1: 兼容老文件
-                    confidence=float(meta.get("confidence", 1.0) or 1.0),  # 兼容老文件
+                    confidence=float(meta.get("confidence", 1.0) or 1.0),
                     expected_valid_days=int(meta.get("expected_valid_days", 365) or 365),
+                    source_session_id=meta.get("source_session_id", "") or "",
                 )
                 entries.append(entry)
             except (ValueError, TypeError) as e:
@@ -269,9 +274,10 @@ class MemoryStore:
         description: str,
         type: str,
         body: str = "",
-        summary: str = "",  # CCALS-P0-1: L1 摘要层
-        confidence: float = 1.0,  # 0.0-1.0,LLM 给的信心分
-        expected_valid_days: int = 365,  # 预期有效期(天),到期进 staleness 评审
+        summary: str = "",
+        confidence: float = 1.0,
+        expected_valid_days: int = 365,
+        source_session_id: str = "",
     ) -> str:
         """创建新记忆。返回 memory_id。"""
         if not name or not description:
@@ -287,6 +293,7 @@ class MemoryStore:
                 created_at=now, updated_at=now,
                 confidence=float(confidence),
                 expected_valid_days=int(expected_valid_days),
+                source_session_id=source_session_id,
             )
             self._write_entry_file(entry)
             self._rebuild_index()
