@@ -91,7 +91,7 @@ def _main(page: ft.Page):
     )
 
     input_field = ft.TextField(
-        hint_text="输入消息,/help 查看命令...",
+        hint_content=ft.Text("输入消息,/help 查看命令..."),
         expand=True,
         border_radius=10,
         max_lines=5,
@@ -122,27 +122,27 @@ def _main(page: ft.Page):
             ft.PopupMenuButton(
                 items=[
                     ft.PopupMenuItem(
-                        text="新对话",
+                        content=ft.Text("新对话"),
                         icon=ft.Icons.ADD_COMMENT,
                         on_click=lambda e: _new_session(page, chat_list, status_text, state),
                     ),
                     ft.PopupMenuItem(
-                        text="历史会话",
+                        content=ft.Text("历史会话"),
                         icon=ft.Icons.HISTORY,
                         on_click=lambda e: _show_sessions(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        text="记忆",
+                        content=ft.Text("记忆"),
                         icon=ft.Icons.PSYCHOLOGY,
                         on_click=lambda e: _show_memory(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        text="技能",
+                        content=ft.Text("技能"),
                         icon=ft.Icons.BUILD,
                         on_click=lambda e: _show_skills(page, chat_list, state),
                     ),
                     ft.PopupMenuItem(
-                        text="用量统计",
+                        content=ft.Text("用量统计"),
                         icon=ft.Icons.ANALYTICS,
                         on_click=lambda e: _show_usage(page, chat_list, state),
                     ),
