@@ -89,7 +89,7 @@ def _main(page: ft.Page):
     )
 
     input_field = ft.TextField(
-        hint_content=ft.Text("输入消息,/help 查看命令..."),
+        hint_text="输入消息,/help 查看命令...",
         expand=True,
         border_radius=10,
         max_lines=5,
