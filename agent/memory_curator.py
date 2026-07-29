@@ -3,7 +3,7 @@
 两阶段:
   第 1 阶段(本模块 apply_automatic_transitions):
     纯函数,按 expected_valid_days 判断过期,转换 state。
-  第 2 阶段(run_memory_review,后续 task 实现):
+  第 2 阶段(run_memory_review,LLM 合并 + 矛盾检测):
     LLM 在 type 桶内找重复/矛盾,改写 body + 归档。
 
 设计原则(沿用 CLAUDE.md "完全可逆"):
@@ -15,7 +15,6 @@
 import datetime
 import logging
 import re
-import shutil
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -48,7 +47,7 @@ def apply_automatic_transitions(
     返回计数 dict。
     """
     # 延迟导入避免循环依赖
-    from agent.memory_store import MemoryStore, _format_frontmatter
+    from agent.memory_store import MemoryStore
 
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -380,7 +379,7 @@ def run_memory_review(
     dry_run: True 时只统计候选,不调 LLM(避免成本)
     max_batch_size: 每批发给 LLM 的最大记忆条数
     config: Optional 配置字典。读取 config["memory"]["curator"]:
-      - llm_review_enabled = False → 直接跳过第 2 麦,不构造 agent
+      - llm_review_enabled = False → 直接跳过第 2 阶段,不构造 agent
       - max_batch_size            → 覆盖默认 30
     缺省/老 config 无此段时按默认值跑(向后兼容)。
 

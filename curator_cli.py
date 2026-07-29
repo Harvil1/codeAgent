@@ -111,7 +111,7 @@ def _cmd_memory(args):
         return
 
     print(f"未知子命令: {sub}")
-    print("可用: status, run [--dry-run], pause, resume")
+    print("可用: status, run [--dry-run|--no-llm], pause, resume")
 
 
 def curator_cli(args: list, skills_dir: Path = None):
