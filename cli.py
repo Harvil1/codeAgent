@@ -226,6 +226,35 @@ class RuntimeContext:
         # 6. 后台触发 curator（不阻塞启动）
         self._maybe_trigger_curator()
 
+        # === Memory Curator 后台触发(照搬 skill curator 模式) ===
+        try:
+            from constants import get_agent_home
+            from agent.memory_curator import should_run_now_memory, apply_automatic_transitions
+            memory_dir = get_agent_home() / ".memory"
+            if memory_dir.exists() and should_run_now_memory(memory_dir):
+                import threading, datetime
+                def _run_memory_curator():
+                    try:
+                        counts = apply_automatic_transitions(memory_dir)
+                        # 第 2 阶段(后续 task 接入)
+                        # run_memory_review(memory_dir, agent_factory=...)
+                        from agent.memory_curator import (
+                            load_memory_curator_state, save_memory_curator_state,
+                        )
+                        state = load_memory_curator_state(memory_dir)
+                        state["last_run_at"] = datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat()
+                        state["last_run_summary"] = f"第 1 阶段: {counts}"
+                        save_memory_curator_state(memory_dir, state)
+                        logger.info("Memory Curator 后台运行完成: %s", counts)
+                    except Exception as e:
+                        logger.warning("Memory Curator 后台运行失败: %s", e)
+
+                threading.Thread(target=_run_memory_curator, daemon=True).start()
+        except Exception as e:
+            logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
+
     def _create_agent(self) -> AIAgent:
         """根据配置创建 agent。
 
