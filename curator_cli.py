@@ -8,6 +8,7 @@ verbs：
   pin       - pin 一个技能（免疫自动转换）
   unpin     - 取消 pin
   restore   - 从 .archive/ 恢复技能
+  memory    - Memory Curator 子命令(status/run [--dry-run]/pause/resume)
 """
 
 import sys
@@ -17,6 +18,67 @@ from agent.curator import (
     load_state, save_state, run_curator_review,
 )
 from tools.skill_usage import load_usage, set_pinned, restore_skill
+
+
+def _cmd_memory(args):
+    """memory 子命令:curator memory status|run [--dry-run]|pause|resume
+
+    第 1 阶段只跑 apply_automatic_transitions(纯状态转换),
+    不依赖 LLM。状态写到 <agent_home>/.memory/.curator_state.json。
+    """
+    import datetime
+    from constants import get_agent_home
+    from agent.memory_curator import (
+        apply_automatic_transitions,
+        load_memory_curator_state,
+        save_memory_curator_state,
+    )
+
+    memory_dir = get_agent_home() / ".memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    sub = args[0] if args else "status"
+
+    if sub == "status":
+        state = load_memory_curator_state(memory_dir)
+        print("=== Memory Curator 状态 ===")
+        print(f"上次运行: {state.get('last_run_at', '从未')}")
+        print(f"上次总结: {state.get('last_run_summary', '无')}")
+        print(f"已暂停: {'是' if state.get('paused') else '否'}")
+        return
+
+    if sub == "run":
+        dry_run = "--dry-run" in args
+        print(f"{'[DRY RUN] ' if dry_run else ''}运行 Memory Curator...")
+        if not dry_run:
+            counts = apply_automatic_transitions(memory_dir)
+        else:
+            # dry-run 不改记忆文件,只预览(与 skill curator 一致)
+            counts = {"checked": 0, "marked_stale": 0, "archived": 0, "reactivated": 0}
+        print(f"\n转换: {counts}")
+        if not dry_run:
+            state = load_memory_curator_state(memory_dir)
+            state["last_run_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            state["last_run_summary"] = f"第 1 阶段: {counts}"
+            state["paused"] = state.get("paused", False)
+            save_memory_curator_state(memory_dir, state)
+        return
+
+    if sub == "pause":
+        state = load_memory_curator_state(memory_dir)
+        state["paused"] = True
+        save_memory_curator_state(memory_dir, state)
+        print("Memory Curator 已暂停")
+        return
+
+    if sub == "resume":
+        state = load_memory_curator_state(memory_dir)
+        state["paused"] = False
+        save_memory_curator_state(memory_dir, state)
+        print("Memory Curator 已恢复")
+        return
+
+    print(f"未知子命令: {sub}")
+    print("可用: status, run [--dry-run], pause, resume")
 
 
 def curator_cli(args: list, skills_dir: Path = None):
@@ -30,6 +92,11 @@ def curator_cli(args: list, skills_dir: Path = None):
         return
 
     verb = args[0]
+
+    # memory 子命令走独立的 Memory Curator 管线(第 1 阶段 dry-run/实跑)
+    if verb == "memory":
+        _cmd_memory(args[1:])
+        return
 
     if verb == "status":
         _show_status(skills_dir)
@@ -120,12 +187,17 @@ def _resume_curator(skills_dir: Path):
     print("curator 已恢复")
 
 
-def main():
-    """curator CLI 入口：python -m curator_cli <verb> ..."""
-    if len(sys.argv) < 2:
+def main(args=None):
+    """curator CLI 入口：python -m curator_cli <verb> ...
+
+    args=None 时从 sys.argv 读取(生产入口);传入 list 时直接使用(测试入口)。
+    """
+    if args is None:
+        args = sys.argv[1:]
+    if not args:
         _show_status(None)
         return
-    curator_cli(sys.argv[1:])
+    curator_cli(args)
 
 
 if __name__ == "__main__":
