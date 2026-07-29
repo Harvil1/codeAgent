@@ -127,3 +127,70 @@ def _set_state_in_file(path, new_state, meta, body, now):
     if new_state == "active":
         meta.pop("state", None)
     atomic_write_text(path, _format_frontmatter(meta) + body)
+
+
+# ---------------------------------------------------------------------------
+# 状态文件 + 门控(照搬 skill Curator 模式)
+# ---------------------------------------------------------------------------
+
+def _state_file_path(memory_dir: Path) -> Path:
+    """状态文件路径:~/.agent/.memory/.curator_state.json"""
+    return Path(memory_dir) / ".curator_state.json"
+
+
+def load_memory_curator_state(memory_dir: Path) -> Dict:
+    """加载状态文件。不存在返回空 dict。"""
+    path = _state_file_path(memory_dir)
+    if not path.exists():
+        return {}
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("读取 curator 状态失败 %s: %s", path, e)
+        return {}
+
+
+def save_memory_curator_state(memory_dir: Path, state: Dict) -> None:
+    """原子写状态文件。"""
+    import json
+    from agent.atomic_io import atomic_write_text
+    path = _state_file_path(memory_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2))
+
+
+def should_run_now_memory(
+    memory_dir: Path,
+    now: Optional[datetime.datetime] = None,
+    interval_hours: int = 168,
+) -> bool:
+    """门控:enabled + not paused + 距上次 ≥ interval_hours + 首次种子化。"""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+    state = load_memory_curator_state(memory_dir)
+    if state.get("paused"):
+        return False
+
+    last_str = state.get("last_run_at")
+    if not last_str:
+        # 首次运行:种子化,等一个周期
+        state["last_run_at"] = now.isoformat()
+        state["last_run_summary"] = "首次运行已推迟——curator 已种子化,等一个周期"
+        state["paused"] = False
+        save_memory_curator_state(memory_dir, state)
+        return False
+
+    last = _parse_iso(last_str)
+    if last is None:
+        # 时间戳损坏,重置
+        state["last_run_at"] = now.isoformat()
+        save_memory_curator_state(memory_dir, state)
+        return False
+
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=datetime.timezone.utc)
+
+    elapsed = (now - last).total_seconds() / 3600
+    return elapsed >= interval_hours
