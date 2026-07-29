@@ -218,11 +218,13 @@ uv sync                                 # 同步已声明依赖
 | MCP 多传输 + OAuth | `agent/mcp_client.py:MCPTransport` 抽象 + `StdioTransport`/`HTTPTransport`（含 OAuth refresh） |
 | 记忆三级粒度（L0/L1/L2） | `agent/memory_store.py:MemoryEntry.summary`（L1 摘要层）；索引行追加 summary，retriever 拿到的 index 自动含 L1 |
 | 任务级反思引擎 | `agent/reflection.py:apply_reflection`（aux_llm 从轨迹提炼 user/feedback/project 三类经验，自动 memory_save）；入口 `agent/__init__.py:AIAgent._trigger_reflection_async`（run_conversation 末尾异步触发） |
+| Memory Curator（记忆维护工人） | `agent/memory_curator.py:apply_automatic_transitions`（第 1 阶段确定性状态机）+ `run_memory_review`（第 2 阶段 LLM 合并/矛盾解决）+ `should_run_now_memory`（门控）；配置入口 `config["memory"]["curator"]`（enabled / interval_hours / llm_review_enabled / max_batch_size） |
 
 ## 已知约束（设计如此，不是 bug）
 
 - **记忆写入后本会话不生效** —— 保护 prompt cache。`MemoryStore.snapshot_for_prompt()` 是 frozen 的。
 - **首次 curator 运行被推迟** —— 种子化 `last_run_at`，等一个完整周期（避免新装就大改技能库）。
+- **Memory Curator 默认推迟** —— 首次启动种子化 `last_run_at`，等一个完整周期（默认 7 天）才跑第一次，避免新装就大改记忆库。
 - **`use_count=0` 不是归档理由** —— 一个 "Kubernetes 故障处理" 技能可能 2 个月不触发，但仍有价值。按内容判断，不按计数。
 - **子代理不继承对话历史** —— 独立 `AIAgent` 实例，只通过 `context` 参数传递必要信息。`summary_only=True`（默认）时连结果都被压缩。
 - **权限审批缓存是会话级的** —— `PermissionChecker._approved` 集合。新会话重置，避免长期信任漂移。

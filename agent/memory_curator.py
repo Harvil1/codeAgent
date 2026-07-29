@@ -166,8 +166,23 @@ def should_run_now_memory(
     memory_dir: Path,
     now: Optional[datetime.datetime] = None,
     interval_hours: int = 168,
+    config: Optional[Dict] = None,
 ) -> bool:
-    """门控:enabled + not paused + 距上次 ≥ interval_hours + 首次种子化。"""
+    """门控:enabled + not paused + 距上次 ≥ interval_hours + 首次种子化。
+
+    config 参数(Optional):
+      config["memory"]["curator"]["enabled"] = False  → 整个 memory curator 关闭
+      config["memory"]["curator"]["interval_hours"]   → 覆盖默认 168(7 天)
+    缺省/老 config 无此段时按默认值跑(向后兼容)。
+    """
+    # config 门控:enabled=False 直接拒绝
+    if config is not None:
+        cur_cfg = config.get("memory", {}).get("curator", {})
+        if not cur_cfg.get("enabled", True):
+            return False
+        # config 覆盖 interval_hours
+        interval_hours = cur_cfg.get("interval_hours", interval_hours)
+
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -357,12 +372,17 @@ def run_memory_review(
     agent_factory,
     dry_run: bool = False,
     max_batch_size: int = 30,
+    config: Optional[Dict] = None,
 ) -> Dict:
     """第 2 阶段:LLM 合并 + 矛盾检测。
 
     agent_factory: () -> AIAgent(主模型后台 agent),每次调用只构造一次
     dry_run: True 时只统计候选,不调 LLM(避免成本)
     max_batch_size: 每批发给 LLM 的最大记忆条数
+    config: Optional 配置字典。读取 config["memory"]["curator"]:
+      - llm_review_enabled = False → 直接跳过第 2 麦,不构造 agent
+      - max_batch_size            → 覆盖默认 30
+    缺省/老 config 无此段时按默认值跑(向后兼容)。
 
     流程:
       1. collect_review_candidates 按 type 分桶
@@ -382,6 +402,21 @@ def run_memory_review(
     """
     memory_dir = Path(memory_dir)
     archive_root = memory_dir.parent / ".archive"
+
+    # config 门控:llm_review_enabled=False 直接跳过(避免 LLM 成本)
+    if config is not None:
+        cur_cfg = config.get("memory", {}).get("curator", {})
+        if not cur_cfg.get("llm_review_enabled", True):
+            logger.info("run_memory_review 跳过:llm_review_enabled=False")
+            return {
+                "dry_run": dry_run,
+                "buckets_reviewed": 0,
+                "executed_actions": 0,
+                "errors": 0,
+                "candidates_found": 0,
+                "skipped": "llm_review_enabled=False",
+            }
+        max_batch_size = cur_cfg.get("max_batch_size", max_batch_size)
 
     # dry_run 短路:不构造 agent,避免 LLM 成本
     if dry_run:

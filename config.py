@@ -164,6 +164,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retrieval_enabled": True,       # 语义检索开关
         "retrieval_max_results": 5,      # 检索最大结果数
         "retrieval_model": None,         # 检索模型（None → 用主模型）
+        # === Memory Curator（NEW，Task 10）===
+        "curator": {
+            "enabled": True,             # False 时整个 memory curator 关闭
+            "interval_hours": 168,       # 7 天
+            "min_idle_hours": 1,         # agent 至少空闲 1 小时才跑
+            "llm_review_enabled": True,  # 第 2 阶段 LLM 总开关
+            "max_batch_size": 30,        # 单桶每批发给 LLM 的最大条数
+            "archive_after_multiplier": 2,  # archived 阈值 = N × valid_days
+        },
     },
 
     # 技能

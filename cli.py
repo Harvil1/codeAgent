@@ -268,7 +268,7 @@ class RuntimeContext:
                 run_memory_review,
             )
             memory_dir = get_agent_home() / ".memory"
-            if memory_dir.exists() and should_run_now_memory(memory_dir):
+            if memory_dir.exists() and should_run_now_memory(memory_dir, config=self.config):
                 import threading, datetime
 
                 def _run_memory_curator():
@@ -281,6 +281,7 @@ class RuntimeContext:
                             review_report = run_memory_review(
                                 memory_dir,
                                 agent_factory=factory,
+                                config=self.config,
                             )
                             review_summary = (
                                 f"第 1 阶段: {counts}; "
