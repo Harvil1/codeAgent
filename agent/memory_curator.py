@@ -14,6 +14,8 @@
 
 import datetime
 import logging
+import re
+import shutil
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -253,3 +255,92 @@ def chunk_batch(entries: List, size: int = 30) -> Iterator[List]:
     """把列表切成 size 大小的批。"""
     for i in range(0, len(entries), size):
         yield entries[i:i + size]
+
+
+# ---------------------------------------------------------------------------
+# Task 7: YAML 解析 + action 执行 + 改写备份
+# ---------------------------------------------------------------------------
+
+
+def parse_yaml_actions(raw: str) -> List[Dict]:
+    """从 LLM 输出解析 YAML action 列表。
+
+    支持格式:包含 ```yaml ... ``` 代码块。
+    损坏/无块返回空列表。
+    """
+    match = re.search(r"```yaml\n(.*?)```", raw, re.DOTALL)
+    if not match:
+        return []
+    try:
+        import yaml
+        parsed = yaml.safe_load(match.group(1))
+        if not isinstance(parsed, list):
+            return []
+        return [a for a in parsed if isinstance(a, dict) and "action" in a]
+    except Exception as e:
+        logger.warning("YAML 解析失败: %s", e)
+        return []
+
+
+def safe_rewrite_body(store, entry_id: str, new_body: str, archive_root: Path) -> Path:
+    """改写 body 前备份原文到 .archive/memory-rewrites-{ts}/。
+
+    返回备份文件路径。
+    """
+    entry = store.get(entry_id)
+    if entry is None:
+        raise KeyError(f"记忆不存在: {entry_id}")
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = Path(archive_root) / f"memory-rewrites-{ts}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"{entry_id}.md"
+    backup_path.write_text(
+        f"---\nname: {entry.name}\ndescription: {entry.description}\n"
+        f"original_updated_at: {entry.updated_at.isoformat(timespec='seconds')}\n---\n"
+        f"{entry.body}",
+        encoding="utf-8",
+    )
+    store.update(entry_id, body=new_body)
+    logger.info("记忆 %s body 改写,原文备份: %s", entry_id, backup_path)
+    return backup_path
+
+
+def execute_action(action: Dict, store, archive_root: Path) -> str:
+    """执行单个 curator action。返回结果描述(用于日志/报告)。
+
+    支持:
+      merge_duplicate {keep, archive: [ids]}
+      resolve_contradiction {update_id, new_body, archive}
+    未知 action 跳过。
+    """
+    act_type = action.get("action")
+
+    if act_type == "merge_duplicate":
+        keep_id = action.get("keep")
+        archive_ids = action.get("archive", [])
+        if isinstance(archive_ids, str):
+            archive_ids = [archive_ids]
+        for aid in archive_ids:
+            if aid and aid != keep_id:
+                try:
+                    store.delete(aid)
+                except Exception as e:
+                    logger.warning("merge_duplicate 归档 %s 失败: %s", aid, e)
+        return f"merge_duplicate: keep={keep_id}, archived={archive_ids}"
+
+    if act_type == "resolve_contradiction":
+        update_id = action.get("update_id")
+        new_body = action.get("new_body", "")
+        archive_id = action.get("archive")
+        if update_id and new_body:
+            safe_rewrite_body(store, update_id, new_body, archive_root)
+        if archive_id and archive_id != update_id:
+            try:
+                store.delete(archive_id)
+            except Exception as e:
+                logger.warning("resolve_contradiction 归档 %s 失败: %s", archive_id, e)
+        return f"resolve_contradiction: updated={update_id}, archived={archive_id}"
+
+    logger.warning("未知 curator action: %s", act_type)
+    return f"skip: 未知 action {act_type}"
