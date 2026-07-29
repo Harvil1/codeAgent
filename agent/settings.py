@@ -41,13 +41,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_model": "opus",                          # 主对话用 opus 级
     "default_haiku_model": "haiku",                   # 子代理/辅助任务用 haiku 级
 
-    "mcpServers": {},
-
-    "agent": {
-        "max_iterations": 200,
-        "compression_enabled": True,
-    },
-
     "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
 
     "agent": {
@@ -322,8 +315,6 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
     cfg.setdefault("auth_token", "")
     cfg.setdefault("api_key", "")
     cfg.setdefault("base_url", None)
-    cfg.setdefault("model", name)
-    return cfg
     cfg.setdefault("model", name)
     return cfg
 

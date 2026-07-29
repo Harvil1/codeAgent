@@ -444,7 +444,7 @@ class RuntimeContext:
             from tools.skill_usage import flush_usage
             flush_usage()
         except Exception:
-            pass
+            logger.debug("flush 技能使用统计失败", exc_info=True)
 
         if hasattr(self, "bg_manager") and self.bg_manager:
             try:
@@ -1001,7 +1001,7 @@ def _list_skills(rt: RuntimeContext):
             fm, _ = parse_frontmatter(content)
             desc = fm.get("description", "")
         except Exception:
-            pass
+            logger.debug("读取技能 frontmatter 失败", exc_info=True)
 
         rating = rec.get("rating")
         rating_str = f"{rating}★" if rating else "-"
@@ -1160,15 +1160,24 @@ def _maybe_prompt_resume(rt: RuntimeContext):
         idx = int(choice)
         if 0 <= idx < len(history):
             # 恢复选中的，删除刚创建的空 session
-            empty_id = rt.session_id
-            rt.resume_session(history[idx]["id"])
-            if empty_id and empty_id != rt.session_id:
-                try:
-                    rt.session_store.delete_session(empty_id)
-                except Exception:
-                    pass
+            _resume_and_cleanup_empty(rt, history[idx]["id"])
         else:
             console.print(f"[yellow]序号超出范围，已开始新对话[/yellow]")
+
+
+def _resume_and_cleanup_empty(rt: RuntimeContext, target_session_id: str) -> None:
+    """恢复到指定 session，并清理掉当前的空 session（如果有）。
+
+    用户在新会话里选择了恢复历史时，刚创建的空 session 需要删掉避免污染列表。
+    清理失败不阻塞（只是多留一个空记录），但留 debug 日志便于排查。
+    """
+    empty_id = rt.session_id
+    rt.resume_session(target_session_id)
+    if empty_id and empty_id != rt.session_id:
+        try:
+            rt.session_store.delete_session(empty_id)
+        except Exception:
+            logger.debug("清理空 session 失败: %s", empty_id, exc_info=True)
 
 
 def _resume_session_interactive(rt: RuntimeContext, args: str):
@@ -1609,13 +1618,7 @@ def _auto_resume_last(rt: RuntimeContext):
         return
 
     last = history[0]
-    empty_id = rt.session_id
-    rt.resume_session(last["id"])
-    if empty_id and empty_id != rt.session_id:
-        try:
-            rt.session_store.delete_session(empty_id)
-        except Exception:
-            pass
+    _resume_and_cleanup_empty(rt, last["id"])
     # 显示历史消息
     _show_history_messages(rt)
 

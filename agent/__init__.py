@@ -24,8 +24,6 @@ import json
 import logging
 from typing import Optional
 
-from openai import OpenAI
-
 from agent.budget import IterationBudget
 from agent.context_pipeline import CompressionSessionState
 from agent.prompt_builder import build_system_prompt
@@ -35,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 class AIAgent:
     """核心 Agent 类。一个实例对应一个会话。"""
+
+    # sentinel：_call_llm_with_escalation 触发了 reactive_compact，主循环需重试本轮
+    _REACTIVE_RETRY = object()
 
     def __init__(
         self,
@@ -158,6 +159,7 @@ class AIAgent:
         # === P2-T6 NEW: hooks 系统 ===
         self.hooks_registry = hooks_registry
         self._stop_fire_count = 0
+        self._stop_hook_forced = False  # STOP hook 触发后让主循环继续（替代内联 continue）
 
         # === P2b-T5 NEW: 后台任务管理器 ===
         self.bg_manager = bg_manager
@@ -651,107 +653,44 @@ class AIAgent:
         """处理一条用户消息，返回助手最终响应。
 
         这是整个系统的核心循环。同步执行，不异步。
+
+        重构后主循环结构（自顶向下阅读）：
+            循环前：hook → drain 外部消息 → 开场记忆检索 → 追加 user history
+            循环内：组装 messages → 压缩 → 工具集/警告/hook → 调 LLM → 分发 tool_calls
+            循环后：兜底响应（预算耗尽/中断）
+
+        具体逻辑见各 _xxx 辅助方法。
         """
         # === P4b final-fix C1: 每个 run_conversation 调用重置 idle 标志 ===
         # 同一 agent 实例在 autonomous lifecycle 多个 WORK 周期复用时，
         # 上一次 idle 请求不应泄漏到下一次调用。
         self._idle_requested = False
 
-        # === P2-T6 NEW: USER_PROMPT_SUBMIT hook ===
-        if (self.hooks_registry
-                and self.config.get("hooks", {}).get("enabled", True)):
-            try:
-                user_message = self.hooks_registry.run_user_prompt_submit(
-                    user_message, session_id=self.session_id or "",
-                )
-            except Exception as e:
-                logger.warning("USER_PROMPT_SUBMIT 编排异常: %s", e)
+        # ---------- 循环前准备 ----------
+        user_message = self._run_prompt_submit_hook(user_message)
+        injected = self._drain_injected_messages()
+        memories_text = self._initial_memory_recall(user_message)
 
-        # === P2b-T5 NEW: drain 后台任务通知（临时，不进 history）===
-        bg_notifications = []
-        if self.bg_manager:
-            try:
-                bg_notifications = self.bg_manager.drain_notifications()
-            except Exception as e:
-                logger.warning("drain_notifications 异常: %s", e)
-                bg_notifications = []
-
-        # === P2c-T4 NEW: drain cron 定时消息（临时，不进 history）===
-        cron_messages = []
-        if self.cron_scheduler:
-            try:
-                cron_messages = self.cron_scheduler.drain_due()
-            except Exception as e:
-                logger.warning("cron drain_due 异常: %s", e)
-                cron_messages = []
-
-        # === P4a-T6 NEW: drain team inbox（临时，不进 history）===
-        team_messages_text = ""
-        if self.team_bus and self.team_name:
-            try:
-                msgs = self.team_bus.read_inbox(self.team_name)
-                if msgs:
-                    team_messages_text = "\n".join(
-                        f"[from {m.from_} ({m.type})] {m.content}"
-                        for m in msgs
-                    )
-            except Exception as e:
-                logger.warning("team inbox drain 异常: %s", e)
-                team_messages_text = ""
-
-        # === Mem-T5 NEW: memory 检索 + 注入 ===
-        relevant_memories_text = ""
-        if (self.memory_retriever and self.memory_store
-                and self._cached_memory_index):
-            try:
-                mem_cfg = (self.config or {}).get("memory", {})
-                retrieval_model = mem_cfg.get("retrieval_model") or self.model
-                max_results = mem_cfg.get("retrieval_max_results", 5)
-                # batch2-T3: 优先用 aux_llm_router 做检索（便宜模型）
-                retrieval_client = self.llm_client
-                if self.aux_llm_router:
-                    retrieval_client = self.aux_llm_router
-                relevant_ids = self.memory_retriever(
-                    query=user_message,
-                    index_text=self._cached_memory_index,
-                    llm_client=retrieval_client,
-                    model=retrieval_model,
-                    max_results=max_results,
-                )
-                if relevant_ids:
-                    bodies = []
-                    for mid in relevant_ids:
-                        body = self.memory_store.load_body(mid)
-                        if body:
-                            bodies.append(f"[memory:{mid}]\n{body}")
-                    if bodies:
-                        relevant_memories_text = "\n\n".join(bodies)
-            except Exception as e:
-                logger.warning("memory retrieval 失败（fail-open）: %s", e)
-                relevant_memories_text = ""
-
-        # 组装实际入 history 的 user_content
-        if relevant_memories_text:
+        # 组装实际入 history 的 user_content（记忆前置包裹）
+        if memories_text:
             user_message_for_history = (
-                f"<relevant_memories>\n{relevant_memories_text}\n</relevant_memories>\n\n"
+                f"<relevant_memories>\n{memories_text}\n</relevant_memories>\n\n"
                 f"{user_message}"
             )
         else:
             user_message_for_history = user_message
 
-        # 1. 追加用户消息到历史
         self.conversation_history.append({
             "role": "user",
             "content": user_message_for_history,
         })
 
-        # 2. 获取系统提示（第一次构建，后续缓存）
         system_prompt = self._get_system_prompt()
 
-        # 3. 延迟导入避免循环依赖
+        # 延迟导入避免循环依赖
         from model_tools import get_tool_definitions, handle_function_call
 
-        # 4. 主循环
+        # ---------- 主循环 ----------
         api_call_count = 0
         turn_exit_reason = "normal"
 
@@ -770,448 +709,608 @@ class AIAgent:
                 if not self.iteration_budget.consume():
                     break
 
-            # 组装完整消息列表（system 临时加在最前面）
-            messages = [
-                {"role": "system", "content": system_prompt},
-                *self.conversation_history,
-            ]
+            # 组装 messages + 注入 bg/cron/team/todo/plan_mode 等临时消息
+            messages = self._assemble_turn_messages(system_prompt, injected)
 
-            # === P2b-T5 NEW: 注入后台任务通知（临时，不进 history）===
-            if bg_notifications:
-                notif_text = "\n".join(
-                    f"[task {n['task_id']} {n['status']}] "
-                    f"exit={n.get('exit_code')} "
-                    f"stdout_tail={(n.get('stdout') or '')[-200:]}"
-                    for n in bg_notifications
-                )
-                messages.append({
-                    "role": "user",
-                    "content": f"<task_notification>\n{notif_text}\n</task_notification>",
-                })
-                # 本轮通知已注入，清空避免后续轮次重复
-                bg_notifications = []
+            # 上下文压缩（接近 token 上限时触发，可能重建 system_prompt）
+            messages, system_prompt, _ = self._run_context_compression(
+                messages, system_prompt,
+            )
 
-            # === P2c-T4 NEW: 注入 cron 定时消息（临时，不进 history）===
-            if cron_messages:
-                sched_text = "\n".join(
-                    f"[Scheduled: {m['job_id']}] {m['message']}"
-                    for m in cron_messages
-                )
-                messages.append({
-                    "role": "user",
-                    "content": f"<scheduled_message>\n{sched_text}\n</scheduled_message>",
-                })
-                # 本轮注入后清空，避免后续轮次重复
-                cron_messages = []
+            # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
+            tool_schemas = self._prepare_toolset_and_injections(messages)
 
-            # === P4a-T6 NEW: 注入 team messages（临时，不进 history）===
-            if team_messages_text:
-                messages.append({
-                    "role": "user",
-                    "content": f"<team_messages>\n{team_messages_text}\n</team_messages>",
-                })
-                # 本轮注入后清空，避免后续轮次重复
-                team_messages_text = ""
-
-            # TodoWrite 提醒：3 轮未更新时注入 reminder（临时，不进 history）
-            if self.todo_manager and self.todo_manager.should_remind():
-                reminder = self.todo_manager.format_for_reminder()
-                if reminder:
-                    messages.append({"role": "user", "content": reminder})
-
-            # === PlanMode NEW: 计划模式提醒（临时，不进 history）===
-            if self.plan_mode:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "<plan_mode_reminder>\n"
-                        "你处于【计划模式】，只能调研，不能修改任何东西。\n"
-                        "完成调研后必须调 exit_plan_mode(plan=...) 提交计划等待用户审批。\n"
-                        "计划要包含：要改什么文件、为什么、步骤、风险点。\n"
-                        "</plan_mode_reminder>"
-                    ),
-                })
-
-            # 上下文压缩（接近 token 上限时触发）
-            # Phase 1 Commit 7：双轨期结束，直接走新管线
-            if self.compression_enabled:
-                from agent.context_pipeline import compress_if_needed
-                ctx_cfg = self.config.get("context", {})
-                messages, compressed = compress_if_needed(
-                    messages,
-                    llm_client=self.llm_client,
-                    model=self.model,
-                    config=ctx_cfg,
-                    session_state=self._compress_session_state,
-                    agent_home=self.harvil_home,
-                    session_id=self.session_id,
-                )
-                if compressed:
-                    # === batch2-T1: 压缩前调 memory_manager.on_pre_compress 提取事实 ===
-                    if self.memory_manager:
-                        try:
-                            self.memory_manager.on_pre_compress(None, messages)
-                        except Exception as e:
-                            logger.warning("on_pre_compress 编排异常: %s", e)
-                    # 压缩会修改历史，需要同步并重建 system prompt
-                    self.conversation_history = messages[1:]  # 跳过 system
-                    self.invalidate_system_prompt()
-                    system_prompt = self._get_system_prompt()
-                    self._compression_attempts += 1
-                    # === PostCompressReanchor NEW: 重新锚定当前工作上下文 ===
-                    # 压缩后 LLM 看到的是"刚醒来"状态，可能丢失：
-                    # - 当前 todo 进度（在内存但不在 conversation_history）
-                    # - plan_mode 状态（虽然有每轮 reminder 但压缩打断节奏）
-                    # 注入一条临时消息到当轮 messages 末尾，不进 conversation_history。
-                    brief_parts = [
-                        "你刚经历了上下文压缩，历史已被总结。"
-                        "身份和 system prompt 不变。"
-                    ]
-                    if self.todo_manager:
-                        try:
-                            todo_brief = self.todo_manager.format_for_reminder()
-                            if todo_brief:
-                                brief_parts.append(f"当前任务清单：\n{todo_brief}")
-                        except Exception as e:
-                            logger.warning("读取 todo 摘要失败（brief 跳过 todo 行）: %s", e)
-                    mode_text = (
-                        "计划模式（只能调研，不能修改）"
-                        if self.plan_mode
-                        else "正常执行模式"
-                    )
-                    brief_parts.append(f"当前模式：{mode_text}")
-                    brief_parts.append("请继续之前的工作。")
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "<post_compress_brief>\n"
-                            + "\n".join(brief_parts)
-                            + "\n</post_compress_brief>"
-                        ),
-                    })
-
-            # === PlanMode: plan_mode 下强制切到 plan 工具集（只读）===
-            # 注意：必须在循环内每轮重算，让 plan_mode 中途切换（如审批通过）
-            # 后能立即刷新工具集，否则 LLM 看到的还是 ['plan']，无法执行计划。
-            effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
-            tool_schemas = get_tool_definitions(effective_toolsets, agent=self)
-
-            # === 失败重试检测:连续 N 次工具失败 → 注入提醒 ===
-            if self._tool_failure_streak >= self._failure_threshold:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"<retry_warning>\n"
-                        f"你已连续 {self._tool_failure_streak} 次工具调用失败。\n"
-                        f"最近错误: {self._last_tool_error}\n\n"
-                        f"**不要用完全相同的方式重试**。建议:\n"
-                        f"1. 分析错误根因(看 stderr / error 字段)\n"
-                        f"2. 换一种方法(改命令 / 改路径 / 改参数)\n"
-                        f"3. 如果是环境问题(路径冲突 / 权限 / 版本不兼容),"
-                        f"**停下来告诉用户**具体问题和解决建议\n"
-                        f"</retry_warning>"
-                    ),
-                })
-                self._tool_failure_streak = 0  # 重置(提醒一次就够,不反复唠叨)
-
-            # === 动态记忆检索(用 aux_llm 轻量模型,只在新用户输入时触发)===
-            if (self.aux_llm_router and self.memory_store
-                    and self.conversation_history
-                    and self.conversation_history[-1].get("role") == "user"):
-                relevant = self._retrieve_relevant_memories(
-                    self.conversation_history[-1].get("content", "")
-                )
-                if relevant:
-                    messages.append({
-                        "role": "user",
-                        "content": f"<relevant_memories>\n{relevant}\n</relevant_memories>",
-                    })
-
-            # === batch2-T2: PRE_LLM_CALL hook（压缩后、调 LLM 前）===
-            if (self.hooks_registry
-                    and self.config.get("hooks", {}).get("enabled", True)):
-                try:
-                    messages, tool_schemas = self.hooks_registry.run_pre_llm_call(
-                        messages, tool_schemas, session_id=self.session_id or "",
-                    )
-                except Exception as e:
-                    logger.warning("PRE_LLM_CALL hook 编排异常: %s", e)
-
-            # 调用 LLM（带重试和备用 client）
-            try:
-                # 04 NEW: 流式分支（stream_callback 设置时启用）
-                if self._stream_callback is not None:
-                    response = self._call_llm_streaming(
-                        messages=messages,
-                        tools=tool_schemas if tool_schemas else None,
-                    )
-                else:
-                    from agent.llm_retry import call_with_retry, detect_length_finish
-                    response = call_with_retry(
-                        self.llm_client,
-                        messages,
-                        tools=tool_schemas if tool_schemas else None,
-                        fallback_llm_client=self.fallback_llm_client,
-                    )
-                    # === P0-3: 非流式路径也支持 max_tokens 升级 ===
-                    # finish_reason=length 时升级重试一次（与流式路径行为对齐）
-                    if (
-                        detect_length_finish(response)
-                        and self._max_tokens_escalator is not None
-                        and not self._max_tokens_escalator.has_escalated
-                    ):
-                        new_max = self._max_tokens_escalator.escalate()
-                        logger.info(
-                            "max_tokens 截断（非流式），升级到 %d 重试", new_max
-                        )
-                        try:
-                            response = call_with_retry(
-                                self.llm_client,
-                                messages,
-                                tools=tool_schemas if tool_schemas else None,
-                                fallback_llm_client=self.fallback_llm_client,
-                                max_tokens=new_max,
-                            )
-                        except Exception as esc_err:
-                            logger.warning(
-                                "max_tokens 升级重试失败（沿用截断响应）: %s",
-                                esc_err,
-                            )
-            except Exception as e:
-                # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
-                err_str = str(e).lower()
-                is_prompt_too_long = (
-                    "prompt_too_long" in err_str
-                    or "context_length" in err_str
-                    or "maximum context" in err_str
-                )
-                if (is_prompt_too_long
-                        and not getattr(self, "_reacted", False)):
-                    from agent.context_pipeline import reactive_compact
-                    messages, _ = reactive_compact(
-                        messages,
-                        session_state=self._compress_session_state,
-                        keep_recent=self.config.get("context", {}).get(
-                            "reactive_keep_recent", 5),
-                    )
-                    self._reacted = True
-                    self.conversation_history = messages[1:]  # 跳过 system
-                    self.invalidate_system_prompt()
-                    system_prompt = self._get_system_prompt()
-                    logger.warning("reactive_compact 后重试本轮")
-                    continue  # 重试本轮
-                logger.error("LLM API 调用失败（重试后）: %s", e)
-                # 错误也作为助手消息塞回，让模型有机会自我修正
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": f"[API 错误: {e}]",
-                })
-                break
+            # 调 LLM（含 max_tokens 升级 + reactive_compact）
+            response = self._call_llm_with_escalation(
+                messages, tool_schemas, system_prompt,
+            )
+            if response is self._REACTIVE_RETRY:
+                system_prompt = self._get_system_prompt()
+                continue  # reactive_compact 已修改 history，重试本轮
+            if response is None:
+                break  # LLM 错误已作为 assistant 消息塞回 history
 
             api_call_count += 1
             # batch1-T2: 记录 LLM 用量（prompt cache 记账）
             self._record_llm_usage(response)
 
             # === batch2-T2: POST_LLM_CALL hook（LLM 返回后、处理 tool_calls 前）===
-            if (self.hooks_registry
-                    and self.config.get("hooks", {}).get("enabled", True)):
-                try:
-                    response = self.hooks_registry.run_post_llm_call(
-                        response, session_id=self.session_id or "",
-                    )
-                except Exception as e:
-                    logger.warning("POST_LLM_CALL hook 编排异常: %s", e)
+            response = self._run_post_llm_call_hook(response)
 
             # 每轮 LLM 调用后递增 todo 计数
             if self.todo_manager:
                 self.todo_manager.increment_round()
             # C1 修复：同步递增压缩会话状态轮次，L4 cooldown 依赖此值
             self._compress_session_state.increment_turn()
+
             assistant_msg = response.choices[0].message
 
-            # 处理工具调用
+            # 分支：有 tool_calls → 分发；无 tool_calls → 最终响应
             if assistant_msg.tool_calls:
-                # 先把 assistant 消息（带 tool_calls）追加到历史
-                # 保留 reasoning_content + thinking_signature(DeepSeek 工具调用回传要求)
-                assistant_entry = {
-                    "role": "assistant",
-                    "content": assistant_msg.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in assistant_msg.tool_calls
-                    ],
-                }
-                # 工具调用时 DeepSeek 要求回传 thinking(否则 400)
-                rc = getattr(assistant_msg, "reasoning_content", None)
-                sig = getattr(assistant_msg, "thinking_signature", None)
-                if rc:
-                    assistant_entry["reasoning_content"] = rc
-                if sig:
-                    assistant_entry["thinking_signature"] = sig
-                self.conversation_history.append(assistant_entry)
-
-                # 执行每个工具调用
-                for tc in assistant_msg.tool_calls:
-                    tool_name = tc.function.name
-                    try:
-                        tool_args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        tool_args = {}
-
-                    # 通知 CLI 打印进度
-                    if self.on_tool_call:
-                        try:
-                            self.on_tool_call(tool_name, tool_args)
-                        except Exception:
-                            pass
-
-                    # 分发到工具注册表
-                    result = handle_function_call(
-                        tool_name, tool_args,
-                        session_id=self.session_id,
-                        memory_store=self.memory_store,
-                        session_store=self.session_store,
-                        harvil_home=self.harvil_home,
-                        tool_call_id=tc.id,
-                        config=self.config,
-                        hooks_registry=self.hooks_registry,  # === P2-T7 NEW ===
-                        bg_manager=self.bg_manager,          # === P2b-T7 NEW ===
-                        team_bus=self.team_bus,              # === P4a-T6 NEW ===
-                        team_coordinator=self.team_coordinator,  # === P4a-T6 NEW ===
-                        team_name=self.team_name,            # === P4a-T6 NEW ===
-                        agent_ref=self,                     # === P4b-T2 NEW ===
-                    )
-
-                    # === PlanMode NEW: 捕获 exit_plan_mode 审批请求 ===
-                    plan_handled = False
-                    try:
-                        result_data = json.loads(result) if isinstance(result, str) else {}
-                    except (json.JSONDecodeError, ValueError):
-                        result_data = {}
-
-                    if result_data.get("error_type") == "plan_approval_required":
-                        plan_text = result_data.get("plan", "")
-                        try:
-                            if self.plan_approval_callback is not None:
-                                approved, feedback = self.plan_approval_callback(plan_text)
-                            else:
-                                approved, feedback = True, ""
-                        except Exception as cb_exc:
-                            logger.warning("plan_approval_callback 异常: %s", cb_exc)
-                            approved = False
-                            feedback = f"审批回调异常: {cb_exc}"
-
-                        if approved:
-                            self.plan_mode = False
-                            tool_content = json.dumps({
-                                "plan_approved": True,
-                                "message": "用户已批准计划。现在可以开始执行：用 todo_write 列步骤然后执行。",
-                            }, ensure_ascii=False)
-                        else:
-                            tool_content = json.dumps({
-                                "plan_rejected": True,
-                                "feedback": feedback or "用户未提供拒绝原因",
-                                "message": "用户拒绝了计划。请根据 feedback 修订后重新调 exit_plan_mode。",
-                            }, ensure_ascii=False)
-
-                        self.conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tool_name,
-                            "content": tool_content,
-                        })
-                        plan_handled = True
-
-                    if not plan_handled:
-                        # 工具结果追加到历史（必须配对 tool_call_id）
-                        self.conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tool_name,
-                            "content": result,  # JSON 字符串
-                        })
-
-                        # === 失败重试检测 ===
-                        try:
-                            rd = json.loads(result) if isinstance(result, str) else {}
-                            is_error = bool(rd.get("error")) or rd.get("exit_code", 0) != 0
-                        except (json.JSONDecodeError, TypeError):
-                            is_error = False
-                        if is_error:
-                            self._tool_failure_streak += 1
-                            err_snippet = (
-                                rd.get("error", "") or str(rd.get("stderr", ""))[:200]
-                                if isinstance(rd, dict) else ""
-                            )
-                            self._last_tool_error = str(err_snippet)[:200]
-                        else:
-                            self._tool_failure_streak = 0
-
-                # === P4b-T2 NEW: idle 标志检查 ===
-                if self._idle_requested:
-                    logger.info("idle 已请求，退出 run_conversation")
-                    break
-
+                should_continue = self._dispatch_tool_calls(
+                    assistant_msg, handle_function_call,
+                )
+                if not should_continue:
+                    break  # P4b-T2: idle 已请求
                 # 继续循环，让 LLM 看到工具结果
                 continue
-            else:
-                # 没有工具调用 = 最终响应
-                final_content = assistant_msg.content or ""
 
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": final_content,
+            # 无 tool_calls = 最终响应
+            final_content = self._finalize_response(assistant_msg, user_message)
+            if self._stop_hook_forced:
+                # STOP hook 注入了 force_msg，跳回 while 让 LLM 再跑一轮
+                continue
+            return final_content
+
+        # ---------- 循环结束（预算耗尽或中断）----------
+        return self._handle_loop_exit(turn_exit_reason, user_message)
+
+    # ------------------------------------------------------------------
+    # run_conversation 辅助方法（按主循环调用顺序排列）
+    # 纯重构：从原 run_conversation 抽出，行为完全等价。
+    # ------------------------------------------------------------------
+
+    def _run_prompt_submit_hook(self, user_message: str) -> str:
+        """USER_PROMPT_SUBMIT hook 编排（可能改写 user_message）。"""
+        if (self.hooks_registry
+                and self.config.get("hooks", {}).get("enabled", True)):
+            try:
+                user_message = self.hooks_registry.run_user_prompt_submit(
+                    user_message, session_id=self.session_id or "",
+                )
+            except Exception as e:
+                logger.warning("USER_PROMPT_SUBMIT 编排异常: %s", e)
+        return user_message
+
+    def _drain_injected_messages(self) -> dict:
+        """收集外部异步消息（后台任务/cron/team inbox），本轮注入后清空。
+
+        返回 dict 含三个 key（任一可能为空）：
+            bg_notifications: list, cron_messages: list, team_messages_text: str
+        """
+        bg_notifications = []
+        if self.bg_manager:
+            try:
+                bg_notifications = self.bg_manager.drain_notifications()
+            except Exception as e:
+                logger.warning("drain_notifications 异常: %s", e)
+
+        cron_messages = []
+        if self.cron_scheduler:
+            try:
+                cron_messages = self.cron_scheduler.drain_due()
+            except Exception as e:
+                logger.warning("cron drain_due 异常: %s", e)
+
+        team_messages_text = ""
+        if self.team_bus and self.team_name:
+            try:
+                msgs = self.team_bus.read_inbox(self.team_name)
+                if msgs:
+                    team_messages_text = "\n".join(
+                        f"[from {m.from_} ({m.type})] {m.content}"
+                        for m in msgs
+                    )
+            except Exception as e:
+                logger.warning("team inbox drain 异常: %s", e)
+
+        return {
+            "bg_notifications": bg_notifications,
+            "cron_messages": cron_messages,
+            "team_messages_text": team_messages_text,
+        }
+
+    def _initial_memory_recall(self, user_message: str) -> str:
+        """开场记忆检索（基于 user_message）。返回记忆正文（fail-open 返回空串）。"""
+        if not (self.memory_retriever and self.memory_store
+                and self._cached_memory_index):
+            return ""
+        try:
+            mem_cfg = (self.config or {}).get("memory", {})
+            retrieval_model = mem_cfg.get("retrieval_model") or self.model
+            max_results = mem_cfg.get("retrieval_max_results", 5)
+            # batch2-T3: 优先用 aux_llm_router 做检索（便宜模型）
+            retrieval_client = self.aux_llm_router or self.llm_client
+            relevant_ids = self.memory_retriever(
+                query=user_message,
+                index_text=self._cached_memory_index,
+                llm_client=retrieval_client,
+                model=retrieval_model,
+                max_results=max_results,
+            )
+            if not relevant_ids:
+                return ""
+            bodies = []
+            for mid in relevant_ids:
+                body = self.memory_store.load_body(mid)
+                if body:
+                    bodies.append(f"[memory:{mid}]\n{body}")
+            return "\n\n".join(bodies) if bodies else ""
+        except Exception as e:
+            logger.warning("memory retrieval 失败（fail-open）: %s", e)
+            return ""
+
+    def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
+        """组装本轮 messages：system + history + 注入临时消息 + reminder。
+
+        injected 里 bg/cron/team 注入后会被原地清空（避免下轮重复）。
+        TodoWrite reminder 和 plan_mode reminder 每轮重算（不消费）。
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *self.conversation_history,
+        ]
+
+        # 后台任务通知（消费型）
+        if injected.get("bg_notifications"):
+            bg = injected["bg_notifications"]
+            notif_text = "\n".join(
+                f"[task {n['task_id']} {n['status']}] "
+                f"exit={n.get('exit_code')} "
+                f"stdout_tail={(n.get('stdout') or '')[-200:]}"
+                for n in bg
+            )
+            messages.append({
+                "role": "user",
+                "content": f"<task_notification>\n{notif_text}\n</task_notification>",
+            })
+            injected["bg_notifications"] = []
+
+        # cron 定时消息（消费型）
+        if injected.get("cron_messages"):
+            cron = injected["cron_messages"]
+            sched_text = "\n".join(
+                f"[Scheduled: {m['job_id']}] {m['message']}"
+                for m in cron
+            )
+            messages.append({
+                "role": "user",
+                "content": f"<scheduled_message>\n{sched_text}\n</scheduled_message>",
+            })
+            injected["cron_messages"] = []
+
+        # team inbox（消费型）
+        if injected.get("team_messages_text"):
+            team_text = injected["team_messages_text"]
+            messages.append({
+                "role": "user",
+                "content": f"<team_messages>\n{team_text}\n</team_messages>",
+            })
+            injected["team_messages_text"] = ""
+
+        # TodoWrite reminder（每轮重算）
+        if self.todo_manager and self.todo_manager.should_remind():
+            reminder = self.todo_manager.format_for_reminder()
+            if reminder:
+                messages.append({"role": "user", "content": reminder})
+
+        # Plan mode reminder（每轮重算）
+        if self.plan_mode:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "<plan_mode_reminder>\n"
+                    "你处于【计划模式】，只能调研，不能修改任何东西。\n"
+                    "完成调研后必须调 exit_plan_mode(plan=...) 提交计划等待用户审批。\n"
+                    "计划要包含：要改什么文件、为什么、步骤、风险点。\n"
+                    "</plan_mode_reminder>"
+                ),
+            })
+
+        return messages
+
+    def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
+        """接近 token 上限时压缩上下文。
+
+        返回 (messages, system_prompt, compressed: bool)。
+        压缩后会重建 system prompt 并注入 <post_compress_brief>。
+        """
+        if not self.compression_enabled:
+            return messages, system_prompt, False
+
+        from agent.context_pipeline import compress_if_needed
+        ctx_cfg = self.config.get("context", {})
+        messages, compressed = compress_if_needed(
+            messages,
+            llm_client=self.llm_client,
+            model=self.model,
+            config=ctx_cfg,
+            session_state=self._compress_session_state,
+            agent_home=self.harvil_home,
+            session_id=self.session_id,
+        )
+        if not compressed:
+            return messages, system_prompt, False
+
+        # batch2-T1: 压缩前调 memory_manager.on_pre_compress 提取事实
+        if self.memory_manager:
+            try:
+                self.memory_manager.on_pre_compress(None, messages)
+            except Exception as e:
+                logger.warning("on_pre_compress 编排异常: %s", e)
+
+        # 压缩修改了历史，同步并重建 system prompt
+        self.conversation_history = messages[1:]  # 跳过 system
+        self.invalidate_system_prompt()
+        system_prompt = self._get_system_prompt()
+        self._compression_attempts += 1
+
+        # PostCompressReanchor：注入"刚醒来"brief
+        brief_parts = [
+            "你刚经历了上下文压缩，历史已被总结。"
+            "身份和 system prompt 不变。"
+        ]
+        if self.todo_manager:
+            try:
+                todo_brief = self.todo_manager.format_for_reminder()
+                if todo_brief:
+                    brief_parts.append(f"当前任务清单：\n{todo_brief}")
+            except Exception as e:
+                logger.warning("读取 todo 摘要失败（brief 跳过 todo 行）: %s", e)
+        mode_text = (
+            "计划模式（只能调研，不能修改）"
+            if self.plan_mode
+            else "正常执行模式"
+        )
+        brief_parts.append(f"当前模式：{mode_text}")
+        brief_parts.append("请继续之前的工作。")
+        messages.append({
+            "role": "user",
+            "content": (
+                "<post_compress_brief>\n"
+                + "\n".join(brief_parts)
+                + "\n</post_compress_brief>"
+            ),
+        })
+
+        return messages, system_prompt, True
+
+    def _prepare_toolset_and_injections(self, messages: list) -> list:
+        """刷新工具集（plan_mode 切换）+ 注入 retry_warning + 动态记忆 + PRE_LLM_CALL hook。
+
+        会原地修改 messages（追加 reminder）。返回 tool_schemas（可能被 hook 修改）。
+        """
+        from model_tools import get_tool_definitions
+
+        # PlanMode: plan_mode 下强制切到 plan 工具集（只读）
+        effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
+        tool_schemas = get_tool_definitions(effective_toolsets, agent=self)
+
+        # 失败重试检测：连续 N 次工具失败 → 注入提醒
+        if self._tool_failure_streak >= self._failure_threshold:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"<retry_warning>\n"
+                    f"你已连续 {self._tool_failure_streak} 次工具调用失败。\n"
+                    f"最近错误: {self._last_tool_error}\n\n"
+                    f"**不要用完全相同的方式重试**。建议:\n"
+                    f"1. 分析错误根因(看 stderr / error 字段)\n"
+                    f"2. 换一种方法(改命令 / 改路径 / 改参数)\n"
+                    f"3. 如果是环境问题(路径冲突 / 权限 / 版本不兼容),"
+                    f"**停下来告诉用户**具体问题和解决建议\n"
+                    f"</retry_warning>"
+                ),
+            })
+            self._tool_failure_streak = 0  # 重置（提醒一次就够）
+
+        # 动态记忆检索（用 aux_llm 轻量模型，只在最新消息是 user 时触发）
+        if (self.aux_llm_router and self.memory_store
+                and self.conversation_history
+                and self.conversation_history[-1].get("role") == "user"):
+            relevant = self._retrieve_relevant_memories(
+                self.conversation_history[-1].get("content", "")
+            )
+            if relevant:
+                messages.append({
+                    "role": "user",
+                    "content": f"<relevant_memories>\n{relevant}\n</relevant_memories>",
                 })
 
-                if self.on_response:
-                    try:
-                        self.on_response(final_content)
-                    except Exception:
-                        pass
+        # PRE_LLM_CALL hook
+        if (self.hooks_registry
+                and self.config.get("hooks", {}).get("enabled", True)):
+            try:
+                messages, tool_schemas = self.hooks_registry.run_pre_llm_call(
+                    messages, tool_schemas, session_id=self.session_id or "",
+                )
+            except Exception as e:
+                logger.warning("PRE_LLM_CALL hook 编排异常: %s", e)
 
-                # 异步写入外部记忆 provider（不阻塞）
-                self._sync_memory(user_message, final_content)
+        return tool_schemas
 
-                # === P2-T6 NEW: STOP hook ===
-                if (self.hooks_registry
-                        and self.config.get("hooks", {}).get("enabled", True)
-                        and self._stop_fire_count < self.config.get(
-                            "hooks", {}).get("stop_hook_max_fires", 3)):
-                    try:
-                        force_msg = self.hooks_registry.run_stop(
-                            session_id=self.session_id or "",
-                            max_fires=self.config.get("hooks", {}).get(
-                                "stop_hook_max_fires", 3),
-                        )
-                    except Exception as e:
-                        logger.warning("STOP hook 编排异常: %s", e)
-                        force_msg = None
+    def _call_llm_with_escalation(
+        self, messages: list, tool_schemas: list, system_prompt: str,
+    ):
+        """调 LLM，处理 max_tokens 升级 + reactive_compact。
 
-                    if force_msg:
-                        self._stop_fire_count += 1
-                        self.conversation_history.append({
-                            "role": "user",
-                            "content": f"[stop_hook]: {force_msg}",
-                        })
-                        continue  # 跳回 while，不 return
+        返回值：
+            response 对象         - 正常返回
+            self._REACTIVE_RETRY  - 触发了 reactive_compact，主循环应重试本轮
+            None                  - LLM 错误（已写入 history），主循环应 break
+        """
+        try:
+            if self._stream_callback is not None:
+                return self._call_llm_streaming(
+                    messages=messages,
+                    tools=tool_schemas if tool_schemas else None,
+                )
+            from agent.llm_retry import call_with_retry, detect_length_finish
+            response = call_with_retry(
+                self.llm_client,
+                messages,
+                tools=tool_schemas if tool_schemas else None,
+                fallback_llm_client=self.fallback_llm_client,
+            )
+            # P0-3: 非流式路径也支持 max_tokens 升级
+            if (detect_length_finish(response)
+                    and self._max_tokens_escalator is not None
+                    and not self._max_tokens_escalator.has_escalated):
+                new_max = self._max_tokens_escalator.escalate()
+                logger.info("max_tokens 截断（非流式），升级到 %d 重试", new_max)
+                try:
+                    response = call_with_retry(
+                        self.llm_client,
+                        messages,
+                        tools=tool_schemas if tool_schemas else None,
+                        fallback_llm_client=self.fallback_llm_client,
+                        max_tokens=new_max,
+                    )
+                except Exception as esc_err:
+                    logger.warning(
+                        "max_tokens 升级重试失败（沿用截断响应）: %s", esc_err,
+                    )
+            return response
 
-                # === CCALS-P0-2 NEW: 任务级反思（异步，不阻塞返回）===
-                if self._reflection_enabled:
-                    try:
-                        self._trigger_reflection_async()
-                    except Exception as e:
-                        logger.warning("触发反思失败（不影响主流程）: %s", e)
+        except Exception as e:
+            # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
+            err_str = str(e).lower()
+            is_prompt_too_long = (
+                "prompt_too_long" in err_str
+                or "context_length" in err_str
+                or "maximum context" in err_str
+            )
+            if is_prompt_too_long and not getattr(self, "_reacted", False):
+                from agent.context_pipeline import reactive_compact
+                messages, _ = reactive_compact(
+                    messages,
+                    session_state=self._compress_session_state,
+                    keep_recent=self.config.get("context", {}).get(
+                        "reactive_keep_recent", 5),
+                )
+                self._reacted = True
+                self.conversation_history = messages[1:]  # 跳过 system
+                self.invalidate_system_prompt()
+                logger.warning("reactive_compact 后重试本轮")
+                return self._REACTIVE_RETRY
 
-                return final_content
+            logger.error("LLM API 调用失败（重试后）: %s", e)
+            # 错误作为助手消息塞回，让模型有机会自我修正
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": f"[API 错误: {e}]",
+            })
+            return None
 
-        # 循环结束（预算耗尽或中断）
+    def _run_post_llm_call_hook(self, response):
+        """POST_LLM_CALL hook 编排（可能修改 response）。"""
+        if (self.hooks_registry
+                and self.config.get("hooks", {}).get("enabled", True)):
+            try:
+                response = self.hooks_registry.run_post_llm_call(
+                    response, session_id=self.session_id or "",
+                )
+            except Exception as e:
+                logger.warning("POST_LLM_CALL hook 编排异常: %s", e)
+        return response
+
+    def _dispatch_tool_calls(self, assistant_msg, handle_function_call) -> bool:
+        """执行 assistant_msg.tool_calls，处理 plan_approval + 失败统计 + idle 检查。
+
+        assistant 消息（含 tool_calls + thinking 字段）会先追加到 history。
+        返回 True 表示继续主循环，False 表示 idle 已请求需退出。
+        """
+        # 追加 assistant 消息（DeepSeek 工具调用回传要求 thinking 字段）
+        assistant_entry = {
+            "role": "assistant",
+            "content": assistant_msg.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in assistant_msg.tool_calls
+            ],
+        }
+        rc = getattr(assistant_msg, "reasoning_content", None)
+        sig = getattr(assistant_msg, "thinking_signature", None)
+        if rc:
+            assistant_entry["reasoning_content"] = rc
+        if sig:
+            assistant_entry["thinking_signature"] = sig
+        self.conversation_history.append(assistant_entry)
+
+        for tc in assistant_msg.tool_calls:
+            tool_name = tc.function.name
+            try:
+                tool_args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            if self.on_tool_call:
+                try:
+                    self.on_tool_call(tool_name, tool_args)
+                except Exception:
+                    pass
+
+            result = handle_function_call(
+                tool_name, tool_args,
+                session_id=self.session_id,
+                memory_store=self.memory_store,
+                session_store=self.session_store,
+                harvil_home=self.harvil_home,
+                tool_call_id=tc.id,
+                config=self.config,
+                hooks_registry=self.hooks_registry,
+                bg_manager=self.bg_manager,
+                team_bus=self.team_bus,
+                team_coordinator=self.team_coordinator,
+                team_name=self.team_name,
+                agent_ref=self,
+            )
+
+            # PlanMode: 捕获 exit_plan_mode 审批请求
+            plan_handled = False
+            try:
+                result_data = json.loads(result) if isinstance(result, str) else {}
+            except (json.JSONDecodeError, ValueError):
+                result_data = {}
+
+            if result_data.get("error_type") == "plan_approval_required":
+                plan_text = result_data.get("plan", "")
+                try:
+                    if self.plan_approval_callback is not None:
+                        approved, feedback = self.plan_approval_callback(plan_text)
+                    else:
+                        approved, feedback = True, ""
+                except Exception as cb_exc:
+                    logger.warning("plan_approval_callback 异常: %s", cb_exc)
+                    approved = False
+                    feedback = f"审批回调异常: {cb_exc}"
+
+                if approved:
+                    self.plan_mode = False
+                    tool_content = json.dumps({
+                        "plan_approved": True,
+                        "message": "用户已批准计划。现在可以开始执行：用 todo_write 列步骤然后执行。",
+                    }, ensure_ascii=False)
+                else:
+                    tool_content = json.dumps({
+                        "plan_rejected": True,
+                        "feedback": feedback or "用户未提供拒绝原因",
+                        "message": "用户拒绝了计划。请根据 feedback 修订后重新调 exit_plan_mode。",
+                    }, ensure_ascii=False)
+
+                self.conversation_history.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tool_name,
+                    "content": tool_content,
+                })
+                plan_handled = True
+
+            if not plan_handled:
+                self.conversation_history.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tool_name,
+                    "content": result,
+                })
+
+                # 失败重试检测
+                try:
+                    rd = json.loads(result) if isinstance(result, str) else {}
+                    is_error = bool(rd.get("error")) or rd.get("exit_code", 0) != 0
+                except (json.JSONDecodeError, TypeError):
+                    is_error = False
+                if is_error:
+                    self._tool_failure_streak += 1
+                    err_snippet = (
+                        rd.get("error", "") or str(rd.get("stderr", ""))[:200]
+                        if isinstance(rd, dict) else ""
+                    )
+                    self._last_tool_error = str(err_snippet)[:200]
+                else:
+                    self._tool_failure_streak = 0
+
+        # P4b-T2: idle 标志检查
+        if self._idle_requested:
+            logger.info("idle 已请求，退出 run_conversation")
+            return False
+        return True
+
+    def _finalize_response(self, assistant_msg, user_message: str) -> str:
+        """处理无 tool_calls 的最终响应：保存历史 + STOP hook + reflection。
+
+        如果 STOP hook 触发 force_msg，会设置 self._stop_hook_forced = True，
+        主循环看到这个标志应 continue（而非 return）。
+        """
+        final_content = assistant_msg.content or ""
+
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": final_content,
+        })
+
+        if self.on_response:
+            try:
+                self.on_response(final_content)
+            except Exception:
+                pass
+
+        # 异步写入外部记忆 provider（不阻塞）
+        self._sync_memory(user_message, final_content)
+
+        # STOP hook（可能触发 force_msg 让循环继续）
+        self._stop_hook_forced = False
+        if (self.hooks_registry
+                and self.config.get("hooks", {}).get("enabled", True)
+                and self._stop_fire_count < self.config.get(
+                    "hooks", {}).get("stop_hook_max_fires", 3)):
+            try:
+                force_msg = self.hooks_registry.run_stop(
+                    session_id=self.session_id or "",
+                    max_fires=self.config.get("hooks", {}).get(
+                        "stop_hook_max_fires", 3),
+                )
+            except Exception as e:
+                logger.warning("STOP hook 编排异常: %s", e)
+                force_msg = None
+
+            if force_msg:
+                self._stop_fire_count += 1
+                self.conversation_history.append({
+                    "role": "user",
+                    "content": f"[stop_hook]: {force_msg}",
+                })
+                self._stop_hook_forced = True
+                return final_content  # 主循环看到标志会 continue
+
+        # CCALS-P0-2: 任务级反思（异步，不阻塞返回）
+        if self._reflection_enabled:
+            try:
+                self._trigger_reflection_async()
+            except Exception as e:
+                logger.warning("触发反思失败（不影响主流程）: %s", e)
+
+        return final_content
+
+    def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
+        """循环结束（预算耗尽或中断）的兜底响应。"""
         if turn_exit_reason == "interrupted_by_user":
             fallback = "[已被用户中断]"
         else:
