@@ -344,3 +344,117 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
 
     logger.warning("未知 curator action: %s", act_type)
     return f"skip: 未知 action {act_type}"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: run_memory_review 主入口(第 2 阶段 LLM 合并 + 矛盾检测)
+# ---------------------------------------------------------------------------
+
+
+def run_memory_review(
+    memory_dir: Path,
+    *,
+    agent_factory,
+    dry_run: bool = False,
+    max_batch_size: int = 30,
+) -> Dict:
+    """第 2 阶段:LLM 合并 + 矛盾检测。
+
+    agent_factory: () -> AIAgent(主模型后台 agent),每次调用只构造一次
+    dry_run: True 时只统计候选,不调 LLM(避免成本)
+    max_batch_size: 每批发给 LLM 的最大记忆条数
+
+    流程:
+      1. collect_review_candidates 按 type 分桶
+      2. dry_run → 直接返回候选统计,不构造 agent
+      3. 否则构造一次 agent,遍历每桶每批
+      4. 每批构造 prompt → agent.chat() → parse_yaml_actions → execute_action
+      5. LLM 失败该批跳过(errors+1),action 执行失败也 errors+1
+
+    返回报告 dict:
+      {
+        "dry_run": bool,
+        "buckets_reviewed": int,   # 实际跑过 LLM 的批数
+        "candidates_found": int,   # 候选总数(2+ 条的桶)
+        "executed_actions": int,
+        "errors": int,
+      }
+    """
+    memory_dir = Path(memory_dir)
+    archive_root = memory_dir.parent / ".archive"
+
+    # dry_run 短路:不构造 agent,避免 LLM 成本
+    if dry_run:
+        buckets = collect_review_candidates(memory_dir)
+        return {
+            "dry_run": True,
+            "buckets_reviewed": 0,
+            "candidates_found": sum(len(v) for v in buckets.values()),
+            "executed_actions": 0,
+            "errors": 0,
+        }
+
+    buckets = collect_review_candidates(memory_dir)
+    from agent.memory_store import MemoryStore
+    store = MemoryStore(harvil_home=memory_dir.parent)
+
+    total_actions = 0
+    errors = 0
+    buckets_reviewed = 0
+
+    # 复用一个 agent 实例(避免每个批都重新构造)
+    try:
+        review_agent = agent_factory()
+    except Exception as e:
+        logger.warning("创建 review agent 失败: %s", e)
+        return {
+            "dry_run": False, "buckets_reviewed": 0,
+            "candidates_found": sum(len(v) for v in buckets.values()),
+            "executed_actions": 0, "errors": 1,
+        }
+
+    import json
+    for type_name, entries in buckets.items():
+        for batch in chunk_batch(entries, size=max_batch_size):
+            buckets_reviewed += 1
+            # 构造 prompt:把 batch 序列化成 JSON
+            entries_json = json.dumps([
+                {
+                    "id": e.id, "name": e.name, "description": e.description,
+                    "body": e.body,
+                    "updated_at": e.updated_at.isoformat(timespec="seconds"),
+                }
+                for e in batch
+            ], ensure_ascii=False, indent=2)
+
+            prompt = MEMORY_REVIEW_PROMPT_TEMPLATE.format(
+                type_name=type_name, n=len(batch), entries_json=entries_json,
+            )
+
+            # LLM 调用单批 try/except —— 一批失败不污染其他批
+            try:
+                raw_output = review_agent.chat(prompt)
+            except Exception as e:
+                logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
+                errors += 1
+                continue
+
+            actions = parse_yaml_actions(raw_output)
+            for action in actions:
+                # execute_action 内部已对 store.delete/rewrite 做了 try/except
+                # 这里再兜一层,确保任何异常都不中断主循环
+                try:
+                    result = execute_action(action, store, archive_root)
+                    total_actions += 1
+                    logger.info("执行: %s", result)
+                except Exception as e:
+                    logger.warning("action 执行失败: %s | action=%s", e, action)
+                    errors += 1
+
+    return {
+        "dry_run": False,
+        "buckets_reviewed": buckets_reviewed,
+        "candidates_found": sum(len(v) for v in buckets.values()),
+        "executed_actions": total_actions,
+        "errors": errors,
+    }
