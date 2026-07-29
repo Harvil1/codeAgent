@@ -15,7 +15,7 @@
 import datetime
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -194,3 +194,62 @@ def should_run_now_memory(
 
     elapsed = (now - last).total_seconds() / 3600
     return elapsed >= interval_hours
+
+
+# ---------------------------------------------------------------------------
+# 第 2 阶段:候选收集 + 分桶 + 分批
+# ---------------------------------------------------------------------------
+
+MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同一个分类(type={type_name})下的 {n} 条记忆。
+请逐对检查,识别以下三种关系之一:
+
+1. **重复**: 多条记忆描述实质相同的事实
+   操作: 选一条最完整/最新的作为主条目,其余归档
+   YAML 输出:
+     - action: merge_duplicate
+       keep: <主条目 id>
+       archive: [<弃用 id>, ...]
+       reason: <一句话>
+
+2. **矛盾**: 用户偏好/习惯发生变化,新旧冲突
+   操作: 把新信息整合进旧条目的 body,然后归档新条目
+   YAML 输出:
+     - action: resolve_contradiction
+       update_id: <旧条目 id>
+       new_body: |
+         <整合后的完整 body,含"原 X,YYYY-MM 改为 Y"说明>
+       archive: <新条目 id>
+       reason: <一句话>
+
+3. **无关**: 只是名字或主题相近,内容不重叠
+   不输出任何东西
+
+完整记忆列表(JSON):
+{entries_json}
+
+只输出 ```yaml ... ``` 代码块,不要其他文字。
+"""
+
+
+def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
+    """收集 state=active 的记忆,按 type 分桶。
+
+    返回 dict:{type_name: [MemoryEntry, ...]}
+    只保留 2+ 条的桶(单条不可能重复/矛盾)。
+    """
+    from agent.memory_store import MemoryStore
+    store = MemoryStore(harvil_home=Path(memory_dir).parent)
+    all_entries = store.list_all()
+    buckets: Dict[str, List] = {}
+    for entry in all_entries:
+        if entry.state != "active":
+            continue
+        buckets.setdefault(entry.type, []).append(entry)
+    # 只保留 2+ 条
+    return {k: v for k, v in buckets.items() if len(v) >= 2}
+
+
+def chunk_batch(entries: List, size: int = 30) -> Iterator[List]:
+    """把列表切成 size 大小的批。"""
+    for i in range(0, len(entries), size):
+        yield entries[i:i + size]
