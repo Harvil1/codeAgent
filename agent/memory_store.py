@@ -49,6 +49,9 @@ class MemoryEntry:
     expected_valid_days: int = 365
     # 来源追溯:这条记忆来自哪次对话(便于回溯原始上下文)
     source_session_id: str = ""
+    # curator 用:active/stale/archived 状态 + 上次评估时间
+    state: str = "active"
+    last_reviewed_at: str = ""
 
 
 def _generate_id() -> str:
@@ -119,6 +122,11 @@ class MemoryStore:
             meta["expected_valid_days"] = entry.expected_valid_days
         if entry.source_session_id:
             meta["source_session_id"] = entry.source_session_id
+        # curator 状态字段(state=active 不写,保持老文件干净)
+        if entry.state != "active":
+            meta["state"] = entry.state
+        if entry.last_reviewed_at:
+            meta["last_reviewed_at"] = entry.last_reviewed_at
         content = _format_frontmatter(meta) + entry.body
         path = self._memory_dir / f"{entry.id}.md"
         atomic_write_text(path, content)
@@ -142,6 +150,8 @@ class MemoryStore:
         # 3. type_priority 升序(feedback=0 最前)
         # 最终顺序:feedback 优先 → 同 type 内 confidence 高的 → 同 confidence 内最新的
         entries = self._scan_all_entries()
+        # curator:archived 不进索引(不出现在 system prompt)
+        entries = [e for e in entries if e.state != "archived"]
         entries.sort(key=lambda e: str(e.updated_at), reverse=True)
         entries.sort(key=lambda e: e.confidence, reverse=True)
         entries.sort(key=lambda e: type_priority.get(e.type, 99))
@@ -189,6 +199,8 @@ class MemoryStore:
                     confidence=float(meta.get("confidence", 1.0) or 1.0),
                     expected_valid_days=int(meta.get("expected_valid_days", 365) or 365),
                     source_session_id=meta.get("source_session_id", "") or "",
+                    state=meta.get("state", "active") or "active",
+                    last_reviewed_at=meta.get("last_reviewed_at", "") or "",
                 )
                 entries.append(entry)
             except (ValueError, TypeError) as e:
@@ -239,6 +251,8 @@ class MemoryStore:
             created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
             updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
             summary=meta.get("summary", "") or "",  # CCALS-P0-1
+            state=meta.get("state", "active") or "active",
+            last_reviewed_at=meta.get("last_reviewed_at", "") or "",
         )
 
     def list_all(self) -> List[MemoryEntry]:
