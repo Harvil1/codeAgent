@@ -140,6 +140,39 @@ class RuntimeContext:
         # === ⑮ NEW: Handoff bundle 存储 ===
         self.handoff_store = None  # 在 initialize() 中真正初始化
 
+    def _make_memory_review_agent_factory(self):
+        """构造 Memory Curator 第 2 阶段的后台 review agent 工厂。
+
+        返回的 factory 调用时创建一个独立 AIAgent 实例:
+        - 用主模型(opus/deepseek-v4-pro)
+        - 无工具集(纯文本交互,LLM 输出 YAML 由 Python 执行)
+        - 独立 messages 历史(不污染主对话)
+        """
+
+        def factory():
+            from agent import AIAgent
+            from agent.settings import load_settings, get_current_model_config
+
+            try:
+                settings = load_settings()
+                model_cfg = get_current_model_config(settings)
+                return AIAgent(
+                    base_url=model_cfg.get("base_url"),
+                    api_key=model_cfg.get("api_key", ""),
+                    auth_token=model_cfg.get("auth_token", ""),
+                    effort_level=model_cfg.get("effort_level"),
+                    model=model_cfg.get("model", ""),
+                    model_format=model_cfg.get("format", "anthropic"),
+                    enabled_toolsets=[],  # 不给工具,纯文本交互
+                    harvil_home=self.home,
+                    config=self.config,
+                )
+            except Exception as e:
+                logger.warning("构造 memory review agent 失败: %s", e)
+                raise
+
+        return factory
+
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
@@ -229,25 +262,51 @@ class RuntimeContext:
         # === Memory Curator 后台触发(照搬 skill curator 模式) ===
         try:
             from constants import get_agent_home
-            from agent.memory_curator import should_run_now_memory, apply_automatic_transitions
+            from agent.memory_curator import (
+                should_run_now_memory,
+                apply_automatic_transitions,
+                run_memory_review,
+            )
             memory_dir = get_agent_home() / ".memory"
             if memory_dir.exists() and should_run_now_memory(memory_dir):
                 import threading, datetime
+
                 def _run_memory_curator():
                     try:
                         counts = apply_automatic_transitions(memory_dir)
-                        # 第 2 阶段(后续 task 接入)
-                        # run_memory_review(memory_dir, agent_factory=...)
+                        # 第 2 阶段(主模型 review)
+                        review_summary = f"第 1 阶段: {counts}"
+                        try:
+                            factory = self._make_memory_review_agent_factory()
+                            review_report = run_memory_review(
+                                memory_dir,
+                                agent_factory=factory,
+                            )
+                            review_summary = (
+                                f"第 1 阶段: {counts}; "
+                                f"第 2 阶段: reviewed={review_report['buckets_reviewed']}, "
+                                f"actions={review_report['executed_actions']}, "
+                                f"errors={review_report['errors']}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "第 2 阶段失败(保留第 1 阶段结果): %s", e,
+                            )
+                            review_summary = (
+                                f"第 1 阶段: {counts}; 第 2 阶段失败: {e}"
+                            )
+                        # 写状态
                         from agent.memory_curator import (
-                            load_memory_curator_state, save_memory_curator_state,
+                            load_memory_curator_state,
+                            save_memory_curator_state,
                         )
                         state = load_memory_curator_state(memory_dir)
                         state["last_run_at"] = datetime.datetime.now(
                             datetime.timezone.utc
                         ).isoformat()
-                        state["last_run_summary"] = f"第 1 阶段: {counts}"
+                        state["last_run_summary"] = review_summary
                         save_memory_curator_state(memory_dir, state)
-                        logger.info("Memory Curator 后台运行完成: %s", counts)
+                        logger.info("Memory Curator 完成: %s", review_summary)
                     except Exception as e:
                         logger.warning("Memory Curator 后台运行失败: %s", e)
 

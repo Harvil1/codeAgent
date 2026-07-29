@@ -8,7 +8,8 @@ verbs：
   pin       - pin 一个技能（免疫自动转换）
   unpin     - 取消 pin
   restore   - 从 .archive/ 恢复技能
-  memory    - Memory Curator 子命令(status/run [--dry-run]/pause/resume)
+  memory    - Memory Curator 子命令
+              status / run [--dry-run] [--no-llm] / pause / resume
 """
 
 import sys
@@ -21,10 +22,11 @@ from tools.skill_usage import load_usage, set_pinned, restore_skill
 
 
 def _cmd_memory(args):
-    """memory 子命令:curator memory status|run [--dry-run]|pause|resume
+    """memory 子命令:curator memory status|run [--dry-run] [--no-llm]|pause|resume
 
-    第 1 阶段只跑 apply_automatic_transitions(纯状态转换),
-    不依赖 LLM。状态写到 <agent_home>/.memory/.curator_state.json。
+    第 1 阶段跑 apply_automatic_transitions(纯状态转换),不依赖 LLM。
+    第 2 阶段调用 run_memory_review(主模型 LLM 合并 + 矛盾检测),
+    --no-llm 跳过第 2 阶段。状态写到 <agent_home>/.memory/.curator_state.json。
     """
     import datetime
     from constants import get_agent_home
@@ -48,17 +50,48 @@ def _cmd_memory(args):
 
     if sub == "run":
         dry_run = "--dry-run" in args
+        no_llm = "--no-llm" in args  # 跳过 LLM 阶段
         print(f"{'[DRY RUN] ' if dry_run else ''}运行 Memory Curator...")
+
+        # 第 1 阶段
         if not dry_run:
             counts = apply_automatic_transitions(memory_dir)
         else:
             # dry-run 不改记忆文件,只预览(与 skill curator 一致)
-            counts = {"checked": 0, "marked_stale": 0, "archived": 0, "reactivated": 0}
-        print(f"\n转换: {counts}")
+            counts = {
+                "checked": 0, "marked_stale": 0,
+                "archived": 0, "reactivated": 0,
+            }
+        print(f"\n第 1 阶段转换: {counts}")
+
+        # 第 2 阶段(可选 LLM review)
+        review_summary = "skipped"
+        if not dry_run and not no_llm:
+            from agent.memory_curator import run_memory_review
+            from cli import RuntimeContext
+            try:
+                rt = RuntimeContext()
+                factory = rt._make_memory_review_agent_factory()
+                report = run_memory_review(memory_dir, agent_factory=factory)
+                review_summary = (
+                    f"reviewed={report['buckets_reviewed']}, "
+                    f"actions={report['executed_actions']}, "
+                    f"errors={report['errors']}"
+                )
+                print(f"第 2 阶段 LLM: {review_summary}")
+            except Exception as e:
+                review_summary = f"failed: {e}"
+                print(f"第 2 阶段失败: {e}")
+
+        # 写状态
         if not dry_run:
             state = load_memory_curator_state(memory_dir)
-            state["last_run_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            state["last_run_summary"] = f"第 1 阶段: {counts}"
+            state["last_run_at"] = datetime.datetime.now(
+                datetime.timezone.utc,
+            ).isoformat()
+            state["last_run_summary"] = (
+                f"第 1 阶段: {counts}; 第 2 阶段: {review_summary}"
+            )
             state["paused"] = state.get("paused", False)
             save_memory_curator_state(memory_dir, state)
         return
