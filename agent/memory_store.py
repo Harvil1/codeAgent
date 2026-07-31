@@ -1,8 +1,8 @@
 """多文件记忆存储：Claude Code 风格。
 
 存储结构：
-- ~/.agent/.memory/{ulid}.md：单条记忆，YAML frontmatter + body
-- ~/.agent/MEMORY.md：索引（自动生成，每次写后重建）
+- ~/.OmniMate/.memory/{ulid}.md：单条记忆，YAML frontmatter + body
+- ~/.OmniMate/MEMORY.md：索引（自动生成，每次写后重建）
 
 原则：
 - 写入立即落盘 + 重建索引

@@ -43,7 +43,7 @@ def apply_automatic_transitions(
       age ≤ valid_days + state==stale → active(reactivated)
       archived 终态,不动
 
-    memory_dir: ~/.agent/.memory/
+    memory_dir: ~/.OmniMate/.memory/
     返回计数 dict。
     """
     # 延迟导入避免循环依赖
@@ -135,7 +135,7 @@ def _set_state_in_file(path, new_state, meta, body, now):
 # ---------------------------------------------------------------------------
 
 def _state_file_path(memory_dir: Path) -> Path:
-    """状态文件路径:~/.agent/.memory/.curator_state.json"""
+    """状态文件路径:~/.OmniMate/.memory/.curator_state.json"""
     return Path(memory_dir) / ".curator_state.json"
 
 
