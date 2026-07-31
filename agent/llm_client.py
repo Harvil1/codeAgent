@@ -210,7 +210,7 @@ class AnthropicClient(LLMClient):
         - api_key:用 x-api-key header(Anthropic 官方)
         - auth_token:用 Authorization: Bearer header(DeepSeek Anthropic 端点)
 
-        effort_level(思考强度,类 Claude Code 的 CLAUDE_CODE_EFFORT_LEVEL):
+        effort_level(思考强度,类 业界 的 CLAUDE_CODE_EFFORT_LEVEL):
         - "max": 85% 的 max_tokens 给思考预算(最强推理)
         - "high": 50% 给思考
         - "medium": 25% 给思考

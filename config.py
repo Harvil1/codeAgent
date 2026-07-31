@@ -302,7 +302,7 @@ def load_config(
 ) -> Dict[str, Any]:
     """加载配置。
 
-    默认（config_file=None）读 settings.json（新 JSON 配置，类 Claude Code），
+    默认（config_file=None）读 settings.json（新 JSON 配置，类 业界），
     自动从旧 config.yaml + .env 迁移。构造兼容的 model 段供旧代码使用。
 
     传 config_file 参数时走旧 yaml 逻辑（测试用）。

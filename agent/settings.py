@@ -1,4 +1,4 @@
-"""settings.json 配置管理（类 Claude Code）。
+"""settings.json 配置管理（类 业界）。
 
 所有配置统一在 ~/.OmniMate/settings.json：
   - models：多模型配置（含 format/api_key/base_url/model）

@@ -123,7 +123,7 @@ class AIAgent:
         else:
             from constants import get_omnimate_home
             self.omnimate_home = get_omnimate_home()
-        # 任务清单（TodoWrite 机制，P1 借鉴 Claude Code）
+        # 任务清单（TodoWrite 机制，P1 借鉴 业界）
         try:
             from agent.todo import get_todo_manager
             self.todo_manager = get_todo_manager()

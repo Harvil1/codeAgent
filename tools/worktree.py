@@ -3,7 +3,7 @@
 git 仓库：用 git worktree 创建（共享历史，独立分支和文件）
 非 git：创建临时目录
 
-借鉴 Claude Code 的 worktree-task-isolation 机制，用于多子代理并行
+借鉴 业界 的 worktree-task-isolation 机制，用于多子代理并行
 时不互相干扰文件。
 
 用法：

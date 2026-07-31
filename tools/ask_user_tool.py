@@ -1,4 +1,4 @@
-"""ask_user 工具:向用户提问(单选/多选),复刻 Claude Code 的 AskUserQuestion。
+"""ask_user 工具:向用户提问(单选/多选),复刻 业界 的 AskUserQuestion。
 
 LLM 调用 → 前端弹窗(CLI 模式:终端 readline)→ 用户选 → handler 拿到答案返回。
 

@@ -6,7 +6,7 @@
   - 主模型重试耗尽后切换备用模型（如有配置）
   - finish_reason=length（max_tokens 截断）：先升 max_tokens 重试，再发续写提示
 
-借鉴 Claude Code 的韧性机制。
+借鉴 业界 的韧性机制。
 """
 
 import logging

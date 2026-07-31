@@ -24,7 +24,7 @@ _CORE_TOOLS = [
     "session_search",
     # 委托（09 实现）
     "delegate_task",
-    # 任务清单（P1 借鉴 Claude Code TodoWrite）
+    # 任务清单（P1 借鉴 业界 TodoWrite）
     "todo_write",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）
     "task_create", "task_update", "task_complete", "task_list",

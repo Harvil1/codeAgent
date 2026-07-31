@@ -303,7 +303,7 @@ def _run_child(
             config = load_config()
 
             # 子代理优先用轻量模型(default_haiku_model),省 token
-            # 类 Claude Code 模式:主对话用 opus,子代理用 haiku
+            # 类 业界 模式:主对话用 opus,子代理用 haiku
             haiku_name = config.get("default_haiku_model", "")
             # 新模式:config["haiku_model"](llm 段注入的)
             haiku_cfg = config.get("haiku_model")

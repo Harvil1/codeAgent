@@ -1,4 +1,4 @@
-"""多文件记忆存储：Claude Code 风格。
+"""多文件记忆存储：业界 风格。
 
 存储结构：
 - ~/.OmniMate/.memory/{ulid}.md：单条记忆，YAML frontmatter + body

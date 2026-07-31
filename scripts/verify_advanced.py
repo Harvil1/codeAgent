@@ -1,4 +1,4 @@
-"""验证 P0-P3 新增功能（借鉴 Claude Code 的取长补短项）。
+"""验证 P0-P3 新增功能（借鉴 业界 的取长补短项）。
 
 用法：
     uv run python scripts/verify_advanced.py
