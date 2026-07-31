@@ -76,11 +76,42 @@ def project_root() -> Path:
 
 
 def all_skills_dirs() -> list:
-    """所有技能扫描目录(内置 + 用户,顺序决定优先级)。
+    """所有技能扫描目录(内置 + 用户 + 已启用 plugin,顺序决定优先级)。
 
-    返回 [builtin, user],扫描时后者覆盖前者(用户优先)。
+    返回 [builtin, user, plugin1/skills, ...],后者覆盖前者
+    (用户/plugin 优先于内置)。plugin 通过 plugin.json 的 enabled 字段控制。
     """
-    return [builtin_skills_dir(), skills_dir()]
+    dirs = [builtin_skills_dir(), skills_dir()]
+    # 已启用 plugin 的 skills 目录
+    plugins_root = plugins_dir()
+    if plugins_root.exists():
+        import json as _json
+        for plugin_dir in sorted(plugins_root.iterdir()):
+            if not plugin_dir.is_dir():
+                continue
+            manifest = plugin_dir / "plugin.json"
+            if not manifest.exists():
+                continue
+            try:
+                data = _json.loads(manifest.read_text(encoding="utf-8"))
+                if data.get("enabled", True):  # 默认启用
+                    skills = plugin_dir / "skills"
+                    if skills.is_dir():
+                        dirs.append(skills)
+            except Exception:
+                continue
+    return dirs
+
+
+def plugins_dir() -> Path:
+    """Plugin 目录(每个子目录是一个 plugin:plugin.json + skills/)。
+
+    plugin 结构:
+        ~/.agent/plugins/<name>/plugin.json   (manifest: name/version/description/enabled)
+        ~/.agent/plugins/<name>/skills/<skill>/SKILL.md
+    启动时 all_skills_dirs() 扫已启用 plugin 的 skills/。
+    """
+    return get_agent_home() / "plugins"
 
 
 def logs_dir() -> Path:
