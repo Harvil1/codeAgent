@@ -1,5 +1,5 @@
 [project]
-name = "harvilagent"
+name = "omnimate"
 version = "0.1.0"
 description = "自学习 AI Agent（基于 Harvil Agent 复刻指南）"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-harvilagent = "main:main"
+omnimate = "main:main"
 
 [tool.setuptools]
 py-modules = ["main", "config", "constants", "model_tools", "toolsets", "env_loader", "cli", "agent_profile", "curator_cli"]

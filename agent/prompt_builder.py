@@ -90,25 +90,25 @@ TOOL_USAGE_GUIDANCE = (
     "上下文时，从占位消息里给的路径（通常是 .transcripts/latest.jsonl "
     "或 .task_outputs/tool-results/ 下的文件）用 read_file 读回。"
     "这些路径在 agent_home 下，默认安全。\n"
-    "- **写入路径白名单**：write_file 默认只允许写入当前工作目录和 ~/.agent。"
+    "- **写入路径白名单**：write_file 默认只允许写入当前工作目录和 ~/.OmniMate。"
     "写入其他位置（如用户桌面、D:\\ 等）会触发用户审批，"
     "用户同意后该路径会加入持久化白名单，下次不再询问。"
     "不要绕过审批——如果用户拒绝，换个在白名单内的位置写。\n"
     "- **项目代码保护(不可违反)**:\n"
-    "  你**不能修改 HarvilAgent 项目自身的代码**(D:/project/HermesAgent/ 下的 .py 文件)。\n"
+    "  你**不能修改 OmniMate 项目自身的代码**(D:/project/HermesAgent/ 下的 .py 文件)。\n"
     "  不在项目目录执行 `uv add` / `pip install` / `write_file`(防止入侵项目)。\n"
     "  项目代码是你的\"身体\",你是\"用户\",用户不改自己的身体。\n\n"
     "- **依赖安装策略(沙箱隔离)**:\n"
-    "  需要装 Python 包时,在 `~/.agent/workspace/` 下用**独立 venv**:\n"
-    "    `uv venv C:/Users/Administrator/.agent/workspace/.venv --python 3.14`\n"
-    "    `C:/Users/Administrator/.agent/workspace/.venv/Scripts/python -m pip install <pkg>`\n"
+    "  需要装 Python 包时,在 `~/.OmniMate/workspace/` 下用**独立 venv**:\n"
+    "    `uv venv C:/Users/Administrator/.OmniMate/workspace/.venv --python 3.14`\n"
+    "    `C:/Users/Administrator/.OmniMate/workspace/.venv/Scripts/python -m pip install <pkg>`\n"
     "  **不要**用 `uv add`(那会写项目 pyproject.toml)。\n"
     "  **不要**装到项目 `.venv/`。\n"
     "  • 反复安装失败(>2 次)→ 停下来问用户,不要陷入死循环。\n\n"
     "- **代码输出位置(沙箱隔离)**:\n"
-    "  写的代码/脚本/产物统一放 `~/.agent/workspace/`:\n"
-    "    `~/.agent/workspace/<文件名>` — 脚本\n"
-    "    `~/.agent/workspace/outputs/` — PPT/Excel/Word 等输出\n"
+    "  写的代码/脚本/产物统一放 `~/.OmniMate/workspace/`:\n"
+    "    `~/.OmniMate/workspace/<文件名>` — 脚本\n"
+    "    `~/.OmniMate/workspace/outputs/` — PPT/Excel/Word 等输出\n"
     "  然后用 terminal 移到用户指定位置(如桌面)。\n"
 )
 
@@ -131,9 +131,9 @@ TODO_GUIDANCE = (
 # 身份声明（多语言：中文/英文）
 # ---------------------------------------------------------------------------
 
-IDENTITY_ZH = "你是 HarvilAgent,自学习 AI Agent 平台。"
+IDENTITY_ZH = "你是 OmniMate,自学习 AI Agent 平台。"
 
-IDENTITY_EN = "You are HarvilAgent, a self-learning AI Agent platform."
+IDENTITY_EN = "You are OmniMate, a self-learning AI Agent platform."
 
 # 向后兼容别名（中文为默认）
 IDENTITY = IDENTITY_ZH
@@ -251,8 +251,8 @@ def build_system_prompt_layers(
 
     # 用户画像(自动归纳,每 5 次反思后更新)
     try:
-        from constants import get_agent_home
-        profile_path = get_agent_home() / "USER_PROFILE.md"
+        from constants import get_omnimate_home
+        profile_path = get_omnimate_home() / "USER_PROFILE.md"
         if profile_path.exists():
             profile_text = profile_path.read_text(encoding="utf-8").strip()
             if profile_text:

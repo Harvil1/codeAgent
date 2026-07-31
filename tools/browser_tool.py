@@ -447,7 +447,7 @@ def _handle_browser_console(args: dict, session, **kwargs) -> str:
     level = args.get("level", "log")
     try:
         page = session.get_page()
-        logs = getattr(page, "_harvil_console_logs", [])
+        logs = getattr(page, "_omnimate_console_logs", [])
         threshold = _CONSOLE_LEVELS.get(level, 0)
         filtered = [
             entry for entry in logs

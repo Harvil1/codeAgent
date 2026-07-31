@@ -1,6 +1,6 @@
 """JSONL 文件消息总线。
 
-每个 agent 一个 inbox 文件 (~/.agent/.team/inbox/{name}.jsonl)。
+每个 agent 一个 inbox 文件 (~/.OmniMate/.team/inbox/{name}.jsonl)。
 所有读写用文件锁序列化（Windows msvcrt / POSIX fcntl，spike 验证过）。
 """
 import json

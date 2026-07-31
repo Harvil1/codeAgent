@@ -92,8 +92,8 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         # 大输出 offload（Phase 1 后始终启用）
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
-        harvil_home = kwargs.get("harvil_home")
-        final_content = _finalize_output(raw_content, tool_call_id, harvil_home, config)
+        omnimate_home = kwargs.get("omnimate_home")
+        final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
         content_offloaded = final_content != raw_content
 
         return json.dumps({
@@ -162,7 +162,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
 
     # 路径权限检查（write=True）：
     #   - 受保护路径（~/.ssh / /etc 等）→ 硬拒
-    #   - 在 cwd 或 ~/.agent 白名单 → 通过
+    #   - 在 cwd 或 ~/.OmniMate 白名单 → 通过
     #   - 不在白名单 → 调 approval_callback 问用户（同意后加入持久化白名单）
     # 优先用注入的 permission_checker（cli.py 注入带 callback 的），
     # 没有则用全局默认（无 callback，白名单外路径会拒绝）。

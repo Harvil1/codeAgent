@@ -7,7 +7,7 @@ MCP 是外部服务统一接入协议。不需要为每个外部服务（Jira、
 - stdio：启动本地子进程（原有）
 - HTTP/SSE：远程 server，支持 OAuth 刷新
 
-配置文件 ~/.agent/.mcp.json：
+配置文件 ~/.OmniMate/.mcp.json：
     {
       "mcpServers": {
         "filesystem": {
@@ -79,7 +79,7 @@ class MCPTransport(ABC):
         resp = self.send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "HarvilAgent", "version": "0.1.0"},
+            "clientInfo": {"name": "OmniMate", "version": "0.1.0"},
         })
         if not resp:
             raise RuntimeError("MCP initialize 无响应")
@@ -515,8 +515,8 @@ def load_mcp_config(config_path=None) -> Dict[str, dict]:
     """
     if config_path is None:
         try:
-            from constants import get_agent_home
-            config_path = get_agent_home() / ".mcp.json"
+            from constants import get_omnimate_home
+            config_path = get_omnimate_home() / ".mcp.json"
         except Exception:
             return {}
 

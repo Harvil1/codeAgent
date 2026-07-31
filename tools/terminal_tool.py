@@ -150,8 +150,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 大输出 offload（Phase 1 后始终启用）
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
-        harvil_home = kwargs.get("harvil_home")
-        final_stdout = _finalize_output(stdout_truncated_raw, tool_call_id, harvil_home, config)
+        omnimate_home = kwargs.get("omnimate_home")
+        final_stdout = _finalize_output(stdout_truncated_raw, tool_call_id, omnimate_home, config)
         stdout_offloaded = final_stdout != stdout_truncated_raw
 
         return json.dumps({

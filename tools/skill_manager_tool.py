@@ -78,9 +78,9 @@ SKILL_MANAGE_SCHEMA = {
 def _get_skills_dir_from_context(kwargs: dict) -> Path:
     """从工具调用上下文获取技能目录。
 
-    优先从 kwargs 获取 harvil_home；否则回退到 constants 默认值。
+    优先从 kwargs 获取 omnimate_home；否则回退到 constants 默认值。
     """
-    home = kwargs.get("harvil_home")
+    home = kwargs.get("omnimate_home")
     if home:
         return Path(home) / "skills"
     # 回退到 constants 的默认 skills 目录

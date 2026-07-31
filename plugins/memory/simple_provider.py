@@ -15,8 +15,8 @@ from agent.memory_provider import MemoryProvider
 class SimpleProvider(MemoryProvider):
     """简单的文件记忆 provider。"""
 
-    def __init__(self, harvil_home: Path):
-        self._home = Path(harvil_home)
+    def __init__(self, omnimate_home: Path):
+        self._home = Path(omnimate_home)
         self._store_path = self._home / "turns.json"
         self._turns: List[Dict] = []
         self._session_id = ""

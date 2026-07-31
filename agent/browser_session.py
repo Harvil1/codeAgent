@@ -47,26 +47,26 @@ class BrowserSession:
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=self._headless)
         self._page = self._browser.new_page()
-        # 订阅 console 事件，缓存到 page._harvil_console_logs
-        self._page._harvil_console_logs = []
+        # 订阅 console 事件，缓存到 page._omnimate_console_logs
+        self._page._omnimate_console_logs = []
 
         def _on_console(msg):
             try:
-                self._page._harvil_console_logs.append({
+                self._page._omnimate_console_logs.append({
                     "type": msg.type,
                     "text": msg.text,
                 })
                 # 限长防溢出
-                if len(self._page._harvil_console_logs) > 200:
-                    self._page._harvil_console_logs = \
-                        self._page._harvil_console_logs[-200:]
+                if len(self._page._omnimate_console_logs) > 200:
+                    self._page._omnimate_console_logs = \
+                        self._page._omnimate_console_logs[-200:]
             except Exception:
                 pass
 
         self._page.on("console", _on_console)
         # 清空 console 在每次 navigate 时
         self._page.on("framenavigated", lambda *_: setattr(
-            self._page, "_harvil_console_logs", []
+            self._page, "_omnimate_console_logs", []
         ))
         self._started = True
         logger.info("BrowserSession 已启动 (headless=%s)", self._headless)

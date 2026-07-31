@@ -166,7 +166,7 @@ wheels = [
 ]
 
 [[package]]
-name = "harvilagent"
+name = "omnimate"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

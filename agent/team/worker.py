@@ -3,7 +3,7 @@
 
 用法：
     python -m agent.team.worker --name X --task "..." \
-        --team-dir ~/.agent/.team --agent-home ~/.agent \
+        --team-dir ~/.OmniMate/.team --agent-home ~/.OmniMate \
         [--autonomous] [--depth N]
 """
 import argparse
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HarvilAgent team worker")
+    parser = argparse.ArgumentParser(description="OmniMate team worker")
     parser.add_argument("--name", required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--team-dir", required=True)
@@ -44,10 +44,10 @@ def main():
     from agent import AIAgent
 
     config = load_config(args.config) if args.config else load_config()
-    memory_store = MemoryStore(harvil_home=agent_home)
+    memory_store = MemoryStore(omnimate_home=agent_home)
     bus = MessageBus(team_dir=team_dir)
     coordinator = TeamCoordinator(
-        team_dir=team_dir, harvil_home=agent_home, config=config,
+        team_dir=team_dir, omnimate_home=agent_home, config=config,
     )
 
     # 构造 AIAgent
@@ -57,7 +57,7 @@ def main():
     agent = AIAgent(
         base_url=api_base, api_key=api_key, model=model_name,
         enabled_toolsets=config.get("agent", {}).get("enabled_toolsets", ["core"]),
-        harvil_home=str(agent_home),
+        omnimate_home=str(agent_home),
         memory_store=memory_store,
         team_bus=bus, team_coordinator=coordinator, team_name=args.name,
         spawn_depth=args.depth,

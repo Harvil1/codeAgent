@@ -7,7 +7,7 @@
 策略(借鉴 DeerFlow env_policy):
 1. 检查变量名是否含密钥关键词(KEY/SECRET/TOKEN/PASS/CREDENTIAL/DSN 等)
 2. 命中则从环境变量里删除
-3. 保留良性变量(PATH/HOME/LANG/VIRTUAL_ENV/AGENT_HOME 等)
+3. 保留良性变量(PATH/HOME/LANG/VIRTUAL_ENV/OMNIMATE_HOME 等)
 4. 支持显式 allow_keys 白名单(技能声明的 required-secrets 用)
 """
 import os
@@ -32,7 +32,7 @@ _ALWAYS_KEEP = {
     "VIRTUAL_ENV", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONHOME",
     "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA",
     "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "OS",
-    "AGENT_HOME",  # 让子进程能找到 agent home
+    "OMNIMATE_HOME",  # 让子进程能找到 agent home
 }
 
 

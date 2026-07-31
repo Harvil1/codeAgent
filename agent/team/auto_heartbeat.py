@@ -1,11 +1,11 @@
 """自动心跳桥：runtime 活动每 60s 自动 bump task.last_heartbeat_at。
 
-防 spawned worker 跑长任务时 dispatcher watchdog 误回收（HarvilAgent 暂时
+防 spawned worker 跑长任务时 dispatcher watchdog 误回收（OmniMate 暂时
 没有 watchdog，但字段值得维护，未来 dispatcher 接入即可用）。
 
 逻辑：
   POST_TOOL_USE hook 触发（每次工具调用结束）→
-    读 HARVIL_KANBAN_TASK env →
+    读 OMNIMATE_KANBAN_TASK env →
       未设（主 agent / legacy）→ no-op
       已设 → rate-limit（60s/进程）→ TaskStore.heartbeat(tid)
 

@@ -54,7 +54,7 @@ class AIAgent:
         memory_store=None,
         memory_manager=None,
         session_store=None,
-        harvil_home=None,
+        omnimate_home=None,
         on_tool_call=None,
         on_response=None,
         config: dict = None,
@@ -117,12 +117,12 @@ class AIAgent:
         self.memory_store = memory_store
         self.memory_manager = memory_manager
         self.session_store = session_store
-        # C3 修复：harvil_home=None 时解析为默认 ~/.agent，避免下游 TypeError
-        if harvil_home is not None:
-            self.harvil_home = harvil_home
+        # C3 修复：omnimate_home=None 时解析为默认 ~/.OmniMate，避免下游 TypeError
+        if omnimate_home is not None:
+            self.omnimate_home = omnimate_home
         else:
-            from constants import get_agent_home
-            self.harvil_home = get_agent_home()
+            from constants import get_omnimate_home
+            self.omnimate_home = get_omnimate_home()
         # 任务清单（TodoWrite 机制，P1 借鉴 Claude Code）
         try:
             from agent.todo import get_todo_manager
@@ -217,7 +217,7 @@ class AIAgent:
 
         # === ⑪b NEW: 自动心跳桥 ===
         # spawned worker 每次工具调用后自动 bump task.last_heartbeat_at
-        # 主 agent 无 HARVIL_KANBAN_TASK env，no-op
+        # 主 agent 无 OMNIMATE_KANBAN_TASK env，no-op
         try:
             from agent.team.auto_heartbeat import register as _register_auto_heartbeat
             _register_auto_heartbeat(self.hooks_registry)
@@ -936,7 +936,7 @@ class AIAgent:
             model=self.model,
             config=ctx_cfg,
             session_state=self._compress_session_state,
-            agent_home=self.harvil_home,
+            agent_home=self.omnimate_home,
             session_id=self.session_id,
         )
         if not compressed:
@@ -1172,7 +1172,7 @@ class AIAgent:
                 session_id=self.session_id,
                 memory_store=self.memory_store,
                 session_store=self.session_store,
-                harvil_home=self.harvil_home,
+                omnimate_home=self.omnimate_home,
                 tool_call_id=tc.id,
                 config=self.config,
                 hooks_registry=self.hooks_registry,
@@ -1391,7 +1391,7 @@ class AIAgent:
                         build_and_save_profile(
                             memory_store=store,
                             aux_llm=self.aux_llm_router,
-                            agent_home=self.harvil_home,
+                            agent_home=self.omnimate_home,
                         )
                 except Exception as e:
                     logger.debug("用户画像更新失败(fail-open): %s", e)

@@ -58,9 +58,9 @@ def apply_automatic_transitions(
     if not memory_dir.exists():
         return counts
 
-    # 用 memory_dir 的 parent 当 harvil_home
-    harvil_home = memory_dir.parent
-    store = MemoryStore(harvil_home=harvil_home)
+    # 用 memory_dir 的 parent 当 omnimate_home
+    omnimate_home = memory_dir.parent
+    store = MemoryStore(omnimate_home=omnimate_home)
 
     for path in sorted(memory_dir.glob("*.md")):
         try:
@@ -254,7 +254,7 @@ def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
     只保留 2+ 条的桶(单条不可能重复/矛盾)。
     """
     from agent.memory_store import MemoryStore
-    store = MemoryStore(harvil_home=Path(memory_dir).parent)
+    store = MemoryStore(omnimate_home=Path(memory_dir).parent)
     all_entries = store.list_all()
     buckets: Dict[str, List] = {}
     for entry in all_entries:
@@ -430,7 +430,7 @@ def run_memory_review(
 
     buckets = collect_review_candidates(memory_dir)
     from agent.memory_store import MemoryStore
-    store = MemoryStore(harvil_home=memory_dir.parent)
+    store = MemoryStore(omnimate_home=memory_dir.parent)
 
     total_actions = 0
     errors = 0

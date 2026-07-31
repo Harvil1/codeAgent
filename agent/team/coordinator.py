@@ -31,10 +31,10 @@ class TeamMember:
 class TeamCoordinator:
     """团队成员管理。"""
 
-    def __init__(self, *, team_dir: Path, harvil_home: Path,
+    def __init__(self, *, team_dir: Path, omnimate_home: Path,
                  config: dict):
         self._team_dir = Path(team_dir)
-        self._harvil_home = Path(harvil_home)
+        self._omnimate_home = Path(omnimate_home)
         self._config = config
         self._registry_path = self._team_dir / "registry.json"
         self._registry_lock = self._team_dir / "registry.lock"
@@ -93,7 +93,7 @@ class TeamCoordinator:
 
         task_id: 可选。若提供：
           1. spawn 前 TaskStore.claim(task_id, owner=name)（持久化绑定）
-          2. 注入 HARVIL_KANBAN_TASK=task_id 到子进程 env（进程绑定）
+          2. 注入 OMNIMATE_KANBAN_TASK=task_id 到子进程 env（进程绑定）
           task_id 不存在时抛 ValueError，registry 标 failed，不启动子进程。
         """
         # 先注册（status=spawning）
@@ -105,7 +105,7 @@ class TeamCoordinator:
             "--name", name,
             "--task", task,
             "--team-dir", str(self._team_dir),
-            "--agent-home", str(self._harvil_home),
+            "--agent-home", str(self._omnimate_home),
             "--depth", str(depth),
         ]
 
@@ -114,7 +114,7 @@ class TeamCoordinator:
         if task_id is not None:
             from agent.task_store import get_task_store
             from agent.team.task_binding import ENV_VAR
-            store = get_task_store(harvil_home=str(self._harvil_home))
+            store = get_task_store(omnimate_home=str(self._omnimate_home))
             claimed = store.claim(task_id, owner=name)
             if claimed is None:
                 self.update_status(name, "failed")

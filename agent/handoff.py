@@ -1,8 +1,8 @@
 """会话移交 bundle：把当前会话打包成自包含 JSON，可跨机导入导出。
 
 存储：
-- ~/.agent/.handoff/<bundle_id>.json    活跃 bundle
-- ~/.agent/.handoff/.archive/<id>.json   软删除
+- ~/.OmniMate/.handoff/<bundle_id>.json    活跃 bundle
+- ~/.OmniMate/.handoff/.archive/<id>.json   软删除
 
 格式详见 docs/superpowers/specs/2026-07-17-handoff-design.md
 """

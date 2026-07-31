@@ -33,7 +33,7 @@ SKILL_VIEW_SCHEMA = {
 
 def _get_skills_dir_from_context(kwargs: dict) -> Path:
     """从工具调用上下文获取技能目录。"""
-    home = kwargs.get("harvil_home")
+    home = kwargs.get("omnimate_home")
     if home:
         return Path(home) / "skills"
     from constants import skills_dir as _skills_dir
@@ -125,7 +125,7 @@ LOAD_SKILL_SCHEMA = {
         "区别于 skill_view：load_skill 只返回指令正文（去 frontmatter），"
         "专门给 LLM 按需读取执行。"
         "\n\n支持技能束：传 name=\"bundle:<bundle_name>\" 一次性加载多个技能"
-        "（在 ~/.agent/.skill-bundles.json 配置）。"
+        "（在 ~/.OmniMate/.skill-bundles.json 配置）。"
     ),
     "parameters": {
         "type": "object",

@@ -15,13 +15,13 @@ IPC 协议：
       "name": "audit-log",
       "command": ["python", "hooks/audit_log.py"],
       "timeout": 2.0,
-      "env": {"AUDIT_LOG_PATH": "~/.agent/.audit.log"}
+      "env": {"AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"}
     }],
     "post_tool_use": [{
       "name": "audit-log",
       "command": ["python", "hooks/audit_log.py"],
       "timeout": 2.0,
-      "env": {"AUDIT_LOG_PATH": "~/.agent/.audit.log"}
+      "env": {"AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"}
     }]
   }
 }
@@ -34,7 +34,7 @@ from pathlib import Path
 
 
 def get_log_path() -> Path:
-    raw = os.environ.get("AUDIT_LOG_PATH", "~/.agent/.audit.log")
+    raw = os.environ.get("AUDIT_LOG_PATH", "~/.OmniMate/.audit.log")
     return Path(raw).expanduser()
 
 

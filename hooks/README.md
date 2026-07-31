@@ -1,4 +1,4 @@
-# HarvilAgent Hooks 预制库
+# OmniMate Hooks 预制库
 
 4 个开箱即用的声明式 hook 脚本。每个脚本独立、跨平台（纯 Python 标准库）。
 
@@ -15,7 +15,7 @@ cp ~/.agent/.hooks/settings.json ~/.agent/.hooks/settings.json.bak
 cp hooks/example-settings.json ~/.agent/.hooks/settings.json
 ```
 
-重启 HarvilAgent 即生效。
+重启 OmniMate 即生效。
 
 ## 4 个 hook
 

@@ -85,7 +85,7 @@ def handle_function_call(
     session_id: Optional[str] = None,
     memory_store=None,
     session_store=None,
-    harvil_home=None,
+    omnimate_home=None,
     tool_call_id: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     hooks_registry=None,  # === P2-T7 NEW ===
@@ -134,7 +134,7 @@ def handle_function_call(
         session_id=session_id,
         memory_store=memory_store,
         session_store=session_store,
-        harvil_home=harvil_home,
+        omnimate_home=omnimate_home,
         tool_call_id=tool_call_id,
         config=config,
         bg_manager=bg_manager,  # === P2b-T7 NEW ===

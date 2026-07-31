@@ -100,7 +100,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Hooks 系统（Phase 2a）
     "hooks": {
         "enabled": True,                            # 全局开关；False 时跳过所有 hook 调用
-        "settings_path": None,                      # None → 默认 ~/.agent/.hooks/settings.json
+        "settings_path": None,                      # None → 默认 ~/.OmniMate/.hooks/settings.json
         "script_timeout_default": 10.0,            # 声明式 hook 默认超时（秒）
         "stop_hook_max_fires": 3,                  # Stop hook 每会话最多触发次数（防失控）
         "fail_closed_default": False,              # 声明式 hook 默认 fail_closed
@@ -120,7 +120,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Cron 调度（Phase 2c）
     "cron": {
         "enabled": True,                        # False 时整个 cron 关闭
-        "jobs_path": None,                      # None → 默认 ~/.agent/.cron/jobs.json
+        "jobs_path": None,                      # None → 默认 ~/.OmniMate/.cron/jobs.json
         "poll_interval_seconds": 30.0,          # 后台线程 tick 间隔
         "max_age_days": 7,                      # === CronRecurringExpiry NEW === 超过自动 disable（防僵尸）
     },
@@ -128,7 +128,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Team 多 agent 协作（Phase 4a）
     "team": {
         "enabled": True,                        # False 时 team_* 工具隐藏
-        "team_dir": None,                       # None → 默认 ~/.agent/.team/
+        "team_dir": None,                       # None → 默认 ~/.OmniMate/.team/
         "default_role": "worker",               # 新成员默认角色
         "spawn_timeout": 600,                   # 子 agent 启动超时（秒）
         "max_members": 10,                      # 单队最大成员数
@@ -160,7 +160,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "memory_char_limit": 2200,
         "user_char_limit": 1375,
         "multifile_enabled": True,       # 多文件模式开关
-        "memory_dir": None,              # 记忆目录（None → ~/.agent/.memory/）
+        "memory_dir": None,              # 记忆目录（None → ~/.OmniMate/.memory/）
         "retrieval_enabled": True,       # 语义检索开关
         "retrieval_max_results": 5,      # 检索最大结果数
         "retrieval_model": None,         # 检索模型（None → 用主模型）
@@ -223,7 +223,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "sessions": {
         "auto_save": True,
         "auto_title": True,
-        "db_path": None,                 # 默认 ~/.agent/sessions.db
+        "db_path": None,                 # 默认 ~/.OmniMate/sessions.db
     },
 
     # 启用的工具集
@@ -269,8 +269,8 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
         "password": True,
         "category": "provider",
     },
-    "AGENT_HOME": {
-        "description": "agent home 目录（覆盖默认 ~/.agent）",
+    "OMNIMATE_HOME": {
+        "description": "agent home 目录（覆盖默认 ~/.OmniMate）",
         "prompt": "Agent Home",
         "password": False,
         "category": "system",
@@ -282,7 +282,7 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
 # 路径辅助
 # ---------------------------------------------------------------------------
 
-# 注：路径函数（get_agent_home / config_path / env_file）已统一收敛到 constants.py，
+# 注：路径函数（get_omnimate_home / config_path / env_file）已统一收敛到 constants.py，
 # 此处保留 config_path alias 仅为本模块内部调用便利（外部请直接 import constants）。
 
 def config_path() -> Path:

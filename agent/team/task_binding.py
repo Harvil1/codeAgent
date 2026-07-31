@@ -3,7 +3,7 @@
 防止 spawned worker 被 prompt 注入后跨任务操作。
 
 工作方式：
-  Coordinator.spawn(task_id=X) 时把 HARVIL_KANBAN_TASK=X 注入子进程 env。
+  Coordinator.spawn(task_id=X) 时把 OMNIMATE_KANBAN_TASK=X 注入子进程 env。
   task_tools 的写工具（task_update / task_complete）调用前用
   assert_owned(task_id) 校验：
     - env 未设（主 agent / legacy 调用）：直接 pass
@@ -17,7 +17,7 @@ import os
 from typing import Optional
 
 
-ENV_VAR = "HARVIL_KANBAN_TASK"
+ENV_VAR = "OMNIMATE_KANBAN_TASK"
 
 
 class TaskOwnershipError(PermissionError):

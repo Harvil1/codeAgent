@@ -42,7 +42,7 @@ def maybe_offload(
     参数：
         content: 工具原始输出（非字符串时原样返回）
         tool_call_id: OpenAI 兼容协议的工具调用 ID（每次唯一）
-        agent_home: agent 根目录（如 ~/.agent）
+        agent_home: agent 根目录（如 ~/.OmniMate）
         threshold: 触发落盘的字符数阈值
         preview_chars: 落盘后保留在 messages 里的预览长度
     """

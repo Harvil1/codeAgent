@@ -66,7 +66,7 @@ TEAM_SPAWN_SCHEMA = {
                 "description": (
                     "可选。绑定的 TaskStore 任务 ID。"
                     "若提供，Coordinator 会先 claim 该任务（owner=name, status=in_progress），"
-                    "并把 HARVIL_KANBAN_TASK 注入子进程 env。"
+                    "并把 OMNIMATE_KANBAN_TASK 注入子进程 env。"
                 ),
             },
         },

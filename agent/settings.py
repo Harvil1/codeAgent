@@ -1,6 +1,6 @@
 """settings.json 配置管理（类 Claude Code）。
 
-所有配置统一在 ~/.agent/settings.json：
+所有配置统一在 ~/.OmniMate/settings.json：
   - models：多模型配置（含 format/api_key/base_url/model）
   - mcpServers：MCP 外部服务器
   - agent/memory/curator/security/sessions/display：行为配置
@@ -78,26 +78,26 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 def settings_path() -> Path:
     """settings.json 路径。"""
-    from constants import get_agent_home
-    return get_agent_home() / "settings.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / "settings.json"
 
 
 def approved_commands_path() -> Path:
     """审批白名单 JSON 路径。"""
-    from constants import get_agent_home
-    return get_agent_home() / "approved_commands.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / "approved_commands.json"
 
 
 def approved_paths_path() -> Path:
     """写入路径审批白名单 JSON（用户批准过的写入路径）。"""
-    from constants import get_agent_home
-    return get_agent_home() / "approved_paths.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / "approved_paths.json"
 
 
 def mcp_config_path() -> Path:
     """旧 .mcp.json 路径（迁移用）。"""
-    from constants import get_agent_home
-    return get_agent_home() / ".mcp.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / ".mcp.json"
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +156,8 @@ def migrate_from_legacy() -> bool:
 
     旧文件改名 .bak 保留。返回是否执行了迁移。
     """
-    from constants import get_agent_home
-    home = get_agent_home()
+    from constants import get_omnimate_home
+    home = get_omnimate_home()
 
     config_yaml = home / "config.yaml"
     env_file = home / ".env"

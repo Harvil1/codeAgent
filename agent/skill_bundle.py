@@ -1,6 +1,6 @@
 """技能束（Skill Bundles）：一次加载多个技能。
 
-配置文件 ~/.agent/.skill-bundles.json：
+配置文件 ~/.OmniMate/.skill-bundles.json：
     {
       "bundles": {
         "python-dev": {
@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 def bundles_config_path() -> Path:
     """技能束配置文件路径。"""
-    from constants import get_agent_home
-    return get_agent_home() / ".skill-bundles.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / ".skill-bundles.json"
 
 
 def load_bundles_config(config_path: Optional[Path] = None) -> Dict[str, dict]:
@@ -66,7 +66,7 @@ def load_bundle(
     参数：
         bundle_name: 技能束名
         skills_dir: 技能根目录
-        config_path: 技能束配置文件（默认 ~/.agent/.skill-bundles.json）
+        config_path: 技能束配置文件（默认 ~/.OmniMate/.skill-bundles.json）
 
     返回：
         {

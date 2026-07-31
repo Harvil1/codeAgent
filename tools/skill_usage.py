@@ -1,6 +1,6 @@
 """技能使用统计 + provenance 追踪。
 
-存在 ~/.agent/skills/.usage.json，键是技能名。
+存在 ~/.OmniMate/skills/.usage.json，键是技能名。
 计数器由 skill_view / skill_manage 工具触发。
 curator 读取活动时间戳决定生命周期转换。
 

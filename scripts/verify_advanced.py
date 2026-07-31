@@ -117,7 +117,7 @@ def check_write_file_blocks_outside_cwd(tmp):
 
 
 def check_write_file_allows_agent_home(tmp, monkeypatch_env):
-    monkeypatch_env("AGENT_HOME", str(tmp))
+    monkeypatch_env("OMNIMATE_HOME", str(tmp))
     target = tmp / "ok.txt"
     result = registry.dispatch("write_file", {"path": str(target), "content": "hi"})
     data = json.loads(result)
@@ -279,7 +279,7 @@ def check_load_skill_returns_body(tmp):
         encoding="utf-8",
     )
 
-    result = registry.dispatch("load_skill", {"name": "demo"}, harvil_home=tmp)
+    result = registry.dispatch("load_skill", {"name": "demo"}, omnimate_home=tmp)
     data = json.loads(result)
     if data.get("body") and "执行这些步骤" in data["body"] and "---" not in data["body"]:
         return _ok("返回正文（去 frontmatter）")
@@ -367,14 +367,14 @@ def check_task_create_and_list(tmp):
     result = registry.dispatch(
         "task_create",
         {"subject": "验证任务", "description": "test"},
-        harvil_home=tmp,
+        omnimate_home=tmp,
     )
     data = json.loads(result)
     if not data.get("success"):
         return _fail(f"create 失败: {data}")
     task_id = data["task"]["id"]
 
-    list_result = registry.dispatch("task_list", {}, harvil_home=tmp)
+    list_result = registry.dispatch("task_list", {}, omnimate_home=tmp)
     list_data = json.loads(list_result)
     if list_data.get("count") == 1:
         return _ok(f"创建 {task_id[:16]}...")
@@ -383,7 +383,7 @@ def check_task_create_and_list(tmp):
 
 def check_task_complete_unblocks(tmp):
     from agent.task_store import TaskStore
-    store = TaskStore(harvil_home=tmp)
+    store = TaskStore(omnimate_home=tmp)
     a = store.create(subject="A")
     b = store.create(subject="B", blocked_by=[a["id"]])
 
@@ -401,9 +401,9 @@ def check_task_complete_unblocks(tmp):
 
 def check_task_persist_across_instances(tmp):
     from agent.task_store import TaskStore
-    s1 = TaskStore(harvil_home=tmp)
+    s1 = TaskStore(omnimate_home=tmp)
     t = s1.create(subject="跨实例")
-    s2 = TaskStore(harvil_home=tmp)
+    s2 = TaskStore(omnimate_home=tmp)
     fetched = s2.get(t["id"])
     if fetched and fetched["subject"] == "跨实例":
         return _ok()
@@ -412,7 +412,7 @@ def check_task_persist_across_instances(tmp):
 
 def check_task_dag_multiple_deps(tmp):
     from agent.task_store import TaskStore
-    store = TaskStore(harvil_home=tmp)
+    store = TaskStore(omnimate_home=tmp)
     a = store.create(subject="A")
     b = store.create(subject="B")
     c = store.create(subject="C", blocked_by=[a["id"], b["id"]])
@@ -432,10 +432,10 @@ def check_task_dag_multiple_deps(tmp):
 
 def main():
     print("=" * 60)
-    print("  HarvilAgent P0-P3 新功能验证")
+    print("  OmniMate P0-P3 新功能验证")
     print("=" * 60)
 
-    tmp = Path(tempfile.mkdtemp(prefix="harvil_verify_adv_"))
+    tmp = Path(tempfile.mkdtemp(prefix="omnimate_verify_adv_"))
 
     # monkeypatch 辅助
     import agent.permission

@@ -46,4 +46,4 @@ def env_file_help() -> str:
         from constants import env_file
         return str(env_file())
     except Exception:
-        return "~/.agent/.env"
+        return "~/.OmniMate/.env"

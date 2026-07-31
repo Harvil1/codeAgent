@@ -32,15 +32,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _tasks_dir(harvil_home=None) -> Path:
-    if harvil_home:
-        home = Path(harvil_home)
+def _tasks_dir(omnimate_home=None) -> Path:
+    if omnimate_home:
+        home = Path(omnimate_home)
     else:
         try:
-            from constants import get_agent_home
-            home = get_agent_home()
+            from constants import get_omnimate_home
+            home = get_omnimate_home()
         except Exception:
-            home = Path.home() / ".agent"
+            home = Path.home() / ".OmniMate"
     d = home / ".tasks"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -49,8 +49,8 @@ def _tasks_dir(harvil_home=None) -> Path:
 class TaskStore:
     """持久化任务图。每个任务一个 JSON 文件。"""
 
-    def __init__(self, harvil_home=None):
-        self._dir = _tasks_dir(harvil_home)
+    def __init__(self, omnimate_home=None):
+        self._dir = _tasks_dir(omnimate_home)
 
     def _task_file(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
@@ -347,8 +347,8 @@ class TaskStore:
 _task_store: Optional[TaskStore] = None
 
 
-def get_task_store(harvil_home=None) -> TaskStore:
+def get_task_store(omnimate_home=None) -> TaskStore:
     global _task_store
-    if _task_store is None or harvil_home is not None:
-        _task_store = TaskStore(harvil_home)
+    if _task_store is None or omnimate_home is not None:
+        _task_store = TaskStore(omnimate_home)
     return _task_store

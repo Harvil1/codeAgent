@@ -167,12 +167,12 @@ def _handle_execute_code(args: dict, **kwargs) -> str:
         if deny_result is not None:
             return deny_result
 
-    # 工作目录:默认 ~/.agent/workspace/(沙箱隔离,不污染项目)
+    # 工作目录:默认 ~/.OmniMate/workspace/(沙箱隔离,不污染项目)
     cwd = ec_config.get("cwd")
     if not cwd:
         try:
-            from constants import get_agent_home
-            workspace = get_agent_home() / "workspace"
+            from constants import get_omnimate_home
+            workspace = get_omnimate_home() / "workspace"
             workspace.mkdir(parents=True, exist_ok=True)
             cwd = str(workspace)
         except Exception:

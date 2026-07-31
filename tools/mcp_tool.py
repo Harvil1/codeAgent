@@ -1,4 +1,4 @@
-"""把 MCP server 的工具注册到 HarvilAgent 的 registry。
+"""把 MCP server 的工具注册到 OmniMate 的 registry。
 
 启动时调用 register_mcp_tools()，把所有连接的 MCP server 的工具
 以 mcp__<server>__<tool> 前缀注册到 registry，让 LLM 能调用。

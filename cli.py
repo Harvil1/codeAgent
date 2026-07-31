@@ -37,7 +37,7 @@ from agent.skill_commands import scan_skill_commands, execute_skill, scan_bundle
 from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
 from config import load_config
-from constants import get_agent_home, skills_dir, sessions_db_path, all_skills_dirs
+from constants import get_omnimate_home, skills_dir, sessions_db_path, all_skills_dirs
 from tools.skill_usage import bump_use, load_usage
 from agent.handoff import (
     HandoffStore,
@@ -62,7 +62,7 @@ class RuntimeContext:
 
     def __init__(self):
         self.config = load_config()
-        self.home = get_agent_home()
+        self.home = get_omnimate_home()
         self.memory_store = None
         self.memory_manager = None
         self.session_store = None
@@ -120,7 +120,7 @@ class RuntimeContext:
                 self.team_bus = MessageBus(team_dir=Path(team_path))
                 self.team_coordinator = TeamCoordinator(
                     team_dir=Path(team_path),
-                    harvil_home=Path(self.home),
+                    omnimate_home=Path(self.home),
                     config=self.config,
                 )
                 # 主 agent 自注册为 lead（仅当 registry 还没有 main running）
@@ -164,7 +164,7 @@ class RuntimeContext:
                     model=model_cfg.get("model", ""),
                     model_format=model_cfg.get("format", "anthropic"),
                     enabled_toolsets=[],  # 不给工具,纯文本交互
-                    harvil_home=self.home,
+                    omnimate_home=self.home,
                     config=self.config,
                 )
             except Exception as e:
@@ -212,7 +212,7 @@ class RuntimeContext:
         # 1b. MemoryStore（纯文件存储，无 SQLite 双写）
         if self.config.get("memory", {}).get("enabled", True):
             self.memory_store = MemoryStore(
-                harvil_home=self.home,
+                omnimate_home=self.home,
             )
             # batch2-T3: memory_manager 的 LLM client 在 agent 创建后注入
             # （因为需要和 aux_llm_router 共享）
@@ -261,13 +261,13 @@ class RuntimeContext:
 
         # === Memory Curator 后台触发(照搬 skill curator 模式) ===
         try:
-            from constants import get_agent_home
+            from constants import get_omnimate_home
             from agent.memory_curator import (
                 should_run_now_memory,
                 apply_automatic_transitions,
                 run_memory_review,
             )
-            memory_dir = get_agent_home() / ".memory"
+            memory_dir = get_omnimate_home() / ".memory"
             if memory_dir.exists() and should_run_now_memory(memory_dir, config=self.config):
                 import threading, datetime
 
@@ -422,7 +422,7 @@ class RuntimeContext:
             memory_store=self.memory_store,
             memory_manager=self.memory_manager,
             session_store=self.session_store,
-            harvil_home=self.home,
+            omnimate_home=self.home,
             on_tool_call=_make_tool_call_callback(self.config),
             config=self.config,
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
@@ -582,8 +582,8 @@ def _make_approval_callback():
 
     callback 接收字符串,根据内容自动判断是命令还是路径,显示不同 prompt。
     同意后:
-    - 命令 → 加入 ~/.agent/approved_commands.json
-    - 路径 → 加入 ~/.agent/approved_paths.json
+    - 命令 → 加入 ~/.OmniMate/approved_commands.json
+    - 路径 → 加入 ~/.OmniMate/approved_paths.json
     跨会话不再询问相同项。
     """
     def callback(item: str) -> bool:

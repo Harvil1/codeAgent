@@ -134,10 +134,10 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
     """用 git worktree 创建独立工作区。"""
     repo_root = get_repo_root(base) or base
     short_id = uuid.uuid4().hex[:8]
-    branch = f"harvil/{name}/{short_id}"
+    branch = f"omnimate/{name}/{short_id}"
 
-    # worktree 放在 .harvil-worktrees/ 下（gitignore 它）
-    worktree_dir = repo_root.parent / ".harvil-worktrees" / f"{name}-{short_id}"
+    # worktree 放在 .omnimate-worktrees/ 下（gitignore 它）
+    worktree_dir = repo_root.parent / ".omnimate-worktrees" / f"{name}-{short_id}"
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # 事件：create.before
@@ -215,7 +215,7 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
 
 def _create_temp_workspace(name: str) -> Tuple[Path, Callable]:
     """非 git 仓库时创建空临时目录。"""
-    prefix = f"harvil-{name}-"
+    prefix = f"omnimate-{name}-"
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
 
     # 事件：create.after（temp workspace 也记录，但 repo_root 为 None 时不写文件）

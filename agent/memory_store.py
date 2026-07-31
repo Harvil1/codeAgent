@@ -90,8 +90,8 @@ def _format_frontmatter(meta: dict) -> str:
 class MemoryStore:
     """多文件记忆存储。"""
 
-    def __init__(self, *, harvil_home: Path):
-        self._home = Path(harvil_home)
+    def __init__(self, *, omnimate_home: Path):
+        self._home = Path(omnimate_home)
         self._memory_dir = self._home / ".memory"
         self._index_path = self._home / "MEMORY.md"
         self._lock = threading.Lock()

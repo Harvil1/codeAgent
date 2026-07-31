@@ -9,10 +9,10 @@
 
 import sys
 
-from constants import get_agent_home, skills_dir, logs_dir
+from constants import get_omnimate_home, skills_dir, logs_dir
 
 # 启动前确保 agent home 目录结构存在
-get_agent_home().mkdir(parents=True, exist_ok=True)
+get_omnimate_home().mkdir(parents=True, exist_ok=True)
 skills_dir().mkdir(parents=True, exist_ok=True)
 logs_dir().mkdir(parents=True, exist_ok=True)
 

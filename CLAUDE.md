@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 项目本质
 
 本项目后期会做成win电脑的软件安装包（现在不做）。
-HarvilAgent 是基于 `D:\project\hermes-agent-main\replication-guide\` 复刻指南实现的自学习 AI Agent，并借鉴 Claude Code 的工程实践做了取长补短。**"越用越聪明" 不是一个营销词，它是由三个独立子系统 + 后台维护工人支撑的工程闭环**：
+OmniMate 是基于 `D:\project\hermes-agent-main\replication-guide\` 复刻指南实现的自学习 AI Agent，并借鉴 Claude Code 的工程实践做了取长补短。**"越用越聪明" 不是一个营销词，它是由三个独立子系统 + 后台维护工人支撑的工程闭环**：
 
 ```
                 Agent 核心（同步 while 循环 + 工具分发 + 消息历史）
@@ -108,7 +108,7 @@ write_file: safe_path(write=True)  → 受保护路径 + 工作目录外写入�
 terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提示
 ```
 
-⚠️ **不要为了"方便"绕过这些检查**。如果某工具确实需要写到 cwd 外，通过 `kwargs` 接收 `harvil_home` 并在 safe_path 的 `allowed_roots` 里显式声明。
+⚠️ **不要为了"方便"绕过这些检查**。如果某工具确实需要写到 cwd 外，通过 `kwargs` 接收 `omnimate_home` 并在 safe_path 的 `allowed_roots` 里显式声明。
 
 ## 韧性机制（重试 + 备用模型 + max_tokens 升级 + 529 早切）
 
@@ -179,7 +179,7 @@ uv sync                                 # 同步已声明依赖
 - **语言**：所有注释、文档、commit message、计划、回复使用中文。代码标识符（变量、函数、类名）用英文。
 - **依赖管理**：不要用 `pip install`，也不要手改 `pyproject.toml` 的 `dependencies`，统一 `uv add`。
 - **文件 I/O**：必须指定 `encoding="utf-8"`（Windows 默认 cp1252 会乱码）。ruff 规则 `PLW1514` 强制。
-- **命令执行安全**：不要绕过 `PermissionChecker` 和 `safe_path`。新增工具如果需要写文件，通过 `harvil_home` 参数 + `safe_path(write=True, allowed_roots=[...])` 显式声明允许的目录。
+- **命令执行安全**：不要绕过 `PermissionChecker` 和 `safe_path`。新增工具如果需要写文件，通过 `omnimate_home` 参数 + `safe_path(write=True, allowed_roots=[...])` 显式声明允许的目录。
 - **默认 provider**：DeepSeek（`base_url=https://api.deepseek.com/v1`，模型 `deepseek-chat`，env `DEEPSEEK_API_KEY`）。在 `config.yaml` / `.env` 切换其他 OpenAI 兼容 provider。
 - **agent home**：默认 `~/.agent`，可用 `AGENT_HOME` 环境变量覆盖（profile 隔离机制）。
 - **工具结果契约**：所有 handler 返回 JSON 字符串，错误用 `{"error": "...", "error_type": "..."}`。

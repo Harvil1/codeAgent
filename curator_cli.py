@@ -1,4 +1,4 @@
-"""curator CLI：harvilagent curator <verb>
+"""curator CLI：omnimate curator <verb>
 
 verbs：
   status    - 查看 curator 状态
@@ -29,14 +29,14 @@ def _cmd_memory(args):
     --no-llm 跳过第 2 阶段。状态写到 <agent_home>/.memory/.curator_state.json。
     """
     import datetime
-    from constants import get_agent_home
+    from constants import get_omnimate_home
     from agent.memory_curator import (
         apply_automatic_transitions,
         load_memory_curator_state,
         save_memory_curator_state,
     )
 
-    memory_dir = get_agent_home() / ".memory"
+    memory_dir = get_omnimate_home() / ".memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     sub = args[0] if args else "status"
 

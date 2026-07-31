@@ -250,11 +250,11 @@ def is_write_protected_path(path) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def default_allowed_roots() -> List[Path]:
-    """默认允许写入的根目录：cwd + ~/.agent。"""
+    """默认允许写入的根目录：cwd + ~/.OmniMate。"""
     roots = [Path.cwd().resolve()]
     try:
-        from constants import get_agent_home
-        roots.append(get_agent_home().resolve())
+        from constants import get_omnimate_home
+        roots.append(get_omnimate_home().resolve())
     except Exception:
         pass
     return roots
@@ -345,8 +345,8 @@ class PermissionChecker:
             approval_callback: fn(command: str) -> bool，破坏性命令 / 路径审批。
                               callback 内部可根据字符串内容判断是命令还是路径
                               （含 / 或 \\ 或 ~ 开头 → 路径）。
-            whitelist_file: 持久化白名单 JSON 路径（如 ~/.agent/approved_commands.json）。
-            paths_whitelist_file: 路径白名单 JSON（如 ~/.agent/approved_paths.json）。
+            whitelist_file: 持久化白名单 JSON 路径（如 ~/.OmniMate/approved_commands.json）。
+            paths_whitelist_file: 路径白名单 JSON（如 ~/.OmniMate/approved_paths.json）。
                                   用户批准过的写入路径，跨会话不再询问。
         """
         self.approval_callback = approval_callback

@@ -8,10 +8,10 @@
   - skills/
   - logs/
 
-通过 AGENT_HOME 环境变量实现隔离。
+通过 OMNIMATE_HOME 环境变量实现隔离。
 
 ⚠️ apply_profile 必须在任何 import 之前调用！
-   因为 get_agent_home() 在模块加载时可能被读取。
+   因为 get_omnimate_home() 在模块加载时可能被读取。
 """
 
 import os
@@ -22,7 +22,7 @@ from typing import List
 
 def get_profiles_root() -> Path:
     """所有 profile 的根目录。"""
-    return Path.home() / ".agent" / "profiles"
+    return Path.home() / ".OmniMate" / "profiles"
 
 
 def list_profiles() -> List[str]:
@@ -34,20 +34,20 @@ def list_profiles() -> List[str]:
 
 
 def apply_profile(profile_name: str) -> None:
-    """应用 profile：设置 AGENT_HOME 环境变量。
+    """应用 profile：设置 OMNIMATE_HOME 环境变量。
 
     ⚠️ 必须在任何 import 之前调用！
     """
     if profile_name == "default":
-        # 默认不设置 AGENT_HOME（用 ~/.agent）
-        os.environ.pop("AGENT_HOME", None)
+        # 默认不设置 OMNIMATE_HOME（用 ~/.OmniMate）
+        os.environ.pop("OMNIMATE_HOME", None)
         return
 
     profile_path = get_profiles_root() / profile_name
     if not profile_path.exists():
         raise ValueError(f"profile 不存在: {profile_name}")
 
-    os.environ["AGENT_HOME"] = str(profile_path)
+    os.environ["OMNIMATE_HOME"] = str(profile_path)
 
 
 def create_profile(name: str, *, clone_from: str = None) -> Path:
@@ -73,7 +73,7 @@ def create_profile(name: str, *, clone_from: str = None) -> Path:
     if clone_from:
         # 从已有 profile 复制配置
         if clone_from == "default":
-            source = Path.home() / ".agent"
+            source = Path.home() / ".OmniMate"
         else:
             source = root / clone_from
 
@@ -97,8 +97,8 @@ def delete_profile(name: str) -> None:
 
 
 def get_current_profile() -> str:
-    """当前 profile 名（根据 AGENT_HOME 推断）。"""
-    agent_home = os.environ.get("AGENT_HOME")
+    """当前 profile 名（根据 OMNIMATE_HOME 推断）。"""
+    agent_home = os.environ.get("OMNIMATE_HOME")
     if not agent_home:
         return "default"
 

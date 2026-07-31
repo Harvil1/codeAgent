@@ -330,7 +330,7 @@ TASK_LINK_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _get_store(kwargs: dict):
-    home = kwargs.get("harvil_home")
+    home = kwargs.get("omnimate_home")
     return get_task_store(home)
 
 

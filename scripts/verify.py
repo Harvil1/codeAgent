@@ -98,7 +98,7 @@ def check_memory_tool_write(tmp):
     """memory 工具能写入记忆。"""
     from tools.registry import registry
     from agent.memory_store import MemoryStore
-    store = MemoryStore(harvil_home=tmp)
+    store = MemoryStore(omnimate_home=tmp)
 
     result = registry.dispatch(
         "memory",
@@ -117,7 +117,7 @@ def check_memory_tool_write(tmp):
 def check_memory_persist(tmp):
     """记忆文件被创建（.memory/ 目录 + MEMORY.md 索引）。"""
     from agent.memory_store import MemoryStore
-    store = MemoryStore(harvil_home=tmp)
+    store = MemoryStore(omnimate_home=tmp)
     store.add("memory", "持久化测试")
     # 多文件模式：.memory/ 下有 .md 文件；索引在 MEMORY.md
     memory_dir = tmp / ".memory"
@@ -130,10 +130,10 @@ def check_memory_persist(tmp):
 def check_memory_reload(tmp):
     """重启后记忆能加载。"""
     from agent.memory_store import MemoryStore
-    s1 = MemoryStore(harvil_home=tmp)
+    s1 = MemoryStore(omnimate_home=tmp)
     s1.add("memory", "重启测试")
 
-    s2 = MemoryStore(harvil_home=tmp)
+    s2 = MemoryStore(omnimate_home=tmp)
     entries = s2.list_all()
     if any("重启测试" in (e.body or "") for e in entries):
         return _ok("记忆已跨实例加载")
@@ -173,7 +173,7 @@ def check_skills_list(tmp):
     """skills_list 工具。"""
     from tools.registry import registry
     skills = _setup_skill(tmp)
-    result = registry.dispatch("skills_list", {}, harvil_home=tmp)
+    result = registry.dispatch("skills_list", {}, omnimate_home=tmp)
     data = json.loads(result)
     names = [s["name"] for s in data["skills"]]
     if "hello" in names:
@@ -185,7 +185,7 @@ def check_skill_view(tmp):
     """skill_view 工具。"""
     from tools.registry import registry
     _setup_skill(tmp)
-    result = registry.dispatch("skill_view", {"name": "hello"}, harvil_home=tmp)
+    result = registry.dispatch("skill_view", {"name": "hello"}, omnimate_home=tmp)
     data = json.loads(result)
     if "Hello" in data.get("content", ""):
         return _ok("查看了 hello 技能")
@@ -198,7 +198,7 @@ def check_skill_manage_create(tmp):
     registry.dispatch(
         "skill_manage",
         {"action": "create", "name": "new-skill", "content": "---\nname: x\n---\nbody"},
-        harvil_home=tmp,
+        omnimate_home=tmp,
     )
     if (tmp / "skills" / "new-skill" / "SKILL.md").exists():
         return _ok("创建了 new-skill")
@@ -389,10 +389,10 @@ def check_context_compress():
 
 def main():
     print("=" * 60)
-    print("  HarvilAgent 复刻检查清单验证")
+    print("  OmniMate 复刻检查清单验证")
     print("=" * 60)
 
-    tmp = Path(tempfile.mkdtemp(prefix="harvil_verify_"))
+    tmp = Path(tempfile.mkdtemp(prefix="omnimate_verify_"))
     checks = [
         ("基础对话", [
             ("agent 初始化", check_agent_initialization),

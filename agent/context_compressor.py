@@ -52,7 +52,7 @@ def _summarize_conversation(
     prompt = (
         "请把以下对话总结成关键信息。\n\n"
         "**必须逐字保留(不能省略/改写)**:\n"
-        "- 文件路径(如 D:/project/xxx.py、~/.agent/workspace/xxx)\n"
+        "- 文件路径(如 D:/project/xxx.py、~/.OmniMate/workspace/xxx)\n"
         "- 命令(如 uv add、pip install、taskkill、netstat、browser-use)\n"
         "- 用户明确的要求/约束(如\"不要加注释\"\"用 uv 不用 pip\")\n"
         "- 关键决策(如\"选方案 A 因为 B\"\"Chrome 需要 taskkill 后重启\")\n"
