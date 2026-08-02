@@ -175,7 +175,8 @@ class AIAgent:
         self._cached_memory_index = ""
         if self.memory_store:
             try:
-                self._cached_memory_index = self.memory_store.snapshot_for_prompt()
+                # 检索用完整索引（不受注入截断影响，能按需检索全部记忆）
+                self._cached_memory_index = self.memory_store.full_index_text()
             except Exception as e:
                 logger.warning("缓存 memory 索引失败: %s", e)
 
@@ -284,7 +285,7 @@ class AIAgent:
         if not self.memory_store or not self.aux_llm_router:
             return ""
         try:
-            index_text = self.memory_store.snapshot_for_prompt()
+            index_text = self.memory_store.full_index_text()
             if not index_text or len(index_text.strip()) < 50:
                 return ""  # 记忆太少不值得检索
 

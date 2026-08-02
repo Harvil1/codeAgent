@@ -551,7 +551,11 @@ class RuntimeContext:
 
         msgs = self.session_store.get_messages(session_id)
         # conversation_history 不含 system（system 由 prompt_builder 生成）
-        self.agent.conversation_history = [m for m in msgs if m.get("role") != "system"]
+        conv = [m for m in msgs if m.get("role") != "system"]
+        # 清理冗余摘要占位（保留最近一个）——压缩频率修复前的会话可能有几十个
+        # "[之前的对话已自动总结]" 占位，全注入上下文会撑爆且混乱
+        conv = _cleanup_redundant_summaries(conv)
+        self.agent.conversation_history = conv
         self.session_id = session_id
         self.agent.session_id = session_id
         self.agent.invalidate_system_prompt()
@@ -1142,6 +1146,26 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     return False
+
+
+def _cleanup_redundant_summaries(msgs: list) -> list:
+    """清理历史里多余的摘要占位（保留最近一个）。
+
+    压缩频率修复前，长会话可能被压几十次，DB 里存了多个"[之前的对话已自动总结]"
+    占位。恢复时全部注入会让上下文被占位符撑爆且混乱——保留最近一个摘要，
+    删掉更早的（其内容已被新摘要覆盖）。
+    """
+    summary_idx = [
+        i for i, m in enumerate(msgs)
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith(
+            ("[之前的对话已自动总结]", "[紧急上下文压缩")
+        )
+    ]
+    if len(summary_idx) <= 1:
+        return msgs
+    drop = set(summary_idx[:-1])  # 保留最后一个摘要
+    return [m for i, m in enumerate(msgs) if i not in drop]
 
 
 def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:

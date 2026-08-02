@@ -25,8 +25,8 @@ RETRIEVAL_PROMPT_TEMPLATE = """你是记忆检索助手。当前用户消息：
 {index_text}
 </index>
 
-返回最多 {max_results} 条与当前 query 最相关的记忆 ID（从索引的 .memory/{{id}}.md 路径中提取 {{id}} 部分）。
-格式：JSON 数组，元素是 ID 字符串。例如：["1720870000000a1b2c3", "1720870000000d4e5f6"]
+返回最多 {max_results} 条与当前 query 最相关的记忆 ID（从索引行的 `.memory/{{topic}}.jsonl#{{uid}}` 路径中提取 `{{topic}}#{{uid}}` 部分）。
+格式：JSON 数组，元素是 ID 字符串。例如：["general#1720870000000a1b2c3", "debugging#1720870000000d4e5f6"]
 只返回 JSON 数组，不要其他文本。若无相关的，返回 []。
 """
 
@@ -45,7 +45,7 @@ def retrieve_relevant(
 
     prompt = RETRIEVAL_PROMPT_TEMPLATE.format(
         query=query[:1000],  # 防止 query 太长
-        index_text=index_text[:5000],  # 防止 index 太长
+        index_text=index_text[:25000],  # 检索 index 上限对齐 25KB（记忆多时检索更完整）
         max_results=max_results,
     )
 

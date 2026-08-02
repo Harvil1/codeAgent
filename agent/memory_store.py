@@ -1,27 +1,33 @@
-"""多文件记忆存储：业界 风格。
+"""多文件记忆存储：对齐 Claude Code 主题组织。
 
-存储结构：
-- ~/.OmniMate/.memory/{ulid}.md：单条记忆，YAML frontmatter + body
-- ~/.OmniMate/MEMORY.md：索引（自动生成，每次写后重建）
+存储结构（对齐 Claude Code topic 文件）：
+- ~/.OmniMate/.memory/{topic}.jsonl：一个主题一个文件，每行一条记忆（JSON）
+- ~/.OmniMate/MEMORY.md：索引（自动生成，按主题分组，注入 system prompt 截断 200行/25KB）
 
 原则：
-- 写入立即落盘 + 重建索引
-- snapshot_for_prompt() 返回索引文本，会话内 frozen
-- 老格式（无 frontmatter）启动时备份到 .archive/legacy-memory-{ts}/
-- 删除软删除到 .archive/memory-{ts}/{id}.md
+- 写入即维护：同主题同 name 的记忆自动更新（不无限堆积）
+- snapshot_for_prompt() 返回截断索引（省 token + 保 prompt cache），retriever 用 full_index_text()
+- 旧格式（每记忆一个 .md 文件）启动时迁移到 topic jsonl
+- 删除软删除到 .archive/memory-{ts}/
 """
+import json
 import logging
+import re
 import shutil
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
 from agent.atomic_io import atomic_write_text
+
+# 记忆索引注入 system prompt 的上限（对齐 Claude Code：200 行 / 25KB，先到者）
+_INDEX_MAX_LINES = 200
+_INDEX_MAX_BYTES = 25000
 
 logger = logging.getLogger(__name__)
 
@@ -31,42 +37,45 @@ VALID_TYPES = {"user", "feedback", "project", "reference", "other"}
 @dataclass
 class MemoryEntry:
     """单条记忆。"""
-    id: str
+    id: str  # 对外格式 {topic}#{uid}
     name: str
     description: str
     type: str
     body: str
     created_at: datetime
     updated_at: datetime
-    # CCALS-P0-1: L1 摘要层（80-100 字符，比 description 更详细）
-    # 老文件无此字段时兼容读为空串
+    # 主题（对齐 Claude Code topic 文件）：记忆按主题组织到 .memory/{topic}.jsonl
+    topic: str = "general"
+    # CCALS-P0-1: L1 摘要层
     summary: str = ""
-    # confidence + expected_valid_days(借鉴 DeerFlow DeerMem):
-    # confidence: LLM 给的信心分 0.0-1.0,低于阈值的候选不写入
-    # expected_valid_days: 预期有效期(天),到期后进 staleness 评审
-    # 老文件无这俩字段时兼容读为默认值(1.0 / 365 天)
     confidence: float = 1.0
     expected_valid_days: int = 365
-    # 来源追溯:这条记忆来自哪次对话(便于回溯原始上下文)
     source_session_id: str = ""
-    # curator 用:active/stale/archived 状态 + 上次评估时间
     state: str = "active"
     last_reviewed_at: str = ""
 
 
 def _generate_id() -> str:
-    """生成时间排序的唯一 ID（不用 ulid 库，简化为 uuid 拼时间戳）。"""
+    """生成时间排序的唯一 ID（topic 文件内的块 uid）。"""
     ts = int(datetime.now().timestamp() * 1000)
     short_uuid = uuid.uuid4().hex[:6]
-    return f"{ts}{short_uuid}"  # 如 "1720870000000a1b2c3"
+    return f"{ts}{short_uuid}"
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _split_entry_id(entry_id: str) -> Tuple[str, str]:
+    """把对外 id（{topic}#{uid}）拆成 (topic, uid)。无 # 时兜底 general。"""
+    if "#" in entry_id:
+        topic, _, uid = entry_id.rpartition("#")
+        return topic or "general", uid
+    return "general", entry_id
+
+
 def _parse_frontmatter(text: str) -> tuple[Optional[dict], str]:
-    """解析 `---\\n...yaml...\\n---\\nbody` 格式。返回 (meta, body) 或 (None, text)。"""
+    """解析 `---\\n...yaml...\\n---\\nbody` 格式（迁移用）。"""
     if not text.startswith("---"):
         return None, text
     parts = text.split("---", 2)
@@ -82,13 +91,8 @@ def _parse_frontmatter(text: str) -> tuple[Optional[dict], str]:
         return None, text
 
 
-def _format_frontmatter(meta: dict) -> str:
-    """格式化 dict 为 frontmatter 字符串。"""
-    return "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip() + "\n---\n\n"
-
-
 class MemoryStore:
-    """多文件记忆存储。"""
+    """主题组织的多文件记忆存储。"""
 
     def __init__(self, *, omnimate_home: Path):
         self._home = Path(omnimate_home)
@@ -96,65 +100,103 @@ class MemoryStore:
         self._index_path = self._home / "MEMORY.md"
         self._lock = threading.Lock()
         self._memory_dir.mkdir(parents=True, exist_ok=True)
-        self._cached_snapshot: str = ""  # P1-5: snapshot_for_prompt 缓存
-        # 启动时迁移老格式（若存在）
+        self._cached_snapshot: str = ""
+        # 启动时迁移老格式（每记忆一 .md → topic jsonl）
         self._migrate_legacy_if_any()
-        # 重建索引（保证一致）
         self._rebuild_index()
 
-    # ---- 内部：写 ----
-    def _write_entry_file(self, entry: MemoryEntry) -> None:
-        """写单条 .md 文件。"""
-        meta = {
-            "name": entry.name,
-            "description": entry.description,
-            "type": entry.type,
-            "created_at": entry.created_at.isoformat(timespec="seconds"),
-            "updated_at": entry.updated_at.isoformat(timespec="seconds"),
-        }
-        # CCALS-P0-1: summary 非空时才写入 frontmatter（避免老格式文件多出空字段）
-        if entry.summary:
-            meta["summary"] = entry.summary
-        # confidence / expected_valid_days:非默认值才写(老文件兼容)
-        if entry.confidence != 1.0:
-            meta["confidence"] = entry.confidence
-        if entry.expected_valid_days != 365:
-            meta["expected_valid_days"] = entry.expected_valid_days
-        if entry.source_session_id:
-            meta["source_session_id"] = entry.source_session_id
-        # curator 状态字段(state=active 不写,保持老文件干净)
-        if entry.state != "active":
-            meta["state"] = entry.state
-        if entry.last_reviewed_at:
-            meta["last_reviewed_at"] = entry.last_reviewed_at
-        content = _format_frontmatter(meta) + entry.body
-        path = self._memory_dir / f"{entry.id}.md"
-        atomic_write_text(path, content)
+    # ------------------------------------------------------------------
+    # topic 文件读写
+    # ------------------------------------------------------------------
+
+    def _topic_path(self, topic: str) -> Path:
+        """topic 文件路径（安全文件名）。"""
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "-", (topic or "general"))
+        return self._memory_dir / f"{safe}.jsonl"
+
+    def _read_topic_rows(self, topic: str) -> List[dict]:
+        """读 topic 文件的全部行（JSON dict）。"""
+        path = self._topic_path(topic)
+        if not path.exists():
+            return []
+        rows = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("topic 文件 %s 有损坏行，跳过", path)
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+        except Exception as e:
+            logger.warning("读 topic 文件失败 %s: %s", path, e)
+        return rows
+
+    def _write_topic_rows(self, topic: str, rows: List[dict]) -> None:
+        """原子写 topic 文件（JSONL）。"""
+        path = self._topic_path(topic)
+        text = "\n".join(
+            json.dumps(r, ensure_ascii=False) for r in rows
+        ) + ("\n" if rows else "")
+        atomic_write_text(path, text)
+
+    def _find_row(self, topic: str, uid: str) -> Optional[dict]:
+        for r in self._read_topic_rows(topic):
+            if r.get("id") == uid:
+                return r
+        return None
+
+    def _row_to_entry(self, topic: str, row: dict) -> MemoryEntry:
+        return MemoryEntry(
+            id=f"{topic}#{row.get('id', '')}",
+            name=row.get("name", ""),
+            description=row.get("description", ""),
+            type=row.get("type", "other"),
+            body=row.get("body", ""),
+            created_at=_parse_dt(row.get("created_at")),
+            updated_at=_parse_dt(row.get("updated_at")),
+            topic=topic,
+            summary=row.get("summary", "") or "",
+            confidence=float(row.get("confidence", 1.0) or 1.0),
+            expected_valid_days=int(row.get("expected_valid_days", 365) or 365),
+            source_session_id=row.get("source_session_id", "") or "",
+            state=row.get("state", "active") or "active",
+            last_reviewed_at=row.get("last_reviewed_at", "") or "",
+        )
+
+    def _scan_all_entries(self) -> List[MemoryEntry]:
+        """扫描所有 topic 文件，解析全部记忆。"""
+        entries = []
+        for path in sorted(self._memory_dir.glob("*.jsonl")):
+            topic = path.stem
+            for row in self._read_topic_rows(topic):
+                try:
+                    entries.append(self._row_to_entry(topic, row))
+                except (ValueError, TypeError) as e:
+                    logger.warning("memory 行解析失败 %s: %s", path, e)
+        return entries
+
+    # ------------------------------------------------------------------
+    # 索引
+    # ------------------------------------------------------------------
 
     def _rebuild_index(self) -> None:
-        """扫描 .memory/ 重建 MEMORY.md。
-
-        CCALS-P0-1: 索引行包含 summary（若有），让 retriever 拿到的
-        index 自动含 L1 摘要层，无需读全文就能判断更细的相关性。
-
-        correction 优先注入(借鉴 DeerFlow guaranteed_categories):
-        - feedback 类型(用户纠正过的)排最前面 + 加 ⭐ 标记
-        - 让 LLM 看到 system prompt 时优先注意到纠正类记忆
-        - 防止"用户说不要用 pip,但 agent 又用 pip"这种重复纠正
-        """
-        # type 优先级:feedback(纠正) 最优先,然后 user/project,最后 other
+        """重建 MEMORY.md：按主题分组。"""
         type_priority = {"feedback": 0, "user": 1, "project": 2, "reference": 3, "other": 4}
-        # 三步稳定排序(从最细粒度到最粗粒度,利用 Python sorted 稳定性):
-        # 1. updated_at 倒序(新的在前)
-        # 2. confidence 倒序(高在前)
-        # 3. type_priority 升序(feedback=0 最前)
-        # 最终顺序:feedback 优先 → 同 type 内 confidence 高的 → 同 confidence 内最新的
         entries = self._scan_all_entries()
-        # curator:archived 不进索引(不出现在 system prompt)
         entries = [e for e in entries if e.state != "archived"]
         entries.sort(key=lambda e: str(e.updated_at), reverse=True)
         entries.sort(key=lambda e: e.confidence, reverse=True)
         entries.sort(key=lambda e: type_priority.get(e.type, 99))
+
+        # 按 topic 分组（保持 topic 内排序）
+        by_topic: Dict[str, list] = {}
+        for e in entries:
+            by_topic.setdefault(e.topic, []).append(e)
 
         lines = [
             "# Memory Index",
@@ -162,116 +204,40 @@ class MemoryStore:
             "自动生成，请勿手动编辑。⭐ 表示 feedback 类(用户纠正过的),永远优先显示。",
             "",
         ]
-        for entry in entries:
-            marker = "⭐ " if entry.type == "feedback" else ""
-            if entry.summary:
-                lines.append(
-                    f"- {marker}[{entry.name}](.memory/{entry.id}.md) — {entry.description}"
-                    f" | 摘要：{entry.summary}"
-                )
-            else:
-                lines.append(
-                    f"- {marker}[{entry.name}](.memory/{entry.id}.md) — {entry.description}"
-                )
+        for topic in sorted(by_topic.keys()):
+            lines.append(f"## 主题：{topic}")
+            for e in by_topic[topic]:
+                marker = "⭐ " if e.type == "feedback" else ""
+                uid = e.id.split("#")[-1]
+                if e.summary:
+                    lines.append(
+                        f"- {marker}[{e.name}](.memory/{topic}.jsonl#{uid}) — "
+                        f"{e.description} | 摘要：{e.summary}"
+                    )
+                else:
+                    lines.append(
+                        f"- {marker}[{e.name}](.memory/{topic}.jsonl#{uid}) — {e.description}"
+                    )
+            lines.append("")
+
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
-        # P1-5: 缓存 snapshot(跳过前 4 行头)
+        # 缓存 snapshot(跳过前 4 行头)
         self._cached_snapshot = "\n".join(lines[4:]) if len(lines) > 4 else ""
 
-    def _scan_all_entries(self) -> List[MemoryEntry]:
-        """扫描 .memory/ 下所有 .md，解析为 MemoryEntry。失败的跳过。"""
-        entries = []
-        for path in sorted(self._memory_dir.glob("*.md")):
-            text = path.read_text(encoding="utf-8")
-            meta, body = _parse_frontmatter(text)
-            if meta is None:
-                logger.warning("跳过无 frontmatter 的 memory 文件: %s", path)
-                continue
-            try:
-                entry = MemoryEntry(
-                    id=path.stem,
-                    name=meta.get("name", ""),
-                    description=meta.get("description", ""),
-                    type=meta.get("type", "other"),
-                    body=body,
-                    created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
-                    updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
-                    summary=meta.get("summary", "") or "",  # CCALS-P0-1: 兼容老文件
-                    confidence=float(meta.get("confidence", 1.0) or 1.0),
-                    expected_valid_days=int(meta.get("expected_valid_days", 365) or 365),
-                    source_session_id=meta.get("source_session_id", "") or "",
-                    state=meta.get("state", "active") or "active",
-                    last_reviewed_at=meta.get("last_reviewed_at", "") or "",
-                )
-                entries.append(entry)
-            except (ValueError, TypeError) as e:
-                logger.warning("memory 文件字段解析失败 %s: %s", path, e)
-        return entries
-
-    def _migrate_legacy_if_any(self) -> None:
-        """检测旧格式 MEMORY.md / USER.md，备份到 .archive/legacy-memory-{ts}/。
-
-        判断标准：文件存在 + 内容不以 `---` 开头（无 frontmatter）。
-        新建的多文件 MEMORY.md 索引以 `# Memory Index` 开头，不会被误判。
-        """
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archived_any = False
-        archive_dir = self._home / ".archive" / f"legacy-memory-{ts}"
-        for filename in ("MEMORY.md", "USER.md"):
-            path = self._home / filename
-            if not path.exists():
-                continue
-            content = path.read_text(encoding="utf-8")
-            if content.startswith("---") or content.startswith("# Memory Index"):
-                continue  # 新格式，不动
-            # 老格式 → 备份
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, archive_dir / filename)
-            logger.info("旧 %s 已备份到 %s/", filename, archive_dir)
-            path.unlink()
-            archived_any = True
-        if archived_any:
-            logger.info("老格式记忆文件已迁移。新格式 MEMORY.md 索引将在下一步重建。")
-
-    # ---- 公开：读 ----
-    def _get_unlocked(self, memory_id: str) -> Optional[MemoryEntry]:
-        """读取单条记忆（调用方已持锁或无需锁）。"""
-        path = self._memory_dir / f"{memory_id}.md"
-        if not path.exists():
-            return None
-        text = path.read_text(encoding="utf-8")
-        meta, body = _parse_frontmatter(text)
-        if meta is None:
-            return None
-        return MemoryEntry(
-            id=memory_id,
-            name=meta.get("name", ""),
-            description=meta.get("description", ""),
-            type=meta.get("type", "other"),
-            body=body,
-            created_at=datetime.fromisoformat(str(meta.get("created_at", _now_iso()))),
-            updated_at=datetime.fromisoformat(str(meta.get("updated_at", _now_iso()))),
-            summary=meta.get("summary", "") or "",  # CCALS-P0-1
-            state=meta.get("state", "active") or "active",
-            last_reviewed_at=meta.get("last_reviewed_at", "") or "",
-        )
-
-    def list_all(self) -> List[MemoryEntry]:
-        with self._lock:
-            return self._scan_all_entries()
-
-    def get(self, memory_id: str) -> Optional[MemoryEntry]:
-        with self._lock:
-            return self._get_unlocked(memory_id)
-
-    def load_body(self, memory_id: str) -> Optional[str]:
-        entry = self.get(memory_id)
-        return entry.body if entry else None
-
     def snapshot_for_prompt(self) -> str:
-        """返回索引文本(frozen,会话内不变)。
+        """索引注入 system prompt（截断：200 行 / 25KB，先到者，对齐 Claude Code）。"""
+        snap = self._cached_snapshot
+        lines = snap.splitlines()
+        if len(lines) > _INDEX_MAX_LINES:
+            snap = "\n".join(lines[:_INDEX_MAX_LINES]) + (
+                "\n... [记忆索引超出行数上限，其余按需检索]"
+            )
+        if len(snap) > _INDEX_MAX_BYTES:
+            snap = snap[:_INDEX_MAX_BYTES] + "\n... [记忆索引超出字节上限，其余按需检索]"
+        return snap
 
-        P1-5: 从内存缓存返回(_rebuild_index 时更新),避免每次 read_text + splitlines。
-        """
+    def full_index_text(self) -> str:
+        """完整记忆索引（供 memory_retriever 按需检索，不被注入截断影响）。"""
         return self._cached_snapshot
 
     def build_index_text(self) -> str:
@@ -280,7 +246,38 @@ class MemoryStore:
             self._rebuild_index()
         return self.snapshot_for_prompt()
 
-    # ---- 公开：写 ----
+    # ------------------------------------------------------------------
+    # 公开：读
+    # ------------------------------------------------------------------
+
+    def get(self, memory_id: str) -> Optional[MemoryEntry]:
+        with self._lock:
+            topic, uid = _split_entry_id(memory_id)
+            row = self._find_row(topic, uid)
+            return self._row_to_entry(topic, row) if row else None
+
+    def load_body(self, memory_id: str) -> Optional[str]:
+        entry = self.get(memory_id)
+        return entry.body if entry else None
+
+    def list_all(self) -> List[MemoryEntry]:
+        with self._lock:
+            return self._scan_all_entries()
+
+    def find_by_topic_name(self, topic: str, name: str) -> Optional[MemoryEntry]:
+        """同主题同 name 查重（写入即维护）。"""
+        if not name:
+            return None
+        with self._lock:
+            for row in self._read_topic_rows(topic or "general"):
+                if row.get("name") == name and row.get("state", "active") != "archived":
+                    return self._row_to_entry(topic or "general", row)
+            return None
+
+    # ------------------------------------------------------------------
+    # 公开：写
+    # ------------------------------------------------------------------
+
     def save(
         self,
         *,
@@ -292,26 +289,50 @@ class MemoryStore:
         confidence: float = 1.0,
         expected_valid_days: int = 365,
         source_session_id: str = "",
+        topic: str = "general",
     ) -> str:
-        """创建新记忆。返回 memory_id。"""
+        """创建或更新记忆（写入即维护：同 topic 同 name → 更新）。返回 entry id。"""
         if not name or not description:
             raise ValueError("name 和 description 必需")
         if type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一，实际: {type}")
+        # 注意：save 内联查重/更新，避免嵌套持锁（threading.Lock 不可重入）
         with self._lock:
-            now = datetime.now()
-            mid = _generate_id()
-            entry = MemoryEntry(
-                id=mid, name=name, description=description,
-                type=type, body=body, summary=summary,
-                created_at=now, updated_at=now,
-                confidence=float(confidence),
-                expected_valid_days=int(expected_valid_days),
-                source_session_id=source_session_id,
+            rows = self._read_topic_rows(topic)
+            existing = next(
+                (r for r in rows
+                 if r.get("name") == name and r.get("state", "active") != "archived"),
+                None,
             )
-            self._write_entry_file(entry)
+            if existing is not None:
+                # 写入即维护：同 topic 同 name → 更新而非新建
+                existing.update({
+                    "description": description, "type": type, "body": body,
+                    "summary": summary, "confidence": confidence,
+                    "expected_valid_days": expected_valid_days,
+                    "source_session_id": source_session_id,
+                    "updated_at": _now_iso(),
+                })
+                self._write_topic_rows(topic, rows)
+                self._rebuild_index()
+                return f"{topic}#{existing['id']}"
+
+            now = datetime.now()
+            uid = _generate_id()
+            row = {
+                "id": uid, "name": name, "description": description,
+                "type": type, "body": body, "summary": summary,
+                "created_at": now.isoformat(timespec="seconds"),
+                "updated_at": now.isoformat(timespec="seconds"),
+                "confidence": confidence,
+                "expected_valid_days": expected_valid_days,
+                "source_session_id": source_session_id,
+                "state": "active",
+            }
+            rows.append(row)
+            self._write_topic_rows(topic, rows)
             self._rebuild_index()
-        return mid
+            return f"{topic}#{uid}"
 
     def update(
         self,
@@ -321,44 +342,147 @@ class MemoryStore:
         description: Optional[str] = None,
         type: Optional[str] = None,
         body: Optional[str] = None,
-        summary: Optional[str] = None,  # CCALS-P0-1
+        summary: Optional[str] = None,
+        confidence: Optional[float] = None,
+        expected_valid_days: Optional[int] = None,
+        source_session_id: Optional[str] = None,
     ) -> MemoryEntry:
         """更新字段。不存在的 id 抛 KeyError。"""
         if type is not None and type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
         with self._lock:
-            entry = self._get_unlocked(memory_id)
-            if entry is None:
+            topic, uid = _split_entry_id(memory_id)
+            rows = self._read_topic_rows(topic)
+            target = None
+            for r in rows:
+                if r.get("id") == uid:
+                    target = r
+                    break
+            if target is None:
                 raise KeyError(f"memory not found: {memory_id}")
             if name is not None:
-                entry.name = name
+                target["name"] = name
             if description is not None:
-                entry.description = description
+                target["description"] = description
             if type is not None:
-                entry.type = type
+                target["type"] = type
             if body is not None:
-                entry.body = body
+                target["body"] = body
             if summary is not None:
-                entry.summary = summary
-            entry.updated_at = datetime.now()
-            self._write_entry_file(entry)
+                target["summary"] = summary
+            if confidence is not None:
+                target["confidence"] = confidence
+            if expected_valid_days is not None:
+                target["expected_valid_days"] = expected_valid_days
+            if source_session_id is not None:
+                target["source_session_id"] = source_session_id
+            target["updated_at"] = _now_iso()
+            self._write_topic_rows(topic, rows)
             self._rebuild_index()
-        return entry
+            return self._row_to_entry(topic, target)
 
     def delete(self, memory_id: str) -> bool:
-        """软删除：移到 .archive/memory-{ts}/{id}.md。"""
+        """软删除：把条目移到 .archive/，并从 topic 文件移除。"""
         with self._lock:
-            path = self._memory_dir / f"{memory_id}.md"
-            if not path.exists():
+            topic, uid = _split_entry_id(memory_id)
+            rows = self._read_topic_rows(topic)
+            target = None
+            for r in rows:
+                if r.get("id") == uid:
+                    target = r
+                    break
+            if target is None:
                 return False
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_dir = self._home / ".archive" / f"memory-{ts}"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(archive_dir / path.name))
+            # 软删除：条目副本存档
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_dir = self._home / ".archive" / f"memory-{ts}"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                (archive_dir / f"{topic}-{uid}.json").write_text(
+                    json.dumps(target, ensure_ascii=False), encoding="utf-8",
+                )
+            except Exception as e:
+                logger.warning("记忆软删除存档失败: %s", e)
+            # 从 topic 文件移除
+            rows = [r for r in rows if r.get("id") != uid]
+            self._write_topic_rows(topic, rows)
             self._rebuild_index()
-        return True
+            return True
 
-    # ---- 兼容旧接口（被 prompt_builder 等调用，留 stub 避免破坏） ----
+    def clear_all(self) -> int:
+        """软删除全部记忆（topic 文件整体移到 .archive，可恢复）。返回删除数。"""
+        with self._lock:
+            topics = sorted(p.stem for p in self._memory_dir.glob("*.jsonl"))
+            total = 0
+            for topic in topics:
+                rows = self._read_topic_rows(topic)
+                total += len(rows)
+                try:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    archive_dir = self._home / ".archive" / f"memory-{ts}"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    src = self._topic_path(topic)
+                    dst = archive_dir / f"{topic}.jsonl"
+                    # 避免覆盖已存在的归档
+                    n = 1
+                    while dst.exists():
+                        dst = archive_dir / f"{topic}-{n}.jsonl"
+                        n += 1
+                    shutil.move(str(src), str(dst))
+                except Exception as e:
+                    logger.warning("清空 topic %s 失败: %s", topic, e)
+                    continue
+            self._rebuild_index()
+            return total
+
+    # ------------------------------------------------------------------
+    # 旧格式迁移（每记忆一 .md → topic jsonl）
+    # ------------------------------------------------------------------
+
+    def _migrate_legacy_if_any(self) -> None:
+        """把旧 `.memory/{id}.md`（frontmatter 单块）迁移到 topic jsonl。"""
+        legacy_mds = [p for p in self._memory_dir.glob("*.md") if p.name != "latest.md"]
+        if not legacy_mds:
+            return
+        logger.info("发现 %d 个旧格式记忆文件，迁移到主题组织", len(legacy_mds))
+        for path in legacy_mds:
+            try:
+                text = path.read_text(encoding="utf-8")
+                meta, body = _parse_frontmatter(text)
+                if meta is None:
+                    continue
+                topic = meta.get("topic") or _infer_topic(meta.get("name", ""), meta.get("type", "other"))
+                row = {
+                    "id": path.stem, "name": meta.get("name", ""),
+                    "description": meta.get("description", ""),
+                    "type": meta.get("type", "other"),
+                    "body": body,
+                    "created_at": meta.get("created_at", _now_iso()),
+                    "updated_at": meta.get("updated_at", _now_iso()),
+                    "summary": meta.get("summary", "") or "",
+                    "confidence": float(meta.get("confidence", 1.0) or 1.0),
+                    "expected_valid_days": int(meta.get("expected_valid_days", 365) or 365),
+                    "source_session_id": meta.get("source_session_id", "") or "",
+                    "state": meta.get("state", "active") or "active",
+                }
+                rows = self._read_topic_rows(topic)
+                rows.append(row)
+                self._write_topic_rows(topic, rows)
+                # 归档旧文件
+                try:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    archive_dir = self._home / ".archive" / f"legacy-memory-{ts}"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), archive_dir / path.name)
+                except Exception as e:
+                    logger.warning("归档旧记忆 %s 失败: %s", path, e)
+            except Exception as e:
+                logger.warning("迁移旧记忆 %s 失败: %s", path, e)
+
+    # ------------------------------------------------------------------
+    # 兼容旧接口
+    # ------------------------------------------------------------------
+
     def format_for_system_prompt(self, target: str) -> str:
         """旧接口兼容：返回索引（忽略 target 参数）。"""
         return self.snapshot_for_prompt()
@@ -374,9 +498,26 @@ class MemoryStore:
             return False
 
     def modify(self, action: str, target: str, content: str, old_content: str = "") -> bool:
-        """旧接口兼容：粗略映射到 save（行为不完全等价）。"""
+        """旧接口兼容：粗略映射到 save。"""
         if action == "add":
             return self.add(target, content)
-        # replace / remove 在旧接口下行为模糊，旧数据已弃用，直接返 False 提示用户用新工具
         logger.warning("旧 modify(action=%s) 不再支持，请用 memory 工具新 action", action)
         return False
+
+
+def _parse_dt(value) -> datetime:
+    """解析 ISO 时间，失败返回 now。"""
+    try:
+        return datetime.fromisoformat(str(value or _now_iso()))
+    except (ValueError, TypeError):
+        return datetime.now()
+
+
+def _infer_topic(name: str, type: str) -> str:
+    """从 name/type 推断主题（旧格式迁移用，兜底 general）。"""
+    if type == "feedback":
+        return "feedback"
+    if type == "project":
+        return "project"
+    first = (name or "").strip().split()[0] if (name or "").strip() else ""
+    return first[:12] if first else "general"
