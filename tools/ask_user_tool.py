@@ -97,7 +97,12 @@ ASK_USER_SCHEMA = {
 
 
 def _handle_ask_user(args: dict, **kwargs) -> str:
-    """提问并阻塞等用户答(超时 fail-open)。"""
+    """提问并等用户答。
+
+    优先用注入的桥接层（agent.ask_user_bridge：CLI readline / GUI HTTP）。
+    无桥接层时立即报错 fail-fast——绝不阻塞 5 分钟
+    （历史 bug：CLI 没接桥接层，ask_user 一调就干等 300s，界面"没反应"）。
+    """
     question = (args.get("question") or "").strip()
     options = args.get("options") or []
     multi = bool(args.get("multi", False))
@@ -107,41 +112,43 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
     if not options or len(options) < 2:
         return json.dumps({"error": "options 至少要 2 个"}, ensure_ascii=False)
 
-    qid = uuid.uuid4().hex[:12]
-    qdata = {
-        "id": qid,
-        "question": question,
-        "options": options,
-        "multi": multi,
-    }
-    ev = threading.Event()
-    with _lock:
-        _pending[qid] = qdata
-        _events[qid] = ev
-
-    # 阻塞等桥接层(GUI HTTP / CLI readline)提交答案
-    answered = ev.wait(timeout=ASK_TIMEOUT_SECONDS)
-
-    with _lock:
-        _pending.pop(qid, None)
-        _events.pop(qid, None)
-        if answered:
-            answers = _answers.pop(qid, [])
-        else:
-            _answers.pop(qid, None)
-            answers = []
-
-    if not answered:
-        return json.dumps({
-            "error": "用户未响应(超时 5 分钟,已按未答处理)",
-            "error_type": "user_no_response",
+    agent_ref = kwargs.get("agent_ref")
+    bridge = (
+        getattr(agent_ref, "ask_user_bridge", None)
+        if agent_ref is not None else None
+    )
+    if callable(bridge):
+        qdata = {
+            "id": uuid.uuid4().hex[:12],
             "question": question,
+            "options": options,
+            "multi": multi,
+        }
+        try:
+            answers = bridge(qdata) or []
+        except (EOFError, KeyboardInterrupt):
+            return json.dumps({
+                "error": "用户中断提问",
+                "error_type": "user_interrupt",
+                "question": question,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({
+                "error": f"ask_user 桥接层异常: {e}",
+                "error_type": "bridge_error",
+                "question": question,
+            }, ensure_ascii=False)
+        return json.dumps({
+            "question": question,
+            "answers": answers,
+            "multi": multi,
         }, ensure_ascii=False)
 
+    # 无桥接层：fail-fast，不阻塞
     return json.dumps({
+        "error": "ask_user 无可用桥接层（CLI/GUI 未注入 ask_user_bridge），无法向用户提问",
+        "error_type": "no_bridge",
         "question": question,
-        "answers": answers,
-        "multi": multi,
     }, ensure_ascii=False)
 
 

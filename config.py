@@ -49,7 +49,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 未配置（None）时 fallback 到主 model 配置
     "aux_model": None,
 
-    # B1 NEW: vision/image 工具配置（image_analyze / image_ocr / browser_vision）
+    # B1 NEW: vision/image 工具配置（image_analyze / image_ocr）
     "vision": {
         "enabled": True,
         "provider": "",          # 空字符串 = 用主 provider
@@ -197,7 +197,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
     # 委托
     "delegation": {
-        "max_concurrent_children": 3,
+        "max_concurrent_children": 5,
         "max_spawn_depth": 2,
         "child_timeout_seconds": 600,
         "orchestrator_enabled": True,
@@ -226,8 +226,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "db_path": None,                 # 默认 ~/.OmniMate/sessions.db
     },
 
-    # 启用的工具集
-    "enabled_toolsets": ["core"],
+    # 启用的工具集：core 全部内置工具 + mcp 外部 server（动态，server 连上才可见）
+    "enabled_toolsets": ["core", "mcp"],
 
     # Plan Mode 总开关（Task 7）
     "plan_mode": {

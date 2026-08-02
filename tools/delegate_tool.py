@@ -81,7 +81,9 @@ DELEGATE_TASK_SCHEMA = {
         "两种模式：\n"
         "- 同步（默认）：等待子代理完成后继续\n"
         "- 异步（background=True）：立即继续，结果稍后送达\n\n"
-        "批量模式：传 tasks=[...] 并行执行多个子代理。\n\n"
+        "**并行规则（重要）**：需要同时派多个子代理（如并行探索多个模块）时，"
+        "必须用 tasks=[...] 一次批量调用（内部真并行）。"
+        "禁止发多个独立的 delegate_task 调用——独立调用是串行执行的，会逐个等待，浪费大量时间。\n\n"
         "角色：\n"
         "- leaf（默认）：执行者，不能再委托\n"
         "- orchestrator：可继续派生（受 max_spawn_depth 限制）"
@@ -100,7 +102,7 @@ DELEGATE_TASK_SCHEMA = {
             "tasks": {
                 "type": "array",
                 "items": {"type": "object"},
-                "description": "批量任务列表（并行执行）",
+                "description": "批量任务列表（并行执行）。要并行多个任务就用这个字段，不要多次调用 delegate_task",
             },
             "background": {
                 "type": "boolean",
@@ -173,21 +175,42 @@ def _delegate_sync(
     role: str,
     **kwargs,
 ) -> str:
-    """同步委托：等待子代理完成。"""
-    try:
-        result = _run_child(goal, context, role, **kwargs)
+    """同步委托：等待子代理完成。带超时（防止无限挂起）。
+
+    用后台线程跑子代理，主线程 join(timeout)。超时后返回错误，
+    子代理留在 daemon 线程继续（结果丢弃，与 async 模式一致）。
+    """
+    child_timeout = float(kwargs.get("child_timeout", 600))
+    box: dict = {}
+
+    def _run():
+        try:
+            box["result"] = _run_child(goal, context, role, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            box["error"] = e
+
+    thread = threading.Thread(target=_run, daemon=True, name="delegate-sync")
+    thread.start()
+    thread.join(timeout=child_timeout)
+
+    if thread.is_alive():
         return json.dumps({
-            "success": True,
-            "result": result,
+            "success": False,
+            "error": f"子代理执行超时（{child_timeout}s），已放弃等待",
             "mode": "sync",
         }, ensure_ascii=False)
-    except Exception as e:
+    if "error" in box:
         logger.exception("子代理执行失败")
         return json.dumps({
             "success": False,
-            "error": str(e),
+            "error": str(box["error"]),
             "mode": "sync",
         }, ensure_ascii=False)
+    return json.dumps({
+        "success": True,
+        "result": box["result"],
+        "mode": "sync",
+    }, ensure_ascii=False)
 
 
 def _delegate_async(
@@ -232,11 +255,19 @@ def _delegate_async(
 
 def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     """批量并行委托。"""
-    max_concurrent = kwargs.get("max_concurrent_children", 3)
+    # 从 config 读并发上限（config.delegation.max_concurrent_children），
+    # 不依赖 kwargs（之前永远 fallback 3，配置不生效）
+    _cfg = (kwargs.get("config") or {}) if isinstance(kwargs.get("config"), dict) else {}
+    max_concurrent = int((_cfg.get("delegation") or {}).get("max_concurrent_children", 5))
+    child_timeout = float(kwargs.get("child_timeout", 600))
 
     results = []
-    with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-        futures = {}
+    # 不用 `with ThreadPoolExecutor`：它退出时 shutdown(wait=True)，
+    # Ctrl+C 的 KeyboardInterrupt 会卡在等子线程跑完 → 界面"没反应"。
+    # 手动管理，KeyboardInterrupt 时传播中断 + 不阻塞等待。
+    executor = ThreadPoolExecutor(max_workers=max_concurrent)
+    futures = {}
+    try:
         for i, task in enumerate(tasks):
             goal = task.get("goal", "")
             context = task.get("context", "")
@@ -248,7 +279,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
         for future in futures:
             idx = futures[future]
             try:
-                result = future.result(timeout=kwargs.get("child_timeout", 600))
+                result = future.result(timeout=child_timeout)
                 results.append({
                     "task_index": idx,
                     "success": True,
@@ -260,6 +291,21 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                     "success": False,
                     "error": str(e),
                 })
+    except KeyboardInterrupt:
+        # Ctrl+C：先传播中断给子代理（让它们在下轮迭代退出），
+        # 取消未启动任务，shutdown(wait=False) 不阻塞，再向上抛。
+        parent = kwargs.get("agent_ref")
+        if parent is not None and hasattr(parent, "interrupt"):
+            try:
+                parent.interrupt()
+            except Exception:
+                pass
+        for f in futures:
+            f.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+
+    executor.shutdown(wait=True)
 
     return json.dumps({
         "success": True,
@@ -513,7 +559,7 @@ def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
     active = len(getattr(agent, "_children", []) or [])
     cfg = getattr(agent, "config", None) or {}
     max_children = (
-        cfg.get("delegate", {}).get("max_concurrent_children", 5)
+        (cfg.get("delegation") or {}).get("max_concurrent_children", 5)
         if isinstance(cfg, dict) else 5
     )
     remaining = max(0, max_children - active)

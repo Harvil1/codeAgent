@@ -64,24 +64,28 @@ def snip_compact(
     if len(conv) <= keep_first + keep_last:
         return messages, False
 
-    # head 边界成对保护：head 末尾是 assistant(tool_calls) 时，
-    # 把后续的 tool result 都带上（防止孤儿 tool_call）
+    # head 边界成对保护：head 末尾是 assistant(tool_calls) 或 tool_result 时，
+    # 把后续的连续 tool_result 都带上（防止把同一 assistant(tc) 的多 result 拆散）。
+    # - 末尾是 assistant(tc)：纳入它所有 result
+    # - 末尾是 tool_result：说明 head 已装下某 assistant(tc) 的部分 result，
+    #   纳入剩余的连续 result（同序列）
     head_end = keep_first
-    if head_end > 0 and head_end < len(conv) and _has_tool_calls(conv[head_end - 1]):
+    needs_extend = (
+        head_end > 0
+        and head_end < len(conv)
+        and (_has_tool_calls(conv[head_end - 1]) or _is_tool_result(conv[head_end - 1]))
+    )
+    if needs_extend:
         while head_end < len(conv) and _is_tool_result(conv[head_end]):
             head_end += 1
 
-    # tail 边界成对保护：tail 开头是 tool result 但它的 tool_call 不在 tail 里时，
-    # tail_start 往后挪跳过这些孤儿 tool result（L1 无损，可读 transcript 找回）
+    # tail 边界成对保护：tail 开头是 tool_result 时，它的 assistant(tc) 必然在
+    # tail 之外（tail 第一条是 tool_result 意味着 prev 是 assistant 或更早的 result，
+    # 都在 tail 外）。无条件 tail_start += 1 跳过这些孤儿 result（L1 无损，可读 transcript 找回）。
+    # 注意：原逻辑误把"prev 是 assistant(tc)"当成"配对完整"——但 prev 在 tail 外，
+    # assistant(tc) 也不在 tail 内，仍是孤儿。
     tail_start = len(conv) - keep_last
-    while tail_start < len(conv) and _is_tool_result(conv[tail_start]) and tail_start > 0:
-        # 检查 tool_call 是否在 tail 内：往前找到的非 tool-result 消息应也是 tool_call 配对
-        # 简化：如果 tail_start 是 tool result，且它前面紧挨着的位置 < tail_start，
-        # 说明它的 tool_call 在 tail 之外 → 跳过这条孤儿 result
-        prev_idx = tail_start - 1
-        if prev_idx >= 0 and _has_tool_calls(conv[prev_idx]):
-            # 紧邻前一条是 tool_call → 这对完整在 tail 里，停止跳过
-            break
+    while tail_start < len(conv) and _is_tool_result(conv[tail_start]) and tail_start > head_end:
         tail_start += 1
 
     head = conv[:head_end]
@@ -349,6 +353,7 @@ def compress_if_needed(
     session_state: CompressionSessionState,
     agent_home,
     session_id: str,
+    hooks_registry=None,
 ) -> Tuple[list, bool]:
     """分层压缩编排器。返回 (新消息, 是否发生变化)。
 
@@ -356,7 +361,23 @@ def compress_if_needed(
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
 
     L4 预算用 session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
+
+    hooks_registry：可选。非 None 时在压缩前后触发 PRE_COMPACT/POST_COMPACT
+    事件；PRE_COMPACT 任一 hook 返回 abort 则跳过本次压缩。
     """
+    # PRE_COMPACT hook（可 abort）
+    if hooks_registry is not None:
+        try:
+            abort = hooks_registry.run_pre_compact({
+                "session_id": session_id,
+                "layer": "orchestrator",
+            })
+            if abort.get("abort"):
+                logger.info("PRE_COMPACT hook 请求 abort，跳过压缩")
+                return messages, False
+        except Exception as e:
+            logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
+
     # L1 snip
     messages, c1 = snip_compact(
         messages,
@@ -501,4 +522,15 @@ def compress_if_needed(
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)
         messages = _reassemble(system, _fix_tool_call_pairs(conv))
+
+    # POST_COMPACT hook（通知压缩完成）
+    if hooks_registry is not None:
+        try:
+            hooks_registry.run_post_compact({
+                "session_id": session_id,
+                "layer": "orchestrator",
+            })
+        except Exception as e:
+            logger.warning("POST_COMPACT hook 触发异常（忽略）: %s", e)
+
     return messages, changed

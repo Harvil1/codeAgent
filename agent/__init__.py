@@ -69,6 +69,7 @@ class AIAgent:
         aux_llm_router=None,     # === batch2-T3 NEW ===
         plan_approval_callback=None,  # === PlanMode NEW ===
         stream_callback=None,    # === 04 NEW: 流式输出回调 ===
+        ask_user_bridge=None,    # ask_user CLI 桥接（渲染问题+读选择）
     ):
         """
         参数：
@@ -198,8 +199,10 @@ class AIAgent:
         # None 表示自动批准（测试/库用法）
         self.plan_mode: bool = False
         self.plan_approval_callback = plan_approval_callback
+        # ask_user 桥接（CLI 渲染问题+读选择 / GUI HTTP）；None = 无桥接（fail-fast）
+        self.ask_user_bridge = ask_user_bridge
 
-        # === B1 NEW: vision client（image_analyze / image_ocr / browser_vision 共用） ===
+        # === B1 NEW: vision client（image_analyze / image_ocr 共用） ===
         # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。
         self._vision_client = None
 
@@ -223,20 +226,6 @@ class AIAgent:
             _register_auto_heartbeat(self.hooks_registry)
         except Exception as e:
             logger.warning("注册 auto_heartbeat hook 失败（不影响主流程）: %s", e)
-
-        # === ⑪c NEW: 浏览器会话 ===
-        # 仅在 browser toolset 启用时创建（lazy init，不立即启 Chromium）
-        self.browser_session = None
-        if "browser" in (enabled_toolsets or []):
-            try:
-                from agent.browser_session import BrowserSession
-                self.browser_session = BrowserSession(headless=True)
-                logger.info("BrowserSession 已创建（lazy，未启动）")
-            except Exception as e:
-                logger.warning(
-                    "BrowserSession 初始化失败（browser 工具将不可用）: %s", e,
-                )
-                self.browser_session = None
 
         # === 04 NEW: 流式输出回调 ===
         # None 时走非流式（向后兼容老测试）；非 None 时每收到一个 LLM chunk 就调用。
@@ -321,15 +310,6 @@ class AIAgent:
 
         幂等：多次调用安全。每个子清理都包 try/except，互不影响。
         """
-        # 关闭浏览器
-        if self.browser_session:
-            try:
-                self.browser_session.cleanup()
-            except Exception as e:
-                logger.warning("关闭 browser_session 失败: %s", e)
-            finally:
-                self.browser_session = None
-
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -665,6 +645,10 @@ class AIAgent:
         # 同一 agent 实例在 autonomous lifecycle 多个 WORK 周期复用时，
         # 上一次 idle 请求不应泄漏到下一次调用。
         self._idle_requested = False
+        # 每条用户消息重置迭代预算：预算只限制"这条消息"的循环轮数，
+        # 避免长会话（多轮用户消息累计消耗）中途耗尽后静默断开
+        # （曾导致：tool 调用后 consume() 返回 False → break → 无提示回"你:"）。
+        self.iteration_budget.reset()
 
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
@@ -728,7 +712,8 @@ class AIAgent:
                 system_prompt = self._get_system_prompt()
                 continue  # reactive_compact 已修改 history，重试本轮
             if response is None:
-                break  # LLM 错误已作为 assistant 消息塞回 history
+                turn_exit_reason = "llm_failed"  # LLM 错误已作为 assistant 消息塞回 history
+                break
 
             api_call_count += 1
             # batch1-T2: 记录 LLM 用量（prompt cache 记账）
@@ -938,6 +923,7 @@ class AIAgent:
             session_state=self._compress_session_state,
             agent_home=self.omnimate_home,
             session_id=self.session_id,
+            hooks_registry=self.hooks_registry,
         )
         if not compressed:
             return messages, system_prompt, False
@@ -1313,6 +1299,11 @@ class AIAgent:
         """循环结束（预算耗尽或中断）的兜底响应。"""
         if turn_exit_reason == "interrupted_by_user":
             fallback = "[已被用户中断]"
+        elif turn_exit_reason == "llm_failed":
+            fallback = (
+                "[LLM 调用失败，本轮已中断] 重试或检查模型连接。"
+                "详见日志（LLM API 调用失败）。"
+            )
         else:
             fallback = "[已达最大迭代次数，强制停止]"
 

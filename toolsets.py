@@ -7,12 +7,14 @@
 from typing import Dict, List
 
 
-# 核心工具：几乎所有场景都需要
+# 核心工具：默认全部可见（项目做好的工具都暴露给 LLM；浏览器走 MCP，不进 core）
 _CORE_TOOLS = [
+    # 文件与命令
     "terminal",        # 执行 shell 命令
     "read_file",       # 读文件
     "write_file",      # 写文件
     "search_files",    # 搜索文件内容（grep）
+    "str_replace",     # 文件定点替换编辑
     # 技能相关（05 实现）
     "skills_list",
     "skill_view",
@@ -24,16 +26,26 @@ _CORE_TOOLS = [
     "session_search",
     # 委托（09 实现）
     "delegate_task",
+    # 澄清（AskUserQuestion 复刻）
+    "ask_user",
     # 任务清单（P1 借鉴 业界 TodoWrite）
     "todo_write",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）
     "task_create", "task_update", "task_complete", "task_list",
+    # 任务系统扩展（Kanban）
+    "task_block", "task_unblock", "task_link", "task_comment",
+    "task_heartbeat", "task_artifacts",
     # Python 代码沙箱（让 LLM 直接写代码执行）
     "execute_code",
     # Vision/Image 分析（B1：本地图片分析 + OCR）
     "image_analyze", "image_ocr",
     # 主动上下文压缩(借鉴 learn-claude-code s08,LLM 自己管理 context)
     "compact",
+    # 后台任务（Phase 2b，check_fn 门控：无 bg 组件时自动隐藏）
+    "bg_start", "bg_status", "bg_result", "bg_list", "bg_stop",
+    # Team 多 agent 协作（Phase 4a）
+    "team_send", "team_inbox", "team_members",
+    "team_spawn", "team_shutdown", "idle",
 ]
 
 TOOLSETS: Dict[str, dict] = {
@@ -71,17 +83,6 @@ TOOLSETS: Dict[str, dict] = {
         "description": "Team 多 agent 协作（Phase 4a）",
         "tools": ["team_send", "team_inbox", "team_members",
                   "team_spawn", "team_shutdown", "idle"],
-        "includes": [],
-    },
-    "browser": {
-        "description": "浏览器自动化（13 个工具，基于 Playwright）",
-        "tools": [
-            "browser_navigate", "browser_snapshot", "browser_click",
-            "browser_type", "browser_scroll", "browser_press_key",
-            "browser_back", "browser_forward", "browser_close",
-            "browser_get_images", "browser_vision", "browser_console",
-            "browser_cdp",
-        ],
         "includes": [],
     },
     "plan": {

@@ -99,11 +99,17 @@ def _rule_based_summary(messages: list) -> str:
 def _fix_tool_call_pairs(messages: list) -> list:
     """修复压缩边界可能破坏的 tool_call 配对。
 
-    处理两类协议违反（OpenAI 要求 tool result 必须紧跟 tool_calls 配对）：
-    - 正向孤儿：assistant(tool_calls) 后没 tool result → 补一条假 tool result
+    处理两类协议违反：
+    - 正向孤儿：assistant(tool_calls) 后没立刻是所有 id 的 tool_result
+      → 在 result 序列末尾补假 tool_result（紧跟 assistant(tc) 后面，
+        满足 Anthropic "tool_use ids found without tool_result blocks immediately after"）
     - 反向孤儿：tool 消息的 tool_call_id 不在前面任何 assistant(tool_calls) 里 → 删掉
       （压缩边界或上游 bug 可能产生这种孤儿，会让 API 报 400:
        "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"）
+
+    ⚠️ Anthropic 严格要求 tool_use 后 immediately 跟所有 id 的 tool_result。
+    补漏位置必须在 assistant(tc) 后的连续 result 序列末尾，**不能** append 到
+    messages 末尾——否则中间隔了其他消息，仍违反 immediately after → 仍 400。
     """
     # 第一遍：收集所有合法 tool_call_ids（来自 assistant(tool_calls)）
     seen_tool_call_ids = set()
@@ -112,38 +118,18 @@ def _fix_tool_call_pairs(messages: list) -> list:
             for tc in msg["tool_calls"]:
                 seen_tool_call_ids.add(tc.get("id"))
 
-    # 第二遍：构建修复后的 messages
+    # 第二遍：单遍构建，pending 跟踪当前 assistant(tc) 缺的 result id。
+    # 遇到非 tool 消息（user/system/新 assistant）时立刻把 pending 补完，
+    # 保证假 result 紧跟在前一个 result 序列末尾（即 assistant(tc) 后面）。
     fixed = []
-    pending_tool_calls = {}  # 正向孤儿的待补列表
+    pending_tool_calls = {}  # {id: name}：当前 assistant(tc) 待补 result 的 id
     dropped_orphans = 0
-
-    for msg in messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                pending_tool_calls[tc["id"]] = tc["function"]["name"]
-            fixed.append(msg)
-        elif msg.get("role") == "tool":
-            call_id = msg.get("tool_call_id")
-            if call_id not in seen_tool_call_ids:
-                # 反向孤儿：tool result 但前面没对应 tool_calls → 删掉
-                dropped_orphans += 1
-                continue
-            pending_tool_calls.pop(call_id, None)
-            fixed.append(msg)
-        else:
-            fixed.append(msg)
-
-    if dropped_orphans:
-        logger.warning(
-            "_fix_tool_call_pairs: 删除 %d 条孤儿 tool result（无对应 tool_calls）",
-            dropped_orphans,
-        )
-
-    # 如果有未配对的 tool_call，补一条 tool 结果
-    # 上限保护：恶意/异常输入可能导致大量未配对 tool_call，全量补全会让 messages 暴涨。
-    # 超过阈值截断 + 记日志，便于排查。
     MAX_PENDING_REPAIR = 100
-    if pending_tool_calls:
+
+    def _flush_pending():
+        nonlocal pending_tool_calls
+        if not pending_tool_calls:
+            return
         if len(pending_tool_calls) > MAX_PENDING_REPAIR:
             logger.warning(
                 "_fix_tool_call_pairs: 未配对 tool_call 数 %d 超过上限 %d，仅补全前 %d 条",
@@ -159,6 +145,38 @@ def _fix_tool_call_pairs(messages: list) -> list:
                     "note": "此工具调用的结果因上下文压缩而丢失",
                 }, ensure_ascii=False),
             })
+        pending_tool_calls = {}
+
+    for msg in messages:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            # 新 assistant(tc) → 前一个 result 序列结束，先补完旧 pending
+            _flush_pending()
+            for tc in msg["tool_calls"]:
+                tid = tc.get("id")
+                if tid:
+                    pending_tool_calls[tid] = tc["function"]["name"]
+            fixed.append(msg)
+        elif msg.get("role") == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id not in seen_tool_call_ids:
+                # 反向孤儿：tool result 但前面没对应 tool_calls → 删掉
+                dropped_orphans += 1
+                continue
+            pending_tool_calls.pop(call_id, None)
+            fixed.append(msg)
+        else:
+            # 非工具消息：result 序列结束 → 立刻补完 pending
+            _flush_pending()
+            fixed.append(msg)
+
+    # 末尾还可能剩 pending（assistant(tc) 是最后一条，后续没消息）
+    _flush_pending()
+
+    if dropped_orphans:
+        logger.warning(
+            "_fix_tool_call_pairs: 删除 %d 条孤儿 tool result（无对应 tool_calls）",
+            dropped_orphans,
+        )
 
     return fixed
 

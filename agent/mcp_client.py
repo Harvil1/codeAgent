@@ -110,7 +110,7 @@ class StdioTransport(MCPTransport):
     def connect(self) -> None:
         full_env = {**os.environ, **self.env}
         self.process = subprocess.Popen(
-            [self.command, *self.args],
+            self._resolve_command_argv(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -132,6 +132,27 @@ class StdioTransport(MCPTransport):
             self.process = None
             raise
         self._connected = True
+
+    def _resolve_command_argv(self) -> List[str]:
+        """解析 MCP 子进程的 argv（跨平台）。
+
+        Windows 上常见坑：配置写 `npx`，但 CreateProcess 找不到裸命令
+        （实际可执行文件是 npx.cmd，且 CreateProcess 不解析 .cmd/.bat）。
+        修复：
+          - 用 shutil.which 解析命令（按 PATHEXT 补 .exe/.cmd/.bat）
+          - 解析到 .cmd/.bat 时用 cmd.exe 包装（CreateProcess 不能直接执行脚本）
+        非 Windows 直接返回 [command, *args]。
+        """
+        if os.name != "nt":
+            return [self.command, *self.args]
+
+        import shutil
+        resolved = shutil.which(self.command) or self.command
+        if resolved.lower().endswith((".cmd", ".bat")):
+            # cmd /c 对含空格路径要加引号
+            quoted = f'"{resolved}"' if " " in resolved else resolved
+            return ["cmd", "/c", quoted, *self.args]
+        return [resolved, *self.args]
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
         if self.process is None or self.process.poll() is not None:

@@ -28,3 +28,8 @@ __pycache__/
 # 这里屏蔽让 git status 干净。磁盘保留 node_modules 省得切回 master 重装。
 frontend/
 backend/
+/.playwright-mcp/
+/.impeccable/
+/.codegraph/
+/.claude/
+/dist/

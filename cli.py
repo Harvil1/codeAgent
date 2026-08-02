@@ -70,6 +70,7 @@ class RuntimeContext:
         self.session_id = None
         self.skill_commands = {}
         self.bundle_commands = {}  # batch1-T3: 技能束斜杠命令
+        self.quit_requested = False  # /quit 请求退出标志（走正常 shutdown）
         # === P2-T8 NEW: Hooks 系统 ===
         from agent.hooks import HookRegistry
         self.hooks_registry = HookRegistry()
@@ -315,6 +316,31 @@ class RuntimeContext:
         except Exception as e:
             logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
 
+        # === Hooks: SESSION_START（会话已建立，声明式 hooks 已加载） ===
+        self._fire_session_start()
+
+    def _fire_session_start(self) -> None:
+        """触发 SESSION_START hook（会话建立后）。"""
+        if not getattr(self, "hooks_registry", None):
+            return
+        try:
+            self.hooks_registry.run_session_start({
+                "session_id": self.session_id or "",
+            })
+        except Exception as e:
+            logger.warning("SESSION_START hook 触发异常: %s", e)
+
+    def _fire_session_end(self) -> None:
+        """触发 SESSION_END hook（会话关闭前，需在资源清理之前）。"""
+        if not getattr(self, "hooks_registry", None):
+            return
+        try:
+            self.hooks_registry.run_session_end({
+                "session_id": self.session_id or "",
+            })
+        except Exception as e:
+            logger.warning("SESSION_END hook 触发异常: %s", e)
+
     def _create_agent(self) -> AIAgent:
         """根据配置创建 agent。
 
@@ -435,6 +461,7 @@ class RuntimeContext:
             aux_llm_router=aux_llm_router,  # === batch2-T3 NEW ===
             plan_approval_callback=cli_plan_approval_callback,  # === PlanMode NEW ===
             stream_callback=stream_callback,  # === 04 NEW: 流式输出 ===
+            ask_user_bridge=_make_ask_user_bridge(),  # ask_user CLI 桥接
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
@@ -442,7 +469,7 @@ class RuntimeContext:
             self.memory_manager._llm_client = agent.llm_client
             self.memory_manager._llm_model = agent.model
 
-        # === B1 NEW: 初始化 vision_client（image_analyze / image_ocr / browser_vision 共用） ===
+        # === B1 NEW: 初始化 vision_client（image_analyze / image_ocr 共用） ===
         vision_cfg = self.config.get("vision", {}) or {}
         if vision_cfg.get("enabled", True):
             try:
@@ -528,6 +555,9 @@ class RuntimeContext:
 
     def shutdown(self):
         """清理资源：终止后台任务等（P2b-T6 + P2c-T5）。"""
+        # === Hooks: SESSION_END（在资源清理前触发，保留会话上下文） ===
+        self._fire_session_end()
+
         # flush 技能使用统计(内存缓存 → 磁盘)
         try:
             from tools.skill_usage import flush_usage
@@ -565,7 +595,7 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("team_coordinator shutdown 失败: %s", e)
 
-        # === ⑪c NEW: agent 资源清理（browser_session 等） ===
+        # === ⑪c NEW: agent 资源清理 ===
         if hasattr(self, "agent") and self.agent:
             try:
                 self.agent.cleanup()
@@ -617,6 +647,53 @@ def _make_approval_callback():
     return callback
 
 
+def _make_ask_user_bridge():
+    """构造 ask_user 的 CLI 桥接：渲染问题面板 + 读取用户选择。
+
+    bridge(qdata) -> list[str]（选中的 label 列表）。
+    异常（EOFError/KeyboardInterrupt）由 ask_user handler 统一捕获。
+    """
+    def bridge(qdata):
+        question = qdata.get("question", "")
+        options = qdata.get("options") or []
+        multi = qdata.get("multi", False)
+
+        lines = [f"[bold]{question}[/bold]", ""]
+        for i, opt in enumerate(options):
+            label = opt.get("label", "")
+            desc = opt.get("description", "")
+            lines.append(
+                f"[cyan]{i + 1}[/cyan]. {label}" + (f" — {desc}" if desc else "")
+            )
+        console.print(Panel.fit(
+            "\n".join(lines),
+            title="❓ 需要你选择",
+            border_style="cyan",
+        ))
+
+        if multi:
+            raw = console.input(
+                "[bold]选择序号（逗号分隔，可多选）> [/bold] ",
+            ).strip()
+            idxs = [
+                int(part) - 1
+                for part in raw.replace("，", ",").split(",")
+                if part.strip().isdigit()
+            ]
+        else:
+            raw = console.input("[bold]选择序号 > [/bold] ").strip()
+            idxs = [int(raw) - 1] if raw.strip().isdigit() else []
+
+        return [options[i]["label"] for i in idxs if 0 <= i < len(options)]
+    return bridge
+
+
+def _ts() -> str:
+    """当前时间戳前缀（[HH:MM:SS]），用于工具调用进度输出。"""
+    from datetime import datetime
+    return f"[{datetime.now().strftime('%H:%M:%S')}]"
+
+
 def _make_tool_call_callback(config: dict):
     """构造工具调用回调，闭包缓存 show_tool_progress，避免每次工具调用都重读 settings.json。"""
     show = (config or {}).get("display", {}).get("show_tool_progress", True)
@@ -629,7 +706,7 @@ def _make_tool_call_callback(config: dict):
         for k, v in (args or {}).items():
             s = str(v)
             short_args[k] = s if len(s) <= 80 else s[:77] + "..."
-        console.print(f"[dim]→ 调用工具: {name} {short_args}[/dim]")
+        console.print(f"[dim]{_ts()} → 调用工具: {name} {short_args}[/dim]")
 
     return callback
 
@@ -643,7 +720,7 @@ def _on_tool_call(name: str, args: dict):
     for k, v in (args or {}).items():
         s = str(v)
         short_args[k] = s if len(s) <= 80 else s[:77] + "..."
-    console.print(f"[dim]→ 调用工具: {name} {short_args}[/dim]")
+    console.print(f"[dim]{_ts()} → 调用工具: {name} {short_args}[/dim]")
 
 
 def _make_cli_stream_callback():
@@ -667,7 +744,16 @@ def _make_cli_stream_callback():
             # 内容流式过程中若切到工具调用，先换行收尾
             print()  # noqa: T201
             name = event.get("name", "?")
-            console.print(f"[dim]⟳ 准备调用 {name}...[/dim]")
+            console.print(f"[dim]{_ts()} ⟳ 准备调用 {name}...[/dim]")
+        elif etype == "progress":
+            # 子代理运行中：周期进度（让用户知道还在工作，不是卡死）
+            msg = (event.get("message") or "").strip()
+            elapsed = int(event.get("elapsed_seconds") or 0)
+            if msg:
+                print()  # noqa: T201
+                console.print(
+                    f"[dim]{_ts()} ⟳ 子代理[{elapsed}s] {msg}[/dim]"
+                )
         # "done" 不打印：留给主流程处理换行
     return cb
 
@@ -947,7 +1033,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     args = parts[1] if len(parts) > 1 else ""
 
     if name in ("/quit", "/exit"):
-        raise SystemExit(0)
+        # 不 raise SystemExit（会跳过 rt.shutdown() 的清理 + SESSION_END hook），
+        # 改为设置标志，主循环检测后 break 走正常退出。
+        rt.quit_requested = True
+        return True
 
     if name == "/help":
         _show_help()
@@ -1512,6 +1601,16 @@ def _switch_model(rt: RuntimeContext, args: str):
         rt.agent.model = model_cfg.get("model", target)
         rt.agent.model_format = model_cfg.get("format", "openai")
         console.print(f"[green][已切换到 {target}（{model_cfg.get('model')}）][/green]")
+
+        # === Hooks: CONFIG_CHANGE（模型切换） ===
+        if getattr(rt, "hooks_registry", None):
+            try:
+                rt.hooks_registry.run_config_change({
+                    "session_id": rt.session_id or "",
+                    "changed_keys": ["default_model"],
+                })
+            except Exception as e:
+                logger.warning("CONFIG_CHANGE hook 触发异常: %s", e)
     except Exception as e:
         console.print(f"[red]重建 client 失败: {e}[/red]")
         logger.exception("切换模型失败")
@@ -1761,6 +1860,8 @@ def run_interactive(resume_last: bool = False):
             elif cmd_name in rt.skill_commands:
                 pass  # 走技能触发逻辑
             elif _handle_command(user_input, rt):
+                if rt.quit_requested:
+                    break  # /quit 请求：走正常退出（rt.shutdown()）
                 continue
 
         # 2. 检查是否触发技能束
@@ -1805,8 +1906,14 @@ def run_interactive(resume_last: bool = False):
             response = rt.agent.run_conversation(user_input)
             # 流式模式(stream_callback 已设)的内容已经在 run_conversation 过程中显示,
             # 不再重复 print。非流式模式(无 callback)才 print response。
+            # 但 LLM 失败/预算耗尽等兜底文案不走流式（没有内容增量），必须显示，
+            # 否则用户会看到"没反应就断了"（之前莫名断开的根因）。
             if not getattr(rt.agent, "_stream_callback", None):
                 console.print(response)
+            elif response and response.startswith(
+                ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数")
+            ):
+                console.print(f"[yellow]{response}[/yellow]")
 
             # 5. 保存助手响应到 session
             if rt.session_store and rt.session_id:

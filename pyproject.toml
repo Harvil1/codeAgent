@@ -22,7 +22,11 @@ omnimate = "main:main"
 py-modules = ["main", "config", "constants", "model_tools", "toolsets", "env_loader", "cli", "agent_profile", "curator_cli"]
 
 [tool.setuptools.packages.find]
-include = ["agent*", "tools*", "plugins*", "scripts*"]
+include = ["agent*", "tools*", "plugins*", "scripts*", "skills*"]
+
+[tool.setuptools.package-data]
+# 内置技能随包分发：SKILL.md / 模板 / SDD 脚本，装哪台机器都一样
+"skills" = ["**/*.md", "**/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

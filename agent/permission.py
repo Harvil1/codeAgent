@@ -85,37 +85,43 @@ def check_command_deny(command: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 项目保护：禁止修改项目依赖（uv add / 项目目录 pip install）
+# 自我保护：禁止修改 OmniMate 自身的依赖（uv add / pip install）
 # ---------------------------------------------------------------------------
 
-def check_project_modification(command: str, cwd: Optional[str] = None) -> Optional[str]:
-    """闸门 0:检查命令是否试图修改项目代码/依赖。
+def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional[str]:
+    """闸门 0:禁止 agent 修改 OmniMate 自身的依赖。
 
-    - uv add 任何地方都拒绝(写 pyproject.toml)
-    - pip install 在项目目录执行(可能装到项目 venv)
+    只保护 OmniMate 自己的代码目录(project_root),不保护用户项目:
+    - cwd 在 OmniMate 自身目录内:uv add / pip install 拒绝(防止改坏自身依赖)
+    - cwd 在用户项目里:装依赖是改代码的正当工作,一律放行
+      (用户项目不一定是 Python:前端项目用 npm/pnpm/yarn,Python 项目用 uv/pip)
 
     返回拒绝原因,未命中返回 None。
     """
-    # uv add 任何地方都拒绝
-    if re.search(r'\buv\s+add\b', command, re.IGNORECASE):
-        return "uv add 会修改项目依赖(pyproject.toml),禁止 agent 操作"
+    if not cwd:
+        return None
+    try:
+        from constants import project_root
+        root = project_root().resolve()
+        cwd_resolved = Path(cwd).resolve()
+    except Exception:
+        return None
 
-    # pip install 在项目目录执行
-    if cwd and re.search(r'\bpip\d?\s+install\b', command, re.IGNORECASE):
+    # 只在 OmniMate 自身目录内才拦截
+    in_self = cwd_resolved == root
+    if not in_self:
         try:
-            from constants import project_root
-            root = project_root().resolve()
-            cwd_resolved = Path(cwd).resolve()
-            if cwd_resolved == root:
-                return "在项目目录 pip install 会污染项目 venv,禁止"
-            try:
-                cwd_resolved.relative_to(root)
-                return "在项目目录 pip install 会污染项目 venv,禁止"
-            except ValueError:
-                pass
-        except Exception:
+            cwd_resolved.relative_to(root)
+            in_self = True
+        except ValueError:
             pass
+    if not in_self:
+        return None
 
+    if re.search(r"\buv\s+add\b", command, re.IGNORECASE):
+        return "在 OmniMate 自身目录内 uv add 会修改自身依赖(pyproject.toml),禁止 agent 操作"
+    if re.search(r"\bpip\d?\s+install\b", command, re.IGNORECASE):
+        return "在 OmniMate 自身目录内 pip install 会污染自身 venv,禁止 agent 操作"
     return None
 
 
@@ -433,10 +439,10 @@ class PermissionChecker:
 
     def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
         """检查命令是否允许执行。"""
-        # 闸门 0:项目保护(禁止 uv add / 项目目录 pip install)
-        proj_violation = check_project_modification(command, cwd)
-        if proj_violation:
-            return PermissionResult(False, f"项目保护: {proj_violation}", "deny")
+        # 闸门 0:自我保护(禁止修改 OmniMate 自身依赖)
+        self_violation = check_self_modification(command, cwd)
+        if self_violation:
+            return PermissionResult(False, f"自我保护: {self_violation}", "deny")
 
         # 闸门 1：硬拒绝
         deny = check_command_deny(command)

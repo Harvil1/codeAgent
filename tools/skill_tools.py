@@ -31,48 +31,72 @@ SKILL_VIEW_SCHEMA = {
 }
 
 
-def _get_skills_dir_from_context(kwargs: dict) -> Path:
-    """从工具调用上下文获取技能目录。"""
+def _get_skills_dirs(kwargs: dict):
+    """获取技能扫描目录列表（内置 + 用户 + 已启用插件）。
+
+    顺序 = 优先级，后者覆盖前者（用户/插件可覆盖内置同名技能）。
+    自定义 omnimate_home 时用自定义用户目录替换默认用户目录。
+    """
+    from constants import all_skills_dirs, get_omnimate_home
+    dirs = list(all_skills_dirs())
     home = kwargs.get("omnimate_home")
     if home:
-        return Path(home) / "skills"
-    from constants import skills_dir as _skills_dir
-    return _skills_dir()
+        home_path = Path(home)
+        if home_path != get_omnimate_home():
+            # 自定义 home：内置目录 + 自定义用户目录 + 插件目录
+            dirs = [dirs[0], home_path / "skills"] + dirs[2:]
+    return dirs
+
+
+def _get_usage_dir(kwargs: dict) -> Path:
+    """usage 统计写入的用户技能目录（第一个非内置目录）。"""
+    dirs = _get_skills_dirs(kwargs)
+    return dirs[1] if len(dirs) > 1 else dirs[0]
+
+
+def _find_skill_md(name: str, dirs) -> Path:
+    """跨目录按名字找 SKILL.md（用户/插件优先）。找不到返回 None。"""
+    for d in reversed(dirs):
+        p = Path(d) / name / "SKILL.md"
+        if p.exists():
+            return p
+    return None
 
 
 def _handle_skills_list(args: dict, **kwargs) -> str:
-    skills_dir = _get_skills_dir_from_context(kwargs)
-    if not skills_dir.exists():
-        return json.dumps({"skills": []}, ensure_ascii=False)
-
-    usage = load_usage(skills_dir)
-    skills = []
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        name = skill_md.parent.name
-        rec = usage.get(name, {})
-        # 跳过归档的
-        if rec.get("state") == "archived":
+    dirs = _get_skills_dirs(kwargs)
+    usage = load_usage(_get_usage_dir(kwargs))
+    skills = {}
+    for d in dirs:  # 顺序：内置 → 用户 → 插件，后者覆盖前者
+        d = Path(d)
+        if not d.exists():
             continue
+        for skill_md in sorted(d.glob("*/SKILL.md")):
+            name = skill_md.parent.name
+            rec = usage.get(name, {})
+            # 跳过归档的
+            if rec.get("state") == "archived":
+                continue
 
-        # 尝试从 frontmatter 读描述
-        description = rec.get("description", "")
-        if not description:
-            try:
-                content = skill_md.read_text(encoding="utf-8")
-                frontmatter, _ = parse_frontmatter(content)
-                description = frontmatter.get("description", "")
-            except Exception:
-                pass
+            # 尝试从 frontmatter 读描述
+            description = rec.get("description", "")
+            if not description:
+                try:
+                    content = skill_md.read_text(encoding="utf-8")
+                    frontmatter, _ = parse_frontmatter(content)
+                    description = frontmatter.get("description", "")
+                except Exception:
+                    pass
 
-        skills.append({
-            "name": name,
-            "description": description,
-            "use_count": rec.get("use_count", 0),
-            "view_count": rec.get("view_count", 0),
-            "state": rec.get("state", "active"),
-        })
+            skills[name] = {
+                "name": name,
+                "description": description,
+                "use_count": rec.get("use_count", 0),
+                "view_count": rec.get("view_count", 0),
+                "state": rec.get("state", "active"),
+            }
 
-    return json.dumps({"skills": skills}, ensure_ascii=False)
+    return json.dumps({"skills": list(skills.values())}, ensure_ascii=False)
 
 
 def _handle_skill_view(args: dict, **kwargs) -> str:
@@ -80,13 +104,12 @@ def _handle_skill_view(args: dict, **kwargs) -> str:
     if not name:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
 
-    skills_dir = _get_skills_dir_from_context(kwargs)
-    skill_md = skills_dir / name / "SKILL.md"
-    if not skill_md.exists():
+    skill_md = _find_skill_md(name, _get_skills_dirs(kwargs))
+    if skill_md is None:
         return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
     content = skill_md.read_text(encoding="utf-8")
-    bump_view(skills_dir, name)  # 查看计数 +1
+    bump_view(_get_usage_dir(kwargs), name)  # 查看计数 +1
 
     return json.dumps({
         "name": name,
@@ -142,30 +165,31 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
     if not name:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
 
-    skills_dir = _get_skills_dir_from_context(kwargs)
+    usage_dir = _get_usage_dir(kwargs)
+    dirs = _get_skills_dirs(kwargs)
 
     # batch1-T3: 支持 bundle:<name> 加载技能束
     if name.startswith("bundle:"):
         bundle_name = name[len("bundle:"):]
         from agent.skill_bundle import load_bundle
-        result = load_bundle(bundle_name, skills_dir)
+        result = load_bundle(bundle_name, usage_dir)
         # 对成功加载的技能 bump view 计数
         for sname in result.get("skills_loaded", []):
             try:
-                bump_view(skills_dir, sname)
+                bump_view(usage_dir, sname)
             except Exception:
                 pass
         return json.dumps(result, ensure_ascii=False)
 
-    skill_md = skills_dir / name / "SKILL.md"
-    if not skill_md.exists():
+    skill_md = _find_skill_md(name, dirs)
+    if skill_md is None:
         return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
     content = skill_md.read_text(encoding="utf-8")
     # 去掉 frontmatter，只返回指令正文
     _, body = parse_frontmatter(content)
 
-    bump_view(skills_dir, name)  # 加载也计入 view 计数
+    bump_view(usage_dir, name)  # 加载也计入 view 计数
 
     return json.dumps({
         "name": name,

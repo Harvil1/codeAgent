@@ -328,6 +328,23 @@ class HookRegistry:
             return None
         return result.get("continue")
 
+    def _invoke_declarative_script(self, hook, session_id: str, event: str,
+                                   **extra) -> Optional[dict]:
+        """跑声明式 hook 子进程（统一入口）。返回 run_script_hook 的 dict 或 None。
+
+        声明式 hook 的 payload 统一含 event/session_id/timestamp/hook_name，
+        事件特定字段通过 extra 传入（不传超大内容，只传元信息）。
+        """
+        from agent.hook_exec import run_script_hook
+        payload = {
+            "event": event,
+            "session_id": session_id,
+            "timestamp": _now_iso(),
+            "hook_name": hook.name,
+        }
+        payload.update(extra)
+        return run_script_hook(hook, payload)
+
     # ---- batch2-T2: 执行 PRE_LLM_CALL / POST_LLM_CALL ----
     def run_pre_llm_call(self, messages: list, tools: Optional[list],
                          *, session_id: str = "") -> tuple:
@@ -335,11 +352,20 @@ class HookRegistry:
 
         fn 签名: (messages, tools) -> Optional[(messages, tools)]
         返回 None 时不修改（保持上一轮输出）。
+        声明式 hook：跑子进程（通知型），不修改 messages/tools。
         失败 fail-open（视为 None）。
         """
         for hook in self._hooks[HookEvent.PRE_LLM_CALL]:
             try:
-                result = hook.fn(messages, tools)
+                if hook.kind == "programmatic":
+                    result = hook.fn(messages, tools)
+                else:
+                    # 声明式：通知型，只传消息数量等元信息（避免超大 payload）
+                    self._invoke_declarative_script(
+                        hook, session_id, "pre_llm_call",
+                        message_count=len(messages),
+                    )
+                    result = None
                 if result is not None:
                     # 解包元组
                     if isinstance(result, tuple) and len(result) == 2:
@@ -359,11 +385,17 @@ class HookRegistry:
 
         fn 签名: (response) -> Optional[response]
         返回 None 时不修改。
+        声明式 hook：跑子进程（通知型），不修改 response。
         失败 fail-open。
         """
         for hook in self._hooks[HookEvent.POST_LLM_CALL]:
             try:
-                result = hook.fn(response)
+                if hook.kind == "programmatic":
+                    result = hook.fn(response)
+                else:
+                    # 声明式：通知型
+                    self._invoke_declarative_script(hook, session_id, "post_llm_call")
+                    result = None
                 if result is not None:
                     response = result
             except Exception as e:
@@ -374,18 +406,32 @@ class HookRegistry:
     # ---- P2-13 NEW: 会话/压缩/配置事件的执行 ----
     def run_session_start(self, payload: dict) -> None:
         """通知型：所有 SESSION_START hook 都被调，返回值忽略。失败 fail-open。"""
+        session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SESSION_START]:
             try:
-                hook.fn(payload)
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "session_start",
+                        session_title=payload.get("title", ""),
+                    )
             except Exception as e:
                 logger.warning("SESSION_START hook %s 异常（忽略）: %s",
                                hook.name, e)
 
     def run_session_end(self, payload: dict) -> None:
         """通知型：所有 SESSION_END hook 都被调。失败 fail-open。"""
+        session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SESSION_END]:
             try:
-                hook.fn(payload)
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "session_end",
+                        message_count=payload.get("message_count", 0),
+                    )
             except Exception as e:
                 logger.warning("SESSION_END hook %s 异常（忽略）: %s",
                                hook.name, e)
@@ -395,9 +441,16 @@ class HookRegistry:
 
         返回 {"abort": bool}。abort=True 时调用方应跳过该层压缩。
         """
+        session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.PRE_COMPACT]:
             try:
-                result = hook.fn(payload)
+                if hook.kind == "programmatic":
+                    result = hook.fn(payload)
+                else:
+                    result = self._invoke_declarative_script(
+                        hook, session_id, "pre_compact",
+                        layer=payload.get("layer", ""),
+                    )
                 if result and result.get("abort"):
                     logger.info(
                         "PRE_COMPACT hook %s 请求 abort（layer=%s）",
@@ -411,18 +464,32 @@ class HookRegistry:
 
     def run_post_compact(self, payload: dict) -> None:
         """通知型：压缩完成后通知所有 hook（metrics 收集、日志等）。"""
+        session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.POST_COMPACT]:
             try:
-                hook.fn(payload)
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "post_compact",
+                        layer=payload.get("layer", ""),
+                    )
             except Exception as e:
                 logger.warning("POST_COMPACT hook %s 异常（忽略）: %s",
                                hook.name, e)
 
     def run_config_change(self, payload: dict) -> None:
         """通知型：配置变更后通知所有 hook（审计、缓存失效等）。"""
+        session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.CONFIG_CHANGE]:
             try:
-                hook.fn(payload)
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "config_change",
+                        changed_keys=payload.get("changed_keys", []),
+                    )
             except Exception as e:
                 logger.warning("CONFIG_CHANGE hook %s 异常（忽略）: %s",
                                hook.name, e)
