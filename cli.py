@@ -1167,9 +1167,33 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
             f"{len(s['files'])} 个文件 | {s['msg_count']} 条消息 | {files}"
         )
     try:
-        raw = console.input("[bold]回滚到哪个？(序号 / 回车取消) > [/bold] ").strip()
+        raw = console.input(
+            "[bold]回滚序号 / s+序号做摘要 / 回车取消 > [/bold] "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         return
+    if not raw:
+        return
+
+    # 摘要模式：s / s3 / s 0 —— 把该 checkpoint 之后的对话压成摘要
+    if raw.lower().startswith("s"):
+        idx_part = raw[1:].strip()
+        if not idx_part.isdigit():
+            try:
+                idx_part = console.input(
+                    "[bold]对哪个序号做摘要？ > [/bold] "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+        if not idx_part.isdigit():
+            return
+        idx = int(idx_part)
+        if idx < 0 or idx >= len(snaps):
+            console.print("[red]序号越界[/red]")
+            return
+        _summarize_rewind(rt, snaps[idx]["id"])
+        return
+
     if not raw.isdigit():
         return
     idx = int(raw)
@@ -1200,6 +1224,46 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
             console.print(f"[green]已恢复对话（{len(conv)} 条消息）[/green]")
         else:
             console.print("[yellow]该快照没有对话副本[/yellow]")
+
+
+def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
+    """把选中 checkpoint 之后的对话压成摘要（对齐 Claude Code Summarize from here）。
+
+    保留该 checkpoint 时的对话，把其后追加的消息交给 LLM 压成摘要，
+    conversation_history = checkpoint 对话 + [摘要 user 消息]。
+    """
+    mgr = getattr(rt, "checkpoint_mgr", None)
+    if not mgr or not rt.agent:
+        console.print("[yellow]Checkpoint 不可用[/yellow]")
+        return
+
+    ckpt_conv = mgr.get_conversation(sid)
+    current = rt.agent.conversation_history
+
+    # 该点之后 = 当前 history 中 checkpoint 对话之后追加的部分（前缀匹配）
+    after = current
+    if (ckpt_conv and len(current) > len(ckpt_conv)
+            and current[:len(ckpt_conv)] == ckpt_conv):
+        after = current[len(ckpt_conv):]
+    if not after:
+        console.print("[yellow]该 checkpoint 之后没有新对话[/yellow]")
+        return
+
+    try:
+        from agent.context_compressor import _summarize_conversation
+        summary = _summarize_conversation(after, rt.agent.llm_client)
+    except Exception as e:
+        console.print(f"[red]摘要失败: {e}[/red]")
+        return
+
+    rt.agent.conversation_history = ckpt_conv + [{
+        "role": "user",
+        "content": f"[该点之后的对话已总结]\n{summary}",
+    }]
+    rt.agent.invalidate_system_prompt()
+    console.print(
+        f"[green]已把 checkpoint 之后的 {len(after)} 条消息压成摘要[/green]"
+    )
 
 
 def _show_help():

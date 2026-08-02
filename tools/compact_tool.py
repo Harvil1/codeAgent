@@ -77,7 +77,7 @@ def _handle_compact(args: dict, **kwargs) -> str:
 
     # 强制 L4 压缩(阈值设 0 让它必触发,绕过 over_threshold 检查)
     from agent.context_pipeline import llm_compact
-    keep_recent = 10
+    keep_recent = 30  # 对齐 L4：主动 compact 后保留更多最近，减少失忆
     new_messages, changed = llm_compact(
         full_messages,
         llm_client=agent.llm_client,

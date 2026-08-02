@@ -252,8 +252,7 @@ def llm_compact(
         over_token = precomputed_tokens > token_threshold
     else:
         over_token = estimate_message_tokens(messages) > token_threshold
-    over_msg = len(conv) > msg_threshold
-    if not (over_token or over_msg):
+    if not over_token:  # 对齐 Claude Code：压缩由 token 驱动，不按消息数
         return messages, False
     if len(conv) <= keep_recent:
         return messages, False
@@ -378,12 +377,12 @@ def compress_if_needed(
         except Exception as e:
             logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
 
-    # L1 snip
+    # L1 snip（对齐 Claude Code：减少频繁裁中间，由 L4 token 主导）
     messages, c1 = snip_compact(
         messages,
         keep_first=config.get("snip_keep_first", 3),
         keep_last=config.get("snip_keep_last", 47),
-        threshold=config.get("snip_message_threshold", 50),
+        threshold=config.get("snip_message_threshold", 200),
     )
 
     # L2.5 + L2.6 合并:一次遍历 tool 消息,同时检查单条阈值 + 总量预算
@@ -450,10 +449,10 @@ def compress_if_needed(
                         i, len(content), len(new_content),
                     )
 
-    # L2 micro
+    # L2 micro（保留更多最近 tool 结果，减少压缩后失忆）
     messages, c2 = micro_compact(
         messages,
-        keep_recent=config.get("micro_keep_recent_results", 3),
+        keep_recent=config.get("micro_keep_recent_results", 10),
     )
 
     # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
@@ -466,14 +465,13 @@ def compress_if_needed(
 
     # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 700K)
     # 1M 窗口留 30% 给输出(300K),70% 给输入(700K)
+    # 对齐 Claude Code:压缩完全由 token 驱动(接近窗口才压缩),
+    # 不按消息数触发(曾因"消息数 > 100 就压"导致长会话被压 51 次、agent 反复失忆)。
     token_threshold = config.get("llm_compact_token_threshold", 100000)
     if model and "[1m]" in str(model):
         token_threshold = max(token_threshold, 700000)
 
-    over_threshold = (
-        est_tokens > token_threshold
-        or conv_len > config.get("llm_compact_message_threshold", 100)
-    )
+    over_threshold = est_tokens > token_threshold
     cooldown_ok = session_state.cooldown_ok(cooldown)
     logger.info(
         "L4 trigger check: over_threshold=%s, est_tokens=%d, conv_msgs=%d, "
@@ -501,9 +499,8 @@ def compress_if_needed(
             messages,
             llm_client=llm_client,
             model=model,
-            keep_recent=config.get("llm_compact_keep_recent", 10),
+            keep_recent=config.get("llm_compact_keep_recent", 30),
             token_threshold=token_threshold,  # 自适应阈值
-            msg_threshold=config.get("llm_compact_message_threshold", 100),
             precomputed_tokens=est_tokens,
         )
         if c4:

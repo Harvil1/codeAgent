@@ -207,6 +207,8 @@ class AIAgent:
         # 压缩后重注入：最近读过的文件 + 加载的技能（对齐 Claude Code）
         self._recent_read_files: list = []
         self._recent_skills: list = []
+        # 上下文管理提示：接近上限时建议主动 /compact /new（对齐 Claude Code context rot）
+        self._context_tip_shown = False
 
         # === B1 NEW: vision client（image_analyze / image_ocr 共用） ===
         # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。
@@ -918,7 +920,44 @@ class AIAgent:
                 ),
             })
 
+        # 上下文管理提示（接近上限时建议主动 /compact /new）
+        self._maybe_inject_context_tip(messages)
+
         return messages
+
+    def _maybe_inject_context_tip(self, messages: list) -> None:
+        """上下文接近上限时注入管理提示（对齐 Claude Code context rot 建议）。
+
+        官方明确：自动压缩发生在模型"最不聪明"的时刻，建议主动 /compact 并带方向；
+        真正的新任务用 /new；大文件读取委托 subagent 只带摘要。
+        只提示一次/会话，避免每轮刷屏。
+        """
+        if self._context_tip_shown:
+            return
+        try:
+            from agent.context_compressor import estimate_message_tokens
+            est = estimate_message_tokens(messages)
+            token_threshold = self.config.get("context", {}).get(
+                "llm_compact_token_threshold", 100000,
+            )
+            if self.model and "[1m]" in str(self.model):
+                token_threshold = max(token_threshold, 700000)
+            if est >= token_threshold * 0.7:
+                self._context_tip_shown = True
+                pct = int(est / token_threshold * 100) if token_threshold else 0
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<context_management_tip>\n上下文接近上限（约 "
+                        f"{pct}%）。为避免自动压缩发生在效果最差时：\n"
+                        "1. 继续当前任务 → 建议主动 /compact 并说明保留哪些重点\n"
+                        "2. 换新任务 → 建议 /new 新开对话（避免 context rot）\n"
+                        "3. 大文件读取 → 用 delegate_task 委托子代理，只带摘要回主上下文\n"
+                        "</context_management_tip>"
+                    ),
+                })
+        except Exception as e:
+            logger.debug("上下文管理提示注入失败（忽略）: %s", e)
 
     def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
         """接近 token 上限时压缩上下文。

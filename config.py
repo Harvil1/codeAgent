@@ -74,22 +74,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "output_offload_threshold": 10000,
         "output_offload_preview": 2000,
         # L1 snip
-        "snip_message_threshold": 50,
+        # 对齐 Claude Code：压缩由 L4 token 主导，消息数阈值放宽避免频繁裁中间
+        "snip_message_threshold": 200,
         "snip_release_threshold": 30,
         "snip_keep_first": 3,
         "snip_keep_last": 47,
         # L2 micro
-        "micro_keep_recent_results": 3,
+        "micro_keep_recent_results": 10,
         # L4 llm
         # 100K tokens ≈ 300K 字符。DeepSeek/OpenAI context 上限 64K-128K。
-        # thinking 模式下每轮占 ~5K tokens,100K 阈值约 20 轮后触发。
+        # 消息数阈值只是兜底（token 接近窗口才 LLM 压缩，1M 模型放宽到 2000）
         "llm_compact_token_threshold": 100000,
-        "llm_compact_message_threshold": 100,
-        "llm_compact_keep_recent": 10,
+        "llm_compact_message_threshold": 500,
+        "llm_compact_keep_recent": 30,
         "llm_compact_cooldown_turns": 5,
         "max_compress_attempts": 3,
         # Reactive
-        "reactive_keep_recent": 5,
+        "reactive_keep_recent": 10,
         "reactive_once_per_session": True,
         # Transcript
         "transcript_enabled": True,
