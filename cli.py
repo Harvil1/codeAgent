@@ -71,6 +71,7 @@ class RuntimeContext:
         self.skill_commands = {}
         self.bundle_commands = {}  # batch1-T3: 技能束斜杠命令
         self.quit_requested = False  # /quit 请求退出标志（走正常 shutdown）
+        self.checkpoint_mgr = None  # Checkpoint（文件快照/回滚，对齐 Claude Code）
         # === P2-T8 NEW: Hooks 系统 ===
         from agent.hooks import HookRegistry
         self.hooks_registry = HookRegistry()
@@ -240,6 +241,19 @@ class RuntimeContext:
                 model=self.config["model"]["name"],
                 provider=self.config["model"]["provider"],
             )
+
+        # Checkpoint：文件快照/回滚（对齐 Claude Code，会话级）
+        try:
+            from agent.checkpoint import CheckpointManager
+            ckpt_root = Path(self.home) / ".checkpoints"
+            self.checkpoint_mgr = CheckpointManager(
+                ckpt_root, self.session_id or "nosession",
+                max_snapshots=self.config.get("checkpoint", {}).get(
+                    "max_snapshots", 100),
+            )
+        except Exception as e:
+            logger.warning("CheckpointManager 初始化失败: %s", e)
+            self.checkpoint_mgr = None
 
         # 4. 创建 agent
         self.agent = self._create_agent()
@@ -462,6 +476,7 @@ class RuntimeContext:
             plan_approval_callback=cli_plan_approval_callback,  # === PlanMode NEW ===
             stream_callback=stream_callback,  # === 04 NEW: 流式输出 ===
             ask_user_bridge=_make_ask_user_bridge(),  # ask_user CLI 桥接
+            checkpoint_manager=self.checkpoint_mgr,  # === Checkpoint NEW ===
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
@@ -541,13 +556,28 @@ class RuntimeContext:
         self.agent.session_id = session_id
         self.agent.invalidate_system_prompt()
 
+        # 重建 checkpoint（对齐恢复的会话 id）
+        try:
+            from agent.checkpoint import CheckpointManager
+            ckpt_root = Path(self.home) / ".checkpoints"
+            self.checkpoint_mgr = CheckpointManager(
+                ckpt_root, session_id,
+                max_snapshots=self.config.get("checkpoint", {}).get(
+                    "max_snapshots", 100),
+            )
+            self.agent.checkpoint_manager = self.checkpoint_mgr
+        except Exception as e:
+            logger.warning("CheckpointManager 重建失败: %s", e)
+            self.checkpoint_mgr = None
+
         title = info.get("title") or "(无标题)"
         console.print(
             f"[green][已恢复会话: {title}（{len(msgs)} 条消息）][/green]"
         )
 
         # 显示最近几条消息让用户看到上下文（不显示 tool 消息，太碎）
-        recent = [m for m in msgs[-6:] if (m.get("content") or "").strip()]
+        recent = [m for m in msgs[-6:]
+                  if (m.get("content") or "").strip() and m.get("role") != "tool"]
         if recent:
             _print_message_list(recent, char_limit=300, header=f"最近 {len(recent)} 条历史消息：")
 
@@ -1107,7 +1137,69 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         _manage_whitelist(rt, args)
         return True
 
+    if name == "/rewind":
+        _handle_rewind_command(rt, args)
+        return True
+
     return False
+
+
+def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
+    """/rewind：列出 checkpoint 快照，选择回滚（恢复文件 + 可选对话）。
+
+    对齐 Claude Code：每个用户 prompt 前自动快照 agent 修改过的文件，
+    这里列出里程碑并回滚到某个时点。
+    """
+    mgr = getattr(rt, "checkpoint_mgr", None)
+    if not mgr:
+        console.print("[yellow]Checkpoint 不可用（会话未初始化）[/yellow]")
+        return
+    snaps = mgr.list_snapshots()
+    if not snaps:
+        console.print("[yellow]没有 checkpoint 快照（至少一个用户 prompt 后才有）[/yellow]")
+        return
+
+    console.print("[bold]Checkpoint 快照：[/bold]")
+    for i, s in enumerate(snaps):
+        files = ", ".join(s["files"][:3]) + ("..." if len(s["files"]) > 3 else "")
+        console.print(
+            f"  [cyan]{i}[/cyan] {s['ts'][:19]} | "
+            f"{len(s['files'])} 个文件 | {s['msg_count']} 条消息 | {files}"
+        )
+    try:
+        raw = console.input("[bold]回滚到哪个？(序号 / 回车取消) > [/bold] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not raw.isdigit():
+        return
+    idx = int(raw)
+    if idx < 0 or idx >= len(snaps):
+        console.print("[red]序号越界[/red]")
+        return
+    sid = snaps[idx]["id"]
+
+    # 恢复文件
+    restored = mgr.restore_files(sid)
+    if restored:
+        console.print(f"[green]已恢复 {len(restored)} 个文件[/green]")
+        for p in restored:
+            console.print(f"  [dim]{p}[/dim]")
+    else:
+        console.print("[yellow]该快照没有可恢复的文件[/yellow]")
+
+    # 可选恢复对话
+    try:
+        choice = console.input("[bold]也恢复对话到该时点？(y/N) > [/bold] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if choice in ("y", "yes"):
+        conv = mgr.get_conversation(sid)
+        if conv and rt.agent:
+            rt.agent.conversation_history = conv
+            rt.agent.invalidate_system_prompt()
+            console.print(f"[green]已恢复对话（{len(conv)} 条消息）[/green]")
+        else:
+            console.print("[yellow]该快照没有对话副本[/yellow]")
 
 
 def _show_help():
@@ -1124,6 +1216,7 @@ def _show_help():
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
+        "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
@@ -1901,6 +1994,14 @@ def run_interactive(resume_last: bool = False):
 
         # 4. 调用 agent
         try:
+            # Checkpoint：每个用户 prompt 前快照（对齐 Claude Code，/rewind 可回滚）
+            if rt.checkpoint_mgr:
+                try:
+                    rt.checkpoint_mgr.create_snapshot(
+                        conversation=list(rt.agent.conversation_history),
+                    )
+                except Exception as e:
+                    logger.warning("checkpoint 快照失败: %s", e)
             # 先打 AI: 前缀,让流式输出在这个前缀之后显示
             console.print("[bold green]AI:[/bold green]")
             response = rt.agent.run_conversation(user_input)
@@ -1943,10 +2044,14 @@ def run_one_shot(message: str):
         return
 
     try:
+        # user 消息必须在 run_conversation 之前入库，保证会话历史顺序：
+        # user → assistant(tool_calls) → tool → ...（否则工具轮次会排在 user 前，
+        # 恢复时 assistant 的 tool_calls 前面没有 user 消息，违反 API 消息协议）
+        if rt.session_store and rt.session_id:
+            rt.session_store.append_message(rt.session_id, "user", message)
         response = rt.agent.run_conversation(message)
         print(response)
         if rt.session_store and rt.session_id:
-            rt.session_store.append_message(rt.session_id, "user", message)
             rt.session_store.append_message(rt.session_id, "assistant", response)
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)

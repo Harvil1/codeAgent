@@ -151,6 +151,21 @@ WRITE_FILE_SCHEMA = {
 }
 
 
+def _track_checkpoint(path, kwargs) -> None:
+    """编辑成功后通知 checkpoint 追踪该文件（对齐 Claude Code /rewind）。
+
+    只追踪编辑工具的直接修改（write_file/str_replace）；bash 命令不追踪。
+    无 checkpoint（测试/子代理）时静默跳过。
+    """
+    agent_ref = kwargs.get("agent_ref")
+    tracker = getattr(agent_ref, "_checkpoint_track", None)
+    if tracker:
+        try:
+            tracker(str(path))
+        except Exception:
+            pass
+
+
 def _handle_write_file(args: dict, **kwargs) -> str:
     path_str = args.get("path", "")
     content = args.get("content", "")
@@ -206,6 +221,8 @@ def _handle_write_file(args: dict, **kwargs) -> str:
                 f.write(content + "\n")
         else:
             path.write_text(content, encoding="utf-8")
+
+        _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
 
         return json.dumps({
             "path": str(path),
@@ -476,6 +493,8 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         path.write_text(new_content, encoding="utf-8")
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
 
     return json.dumps({
         "path": str(path),

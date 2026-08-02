@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     tool_calls TEXT,              -- JSON（assistant 的工具调用）
     tool_call_id TEXT,            -- tool 消息的配对 id
+    name TEXT,                    -- tool 消息的工具名（对齐 Claude Code 会话恢复）
     timestamp TEXT NOT NULL,
     turn_index INTEGER NOT NULL,  -- 第几轮对话
     FOREIGN KEY (session_id) REFERENCES sessions(id)
@@ -144,9 +145,14 @@ class SessionStore:
             self._conn_lock.release()
 
     def _init_schema(self):
-        """初始化数据库 schema。"""
+        """初始化数据库 schema（含旧库迁移：补 name 列）。"""
         with self._get_conn() as conn:
             conn.executescript(SCHEMA_SQL)
+            # 旧库迁移：messages 表补 name 列（SQLite 无 ADD COLUMN IF NOT EXISTS，try/except 幂等）
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN name TEXT")
+            except sqlite3.OperationalError:
+                pass  # 列已存在（新库由 SCHEMA_SQL 直接建）
 
     def close(self) -> None:
         """关闭持久连接（测试或 shutdown 时调用，Windows 上不关会锁文件）。"""
@@ -195,8 +201,12 @@ class SessionStore:
         *,
         tool_calls: Optional[list] = None,
         tool_call_id: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> str:
-        """追加一条消息到会话。"""
+        """追加一条消息到会话。
+
+        name：tool 消息的工具名（对齐 Claude Code 会话恢复，恢复时还原完整工具轮次）。
+        """
         msg_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
 
@@ -219,12 +229,13 @@ class SessionStore:
                 conn.execute(
                     """INSERT INTO messages
                        (id, session_id, role, content, tool_calls, tool_call_id,
-                        timestamp, turn_index)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        name, timestamp, turn_index)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         msg_id, session_id, role, content,
                         json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
                         tool_call_id,
+                        name,
                         now, current_turn,
                     ),
                 )
@@ -252,7 +263,8 @@ class SessionStore:
         """获取会话的消息历史。"""
         with self._get_conn() as conn:
             query = """
-                SELECT role, content, tool_calls, tool_call_id, timestamp, turn_index
+                SELECT role, content, tool_calls, tool_call_id, name,
+                       timestamp, turn_index
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY rowid
@@ -262,7 +274,7 @@ class SessionStore:
                 # 取最后 N 条
                 query = """
                     SELECT * FROM (
-                        SELECT role, content, tool_calls, tool_call_id,
+                        SELECT role, content, tool_calls, tool_call_id, name,
                                timestamp, turn_index
                         FROM messages
                         WHERE session_id = ?
@@ -286,6 +298,8 @@ class SessionStore:
                     pass
             if row["tool_call_id"]:
                 msg["tool_call_id"] = row["tool_call_id"]
+            if row["name"]:
+                msg["name"] = row["name"]
             messages.append(msg)
 
         return messages
@@ -394,6 +408,7 @@ class SessionStore:
                     m.get("content") or "",
                     json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
                     m.get("tool_call_id"),
+                    m.get("name"),
                     now,
                     current_turn,
                 ))
@@ -403,8 +418,8 @@ class SessionStore:
                     conn.executemany(
                         """INSERT INTO messages
                            (id, session_id, role, content, tool_calls, tool_call_id,
-                            timestamp, turn_index)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            name, timestamp, turn_index)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         rows,
                     )
                     conn.execute(

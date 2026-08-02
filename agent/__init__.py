@@ -70,6 +70,7 @@ class AIAgent:
         plan_approval_callback=None,  # === PlanMode NEW ===
         stream_callback=None,    # === 04 NEW: 流式输出回调 ===
         ask_user_bridge=None,    # ask_user CLI 桥接（渲染问题+读选择）
+        checkpoint_manager=None, # === Checkpoint NEW: 文件快照/回滚（对齐 Claude Code）===
     ):
         """
         参数：
@@ -201,6 +202,8 @@ class AIAgent:
         self.plan_approval_callback = plan_approval_callback
         # ask_user 桥接（CLI 渲染问题+读选择 / GUI HTTP）；None = 无桥接（fail-fast）
         self.ask_user_bridge = ask_user_bridge
+        # Checkpoint：文件快照/回滚（编辑工具通过 _checkpoint_track 追踪修改文件）
+        self.checkpoint_manager = checkpoint_manager
 
         # === B1 NEW: vision client（image_analyze / image_ocr 共用） ===
         # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。
@@ -941,6 +944,17 @@ class AIAgent:
         system_prompt = self._get_system_prompt()
         self._compression_attempts += 1
 
+        # 对齐 Claude Code compact_boundary：压缩摘要占位也入库，
+        # 恢复时模型能知道"此处之前的旧消息已被总结"（避免困惑/重复总结）
+        if self.conversation_history:
+            first_msg = self.conversation_history[0]
+            if first_msg.get("role") == "user":
+                first_content = first_msg.get("content", "")
+                if first_content.startswith(
+                    ("[之前的对话已自动总结]", "[紧急上下文压缩")
+                ):
+                    self._persist_session_message("user", first_content)
+
         # PostCompressReanchor：注入"刚醒来"brief
         brief_parts = [
             "你刚经历了上下文压缩，历史已被总结。"
@@ -1110,6 +1124,35 @@ class AIAgent:
                 logger.warning("POST_LLM_CALL hook 编排异常: %s", e)
         return response
 
+    def _checkpoint_track(self, path: str) -> None:
+        """编辑工具成功改文件后调用：记录该文件供 checkpoint 快照/回滚。"""
+        if self.checkpoint_manager:
+            try:
+                self.checkpoint_manager.track_file(path)
+            except Exception as e:
+                logger.debug("checkpoint track 失败: %s", e)
+
+    def _persist_session_message(self, role, content, *, tool_calls=None,
+                                 tool_call_id=None, name=None) -> None:
+        """把消息持久化到会话库（对齐 Claude Code：工具轮次完整入库）。
+
+        当前会话内 conversation_history 在内存里已含工具轮次；这里把
+        assistant(tool_calls) 和 tool 结果同步写入 sessions.db，让重开会话
+        恢复时能全量重放。user 输入和最终 assistant 回复由 cli.py 持久化，
+        这里只补工具轮次，避免重复。失败不阻塞主流程。
+        """
+        if not self.session_store or not self.session_id:
+            return
+        try:
+            self.session_store.append_message(
+                self.session_id, role, content or "",
+                tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
+                name=name,
+            )
+        except Exception as e:
+            logger.warning("持久化 %s 消息失败: %s", role, e)
+
     def _dispatch_tool_calls(self, assistant_msg, handle_function_call) -> bool:
         """执行 assistant_msg.tool_calls，处理 plan_approval + 失败统计 + idle 检查。
 
@@ -1139,6 +1182,11 @@ class AIAgent:
         if sig:
             assistant_entry["thinking_signature"] = sig
         self.conversation_history.append(assistant_entry)
+        # 对齐 Claude Code：assistant(tool_calls) 消息持久化，恢复时可重放
+        self._persist_session_message(
+            "assistant", assistant_entry.get("content") or "",
+            tool_calls=assistant_entry.get("tool_calls"),
+        )
 
         for tc in assistant_msg.tool_calls:
             tool_name = tc.function.name
@@ -1207,6 +1255,9 @@ class AIAgent:
                     "name": tool_name,
                     "content": tool_content,
                 })
+                self._persist_session_message(
+                    "tool", tool_content, tool_call_id=tc.id, name=tool_name,
+                )
                 plan_handled = True
 
             if not plan_handled:
@@ -1216,6 +1267,9 @@ class AIAgent:
                     "name": tool_name,
                     "content": result,
                 })
+                self._persist_session_message(
+                    "tool", result, tool_call_id=tc.id, name=tool_name,
+                )
 
                 # 失败重试检测
                 try:
