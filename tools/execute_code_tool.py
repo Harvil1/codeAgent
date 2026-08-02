@@ -13,8 +13,10 @@
 """
 import json
 import logging
+import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional
 
 from agent.permission import get_default_checker
@@ -64,9 +66,44 @@ EXECUTE_CODE_SCHEMA = {
 }
 
 
-# 会话级审批缓存：本次会话批准过的代码不再重复问。
-# 以代码前 200 字符做指纹（平衡唯一性和缓存命中率）。
+# 会话级审批缓存：
+# 1. 已批准的代码前 200 字符指纹（无路径的纯计算代码 / 有写操作的代码）
+# 2. 已批准的路径父目录（代码访问白名单外路径时，按目录缓存）
 _approved_code_fingerprints: set = set()
+_approved_code_dirs: set = set()
+
+# 匹配引号里的路径字符串（Windows D:\... / Unix /... / ~/...）
+_PATH_STR_RE = re.compile(r'["\']((?:[A-Za-z]:[\\/]|~[\\/]|[\\/])[^"\']+)["\']')
+
+# 写操作 / 命令执行特征：检测到这些即使路径已批准，代码执行也需审批
+# （execute_code 能执行任意代码，不能仅凭"路径在批准目录"就完全豁免）。
+_WRITE_LIKE_RE = re.compile(
+    r"\.write(?:text|bytes)?\(|open\([^)]*['\"]w|open\([^)]*['\"]a|"
+    r"os\.(?:remove|unlink|rmdir|rename|replace|system|popen|chmod|chown)|"
+    r"shutil\.|subprocess|tempfile|pickle\.|eval\(|exec\(",
+    re.IGNORECASE,
+)
+
+
+def _extract_path_dirs(code: str) -> set:
+    """提取代码里引号内路径的父目录集合。
+
+    用 Path.resolve() 规范化（展开 ~、消除 ..），防止 `D:/safe/../../etc` 这类
+    路径遍历绕过"已批准目录"检查——规范化后 D:/safe/../../etc → D:/etc，
+    不在任何批准目录内，会正确触发新审批。
+    """
+    dirs = set()
+    for m in _PATH_STR_RE.finditer(code):
+        raw = m.group(1)
+        try:
+            p = Path(raw).expanduser().resolve()
+        except Exception:
+            continue
+        if p.suffix:
+            dirs.add(str(p.parent))
+        else:
+            dirs.add(str(p))
+    return dirs
 
 
 def _check_execute_code_enabled(*, config: Optional[dict] = None, **_) -> bool:
@@ -79,26 +116,26 @@ def _request_approval(code: str, checker, **kwargs) -> Optional[str]:
 
     返回 None 表示通过，返回 JSON 字符串表示拒绝（直接短路返回给 LLM）。
 
-    审批链：
-      1. 会话缓存命中 → 通过
-      2. 持久化白名单命中（checker._persistent_whitelist）→ 通过
-      3. checker.approval_callback 问用户 → 通过则加入会话缓存
-      4. 无 callback → 拒绝（安全默认）
+    审批规则（对齐 read_file/write_file 的路径白名单体验，但保留代码执行审批）：
+      - 只读代码 + 访问路径全部已在批准目录 → 豁免（读白名单外路径不拦，同 read_file）
+      - 有写操作 / 命令执行（subprocess/eval 等）→ 即使路径已批准，代码执行仍需审批
+        （按 code 前 200 字符指纹缓存，批准后同 code 不再问）
+      - 访问未批准目录 → 逐个审批父目录（批准后跨会话持久化）
     """
-    fingerprint = code[:200]
+    dirs = _extract_path_dirs(code)
+    has_write = bool(_WRITE_LIKE_RE.search(code))
 
-    # 1. 会话缓存
-    if fingerprint in _approved_code_fingerprints:
+    # 已批准目录 = 会话缓存 + checker 的持久化路径白名单
+    approved_dirs = set(_approved_code_dirs)
+    persistent_paths = getattr(checker, "_approved_paths", set()) or set()
+    approved_dirs |= persistent_paths
+
+    pending = {d for d in dirs if d not in approved_dirs}
+
+    # 只读 + 路径全部已批准 → 豁免（execute_code 只读文件对齐 read_file 不审批）
+    if dirs and not pending and not has_write:
         return None
 
-    # 2. 持久化白名单（如果 checker 支持）
-    persistent = getattr(checker, "_persistent_whitelist", set())
-    approval_key = f"execute_code: {fingerprint}"
-    if approval_key in persistent:
-        _approved_code_fingerprints.add(fingerprint)
-        return None
-
-    # 3. 审批 callback
     callback = getattr(checker, "approval_callback", None)
     if callback is None:
         # 无 callback 时默认拒绝（安全默认 > 事后补救）
@@ -111,23 +148,51 @@ def _request_approval(code: str, checker, **kwargs) -> Optional[str]:
             ensure_ascii=False,
         )
 
-    try:
-        approved = bool(callback(approval_key))
-    except Exception:
-        approved = False
+    # 逐个批准待批的父目录
+    for d in sorted(pending):
+        try:
+            approved = bool(callback(d))
+        except Exception:
+            approved = False
+        if not approved:
+            return json.dumps(
+                {
+                    "error": "用户拒绝执行代码",
+                    "error_type": "permission_denied",
+                    "gate": "approval",
+                },
+                ensure_ascii=False,
+            )
+        _approved_code_dirs.add(d)
+        # 持久化到 checker 的路径白名单（跨会话不再询问）
+        if (hasattr(checker, "_approved_paths")
+                and hasattr(checker, "_save_paths_whitelist")):
+            try:
+                checker._approved_paths.add(d)
+                checker._save_paths_whitelist()
+            except Exception:
+                pass
 
-    if not approved:
-        return json.dumps(
-            {
-                "error": "用户拒绝执行代码",
-                "error_type": "permission_denied",
-                "gate": "approval",
-            },
-            ensure_ascii=False,
-        )
+    # 有写操作 / 命令执行，或纯计算无路径：代码执行需审批一次（code 指纹缓存）
+    if has_write or not dirs:
+        fingerprint = code[:200]
+        if fingerprint in _approved_code_fingerprints:
+            return None
+        try:
+            approved = bool(callback(f"execute_code: {fingerprint}"))
+        except Exception:
+            approved = False
+        if not approved:
+            return json.dumps(
+                {
+                    "error": "用户拒绝执行代码",
+                    "error_type": "permission_denied",
+                    "gate": "approval",
+                },
+                ensure_ascii=False,
+            )
+        _approved_code_fingerprints.add(fingerprint)
 
-    # 批准：加入会话缓存
-    _approved_code_fingerprints.add(fingerprint)
     return None
 
 

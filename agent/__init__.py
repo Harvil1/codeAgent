@@ -204,6 +204,9 @@ class AIAgent:
         self.ask_user_bridge = ask_user_bridge
         # Checkpoint：文件快照/回滚（编辑工具通过 _checkpoint_track 追踪修改文件）
         self.checkpoint_manager = checkpoint_manager
+        # 压缩后重注入：最近读过的文件 + 加载的技能（对齐 Claude Code）
+        self._recent_read_files: list = []
+        self._recent_skills: list = []
 
         # === B1 NEW: vision client（image_analyze / image_ocr 共用） ===
         # 默认 None；由 RuntimeContext 根据 config 注入，或测试时手工注入。
@@ -707,6 +710,16 @@ class AIAgent:
             # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
             tool_schemas = self._prepare_toolset_and_injections(messages)
 
+            # 防孤儿兜底：发送前修复 tool_call 配对。任何来源的孤儿 tool_result
+            # （压缩边界 / 流式断连 / 工具异常）都会让 Anthropic API 报 400：
+            # "tool_result must have corresponding tool_use in the previous message"。
+            # _fix_tool_call_pairs 补缺失的假 result 或删除无主的 tool_result。
+            try:
+                from agent.context_compressor import _fix_tool_call_pairs
+                messages = _fix_tool_call_pairs(messages)
+            except Exception as pair_err:
+                logger.warning("发送前配对修复失败（忽略）: %s", pair_err)
+
             # 调 LLM（含 max_tokens 升级 + reactive_compact）
             response = self._call_llm_with_escalation(
                 messages, tool_schemas, system_prompt,
@@ -973,6 +986,16 @@ class AIAgent:
             else "正常执行模式"
         )
         brief_parts.append(f"当前模式：{mode_text}")
+
+        # 对齐 Claude Code：压缩后重注入最近加载的技能正文 + 读过的文件，
+        # 让 agent 压缩后不"失忆"（避免反复手动读文件/重新 load_skill）。
+        reinject = self._build_reinject_context()
+        if reinject:
+            brief_parts.append(
+                "以下是你最近加载的技能和读过的文件（压缩后重注入，帮助恢复上下文）：\n"
+                f"{reinject}"
+            )
+
         brief_parts.append("请继续之前的工作。")
         messages.append({
             "role": "user",
@@ -1132,6 +1155,67 @@ class AIAgent:
             except Exception as e:
                 logger.debug("checkpoint track 失败: %s", e)
 
+    def _record_recent(self, kind: str, key: str) -> None:
+        """记录最近读过的文件 / 加载的技能（去重保序，保留最近 10 个）。
+
+        压缩后把这些重注入上下文，让 agent 不"失忆"（对齐 Claude Code）。
+        """
+        bucket = self._recent_read_files if kind == "read" else self._recent_skills
+        if key in bucket:
+            bucket.remove(key)
+        bucket.append(key)
+        del bucket[:-10]
+
+    def _load_skill_body(self, name: str) -> str:
+        """跨目录加载技能正文（去 frontmatter），失败返回空串。"""
+        try:
+            from tools.skill_tools import _find_skill_md, _get_skills_dirs
+            from agent.skill_commands import parse_frontmatter
+            md = _find_skill_md(
+                name,
+                _get_skills_dirs({"omnimate_home": str(self.omnimate_home)}),
+            )
+            if md is None:
+                return ""
+            content = md.read_text(encoding="utf-8")
+            _, body = parse_frontmatter(content)
+            return body.strip()
+        except Exception as e:
+            logger.debug("加载技能正文失败 %s: %s", name, e)
+            return ""
+
+    def _build_reinject_context(self) -> str:
+        """压缩后重注入最近技能正文 + 最近读过的文件。
+
+        上限：总 reinject_char_limit（默认 25000 字符）；每技能 5000、每文件 4000。
+        技能优先（官方确认的核心），其次是最近读过的文件（对症：减少反复手动读）。
+        """
+        budget = self.config.get("context", {}).get(
+            "reinject_char_limit", 25000,
+        )
+        from pathlib import Path  # 本模块顶部未导入，局部导入避免 NameError 被 except 吞
+        parts, used = [], 0
+        for skill in reversed(self._recent_skills[-5:]):
+            body = self._load_skill_body(skill)
+            if not body:
+                continue
+            snippet = body[:5000]
+            if used + len(snippet) > budget:
+                break
+            parts.append(f"[技能 {skill} 正文]\n{snippet}")
+            used += len(snippet)
+        for path in reversed(self._recent_read_files[-5:]):
+            try:
+                content = Path(path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            snippet = content[:4000]
+            if used + len(snippet) > budget:
+                break
+            parts.append(f"[最近读过的文件 {path}]\n{snippet}")
+            used += len(snippet)
+        return "\n\n".join(parts)
+
     def _persist_session_message(self, role, content, *, tool_calls=None,
                                  tool_call_id=None, name=None) -> None:
         """把消息持久化到会话库（对齐 Claude Code：工具轮次完整入库）。
@@ -1194,6 +1278,12 @@ class AIAgent:
                 tool_args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
                 tool_args = {}
+
+            # 压缩后重注入：记录最近读过的文件 / 加载的技能
+            if tool_name == "read_file" and tool_args.get("path"):
+                self._record_recent("read", str(tool_args["path"]))
+            elif tool_name == "load_skill" and tool_args.get("name"):
+                self._record_recent("skill", str(tool_args["name"]))
 
             if self.on_tool_call:
                 try:
