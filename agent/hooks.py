@@ -49,8 +49,21 @@ PayloadFn = Callable[[dict], Optional[dict]]
 
 @dataclass
 class HookScriptConfig:
-    """声明式 hook 的子进程配置。"""
-    command: list  # list[str]，如 ["python", "./hooks/audit.py"]
+    """声明式 hook 配置（支持 5 种 handler 类型）。
+
+    - command:  本地子进程（向后兼容，老 hook_loader 总会传它）
+    - http:     POST JSON 到 url，解析响应
+    - mcp_tool: 调 MCP 工具 mcp_server.mcp_tool
+    - prompt:   单轮 aux_llm 评估
+    - agent:    多轮子代理（delegate）评估
+    """
+    handler_type: str = "command"   # command | http | mcp_tool | prompt | agent
+    command: Optional[list] = None  # list[str]，command 类型用（老配置仍是必需）
+    url: Optional[str] = None       # http 类型用
+    mcp_server: Optional[str] = None  # mcp_tool 类型用
+    mcp_tool: Optional[str] = None    # mcp_tool 类型用
+    prompt: Optional[str] = None      # prompt / agent 类型用（模板字符串，.format(**payload)）
+    agent_name: Optional[str] = None  # agent 类型用（自定义子代理名，可选）
     timeout: float = 10.0
     env: Optional[dict] = None
 
@@ -192,7 +205,7 @@ class HookRegistry:
 
     def _invoke_declarative_user_prompt(self, hook, prompt, session_id):
         """跑子进程，按 IPC 协议解析。返回新 prompt 或 None。"""
-        from agent.hook_exec import run_script_hook  # 懒加载避免循环
+        from agent.hook_exec import dispatch_hook  # 懒加载避免循环
         payload = {
             "event": "user_prompt_submit",
             "session_id": session_id,
@@ -200,7 +213,7 @@ class HookRegistry:
             "hook_name": hook.name,
             "prompt": prompt,
         }
-        result = run_script_hook(hook, payload)
+        result = dispatch_hook(hook, payload)
         if result is None:
             return None
         # IPC: {"prompt": "..."} → 替换；其他/空 → None
@@ -241,7 +254,7 @@ class HookRegistry:
 
     def _invoke_declarative_pre_tool(self, hook, tool_name, args, session_id):
         """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。"""
-        from agent.hook_exec import run_script_hook
+        from agent.hook_exec import dispatch_hook
         payload = {
             "event": "pre_tool_use",
             "session_id": session_id,
@@ -250,7 +263,7 @@ class HookRegistry:
             "tool_name": tool_name,
             "args": args,
         }
-        result = run_script_hook(hook, payload)
+        result = dispatch_hook(hook, payload)
         if result is None:
             return None
         action = result.get("action", "allow")
@@ -279,7 +292,7 @@ class HookRegistry:
 
     def _invoke_declarative_post_tool(self, hook, tool_name, args, result, session_id):
         """跑子进程，按 IPC 协议解析。返回新 result 或 None。"""
-        from agent.hook_exec import run_script_hook
+        from agent.hook_exec import dispatch_hook
         payload = {
             "event": "post_tool_use",
             "session_id": session_id,
@@ -289,7 +302,7 @@ class HookRegistry:
             "args": args,
             "result": result,
         }
-        proc_result = run_script_hook(hook, payload)
+        proc_result = dispatch_hook(hook, payload)
         if proc_result is None:
             return None
         return proc_result.get("result")
@@ -316,26 +329,28 @@ class HookRegistry:
 
     def _invoke_declarative_stop(self, hook, session_id):
         """跑子进程，按 IPC 协议解析。返回 continue 消息或 None。"""
-        from agent.hook_exec import run_script_hook
+        from agent.hook_exec import dispatch_hook
         payload = {
             "event": "stop",
             "session_id": session_id,
             "timestamp": _now_iso(),
             "hook_name": hook.name,
         }
-        result = run_script_hook(hook, payload)
+        result = dispatch_hook(hook, payload)
         if result is None:
             return None
         return result.get("continue")
 
     def _invoke_declarative_script(self, hook, session_id: str, event: str,
                                    **extra) -> Optional[dict]:
-        """跑声明式 hook 子进程（统一入口）。返回 run_script_hook 的 dict 或 None。
+        """跑声明式 hook 子进程（统一入口）。返回 dispatch_hook 的 dict 或 None。
 
         声明式 hook 的 payload 统一含 event/session_id/timestamp/hook_name，
         事件特定字段通过 extra 传入（不传超大内容，只传元信息）。
+        dispatch_hook 按 hook.script.handler_type 分发到对应执行器
+        （command/http/mcp_tool/prompt/agent）。
         """
-        from agent.hook_exec import run_script_hook
+        from agent.hook_exec import dispatch_hook
         payload = {
             "event": event,
             "session_id": session_id,
@@ -343,7 +358,7 @@ class HookRegistry:
             "hook_name": hook.name,
         }
         payload.update(extra)
-        return run_script_hook(hook, payload)
+        return dispatch_hook(hook, payload)
 
     # ---- batch2-T2: 执行 PRE_LLM_CALL / POST_LLM_CALL ----
     def run_pre_llm_call(self, messages: list, tools: Optional[list],
