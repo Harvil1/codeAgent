@@ -1,7 +1,7 @@
 """Task System 工具集：持久化任务管理。
 
-和 todo_write 的区别：
-  - todo_write：内存清单，单会话，扁平
+和已废弃的 TodoWrite（todo_write 工具，已删除）的区别：
+  - TodoWrite（已废弃）：曾是内存清单工具，单会话，扁平结构，已被删除
   - task_create/update/complete：持久化到 .tasks/，跨会话，DAG 依赖
 
 工具：

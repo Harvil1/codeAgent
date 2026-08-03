@@ -279,6 +279,13 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
     hook.script.prompt 是 goal 模板（.format(**payload)）。
     hook.script.agent_name 透传给 _run_child（自定义子代理名，可选）。
     返回 dict（解析子代理输出里的 JSON），解析失败返回 {"decision": "review", ...}。
+
+    约束：hook_exec 是模块级函数，无父 agent 上下文，因此 _run_child 不传
+    config/agent_ref。后果：
+    - config：_run_child 内部从 load_config() 自取（fallback 路径），可正常运行。
+    - agent_ref：无中断传播、无 pendingToolUseSummary、无 checkpoint 追踪。
+    agent hook 设计用于一次性事件评估（不长任务运行），影响可控。
+    如需补全，可参考 _AUX_ROUTER_PROVIDER 模式增设 _AGENT_REF_PROVIDER 注入点。
     """
     # 懒加载避免循环
     from tools.delegate_tool import _run_child

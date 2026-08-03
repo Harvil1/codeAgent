@@ -19,15 +19,15 @@ Load plan, review critically, execute all tasks, report when complete.
 1. Read plan file
 2. Review critically - identify any questions or concerns about the plan
 3. If concerns: Raise them with your human partner before starting
-4. If no concerns: Create todos for the plan items (via `todo_write`) and proceed
+4. If no concerns: Create tasks for the plan items (via `task_create`) and proceed
 
 ### Step 2: Execute Tasks
 
 For each task:
-1. Mark as in_progress (via `todo_write`)
+1. Mark as in_progress (via `task_update`)
 2. Follow each step exactly (plan has bite-sized steps)
 3. Run verifications as specified
-4. Mark as completed (via `todo_write`)
+4. Mark as completed (via `task_complete`)
 
 ### Step 3: Complete Development
 

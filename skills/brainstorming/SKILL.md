@@ -19,7 +19,7 @@ Every project goes through this process. A todo list, a single-function utility,
 
 ## Checklist
 
-You MUST create a task for each of these items (using `todo_write`) and complete them in order:
+You MUST create a task for each of these items (using `task_create`) and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
 2. **Ask clarifying questions** — one at a time via the `ask_user` tool (multiple choice preferred), understand purpose/constraints/success criteria

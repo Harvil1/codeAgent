@@ -488,8 +488,23 @@ class PermissionChecker:
         except Exception as e:
             logger.debug("保存路径白名单失败: %s", e)
 
-    def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
-        """检查命令是否允许执行。"""
+    def check(
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        *,
+        mode_override: Optional[str] = None,
+    ) -> PermissionResult:
+        """检查命令是否允许执行。
+
+        参数：
+            mode_override: 可选的 mode 覆盖（"default" / "bypassPermissions"）。
+                          优先于 self.mode，用于子代理按 agent_ref.permission_mode
+                          做决策，而不污染全局 checker 状态（线程安全）。
+        """
+        # 决定本次 check 使用的 effective mode（override 优先）
+        effective_mode = mode_override or self.mode
+
         # 闸门 0:不可绕过的底线（自我保护 + 系统级 fatal）
         # 这两道检查在任何 mode（包括 bypassPermissions）下都执行
         self_violation = check_self_modification(command, cwd)
@@ -502,7 +517,7 @@ class PermissionChecker:
         # bypassPermissions 模式:跳过闸门 1/2/3,直接放行剩余所有命令
         # 适用场景:Claude Code 兼容的 --dangerously-skip-permissions,
         # 用户已明确接受风险,不需要审批。闸门 0 的两道底线仍生效。
-        if self.mode == "bypassPermissions":
+        if effective_mode == "bypassPermissions":
             return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
 
         # 闸门 1：硬拒绝
@@ -549,6 +564,7 @@ class PermissionChecker:
         *,
         write: bool = False,
         allowed_roots: Optional[List] = None,
+        mode_override: Optional[str] = None,
     ) -> PermissionResult:
         """检查文件路径是否可访问。
 
@@ -558,8 +574,15 @@ class PermissionChecker:
           闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线)
           闸门 2:写保护路径(项目代码目录)→ 硬拒(防入侵)
           闸门 3:其他全通过(用户已授权)
+
+        参数：
+            mode_override: 可选的 mode 覆盖。bypassPermissions 时跳过写保护（项目代码）
+                          之外的写约束（仍受 is_protected_path 硬底线限制）。
         """
-        # 闸门 1:受保护路径硬拒
+        # 决定本次 check_path 使用的 effective mode
+        effective_mode = mode_override or self.mode
+
+        # 闸门 1:受保护路径硬拒（任何模式下都拒——安全底线）
         prot = is_protected_path(path)
         if prot:
             return PermissionResult(False, f"受保护路径: {prot}", "protected")
@@ -568,6 +591,7 @@ class PermissionChecker:
             return PermissionResult(True, "ok", "ok")
 
         # 闸门 2:写保护路径(项目代码目录)→ 拒
+        # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
         wprot = is_write_protected_path(path)
         if wprot:
             return PermissionResult(
@@ -576,7 +600,9 @@ class PermissionChecker:
                 "protected",
             )
 
-        # 闸门 3:其他全通过(用户授权)
+        # 闸门 3:其他全通过(用户授权)。
+        # bypassPermissions 模式下同样全通过（写白名单约束在 safe_path 中已弱化为"其他全通过"，
+        # check_path 本就不再做白名单检查）。
         return PermissionResult(True, "ok", "ok")
 
     def add_to_whitelist(self, command: str):

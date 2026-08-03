@@ -17,6 +17,22 @@ from agent.permission import safe_path
 from tools.registry import registry
 
 
+def _get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
+    """从工具调用的 kwargs 里提取子代理 permission_mode override。
+
+    必修 1：工具读 kwargs["agent_ref"].permission_mode，作为本次 check 的 mode override。
+    线程安全：mode override 只影响本次调用，不修改全局 checker 状态。
+    返回 "bypassPermissions" / "default" / None（无 agent_ref 时）。
+    """
+    agent_ref = kwargs.get("agent_ref")
+    if agent_ref is None:
+        return None
+    mode = getattr(agent_ref, "permission_mode", None)
+    if mode in ("default", "bypassPermissions"):
+        return mode
+    return None
+
+
 def _content_hash(text: str) -> str:
     """计算文本的短 hash(sha256 前 16 位),用于 read-before-write 校验。"""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -181,9 +197,11 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     #   - 不在白名单 → 调 approval_callback 问用户（同意后加入持久化白名单）
     # 优先用注入的 permission_checker（cli.py 注入带 callback 的），
     # 没有则用全局默认（无 callback，白名单外路径会拒绝）。
+    # 必修 1：子代理 permission_mode 透传（bypassPermissions 放行白名单外路径）。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
-    perm = checker.check_path(path_str, write=True)
+    mode_override = _get_mode_override_from_kwargs(kwargs)
+    perm = checker.check_path(path_str, write=True, mode_override=mode_override)
     if not perm.allowed:
         return json.dumps(
             {"error": f"路径拒绝: {perm.reason}", "error_type": "permission_denied"},
@@ -433,9 +451,11 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         return json.dumps({"error": "new_str 不能为空(用空串表示删除)"}, ensure_ascii=False)
 
     # 路径权限检查(走 write 审批)
+    # 必修 1：子代理 permission_mode 透传。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
-    perm = checker.check_path(path_str, write=True)
+    mode_override = _get_mode_override_from_kwargs(kwargs)
+    perm = checker.check_path(path_str, write=True, mode_override=mode_override)
     if not perm.allowed:
         return json.dumps(
             {"error": f"路径拒绝: {perm.reason}", "error_type": "permission_denied"},
