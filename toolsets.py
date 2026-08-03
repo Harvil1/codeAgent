@@ -28,8 +28,6 @@ _CORE_TOOLS = [
     "subagent",  # 子代理（对齐 Claude Code Agent；delegate_task 为兼容别名）
     # 澄清（AskUserQuestion 复刻）
     "ask_user",
-    # 任务清单（P1 借鉴 业界 TodoWrite）
-    "todo_write",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）
     "task_create", "task_update", "task_complete", "task_list",
     # 任务系统扩展（Kanban）
@@ -94,7 +92,6 @@ TOOLSETS: Dict[str, dict] = {
             "skill_view",
             "load_skill",
             "session_search",
-            "todo_write",
             "exit_plan_mode",
         ],
         "includes": [],
