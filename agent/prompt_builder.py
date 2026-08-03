@@ -80,17 +80,11 @@ TOOL_USAGE_GUIDANCE = (
 )
 
 
-TODO_GUIDANCE = (
-    "## 任务追踪（TodoWrite）\n"
-    "3 步以上的任务必须先调 todo_write 创建清单:首项 `in_progress`,其余 `pending`;"
-    "每步完成时更新状态(同时只能 1 个 `in_progress`,强制顺序聚焦);"
-    "全部完成时全 `completed`。\n\n"
-    "### 开放式探索任务也要先列清单\n"
-    "用户给的是模糊目标(非步骤列表)时,**先拆成探索清单再动手**,不要一路 read_file 几十轮:"
-    "'学习这个项目' → [后端架构, 前端结构, skills, 部署/运行, 测试组织]"
-    "'排查 bug' → [复现路径, 相关代码, 数据流, 假设根因, 验证]。\n"
-    "列清单:(a)不漏维度 (b)用户能纠偏 (c)有节奏推进。\n\n"
-    "系统 3 轮未更新清单会自动提醒。清单仅存内存(单会话),跨会话用 task_create。"
+TASK_GUIDANCE = (
+    "## 任务追踪（Task System）\n"
+    "3 步以上的任务必须先调 task_create 创建任务列表，每步完成调 task_complete；"
+    "任务之间的依赖用 blocked_by 字段声明；多步并行用 task_list 查看 ready 任务。"
+    "Task System 跨会话持久化（~/.OmniMate/.tasks/）。"
 )
 
 
@@ -175,7 +169,6 @@ def build_system_prompt_layers(
     include_guidance: bool = True,
     language: str = "zh",
     # volatile 来源（运行时传入）
-    todo_state: Optional[str] = None,
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
 ) -> SystemPromptLayers:
@@ -199,7 +192,7 @@ def build_system_prompt_layers(
     if include_guidance:
         stable_parts.extend([
             MEMORY_GUIDANCE, SKILLS_GUIDANCE,
-            SESSION_SEARCH_GUIDANCE, TOOL_USAGE_GUIDANCE, TODO_GUIDANCE,
+            SESSION_SEARCH_GUIDANCE, TOOL_USAGE_GUIDANCE, TASK_GUIDANCE,
             DELEGATE_GUIDANCE,
         ])
     stable = "\n\n".join(stable_parts)
@@ -265,8 +258,6 @@ def build_system_prompt_layers(
 
     # ---- volatile 层 ----
     volatile_parts = []
-    if todo_state:
-        volatile_parts.append(f"<todo_state>{todo_state}</todo_state>")
     if task_state:
         volatile_parts.append(f"<current_tasks>{task_state}</current_tasks>")
     if reminder:
