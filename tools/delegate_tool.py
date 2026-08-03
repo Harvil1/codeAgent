@@ -418,8 +418,24 @@ def _run_child(
         parent_depth = int(kwargs.get("spawn_depth", 0))
     child_spawn_depth = parent_depth + 1
 
-    # 可选：隔离工作区
-    isolated = kwargs.get("isolated_workspace", False)
+    # 工具集选择（对齐 Claude Code Agent subagent_type）
+    # 提前解析 stype + custom_def，让 isolation=worktree 能在 worktree 创建分支前生效
+    # （曾有时序 bug：isolated 在 custom_def 写入 kwargs 前读取，worktree 永不创建）
+    stype = kwargs.get("subagent_type", "general-purpose")
+    custom_def = None
+    if stype not in ("general-purpose", "custom"):
+        # 自定义子代理名：从 .md 定义加载
+        from agent.agent_defs import get_agent_def
+        custom_def = get_agent_def(stype)
+        if custom_def is None:
+            raise RuntimeError(
+                f"未找到子代理定义: {stype}"
+                f"（检查 ~/.OmniMate/agents/ 和 ./.claude/agents/）"
+            )
+
+    # 可选：隔离工作区（自定义 .md 定义 isolation=worktree 也开启）
+    isolated = kwargs.get("isolated_workspace", False) or (
+        custom_def is not None and custom_def.isolation == "worktree")
     original_cwd = os.getcwd()
     workspace_cleanup = None
     if isolated:
@@ -439,31 +455,18 @@ def _run_child(
     child = None
     try:
         # 工具集选择（对齐 Claude Code Agent subagent_type）
-        # - 自定义名：从 .md 定义加载，按定义配置 toolsets/model/perm/maxTurns/isolation
+        # - 自定义名：custom_def 已在 worktree 分支前加载，按定义配置 toolsets/model/perm/maxTurns
         # - custom：用显式 enabled_toolsets
         # - general-purpose：按角色默认
-        stype = kwargs.get("subagent_type", "general-purpose")
-        custom_def = None
-        if stype not in ("general-purpose", "custom"):
-            # 自定义子代理名：从 .md 定义加载
-            from agent.agent_defs import get_agent_def
-            custom_def = get_agent_def(stype)
-            if custom_def is None:
-                raise RuntimeError(
-                    f"未找到子代理定义: {stype}"
-                    f"（检查 ~/.OmniMate/agents/ 和 ./.claude/agents/）"
-                )
-
         if custom_def:
             # 按定义配置
             child_toolsets = custom_def.tools or (
                 ["core"] if role == "orchestrator" else ["minimal"])
+            # 自定义 .md 的 disallowedTools 覆盖父 config（非 union）
             disabled = custom_def.disallowed_tools or None
             child_model = custom_def.model or model
             child_perm_mode = custom_def.permission_mode or "default"
             child_max_iter = custom_def.max_turns or kwargs.get("child_max_iterations", 50)
-            if custom_def.isolation == "worktree":
-                kwargs["isolated_workspace"] = True
         elif stype == "custom":
             child_toolsets = kwargs.get("enabled_toolsets") or (
                 ["core"] if role == "orchestrator" else ["minimal"])
