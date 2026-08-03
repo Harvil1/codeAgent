@@ -56,6 +56,10 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
                 if not cmd_name:
                     continue
 
+                # user-invocable: false → 不进 slash 命令（对用户隐藏，但模型仍可自动触发）
+                if frontmatter.get("user-invocable", True) is False:
+                    continue
+
                 commands[f"/{cmd_name}"] = {
                     "name": name,
                     "description": frontmatter.get("description", ""),

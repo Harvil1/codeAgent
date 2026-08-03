@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from agent.skill_commands import parse_frontmatter
+
 logger = logging.getLogger(__name__)
 
 
@@ -345,10 +347,14 @@ def _build_skill_index(skills_dirs) -> str:
         if rec.get("state") == "archived":
             continue
 
-        # 解析 frontmatter 获取描述
         try:
             content = skill_md.read_text(encoding="utf-8")
-            description = _extract_description(content)
+            frontmatter, _ = parse_frontmatter(content)
+            # disable-model-invocation: true → 不注入索引（模型不能自动触发）
+            if frontmatter.get("disable-model-invocation", False) is True:
+                continue
+            # 优先用 frontmatter 的 description，否则回退到 _extract_description
+            description = frontmatter.get("description", "") or _extract_description(content)
             if description:
                 lines.append(f"- /{name}: {description}")
             else:
