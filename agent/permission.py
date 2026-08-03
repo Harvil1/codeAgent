@@ -133,9 +133,14 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
 # - _FATAL_IRREVERSIBLE_PATTERNS(闸门 0 的子检查) 在任何模式下都拒绝,
 #   作为不可绕过的"硬底线",保护系统不被彻底破坏
 _FATAL_IRREVERSIBLE_PATTERNS: List[str] = [
-    r"\brm\s+-rf\s+/(?:--no-preserve-root)?\s*$",  # rm -rf / 根目录(递归删整个文件系统)
+    # rm -rf / 根目录(递归删整个文件系统)
+    # 注意:必须只命中"根目录",不能误伤 /home /tmp/x 等子路径。
+    # 拆成两条:第一条匹配 rm -rf / 后紧跟空格或行尾(排除 /home 等非根路径);
+    # 第二条专门兜底显式 --no-preserve-root(无论后面还有什么参数,都是致命的)。
+    r"\brm\s+-rf\s+/(?:\s|$)",
+    r"\brm\s+-rf\s+/\s+--no-preserve-root",
     r"\bmkfs\b",                                    # mkfs 格式化文件系统
-    r":\(\)\s*\{\s*:\|\:&\s*\}\s*;",                # fork bomb :(){ :|:& };
+    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;",        # fork bomb :(){ :|:& };(容忍空格变体)
     r"\bdd\s+if=.*of=/dev/[sh]d",                   # dd 覆盖磁盘设备
 ]
 _FATAL_IRREVERSIBLE_RE: List["re.Pattern"] = [
