@@ -125,12 +125,6 @@ class AIAgent:
         else:
             from constants import get_omnimate_home
             self.omnimate_home = get_omnimate_home()
-        # 任务清单（TodoWrite 机制，P1 借鉴 业界）
-        try:
-            from agent.todo import get_todo_manager
-            self.todo_manager = get_todo_manager()
-        except Exception:
-            self.todo_manager = None
         self.on_tool_call = on_tool_call
         self.on_response = on_response
 
@@ -596,7 +590,7 @@ class AIAgent:
         05 升级：分 stable/context 两层缓存，volatile 每次取最新。
         - stable：跨会话不变（身份、指导），几乎 100% 命中 prompt cache
         - context：单会话内不变（记忆/技能/CLAUDE.md）
-        - volatile：每轮可变（todo/reminder），不入缓存
+        - volatile：每轮可变（reminder），不入缓存
         """
         if not self._system_prompt_built:
             # 从 config 读 language（默认 "zh"）
@@ -617,14 +611,10 @@ class AIAgent:
     def _get_volatile_prompt(self) -> str:
         """每轮重建的 volatile 部分（05）。
 
-        当前含：todo reminder（3 轮未更新时）、task 状态。
-        不入 stable/context 缓存——直接拼到 system prompt 末尾。
+        当前为空（task 状态走 task 工具自取，无系统级 reminder）。
+        保留入口以便未来扩展，不入 stable/context 缓存——直接拼到 system prompt 末尾。
         """
-        parts = []
-        if self.todo_manager and self.todo_manager.should_remind():
-            parts.append("<todo_reminder>3 轮未更新 todo</todo_reminder>")
-        # task_state 等可按需扩展
-        return "\n\n".join(parts)
+        return ""
 
     def invalidate_system_prompt(self):
         """使缓存的 system prompt 失效。
@@ -702,7 +692,7 @@ class AIAgent:
                 if not self.iteration_budget.consume():
                     break
 
-            # 组装 messages + 注入 bg/cron/team/todo/plan_mode 等临时消息
+            # 组装 messages + 注入 bg/cron/team/plan_mode 等临时消息
             messages = self._assemble_turn_messages(system_prompt, injected)
 
             # 上下文压缩（接近 token 上限时触发，可能重建 system_prompt）
@@ -741,9 +731,6 @@ class AIAgent:
             # === batch2-T2: POST_LLM_CALL hook（LLM 返回后、处理 tool_calls 前）===
             response = self._run_post_llm_call_hook(response)
 
-            # 每轮 LLM 调用后递增 todo 计数
-            if self.todo_manager:
-                self.todo_manager.increment_round()
             # C1 修复：同步递增压缩会话状态轮次，L4 cooldown 依赖此值
             self._compress_session_state.increment_turn()
 
@@ -858,7 +845,7 @@ class AIAgent:
         """组装本轮 messages：system + history + 注入临时消息 + reminder。
 
         injected 里 bg/cron/team 注入后会被原地清空（避免下轮重复）。
-        TodoWrite reminder 和 plan_mode reminder 每轮重算（不消费）。
+        plan_mode reminder 每轮重算（不消费）。
         """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -901,12 +888,6 @@ class AIAgent:
                 "content": f"<team_messages>\n{team_text}\n</team_messages>",
             })
             injected["team_messages_text"] = ""
-
-        # TodoWrite reminder（每轮重算）
-        if self.todo_manager and self.todo_manager.should_remind():
-            reminder = self.todo_manager.format_for_reminder()
-            if reminder:
-                messages.append({"role": "user", "content": reminder})
 
         # Plan mode reminder（每轮重算）
         if self.plan_mode:
@@ -1013,13 +994,6 @@ class AIAgent:
             "你刚经历了上下文压缩，历史已被总结。"
             "身份和 system prompt 不变。"
         ]
-        if self.todo_manager:
-            try:
-                todo_brief = self.todo_manager.format_for_reminder()
-                if todo_brief:
-                    brief_parts.append(f"当前任务清单：\n{todo_brief}")
-            except Exception as e:
-                logger.warning("读取 todo 摘要失败（brief 跳过 todo 行）: %s", e)
         mode_text = (
             "计划模式（只能调研，不能修改）"
             if self.plan_mode
@@ -1370,7 +1344,7 @@ class AIAgent:
                     self.plan_mode = False
                     tool_content = json.dumps({
                         "plan_approved": True,
-                        "message": "用户已批准计划。现在可以开始执行：用 todo_write 列步骤然后执行。",
+                        "message": "用户已批准计划。现在可以开始执行：用 task_create 列出步骤，每步完成调 task_complete，依赖关系用 blocked_by。",
                     }, ensure_ascii=False)
                 else:
                     tool_content = json.dumps({
