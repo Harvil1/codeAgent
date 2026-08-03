@@ -71,6 +71,7 @@ class AIAgent:
         stream_callback=None,    # === 04 NEW: 流式输出回调 ===
         ask_user_bridge=None,    # ask_user CLI 桥接（渲染问题+读选择）
         checkpoint_manager=None, # === Checkpoint NEW: 文件快照/回滚（对齐 Claude Code）===
+        permission_mode: str = "default",  # === B2 NEW: default | bypassPermissions ===
     ):
         """
         参数：
@@ -199,6 +200,8 @@ class AIAgent:
         self.ask_user_bridge = ask_user_bridge
         # Checkpoint：文件快照/回滚（编辑工具通过 _checkpoint_track 追踪修改文件）
         self.checkpoint_manager = checkpoint_manager
+        # === B2 NEW: 权限模式（default | bypassPermissions），由 CLI 启动参数或 /permission 切换 ===
+        self.permission_mode = permission_mode
         # 压缩后重注入：最近读过的文件 + 加载的技能（对齐 Claude Code）
         self._recent_read_files: list = []
         self._recent_skills: list = []

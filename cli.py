@@ -178,6 +178,8 @@ class RuntimeContext:
     def initialize(self):
         """初始化所有组件。"""
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
+        # B2: perm_mode 在 try 外定义，AIAgent 构造处（行 460+）也要用
+        perm_mode = self.config.get("security", {}).get("permission_mode", "default")
         try:
             from agent.permission import set_default_checker, PermissionChecker
             from agent.settings import approved_commands_path, approved_paths_path
@@ -185,6 +187,7 @@ class RuntimeContext:
                 approval_callback=_make_approval_callback(),
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
+                mode=perm_mode,
             ))
         except Exception as e:
             logger.debug("权限检查器初始化失败（用默认）: %s", e)
@@ -477,6 +480,7 @@ class RuntimeContext:
             stream_callback=stream_callback,  # === 04 NEW: 流式输出 ===
             ask_user_bridge=_make_ask_user_bridge(),  # ask_user CLI 桥接
             checkpoint_manager=self.checkpoint_mgr,  # === Checkpoint NEW ===
+            permission_mode=perm_mode,  # === B2 NEW: 透传给 AIAgent ===
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
@@ -1134,6 +1138,31 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                 console.print("[yellow]已经在计划模式中。[/yellow]")
         return True
 
+    if name == "/permission":
+        # B2 NEW: /permission [default|bypass]
+        # 不带参数 → 显示当前模式；带参数 → 切换（同步改 checker.mode + rt.agent.permission_mode）
+        arg = args.strip().lower() if args else ""
+        from agent.permission import get_default_checker
+        checker = get_default_checker()
+        if not arg:
+            current = getattr(checker, "mode", "default")
+            console.print(f"当前权限模式: [cyan]{current}[/cyan]")
+            console.print(
+                "[dim]用法: /permission default 切回默认（带审批闸门） | "
+                "/permission bypass 切到 bypassPermissions（跳过审批，仍挡 fatal 根删除）[/dim]"
+            )
+            return True
+        if arg in ("default", "bypass", "bypasspermissions"):
+            new_mode = "bypassPermissions" if arg != "default" else "default"
+            if checker is not None:
+                checker.mode = new_mode
+            if getattr(rt, "agent", None) is not None:
+                rt.agent.permission_mode = new_mode
+            console.print(f"[green]权限模式切换为: {new_mode}[/green]")
+        else:
+            console.print("[yellow]用法: /permission [default|bypass][/yellow]")
+        return True
+
     if name == "/handoff":
         return _handle_handoff_command(args, rt)
 
@@ -1303,6 +1332,7 @@ def _show_help():
         "[cyan]/stats[/cyan]     会话统计（跨会话聚合）\n"
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
+        "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass]）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"

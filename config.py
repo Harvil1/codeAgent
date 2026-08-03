@@ -203,6 +203,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "command_approval": "ask",       # ask | always | never
         "dangerous_commands": [],
         "redact_secrets": True,
+        "permission_mode": "default",    # "default" | "bypassPermissions"（B2 NEW）
     },
 
     # 显示
