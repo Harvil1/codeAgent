@@ -71,23 +71,56 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
 def _parse_hook(h_cfg: dict, event: HookEvent):
     """解析单个 hook 配置。缺关键字段时返回 None + log warning。"""
     name = h_cfg.get("name")
-    command = h_cfg.get("command")
-
     if not name:
         logger.warning("settings.json hook 缺 name 字段，跳过: %s", h_cfg)
         return None
-    if not command or not isinstance(command, list):
-        logger.warning("settings.json hook '%s' 缺 command（或非 list），跳过", name)
+
+    ht = h_cfg.get("type", "command")
+    timeout = h_cfg.get("timeout", 10.0)
+
+    if ht == "command":
+        command = h_cfg.get("command")
+        if not command or not isinstance(command, list):
+            logger.warning("hook '%s' 缺 command（或非 list），跳过", name)
+            return None
+        script = HookScriptConfig(handler_type="command", command=command, timeout=timeout,
+                                  env=h_cfg.get("env"))
+    elif ht == "http":
+        url = h_cfg.get("url")
+        if not url:
+            logger.warning("hook '%s' (http) 缺 url，跳过", name)
+            return None
+        script = HookScriptConfig(handler_type="http", url=url, timeout=timeout)
+    elif ht == "mcp_tool":
+        server = h_cfg.get("server")
+        tool = h_cfg.get("tool")
+        if not server or not tool:
+            logger.warning("hook '%s' (mcp_tool) 缺 server/tool，跳过", name)
+            return None
+        script = HookScriptConfig(handler_type="mcp_tool", mcp_server=server,
+                                  mcp_tool=tool, timeout=timeout)
+    elif ht == "prompt":
+        prompt = h_cfg.get("prompt")
+        if not prompt:
+            logger.warning("hook '%s' (prompt) 缺 prompt，跳过", name)
+            return None
+        script = HookScriptConfig(handler_type="prompt", prompt=prompt, timeout=timeout)
+    elif ht == "agent":
+        prompt = h_cfg.get("prompt") or ""
+        agent_name = h_cfg.get("agent")
+        if not prompt and not agent_name:
+            logger.warning("hook '%s' (agent) 缺 prompt/agent，跳过", name)
+            return None
+        script = HookScriptConfig(handler_type="agent", prompt=prompt,
+                                  agent_name=agent_name, timeout=timeout)
+    else:
+        logger.warning("hook '%s' 未知 type '%s'，跳过", name, ht)
         return None
 
     return Hook(
         name=name,
         event=event,
         kind="declarative",
-        script=HookScriptConfig(
-            command=command,
-            timeout=h_cfg.get("timeout", 10.0),
-            env=h_cfg.get("env"),
-        ),
+        script=script,
         fail_closed=h_cfg.get("fail_closed", False),
     )

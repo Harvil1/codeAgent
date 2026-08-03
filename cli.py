@@ -452,6 +452,12 @@ class RuntimeContext:
                 # 没配置 aux 时用主 client（延迟到 agent 创建后注入）
                 pass
 
+        # === F2 NEW: 注入 aux_llm_router provider 给 hook_exec ===
+        # 声明式 hook 的 prompt/agent 类型 handler 需要通过 aux_llm 跑评估。
+        # hook_exec 模块级 provider 注入点，未配置 aux 时 lambda 返回 None（fail-open）。
+        from agent.hook_exec import set_aux_router_provider
+        set_aux_router_provider(lambda: aux_llm_router)
+
         agent = AIAgent(
             base_url=model_cfg.get("base_url"),
             api_key=api_key,
