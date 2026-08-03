@@ -69,6 +69,17 @@ def get_tool_definitions(
         disabled_set = set(disabled_tools)
         tool_names = [n for n in tool_names if n not in disabled_set]
 
+    # 技能触发的工具作用域（allowed/disallowed）
+    scope = getattr(agent, "_skill_tool_scope", None) if agent else None
+    if scope:
+        allowed_tools, disallowed_tools_scope = scope
+        if allowed_tools:
+            allow_set = set(allowed_tools)
+            tool_names = [n for n in tool_names if n in allow_set]
+        if disallowed_tools_scope:
+            dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
+            tool_names = [n for n in tool_names if n not in dis_scope]
+
     global _last_resolved_tool_names
     _last_resolved_tool_names = tool_names
 

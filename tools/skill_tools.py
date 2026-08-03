@@ -187,9 +187,19 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
 
     content = skill_md.read_text(encoding="utf-8")
     # 去掉 frontmatter，只返回指令正文
-    _, body = parse_frontmatter(content)
+    frontmatter, body = parse_frontmatter(content)
 
     bump_view(usage_dir, name)  # 加载也计入 view 计数
+
+    # allowed-tools / disallowed-tools：技能触发时临时调整可用工具集
+    allowed = frontmatter.get("allowed-tools")
+    disallowed = frontmatter.get("disallowed-tools")
+    agent = kwargs.get("agent_ref")
+    if agent is not None and (allowed or disallowed):
+        try:
+            agent._skill_tool_scope = (allowed, disallowed)
+        except Exception:
+            pass
 
     return json.dumps({
         "name": name,
