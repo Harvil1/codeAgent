@@ -304,6 +304,37 @@ def build_system_prompt(
     return layers.render_flat()
 
 
+def _current_cwd() -> str:
+    import os
+    return os.getcwd()
+
+
+def _paths_match(paths: list, cwd: str) -> bool:
+    """简化版 path glob 匹配：支持前缀目录 + 后缀扩展名 + * 通配。
+
+    基于 brief 的简化版（startswith 语义），并扩展支持绝对路径 cwd：
+    当 cwd 是绝对路径（os.getcwd() 返回值）时，检查 base 是否作为路径段出现。
+    """
+    import fnmatch
+    cwd_norm = cwd.replace("\\", "/")
+    for pat in paths or []:
+        pat = pat.replace("\\", "/")
+        # src/** → cwd 在 src/ 下即匹配
+        if pat.endswith("/**"):
+            base = pat[:-3]
+            # brief 原始语义：相对 cwd 前缀匹配（接受 srcfoo 边界，风险 2）
+            if cwd_norm.startswith(base):
+                return True
+            # 绝对 cwd：检查 base 作为路径段出现（/src/ 或末尾 /src）
+            if f"/{base}/" in cwd_norm or cwd_norm.endswith(f"/{base}"):
+                return True
+        # *.py → cwd 下有 .py 文件？简化：cwd 路径段不匹配，但保留技能（保守显示）
+        # 用 fnmatch 兜底
+        if fnmatch.fnmatch(cwd_norm, f"*/{pat}") or fnmatch.fnmatch(cwd_norm, pat):
+            return True
+    return False
+
+
 def _build_skill_index(skills_dirs) -> str:
     """构建技能索引(名字 + 描述),支持多目录(内置 + 用户)。
 
@@ -353,6 +384,11 @@ def _build_skill_index(skills_dirs) -> str:
             # disable-model-invocation: true → 不注入索引（模型不能自动触发）
             if frontmatter.get("disable-model-invocation", False) is True:
                 continue
+            # paths frontmatter：cwd 不匹配则不注入索引
+            paths = frontmatter.get("paths")
+            if paths:
+                if not _paths_match(paths, _current_cwd()):
+                    continue
             # 优先用 frontmatter 的 description，否则回退到 _extract_description
             description = frontmatter.get("description", "") or _extract_description(content)
             if description:
