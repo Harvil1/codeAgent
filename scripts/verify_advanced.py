@@ -6,7 +6,7 @@
 所有检查纯本地跑（不需要真 LLM），需要 LLM 的用 mock。
 
 P0：权限三道闸门 + 路径白名单 + 输出截断
-P1：TodoWrite + 错误恢复 + load_skill
+P1：错误恢复 + load_skill
 P2：子代理摘要 + worktree 隔离
 P3：MCP + Task System
 """
@@ -138,47 +138,6 @@ def check_terminal_output_truncation():
     if data.get("stdout_truncated") is True and "已截断" in data.get("stdout", ""):
         return _ok(f"{len(data['stdout'])} 字符")
     return _fail("未截断")
-
-
-# ---------------------------------------------------------------------------
-# P1 TodoWrite
-# ---------------------------------------------------------------------------
-
-def check_todo_write_basic():
-    from agent.todo import get_todo_manager
-    get_todo_manager().reset()
-    result = registry.dispatch("todo_write", {"items": [
-        {"text": "步骤 1", "status": "in_progress"},
-        {"text": "步骤 2", "status": "pending"},
-    ]})
-    data = json.loads(result)
-    if data.get("success") and data.get("count") == 2:
-        return _ok()
-    return _fail(f"todo_write 失败: {data}")
-
-
-def check_todo_write_blocks_multiple_in_progress():
-    result = registry.dispatch("todo_write", {"items": [
-        {"text": "A", "status": "in_progress"},
-        {"text": "B", "status": "in_progress"},
-    ]})
-    data = json.loads(result)
-    if data.get("success") is False and "in_progress" in data.get("error", ""):
-        return _ok()
-    return _fail("允许多个 in_progress")
-
-
-def check_todo_reminder_after_3_rounds():
-    from agent.todo import TodoManager
-    mgr = TodoManager()
-    mgr.write([{"text": "未完成", "status": "in_progress"}])
-    for _ in range(3):
-        mgr.increment_round()
-    if mgr.should_remind():
-        reminder = mgr.format_for_reminder()
-        if "todo_reminder" in reminder and "未完成" in reminder:
-            return _ok()
-    return _fail("3 轮后未触发 reminder")
 
 
 # ---------------------------------------------------------------------------
@@ -464,11 +423,6 @@ def main():
             ("write cwd 外被拒", lambda: check_write_file_blocks_outside_cwd(tmp)),
             ("write agent_home 允许", lambda: check_write_file_allows_agent_home(tmp, monkeypatch_env)),
             ("输出超 50000 字符截断", check_terminal_output_truncation),
-        ]),
-        ("P1 TodoWrite", [
-            ("todo_write 写入", check_todo_write_basic),
-            ("多个 in_progress 被拒", check_todo_write_blocks_multiple_in_progress),
-            ("3 轮触发 reminder", check_todo_reminder_after_3_rounds),
         ]),
         ("P1 错误恢复", [
             ("retry 判断（429/400）", check_retry_judgment),

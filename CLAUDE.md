@@ -25,7 +25,7 @@ OmniMate 是基于 `D:\project\hermes-agent-main\replication-guide\` 复刻指�
 ```
    ┌──────────────────────────────────────────────────┐
    │  权限三道闸门 · 路径白名单 · 输出截断            │
-   │  LLM 重试退避 · 备用模型切换 · TodoWrite reminder │
+   │  LLM 重试退避 · 备用模型切换 · 持久化任务图      │
    │  MCP 外部工具 · 持久化任务图 · worktree 隔离     │
    └──────────────────────────────────────────────────┘
 ```
@@ -61,7 +61,7 @@ tools/mcp_tool.py       ← 把 MCP 工具动态注册到 registry
 model_tools.py          ← handle_function_call + get_tool_definitions
                            （启用 mcp toolset 时动态发现 mcp__ 工具）
     ↑
-agent/__init__.py       ← AIAgent 主类（run_conversation 同步循环 + TodoWrite reminder）
+agent/__init__.py       ← AIAgent 主类（run_conversation 同步循环）
     ↑
 cli.py                  ← RuntimeContext 聚合所有组件
 ```
@@ -86,7 +86,7 @@ cli.py                  ← RuntimeContext 聚合所有组件
 | 形态 | Python 代码 | Markdown 文件 | 短文本条目 | JSON 任务对象 |
 | 创建者 | 开发者 | Agent + 用户 + 开发者 | Agent | Agent |
 | 持久化 | 永久（代码） | `~/.agent/skills/` | `~/.agent/MEMORY.md` | `~/.agent/.tasks/` |
-| 跨会话 | 是 | 是 | 是 | TodoWrite 否 / Task System 是 |
+| 跨会话 | 是 | 是 | 是 | 是 |
 | 注入位置 | 工具 schema | user 消息（触发时） | system prompt | 工具调用 |
 
 技能是数据不是代码——这让 LLM 能通过 `skill_manage` 工具自己创建和改进，是自学习的关键。
@@ -122,18 +122,15 @@ terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提�
 - AIAgent 构造参数：`AIAgent(..., fallback_model="deepseek-reasoner")`
 - **max_tokens 升级（P0-3）**：LLM 返回 `finish_reason="length"`（max_tokens 截断）时，先升 `max_tokens` 到 32768 用非流式重试一次（不打断思路），升级后仍不够才让主循环走续写路径。`MaxTokensEscalator` 整个会话幂等（最多升 1 次）。入口：流式 `agent/__init__.py:_call_llm_streaming` 末尾 + 非流式 `agent/__init__.py:run_conversation` 非流式分支
 
-## 任务追踪（两层）
+## 任务追踪（Task System）
 
-| 层 | TodoWrite | Task System |
-|---|---|---|
-| 文件 | `agent/todo.py` + `tools/todo_tool.py` | `agent/task_store.py` + `tools/task_tools.py` |
-| 持久化 | 内存（单会话） | `~/.agent/.tasks/{id}.json`（跨会话） |
-| 依赖 | 无 | DAG（`blocked_by` + `can_start` + `find_ready`） |
-| 约束 | 同时只能 1 个 in_progress | 状态机 pending→in_progress→completed |
-| 工具 | `todo_write`（替换式） | `task_create` / `task_update` / `task_complete` / `task_list` |
-| 提醒 | 3 轮未更新注入 `<todo_reminder>` | 无自动提醒（靠 LLM 调 task_list） |
-
-修改 `AIAgent.run_conversation` 时记得：每轮 LLM 调用后必须 `self.todo_manager.increment_round()`，调用前检查 `should_remind()` 并临时注入 reminder 消息（**不进 conversation_history**，避免污染持久化）。
+| 层 | Task System |
+|---|---|
+| 文件 | `agent/task_store.py` + `tools/task_tools.py` |
+| 持久化 | `~/.agent/.tasks/{id}.json`（跨会话） |
+| 依赖 | DAG（`blocked_by` + `can_start` + `find_ready`） |
+| 约束 | 状态机 pending→in_progress→completed |
+| 工具 | `task_create` / `task_update` / `task_complete` / `task_list` 等 |
 
 ## 扩展机制（MCP + worktree + load_skill）
 
@@ -196,7 +193,6 @@ uv sync                                 # 同步已声明依赖
 | 路径白名单 | `agent/permission.py:safe_path` |
 | LLM 重试/备用模型/退避抖动/529 早切 | `agent/llm_retry.py:call_with_retry` + `_compute_backoff`（抖动）+ 连续 529 计数 |
 | max_tokens 升级（finish_reason=length 自动重试） | `agent/llm_retry.py:MaxTokensEscalator` + `detect_length_finish`；入口 `agent/__init__.py:_call_llm_streaming`（流式）和 `run_conversation` 非流式分支 |
-| TodoWrite reminder 注入 | `agent/__init__.py`（搜 `should_remind`） |
 | 工具注册模式（添加新工具看这个） | `tools/terminal_tool.py`（含权限集成） |
 | 工具集可见性控制 | `toolsets.py:TOOLSETS` + `model_tools.py:get_tool_definitions` |
 | MCP 外部工具接入 | `agent/mcp_client.py` + `tools/mcp_tool.py` |
@@ -228,7 +224,6 @@ uv sync                                 # 同步已声明依赖
 - **`use_count=0` 不是归档理由** —— 一个 "Kubernetes 故障处理" 技能可能 2 个月不触发，但仍有价值。按内容判断，不按计数。
 - **子代理不继承对话历史** —— 独立 `AIAgent` 实例，只通过 `context` 参数传递必要信息。`summary_only=True`（默认）时连结果都被压缩。
 - **权限审批缓存是会话级的** —— `PermissionChecker._approved` 集合。新会话重置，避免长期信任漂移。
-- **TodoWrite 不持久化** —— 单会话用。跨会话任务用 Task System（`.tasks/{id}.json`）。
 - **MCP 工具依赖外部进程** —— server 崩溃后工具自动隐藏（`check_fn` 返回 False），但不自动重启。
 
 ## 测试策略
