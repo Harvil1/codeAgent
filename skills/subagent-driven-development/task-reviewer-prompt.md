@@ -8,7 +8,7 @@ code quality.
 more, nothing less) and is well-built (clean, tested, maintainable)
 
 ```
-delegate_task(
+subagent(
   goal: "Review Task N (spec + quality)",
   model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
          model silently inherits the session's most expensive one],

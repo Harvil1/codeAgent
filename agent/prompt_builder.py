@@ -95,14 +95,14 @@ TODO_GUIDANCE = (
 
 
 DELEGATE_GUIDANCE = (
-    "## 子代理委托（delegate_task）\n"
-    "大项目探索、多个独立子任务、或单子任务预计 10+ 次工具调用,必须用 delegate_task "
+    "## 子代理委托（subagent）\n"
+    "大项目探索、多个独立子任务、或单子任务预计 10+ 次工具调用,必须用 subagent "
     "省父 context(可 tasks=[...] 批量并行)。\n"
     "不要委托:强依赖父上下文(如基于已读内容做判断)、短任务(<5 次调用)、顺序型任务。\n"
-    "用法:delegate_task(goal=..., role='leaf', summary_only=True);"
+    "用法:subagent(prompt=..., role='leaf', summary_only=True);"
     "summary_only 自动把结果压缩成 300 字摘要回填。\n"
     "**并行铁律**:需要同时派多个子代理(如并行探索各模块)时,必须用 tasks=[...] "
-    "一次调用;禁止发多个独立 delegate_task——独立调用是串行执行的,逐个等待,不会并行。\n"
+    "一次调用;禁止发多个独立 subagent——独立调用是串行执行的,逐个等待,不会并行。\n"
     "判断标准:同一领域打算连续 read_file 5+ 次,立刻停,委托子代理——"
     "父 context 留给综合判断。"
 )

@@ -953,7 +953,7 @@ class AIAgent:
                         f"{pct}%）。为避免自动压缩发生在效果最差时：\n"
                         "1. 继续当前任务 → 建议主动 /compact 并说明保留哪些重点\n"
                         "2. 换新任务 → 建议 /new 新开对话（避免 context rot）\n"
-                        "3. 大文件读取 → 用 delegate_task 委托子代理，只带摘要回主上下文\n"
+                        "3. 大文件读取 → 用 subagent 委托子代理，只带摘要回主上下文\n"
                         "</context_management_tip>"
                     ),
                 })

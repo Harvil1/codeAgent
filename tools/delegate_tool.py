@@ -1,12 +1,12 @@
-"""delegate_task 工具：派生子代理执行独立任务。
+"""subagent 工具：派生子代理执行独立任务（对齐 Claude Code Agent）。
 
 两种角色：
   - leaf（默认）：执行者，不能再委托
     有 terminal/read_file 等工具
-    不能调用 delegate_task/clarify/memory/send_message（通过工具集隔离）
+    不能调用 subagent/clarify/memory/send_message（通过工具集隔离）
 
   - orchestrator：协调者，可以继续委托
-    可以调用 delegate_task 派生自己的子代理
+    可以调用 subagent 派生自己的子代理
     受 max_spawn_depth 限制（默认 2 层）
 
 三种模式：
@@ -71,7 +71,7 @@ def get_delegation_queue() -> DelegationCompletionQueue:
 
 
 # ---------------------------------------------------------------------------
-# delegate_task 工具
+# subagent 工具
 # ---------------------------------------------------------------------------
 
 DELEGATE_TASK_SCHEMA = {
@@ -114,7 +114,7 @@ DELEGATE_TASK_SCHEMA = {
             "tasks": {
                 "type": "array",
                 "items": {"type": "object"},
-                "description": "批量任务列表（并行执行）。要并行多个任务就用这个字段，不要多次调用 delegate_task",
+                "description": "批量任务列表（并行执行）。要并行多个任务就用这个字段，不要多次调用 subagent",
             },
             "background": {
                 "type": "boolean",
@@ -570,7 +570,7 @@ def _build_child_system_prompt(goal: str, context: str, role: str) -> str:
 
 
 def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
-    """根据运行时状态改 delegate_task schema description（03）。
+    """根据运行时状态改 subagent schema description（03）。
 
     让 LLM 看到当前剩余并发槽位，避免"试 spawn 被拒"浪费一轮。
     """

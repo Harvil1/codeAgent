@@ -226,10 +226,10 @@ Use words an agent would search for:
 **Move details to tool help:**
 ```bash
 # ❌ BAD: Document all flags in SKILL.md
-delegate_task supports --context, --isolated-workspace, --summary-only, ...
+subagent supports --context, --isolated-workspace, --summary-only, ...
 
 # ✅ GOOD: Reference the tool schema
-delegate_task supports multiple modes and filters. Check its schema for details.
+subagent supports multiple modes and filters. Check its schema for details.
 ```
 
 **Use cross-references:**

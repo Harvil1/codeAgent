@@ -11,7 +11,7 @@ Load plan, review critically, execute all tasks, report when complete.
 
 **Announce at start:** "I'm using the executing-plans skill to implement this plan."
 
-**Note:** Executing plans works much better with access to subagents. The quality of its work will be significantly higher if you can spawn subagents via `delegate_task`. If subagents are available, use `subagent-driven-development` instead of this skill.
+**Note:** Executing plans works much better with access to subagents. The quality of its work will be significantly higher if you can spawn subagents via `subagent`. If subagents are available, use `subagent-driven-development` instead of this skill.
 
 ## The Process
 

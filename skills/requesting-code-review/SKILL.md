@@ -31,7 +31,7 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 **2. Dispatch code reviewer subagent:**
 
-Call `delegate_task` with a `general-purpose` (leaf) subagent, filling the template at [code-reviewer.md](code-reviewer.md). Pass the filled template as the `context`, and set `summary_only` to `false` if you need the full review report rather than a summary.
+Call `subagent` with a `general-purpose` (leaf) subagent, filling the template at [code-reviewer.md](code-reviewer.md). Pass the filled template as the `context`, and set `summary_only` to `false` if you need the full review report rather than a summary.
 
 **Placeholders:**
 - `{DESCRIPTION}` - Brief summary of what you built
@@ -55,7 +55,7 @@ You: Let me request code review before proceeding.
 BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print $1}')
 HEAD_SHA=$(git rev-parse HEAD)
 
-[Call delegate_task with code reviewer prompt]
+[Call subagent with code reviewer prompt]
   DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
   PLAN_OR_REQUIREMENTS: Task 2 from docs/superpowers/plans/deployment-plan.md
   BASE_SHA: a7981ec

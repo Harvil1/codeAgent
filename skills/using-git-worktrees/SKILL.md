@@ -50,7 +50,7 @@ Honor any existing declared preference without asking. If the user declines cons
 
 ### 1a. Native Worktree Tool (preferred)
 
-The user has asked for an isolated workspace (Step 0 consent). OmniMate's native mechanism is `create_isolated_workspace(name="task-x")` from `tools/worktree.py` — it returns a `(path, cleanup)` tuple where `cleanup` removes the worktree. It also powers sub-agent isolation via `delegate_task(isolated_workspace=True)`. Use it and skip to Step 2.
+The user has asked for an isolated workspace (Step 0 consent). OmniMate's native mechanism is `create_isolated_workspace(name="task-x")` from `tools/worktree.py` — it returns a `(path, cleanup)` tuple where `cleanup` removes the worktree. It also powers sub-agent isolation via `subagent(isolated_workspace=True)`. Use it and skip to Step 2.
 
 Native tooling handles directory placement, branch creation, and cleanup automatically. Using `git worktree add` when you have a native tool creates phantom state your harness can't see or manage.
 
@@ -160,7 +160,7 @@ Ready to implement <feature-name>
 
 ### Fighting the tooling
 
-- **Problem:** Using `git worktree add` when OmniMate already provides isolation (`create_isolated_workspace` / `delegate_task(isolated_workspace=True)`)
+- **Problem:** Using `git worktree add` when OmniMate already provides isolation (`create_isolated_workspace` / `subagent(isolated_workspace=True)`)
 - **Fix:** Step 0 detects existing isolation. Step 1a defers to native tools.
 
 ### Skipping detection

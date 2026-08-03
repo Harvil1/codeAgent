@@ -1,9 +1,9 @@
 # Implementer Subagent Prompt Template
 
-Use this template when dispatching an implementer subagent via `delegate_task`.
+Use this template when dispatching an implementer subagent via `subagent`.
 
 ```
-delegate_task(
+subagent(
   goal: "Implement Task N: [task name]",
   model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
          model silently inherits the session's most expensive one],

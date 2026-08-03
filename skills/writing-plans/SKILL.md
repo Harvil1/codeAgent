@@ -13,7 +13,7 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
 
-**Context:** If working in an isolated workspace, it should have been created via `delegate_task(isolated_workspace=True)` (which uses `tools/worktree.py:create_isolated_workspace`).
+**Context:** If working in an isolated workspace, it should have been created via `subagent(isolated_workspace=True)` (which uses `tools/worktree.py:create_isolated_workspace`).
 
 **Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
 - (User preferences for plan location override this default)
@@ -143,7 +143,7 @@ Every step must contain the actual content an engineer needs. These are **plan f
 
 ## Self-Review
 
-After writing the complete plan, look at the spec with fresh eyes and check the plan against it. This is a checklist you run yourself — not a `delegate_task` dispatch.
+After writing the complete plan, look at the spec with fresh eyes and check the plan against it. This is a checklist you run yourself — not a `subagent` dispatch.
 
 **1. Spec coverage:** Skim each section/requirement in the spec. Can you point to a task that implements it? List any gaps.
 
@@ -159,7 +159,7 @@ After saving the plan, offer execution choice:
 
 **"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
 
-**1. Delegate-Driven (recommended)** - I dispatch a fresh delegate via `delegate_task` per task, review between tasks, fast iteration
+**1. Delegate-Driven (recommended)** - I dispatch a fresh delegate via `subagent` per task, review between tasks, fast iteration
 
 **2. Inline Execution** - Execute tasks in this session using `executing-plans`, batch execution with checkpoints
 
@@ -167,7 +167,7 @@ After saving the plan, offer execution choice:
 
 **If Delegate-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use subagent-driven-development
-- Fresh delegate (`delegate_task`) per task + two-stage review
+- Fresh delegate (`subagent`) per task + two-stage review
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use executing-plans

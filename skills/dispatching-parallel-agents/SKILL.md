@@ -65,10 +65,10 @@ Each agent gets:
 
 ### 3. Dispatch in Parallel
 
-Issue all sub-agent tasks in a single `delegate_task(tasks=[...])` call — they run in parallel:
+Issue all sub-agent tasks in a single `subagent(tasks=[...])` call — they run in parallel:
 
 ```python
-delegate_task(tasks=[
+subagent(tasks=[
     {"goal": "Fix agent-tool-abort.test.ts failures"},
     {"goal": "Fix batch-completion-behavior.test.ts failures"},
     {"goal": "Fix tool-approval-race-conditions.test.ts failures"},
@@ -76,7 +76,7 @@ delegate_task(tasks=[
 # All three run concurrently.
 ```
 
-One `delegate_task(tasks=[...])` call with multiple tasks = parallel execution. Calling `delegate_task` once per task, one at a time, = sequential.
+One `subagent(tasks=[...])` call with multiple tasks = parallel execution. Calling `subagent` once per task, one at a time, = sequential.
 
 ### 4. Review and Integrate
 
@@ -93,10 +93,10 @@ Good agent prompts are:
 2. **Self-contained** - All context needed to understand the problem
 3. **Specific about output** - What should the agent return?
 
-Pass the goal and context to `delegate_task`:
+Pass the goal and context to `subagent`:
 
 ```python
-delegate_task(
+subagent(
     goal="Fix the 3 failing tests in src/agents/agent-tool-abort.test.ts",
     context="""1. "should abort tool with partial output capture" - expects 'interrupted at' in message
 2. "should handle mixed completed and aborted tools" - fast tool aborted instead of completed
@@ -151,7 +151,7 @@ Return: Summary of what you found and what you fixed."""
 
 **Dispatch:**
 ```python
-delegate_task(tasks=[
+subagent(tasks=[
     {"goal": "Fix agent-tool-abort.test.ts"},
     {"goal": "Fix batch-completion-behavior.test.ts"},
     {"goal": "Fix tool-approval-race-conditions.test.ts"},

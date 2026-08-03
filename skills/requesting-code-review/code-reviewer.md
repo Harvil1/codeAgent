@@ -1,11 +1,11 @@
 # Code Reviewer Prompt Template
 
-Use this template when dispatching a code reviewer subagent via `delegate_task`.
+Use this template when dispatching a code reviewer subagent via `subagent`.
 
 **Purpose:** Review completed work against requirements and code quality standards before it cascades into more work.
 
 ```
-delegate_task(
+subagent(
   goal: "Review code changes"
   context: |
     You are a Senior Code Reviewer with expertise in software architecture,

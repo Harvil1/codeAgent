@@ -138,9 +138,9 @@ terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提�
 ## 扩展机制（MCP + worktree + load_skill）
 
 - **MCP**：`~/.agent/.mcp.json` 配置外部 server，启动时 `tools/mcp_tool.py:initialize_mcp` 连接 + 注册。工具以 `mcp__<server>__<tool>` 前缀暴露，`check_fn` 在 server 断开时自动隐藏。`enabled_toolsets` 要含 `"mcp"` 才对 LLM 可见。
-- **worktree 隔离**：`tools/worktree.py:create_isolated_workspace`。`delegate_task(isolated_workspace=True)` 让子代理在独立 git worktree 或临时目录跑，互不干扰。
+- **worktree 隔离**：`tools/worktree.py:create_isolated_workspace`。`subagent(isolated_workspace=True)` 让子代理在独立 git worktree 或临时目录跑，互不干扰。
 - **load_skill**：两级加载。system prompt 只放技能索引（名字+描述），LLM 按需调 `load_skill(name)` 获取完整正文（去 frontmatter）。区别于 `skill_view`（含 frontmatter，用户视角）。
-- **summary_only**：`delegate_task(summary_only=True)`（默认）时，子代理结果超 500 字用 LLM 压缩成 300 字摘要，节省父代理 context。
+- **summary_only**：`subagent(summary_only=True)`（默认）时，子代理结果超 500 字用 LLM 压缩成 300 字摘要，节省父代理 context。
 
 ## 常用命令
 

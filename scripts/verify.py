@@ -309,12 +309,12 @@ def check_curator_restore(tmp):
 # ---------------------------------------------------------------------------
 
 def check_delegate_sync(tmp):
-    """delegate_task 同步模式（mock）。"""
+    """subagent 同步模式（mock）。"""
     from unittest.mock import patch
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="子代理完成"):
         result = registry.dispatch(
-            "delegate_task",
+            "subagent",
             {"goal": "测试任务"},
             base_url=None, api_key="fake", model="test",
         )
@@ -330,7 +330,7 @@ def check_delegate_batch(tmp):
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="ok"):
         result = registry.dispatch(
-            "delegate_task",
+            "subagent",
             {"tasks": [{"goal": "a"}, {"goal": "b"}, {"goal": "c"}]},
             base_url=None, api_key="fake", model="test",
         )
@@ -424,7 +424,7 @@ def main():
             ("restore 恢复", lambda: check_curator_restore(tmp)),
         ]),
         ("委托", [
-            ("delegate_task 同步", lambda: check_delegate_sync(tmp)),
+            ("subagent 同步", lambda: check_delegate_sync(tmp)),
             ("批量委托并行", lambda: check_delegate_batch(tmp)),
         ]),
         ("上下文压缩", [
