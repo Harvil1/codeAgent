@@ -79,8 +79,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "snip_release_threshold": 30,
         "snip_keep_first": 3,
         "snip_keep_last": 47,
-        # L2 micro
-        "micro_keep_recent_results": 10,
+        # L2 micro（对齐 Claude Code microCompact：按单条大小折叠，保护最近 3 条）
+        "micro_keep_recent_results": 3,
         # L4 llm
         # 100K tokens ≈ 300K 字符。DeepSeek/OpenAI context 上限 64K-128K。
         # 消息数阈值只是兜底（token 接近窗口才 LLM 压缩，1M 模型放宽到 2000）
@@ -144,14 +144,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "cwd": None,
         "default_timeout": 120,
         "shell": None,
-    },
-
-    # execute_code 沙箱（让 LLM 直接写 Python 代码执行）
-    "execute_code": {
-        "enabled": True,             # False 时 execute_code 工具隐藏
-        "default_timeout": 30,       # 默认超时秒数
-        "require_approval": True,    # 首次执行审批，会话内缓存
-        "cwd": None,                 # None → 继承 terminal 的 cwd
     },
 
     # 记忆

@@ -108,41 +108,74 @@ def snip_compact(
 def micro_compact(
     messages: list,
     *,
+    threshold: int = 10000,
+    preview_chars: int = 200,
     keep_recent: int = 3,
+    agent_home=None,
 ) -> Tuple[list, bool]:
-    """L2：把较旧的 tool 消息 content 替换为占位 JSON。
+    """L2：对齐 Claude Code microCompact——按单条大小折叠笨重的 tool 结果。
 
-    无损：占位提示去 .transcripts/latest.jsonl 或重跑工具。
+    触发：单条 tool 结果 content 超过 threshold 才折叠（不是按数量）。
+    折叠：原文落盘到 .task_outputs/，占位留 full_at 指针（agent 可 read_file 读回）。
+    保护：最近 keep_recent（默认 3）条 tool 结果永远不折叠。
     安全：只换 content，保留 role/tool_call_id/name（不破 tool_call 配对）。
-    幂等：已是占位的不再动。
+    幂等：已是占位/已 offload 的不再动。
     """
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
-    if len(tool_indices) <= keep_recent:
+    if not tool_indices:
         return messages, False
+    protected = set(tool_indices[-keep_recent:])  # 最近 keep_recent 条保护
 
-    to_compact = set(tool_indices[:-keep_recent])  # 除最后 keep_recent 个外
     folded = 0
     out = []
     for i, m in enumerate(messages):
-        if i in to_compact and not _already_micro_placeheld(m):
-            new_m = dict(m)
-            orig_len = len(str(m.get("content", "")))
-            new_m["content"] = json.dumps({
-                "micro_compacted": True,
-                "orig_chars": orig_len,
-                "hint": (
-                    f"Tool {m.get('name', '?')} 结果已折叠，"
-                    f"完整内容见 .transcripts/latest.jsonl 或重跑工具"
-                ),
-            }, ensure_ascii=False)
-            out.append(new_m)
-            folded += 1
-        else:
+        if m.get("role") != "tool" or i in protected:
             out.append(m)
+            continue
+        content = m.get("content", "")
+        if not isinstance(content, str) or len(content) <= threshold:
+            out.append(m)
+            continue
+        if _already_micro_placeheld(m) or _already_offloaded(m):
+            out.append(m)
+            continue
+
+        # 落盘原文 + 留 full_at 指针（可读回，对齐 Claude Code microCompact）
+        if agent_home:
+            try:
+                from agent.output_offload import maybe_offload
+                new_content = maybe_offload(
+                    content,
+                    tool_call_id=m.get("tool_call_id") or f"micro_{i}",
+                    agent_home=agent_home,
+                    threshold=0,  # 强制落盘
+                    preview_chars=preview_chars,
+                )
+                if new_content != content:
+                    new_m = dict(m)
+                    new_m["content"] = new_content
+                    out.append(new_m)
+                    folded += 1
+                    continue
+            except Exception:
+                pass
+
+        # fallback（无 agent_home / 落盘失败）：hint 占位
+        new_m = dict(m)
+        new_m["content"] = json.dumps({
+            "micro_compacted": True,
+            "orig_chars": len(content),
+            "hint": (
+                f"Tool {m.get('name', '?')} 结果已折叠，"
+                f"完整内容见 .transcripts/latest.jsonl 或重跑工具"
+            ),
+        }, ensure_ascii=False)
+        out.append(new_m)
+        folded += 1
 
     if folded == 0:
         return messages, False
-    logger.info("L2 micro_compact: folded %d old tool results", folded)
+    logger.info("L2 micro_compact: folded %d oversized tool results", folded)
     return out, True
 
 
@@ -385,36 +418,23 @@ def compress_if_needed(
         threshold=config.get("snip_message_threshold", 200),
     )
 
-    # L2.5 + L2.6 合并:一次遍历 tool 消息,同时检查单条阈值 + 总量预算
+    # L2 micro（对齐 Claude Code microCompact：按单条大小折叠 + 落盘留指针 + 保最近3条）
+    # 替代原 L2.5 单条 offload——micro_compact 内部按大小触发 + 落盘 + 可读回
     offload_threshold = config.get("output_offload_threshold", 10000)
     offload_preview = config.get("output_offload_preview", 2000)
-    TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
     from agent.output_offload import maybe_offload
+    messages, c2 = micro_compact(
+        messages,
+        threshold=offload_threshold,
+        preview_chars=offload_preview,
+        keep_recent=config.get("micro_keep_recent_results", 3),
+        agent_home=agent_home,
+    )
 
-    c25 = False
-    # 第 1 趟:单条 offload(L2.5) + 收集索引
-    tool_indices = []
-    for i, m in enumerate(messages):
-        if m.get("role") != "tool":
-            continue
-        content = m.get("content", "")
-        if not isinstance(content, str):
-            continue
-        tool_indices.append(i)
-        if len(content) > offload_threshold:
-            new_content = maybe_offload(
-                content,
-                tool_call_id=m.get("tool_call_id") or f"orphan_{i}",
-                agent_home=agent_home,
-                threshold=offload_threshold,
-                preview_chars=offload_preview,
-            )
-            if new_content != content:
-                messages[i] = dict(m)
-                messages[i]["content"] = new_content
-                c25 = True
-
-    # 第 2 趟:总量预算(L2.6),用 offload 后的新长度
+    # L2.6 总量预算：全部 tool 结果合计仍超预算 → 最大的再落盘
+    c26 = False
+    TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if tool_indices:
         tool_total = sum(
             len(str(messages[i].get("content", ""))) for i in tool_indices
@@ -432,6 +452,8 @@ def compress_if_needed(
                 content = messages[i].get("content", "")
                 if not isinstance(content, str) or len(content) <= offload_threshold:
                     continue
+                if _already_offloaded(messages[i]):
+                    continue
                 new_content = maybe_offload(
                     content,
                     tool_call_id=messages[i].get("tool_call_id") or f"budget_{i}",
@@ -443,17 +465,11 @@ def compress_if_needed(
                     messages[i] = dict(messages[i])
                     messages[i]["content"] = new_content
                     tool_total -= len(content) - len(new_content)
-                    c25 = True
+                    c26 = True
                     logger.info(
                         "L2.6 总量预算 offload: tool 消息 %d %d→%d",
                         i, len(content), len(new_content),
                     )
-
-    # L2 micro（保留更多最近 tool 结果，减少压缩后失忆）
-    messages, c2 = micro_compact(
-        messages,
-        keep_recent=config.get("micro_keep_recent_results", 10),
-    )
 
     # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
     c4 = False
@@ -514,7 +530,7 @@ def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c1 or c25 or c2 or c4
+    changed = c1 or c2 or c26 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)

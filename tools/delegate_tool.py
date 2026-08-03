@@ -75,15 +75,17 @@ def get_delegation_queue() -> DelegationCompletionQueue:
 # ---------------------------------------------------------------------------
 
 DELEGATE_TASK_SCHEMA = {
-    "name": "delegate_task",
+    "name": "subagent",
     "description": (
-        "派生子代理执行独立任务。子代理有独立的上下文和工具。\n\n"
+        "派生子代理（subagent）执行独立任务（对齐 Claude Code Agent 工具）。"
+        "子代理有独立的上下文和工具，只把结果带回主代理。\n\n"
+        "主入口用 prompt 描述任务；subagent_type 选子代理类型。\n\n"
         "两种模式：\n"
         "- 同步（默认）：等待子代理完成后继续\n"
         "- 异步（background=True）：立即继续，结果稍后送达\n\n"
         "**并行规则（重要）**：需要同时派多个子代理（如并行探索多个模块）时，"
         "必须用 tasks=[...] 一次批量调用（内部真并行）。"
-        "禁止发多个独立的 delegate_task 调用——独立调用是串行执行的，会逐个等待，浪费大量时间。\n\n"
+        "禁止发多个独立的 subagent 调用——独立调用是串行执行的，会逐个等待，浪费大量时间。\n\n"
         "角色：\n"
         "- leaf（默认）：执行者，不能再委托\n"
         "- orchestrator：可继续派生（受 max_spawn_depth 限制）"
@@ -91,9 +93,19 @@ DELEGATE_TASK_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "子代理任务（Claude Code Agent 主入口，必填之一）",
+            },
+            "subagent_type": {
+                "type": "string",
+                "enum": ["general-purpose", "custom"],
+                "default": "general-purpose",
+                "description": "子代理类型：general-purpose=通用（minimal 工具集）；custom=自定义工具集（用 enabled_toolsets）",
+            },
             "goal": {
                 "type": "string",
-                "description": "子代理的目标（单任务模式）",
+                "description": "子代理的目标（兼容旧字段，等同 prompt）",
             },
             "context": {
                 "type": "string",
@@ -135,11 +147,13 @@ DELEGATE_TASK_SCHEMA = {
 
 
 def _handle_delegate_task(args: dict, **kwargs) -> str:
-    """处理委托请求。"""
-    goal = args.get("goal", "")
+    """处理委托请求（subagent）。"""
+    # prompt 是 Claude Code Agent 主入口，兼容 goal
+    goal = args.get("goal") or args.get("prompt", "")
     tasks = args.get("tasks")
     background = args.get("background", False)
     role = args.get("role", "leaf")
+    subagent_type = args.get("subagent_type", "general-purpose")
 
     # 批量模式
     if tasks:
@@ -162,6 +176,9 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
             "error": f"已达最大嵌套深度 {max_depth}",
             "current_depth": current_depth,
         }, ensure_ascii=False)
+
+    # 透传 subagent_type 给子代理创建（工具集选择）
+    kwargs["subagent_type"] = subagent_type
 
     if background:
         return _delegate_async(goal, args.get("context", ""), role, **kwargs)
@@ -417,8 +434,13 @@ def _run_child(
 
     child = None
     try:
-        # leaf 角色：限制工具集
-        if role == "leaf":
+        # 工具集选择（对齐 Claude Code Agent subagent_type）
+        # custom：用显式 enabled_toolsets；general-purpose：按角色默认
+        stype = kwargs.get("subagent_type", "general-purpose")
+        if stype == "custom":
+            child_toolsets = kwargs.get("enabled_toolsets") or (
+                ["core"] if role == "orchestrator" else ["minimal"])
+        elif role == "leaf":
             child_toolsets = kwargs.get("enabled_toolsets") or ["minimal"]
         else:  # orchestrator
             child_toolsets = kwargs.get("enabled_toolsets") or ["core"]
@@ -578,10 +600,20 @@ def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
 
 # 注册到 core 工具集（让 resolve("core") 能找到）
 registry.register(
+    name="subagent",
+    toolset="core",
+    schema=DELEGATE_TASK_SCHEMA,
+    handler=_handle_delegate_task,
+    schema_overrides_fn=_delegate_schema_overrides,
+    emoji="🤝",
+)
+# 兼容 alias：历史会话/记忆里的 delegate_task 调用仍可 dispatch 命中
+registry.register(
     name="delegate_task",
     toolset="core",
     schema=DELEGATE_TASK_SCHEMA,
     handler=_handle_delegate_task,
     schema_overrides_fn=_delegate_schema_overrides,
     emoji="🤝",
+    override=True,
 )

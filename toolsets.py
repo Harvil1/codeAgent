@@ -25,7 +25,7 @@ _CORE_TOOLS = [
     # 会话搜索（07 实现）
     "session_search",
     # 委托（09 实现）
-    "delegate_task",
+    "subagent",  # 子代理（对齐 Claude Code Agent；delegate_task 为兼容别名）
     # 澄清（AskUserQuestion 复刻）
     "ask_user",
     # 任务清单（P1 借鉴 业界 TodoWrite）
@@ -35,12 +35,12 @@ _CORE_TOOLS = [
     # 任务系统扩展（Kanban）
     "task_block", "task_unblock", "task_link", "task_comment",
     "task_heartbeat", "task_artifacts",
-    # Python 代码沙箱（让 LLM 直接写代码执行）
-    "execute_code",
     # Vision/Image 分析（B1：本地图片分析 + OCR）
     "image_analyze", "image_ocr",
     # 主动上下文压缩(借鉴 learn-claude-code s08,LLM 自己管理 context)
     "compact",
+    # 网页抓取（对齐 Claude Code WebFetch）
+    "web_fetch",
     # 后台任务（Phase 2b，check_fn 门控：无 bg 组件时自动隐藏）
     "bg_start", "bg_status", "bg_result", "bg_list", "bg_stop",
     # Team 多 agent 协作（Phase 4a）
