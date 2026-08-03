@@ -54,7 +54,7 @@ agent/llm_retry.py      ← LLM 调用重试/退避（被 agent 调用）
 tools/registry.py       ← 中央工具注册表（AST 自动发现 + check_fn TTL 缓存）
     ↑
 tools/*.py              ← 每个文件 import 后在模块顶层 registry.register()
-                           （terminal/file/memory/skill/delegate/todo/task）
+                           （terminal/file/memory/skill/delegate/task）
 agent/mcp_client.py     ← MCP 客户端（stdio transport）
 tools/mcp_tool.py       ← 把 MCP 工具动态注册到 registry
     ↑
@@ -215,6 +215,10 @@ uv sync                                 # 同步已声明依赖
 | 记忆三级粒度（L0/L1/L2） | `agent/memory_store.py:MemoryEntry.summary`（L1 摘要层）；索引行追加 summary，retriever 拿到的 index 自动含 L1 |
 | 任务级反思引擎 | `agent/reflection.py:apply_reflection`（aux_llm 从轨迹提炼 user/feedback/project 三类经验，自动 memory_save）；入口 `agent/__init__.py:AIAgent._trigger_reflection_async`（run_conversation 末尾异步触发） |
 | Memory Curator（记忆维护工人） | `agent/memory_curator.py:apply_automatic_transitions`（第 1 阶段确定性状态机）+ `run_memory_review`（第 2 阶段 LLM 合并/矛盾解决）+ `should_run_now_memory`（门控）；配置入口 `config["memory"]["curator"]`（enabled / interval_hours / llm_review_enabled / max_batch_size） |
+| WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
+| 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
+| 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
+| Hooks 5 种 handler 类型 | `agent/hook_exec.py:dispatch_hook`（command/http/mcp_tool/prompt/agent）；声明式配置解析在 `agent/hook_loader.py:_parse_hook`；aux_router 注入 `set_aux_router_provider`（cli.py 接线） |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -225,10 +229,13 @@ uv sync                                 # 同步已声明依赖
 - **子代理不继承对话历史** —— 独立 `AIAgent` 实例，只通过 `context` 参数传递必要信息。`summary_only=True`（默认）时连结果都被压缩。
 - **权限审批缓存是会话级的** —— `PermissionChecker._approved` 集合。新会话重置，避免长期信任漂移。
 - **MCP 工具依赖外部进程** —— server 崩溃后工具自动隐藏（`check_fn` 返回 False），但不自动重启。
+- **bypassPermissions 仍保留 fatal 底线** —— `rm -rf /` / `mkfs` / fork bomb / `dd` 覆盖磁盘在任何权限模式下都拒绝（`check_fatal_irreversible`）；bypass 只跳过审批，不是裸奔。
+- **自定义子代理项目级覆盖用户级** —— `<cwd>/.claude/agents/` 同名定义覆盖 `~/.OmniMate/agents/`（与 skills 多目录优先级一致）。
+- **`_skill_tool_scope` 会话内持久** —— load_skill 触发的 allowed/disabled tools 作用域当前无清除机制（技能切换覆盖语义），slash 注入路径暂未接入。
 
 ## 测试策略
 
-- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,todo,llm_retry,worktree,mcp,task_system}.py`
+- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,llm_retry,worktree,mcp,task_system,agent_defs,web_search,hooks}.py`
 - **集成**：`tests/test_integration.py` 用 mock OpenAI client 跑完整对话流程（含工具调用、记忆注入、中断）
 - **验证脚本**：`scripts/verify.py` 跑 11-scaffold.md 的 22 项检查清单，适合改完代码后快速回归（不含 P0-P3 新功能测试）
-- **新增功能必加测试**：每个新模块（permission/todo/mcp/task_store 等）都有独立测试文件，改完跑 `uv run pytest tests/` 确认无回归
+- **新增功能必加测试**：每个新模块（permission/mcp/task_store/agent_defs/web_search 等）都有独立测试文件，改完跑 `uv run pytest tests/` 确认无回归
