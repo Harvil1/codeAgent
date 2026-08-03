@@ -126,6 +126,42 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
 
 
 # ---------------------------------------------------------------------------
+# 不可绕过的系统级破坏（即使 bypassPermissions 也拒）
+# ---------------------------------------------------------------------------
+# 这组模式与 _DENY_COMMAND_PATTERNS 的区别:
+# - _DENY_COMMAND_PATTERNS(闸门 1) 在 bypassPermissions 模式下被跳过
+# - _FATAL_IRREVERSIBLE_PATTERNS(闸门 0 的子检查) 在任何模式下都拒绝,
+#   作为不可绕过的"硬底线",保护系统不被彻底破坏
+_FATAL_IRREVERSIBLE_PATTERNS: List[str] = [
+    r"\brm\s+-rf\s+/(?:--no-preserve-root)?\s*$",  # rm -rf / 根目录(递归删整个文件系统)
+    r"\bmkfs\b",                                    # mkfs 格式化文件系统
+    r":\(\)\s*\{\s*:\|\:&\s*\}\s*;",                # fork bomb :(){ :|:& };
+    r"\bdd\s+if=.*of=/dev/[sh]d",                   # dd 覆盖磁盘设备
+]
+_FATAL_IRREVERSIBLE_RE: List["re.Pattern"] = [
+    re.compile(p) for p in _FATAL_IRREVERSIBLE_PATTERNS
+]
+
+
+def check_fatal_irreversible(command: str) -> Optional[str]:
+    """检查系统级不可逆破坏命令(bypassPermissions 也无法绕过)。
+
+    这是整个权限系统中唯一"绝对不可绕过"的硬底线。即使在
+    bypassPermissions 模式下,这些命令也会被拒绝,因为它们会导致:
+    - 整个文件系统被删除(rm -rf /)
+    - 文件系统被格式化(mkfs)
+    - 系统资源耗尽(fork bomb)
+    - 物理磁盘数据被覆盖(dd)
+
+    返回拒绝原因,未命中返回 None。
+    """
+    for pat in _FATAL_IRREVERSIBLE_RE:
+        if pat.search(command):
+            return f"系统级不可逆命令（任何模式都拒绝）: {command}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 闸门 2：破坏性命令模式（需用户审批才能执行）
 # ---------------------------------------------------------------------------
 
@@ -345,6 +381,7 @@ class PermissionChecker:
         approval_callback: Optional[Callable[[str], bool]] = None,
         whitelist_file=None,
         paths_whitelist_file=None,
+        mode: str = "default",  # "default" | "bypassPermissions"
     ):
         """
         参数：
@@ -354,6 +391,11 @@ class PermissionChecker:
             whitelist_file: 持久化白名单 JSON 路径（如 ~/.OmniMate/approved_commands.json）。
             paths_whitelist_file: 路径白名单 JSON（如 ~/.OmniMate/approved_paths.json）。
                                   用户批准过的写入路径，跨会话不再询问。
+            mode: 权限模式。
+                  - "default": 三道闸门全开（黑名单 + 破坏性审批 + 默认通过）。
+                  - "bypassPermissions": 跳过闸门 1/2/3,直接放行所有命令;
+                    但仍保留闸门 0(自我保护 + fatal 硬底线)。
+                    用于 Claude Code 兼容的 --dangerously-skip-permissions 场景。
         """
         self.approval_callback = approval_callback
         self._approved = set()  # 会话内缓存（命令）
@@ -366,6 +408,10 @@ class PermissionChecker:
         self._approved_paths = set()
         if paths_whitelist_file:
             self._load_paths_whitelist()
+        # 权限模式（default / bypassPermissions）
+        if mode not in ("default", "bypassPermissions"):
+            raise ValueError(f"未知权限模式: {mode}（支持: default / bypassPermissions）")
+        self.mode = mode
 
     def _load_whitelist(self):
         """加载持久化白名单。"""
@@ -439,10 +485,20 @@ class PermissionChecker:
 
     def check(self, command: str, cwd: Optional[str] = None) -> PermissionResult:
         """检查命令是否允许执行。"""
-        # 闸门 0:自我保护(禁止修改 OmniMate 自身依赖)
+        # 闸门 0:不可绕过的底线（自我保护 + 系统级 fatal）
+        # 这两道检查在任何 mode（包括 bypassPermissions）下都执行
         self_violation = check_self_modification(command, cwd)
         if self_violation:
             return PermissionResult(False, f"自我保护: {self_violation}", "deny")
+        fatal = check_fatal_irreversible(command)
+        if fatal:
+            return PermissionResult(False, f"硬底线: {fatal}", "deny")
+
+        # bypassPermissions 模式:跳过闸门 1/2/3,直接放行剩余所有命令
+        # 适用场景:Claude Code 兼容的 --dangerously-skip-permissions,
+        # 用户已明确接受风险,不需要审批。闸门 0 的两道底线仍生效。
+        if self.mode == "bypassPermissions":
+            return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
 
         # 闸门 1：硬拒绝
         deny = check_command_deny(command)
