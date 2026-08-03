@@ -1163,6 +1163,29 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             console.print("[yellow]用法: /permission [default|bypass][/yellow]")
         return True
 
+    if name == "/agents":
+        # E2 NEW: 列出自定义子代理定义（~/.OmniMate/agents + ./.claude/agents）
+        from agent.agent_defs import scan_agent_defs
+        defs = scan_agent_defs()
+        if not defs:
+            console.print(
+                "[yellow]无自定义子代理。[/yellow] "
+                "在 [cyan]~/.OmniMate/agents/[/cyan] 或 [cyan]./.claude/agents/[/cyan] "
+                "放 .md 文件（frontmatter 含 name/description/tools/maxTurns 等）。"
+            )
+            return True
+        console.print(f"[green]共 {len(defs)} 个自定义子代理:[/green]")
+        for n, d in defs.items():
+            tools = ",".join(d.tools) if d.tools else "(默认)"
+            model_str = d.model or "继承"
+            perm_str = d.permission_mode or "default"
+            max_str = d.max_turns if d.max_turns else "默认"
+            console.print(
+                f"  [cyan]{n}[/cyan]: {d.description} "
+                f"[tools={tools}, model={model_str}, perm={perm_str}, maxTurns={max_str}]"
+            )
+        return True
+
     if name == "/handoff":
         return _handle_handoff_command(args, rt)
 
@@ -1333,6 +1356,7 @@ def _show_help():
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
         "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass]）\n"
+        "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.OmniMate/agents/*.md）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"

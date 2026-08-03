@@ -1034,7 +1034,10 @@ class AIAgent:
 
         # PlanMode: plan_mode 下强制切到 plan 工具集（只读）
         effective_toolsets = ["plan"] if self.plan_mode else self.enabled_toolsets
-        tool_schemas = get_tool_definitions(effective_toolsets, agent=self)
+        # E2 NEW: 从 config 透传 disabled_tools（子代理自定义 .md 定义的 disallowedTools）
+        _disabled = (self.config or {}).get("disabled_tools")
+        tool_schemas = get_tool_definitions(
+            effective_toolsets, disabled_tools=_disabled, agent=self)
 
         # 失败重试检测：连续 N 次工具失败 → 注入提醒
         if self._tool_failure_streak >= self._failure_threshold:

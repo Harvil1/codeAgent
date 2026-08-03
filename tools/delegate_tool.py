@@ -99,9 +99,13 @@ DELEGATE_TASK_SCHEMA = {
             },
             "subagent_type": {
                 "type": "string",
-                "enum": ["general-purpose", "custom"],
                 "default": "general-purpose",
-                "description": "子代理类型：general-purpose=通用（minimal 工具集）；custom=自定义工具集（用 enabled_toolsets）",
+                "description": (
+                    "子代理类型：general-purpose=通用（minimal 工具集）；"
+                    "custom=显式 enabled_toolsets；"
+                    "或自定义子代理名（扫描 ~/.OmniMate/agents/*.md 和 ./.claude/agents/*.md 的 name 字段）。"
+                    "自定义名时按定义的 model/tools/permissionMode/isolation/maxTurns 配置子代理。"
+                ),
             },
             "goal": {
                 "type": "string",
@@ -435,26 +439,77 @@ def _run_child(
     child = None
     try:
         # 工具集选择（对齐 Claude Code Agent subagent_type）
-        # custom：用显式 enabled_toolsets；general-purpose：按角色默认
+        # - 自定义名：从 .md 定义加载，按定义配置 toolsets/model/perm/maxTurns/isolation
+        # - custom：用显式 enabled_toolsets
+        # - general-purpose：按角色默认
         stype = kwargs.get("subagent_type", "general-purpose")
-        if stype == "custom":
+        custom_def = None
+        if stype not in ("general-purpose", "custom"):
+            # 自定义子代理名：从 .md 定义加载
+            from agent.agent_defs import get_agent_def
+            custom_def = get_agent_def(stype)
+            if custom_def is None:
+                raise RuntimeError(
+                    f"未找到子代理定义: {stype}"
+                    f"（检查 ~/.OmniMate/agents/ 和 ./.claude/agents/）"
+                )
+
+        if custom_def:
+            # 按定义配置
+            child_toolsets = custom_def.tools or (
+                ["core"] if role == "orchestrator" else ["minimal"])
+            disabled = custom_def.disallowed_tools or None
+            child_model = custom_def.model or model
+            child_perm_mode = custom_def.permission_mode or "default"
+            child_max_iter = custom_def.max_turns or kwargs.get("child_max_iterations", 50)
+            if custom_def.isolation == "worktree":
+                kwargs["isolated_workspace"] = True
+        elif stype == "custom":
             child_toolsets = kwargs.get("enabled_toolsets") or (
                 ["core"] if role == "orchestrator" else ["minimal"])
+            disabled = None
+            child_model = model
+            child_perm_mode = "default"
+            child_max_iter = kwargs.get("child_max_iterations", 50)
         elif role == "leaf":
             child_toolsets = kwargs.get("enabled_toolsets") or ["minimal"]
+            disabled = None
+            child_model = model
+            child_perm_mode = "default"
+            child_max_iter = kwargs.get("child_max_iterations", 50)
         else:  # orchestrator
             child_toolsets = kwargs.get("enabled_toolsets") or ["core"]
+            disabled = None
+            child_model = model
+            child_perm_mode = "default"
+            child_max_iter = kwargs.get("child_max_iterations", 50)
+
+        # 自定义子代理 system_prompt 覆盖（重建 system_prompt）
+        if custom_def and custom_def.system_prompt:
+            system_prompt = _build_child_system_prompt(
+                goal, context, role, override=custom_def.system_prompt)
+
+        # disabled_tools 透传：AIAgent.__init__ 无此参数，走 config 透传
+        # （get_tool_definitions 运行时从 self.config 读 disabled_tools，见 D2）
+        child_config = None
+        if disabled:
+            # 继承父 config（如有）再加 disabled_tools
+            parent_cfg = kwargs.get("config")
+            child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
+            child_config["disabled_tools"] = disabled
 
         child = AIAgent(
             base_url=base_url,
             api_key=api_key or None,
             auth_token=auth_token or None,
-            model=model,
+            model=child_model,
             model_format=model_format or "anthropic",
-            max_iterations=kwargs.get("child_max_iterations", 50),
+            max_iterations=child_max_iter,
             enabled_toolsets=child_toolsets,
             system_prompt_override=system_prompt,
             spawn_depth=child_spawn_depth,
+            permission_mode=child_perm_mode,
+            config=child_config,
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）
@@ -544,24 +599,39 @@ def _summarize_child_result(result: str, client, model: str) -> str:
         return result
 
 
-def _build_child_system_prompt(goal: str, context: str, role: str) -> str:
-    """构建子代理的 system prompt。"""
-    parts = [
-        "你是一个子代理，由父代理派生执行独立任务。",
-        f"\n你的角色: {role}",
-        f"\n你的任务目标: {goal}",
-    ]
+def _build_child_system_prompt(goal: str, context: str, role: str, override: str = None) -> str:
+    """构建子代理的 system prompt。
+
+    override 非空时，base 用 override（自定义子代理 .md 的 system_prompt），
+    仅追加上下文/约束/角色提示。None 时走默认构建（与历史行为一致）。
+    """
+    if override:
+        parts = [override]
+    else:
+        parts = [
+            "你是一个子代理，由父代理派生执行独立任务。",
+            f"\n你的角色: {role}",
+            f"\n你的任务目标: {goal}",
+        ]
 
     if context:
         parts.append(f"\n来自父代理的上下文:\n{context}")
 
-    parts.append(
-        "\n要求:\n"
-        "- 专注完成任务，不要偏离目标\n"
-        "- 完成后给出清晰的总结\n"
-        "- 遇到不可解决的阻碍时，返回错误说明\n"
-        "- 不要做任务范围外的事"
-    )
+    # 自定义 override 也补一份通用约束（不含默认 goal/role 文本）
+    if override:
+        parts.append(
+            "\n## 约束\n"
+            "- 独立执行，不假设父代理历史\n"
+            "- 结果要具体（文件路径、命令、数据）\n"
+        )
+    else:
+        parts.append(
+            "\n要求:\n"
+            "- 专注完成任务，不要偏离目标\n"
+            "- 完成后给出清晰的总结\n"
+            "- 遇到不可解决的阻碍时，返回错误说明\n"
+            "- 不要做任务范围外的事"
+        )
 
     if role == "leaf":
         parts.append("\n你是 leaf 角色，不能再派生子代理。")
