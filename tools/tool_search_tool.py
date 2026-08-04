@@ -64,6 +64,21 @@ def _handle_tool_search(args: dict, **kwargs) -> str:
     # 取所有 mcp__ 工具（只对这些生效，built-in 仍走完整 schema）
     mcp_names = [n for n in registry.list_all() if n.startswith("mcp__")]
 
+    # 尊重 child 的 mcp_server_filter（自定义子代理 mcpServers 字段）
+    # spec 第 286 行承诺：ToolSearch 只搜可见 mcp__ 工具（filter 后的子集）。
+    # 否则 LLM 拿到完整 schema 后调用，registry.dispatch 仍命中 → 实际执行被 filter 掉的工具。
+    agent = kwargs.get("agent_ref") or kwargs.get("agent")
+    mcp_filter = None
+    if agent and isinstance(getattr(agent, "config", None), dict):
+        mcp_filter = agent.config.get("mcp_server_filter")
+    if mcp_filter:
+        filtered = []
+        for n in mcp_names:
+            parts = n.split("__", 2)
+            if len(parts) >= 2 and parts[1] in mcp_filter:
+                filtered.append(n)
+        mcp_names = filtered
+
     # 打分（关键字在 name 或 description 里）
     keywords = query.split()
     scored = []

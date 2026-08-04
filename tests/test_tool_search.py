@@ -112,3 +112,68 @@ def test_get_tool_definitions_uses_catalog_for_mcp():
     params = by_name["mcp__test__probe"].get("parameters", {})
     # catalog 应缺详细 properties 或为空对象
     assert not params.get("properties", {}).get("x"), "catalog 不该含详细 parameters"
+
+
+def test_tool_search_respects_mcp_server_filter():
+    """child 的 mcp_server_filter 限制 tool_search 只搜可见子集。
+
+    场景：自定义子代理 mcpServers: [github]，LLM schema 目录里只有 github 工具
+    （C1 filter 生效），但调 tool_search(query='issue') 不应搜出 filesystem/jira 等
+    其他连接 server 的工具——否则 LLM 拿到完整参数后调用，registry.dispatch 命中，
+    实际执行被 filter 掉的工具，违背 spec 第 286 行承诺。
+    """
+    from tools.tool_search_tool import _handle_tool_search
+    from tools.registry import ToolRegistry, ToolEntry
+
+    fake_schemas = {
+        "mcp__github__list_issues": {
+            "name": "mcp__github__list_issues",
+            "description": "列 issue",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "mcp__filesystem__read_file": {
+            "name": "mcp__filesystem__read_file",
+            "description": "读文件 issue 相关",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "mcp__jira__create_ticket": {
+            "name": "mcp__jira__create_ticket",
+            "description": "建 issue ticket",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    fake_reg = ToolRegistry()
+    for n, s in fake_schemas.items():
+        fake_reg.register(
+            name=n, toolset="mcp", schema=s, handler=lambda args, **kw: "{}",
+        )
+    # child agent 只允许 github
+    class FakeAgent:
+        config = {"mcp_server_filter": ["github"]}
+
+    with patch("tools.tool_search_tool.registry", fake_reg):
+        out = json.loads(_handle_tool_search({"query": "issue"}, agent_ref=FakeAgent()))
+    names = [r["name"] for r in out["results"]]
+    # 应只返回 github 工具（即使 filesystem/jira 描述含 issue 也不该出现）
+    assert all("github" in n for n in names), f"含非 github 工具: {names}"
+    assert "mcp__github__list_issues" in names
+
+
+def test_tool_search_no_filter_returns_all_servers():
+    """无 mcp_server_filter（主代理场景）—— 所有 server 工具都搜得到。"""
+    from tools.tool_search_tool import _handle_tool_search
+    from tools.registry import ToolRegistry
+
+    fake_reg = ToolRegistry()
+    for n in ["mcp__github__list_issues", "mcp__jira__create_ticket"]:
+        fake_reg.register(
+            name=n, toolset="mcp",
+            schema={"name": n, "description": "issue", "parameters": {}},
+            handler=lambda args, **kw: "{}",
+        )
+    # 无 agent_ref → 不过滤
+    with patch("tools.tool_search_tool.registry", fake_reg):
+        out = json.loads(_handle_tool_search({"query": "issue"}))
+    names = [r["name"] for r in out["results"]]
+    assert "mcp__github__list_issues" in names
+    assert "mcp__jira__create_ticket" in names
