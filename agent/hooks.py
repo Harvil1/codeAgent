@@ -31,6 +31,14 @@ class HookEvent(Enum):
     PRE_COMPACT = "pre_compact"
     POST_COMPACT = "post_compact"
     CONFIG_CHANGE = "config_change"
+    # round3 NEW: 关键生命周期/审计事件
+    POST_TOOL_USE_FAILURE = "post_tool_use_failure"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_STOP = "subagent_stop"
+    TASK_CREATED = "task_created"
+    TASK_COMPLETED = "task_completed"
+    PERMISSION_REQUEST = "permission_request"
+    PERMISSION_DENIED = "permission_denied"
 
 
 # 程序式 hook 的签名
@@ -508,3 +516,145 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("CONFIG_CHANGE hook %s 异常（忽略）: %s",
                                hook.name, e)
+
+    # ---- round3 NEW: 7 个关键事件 ----
+
+    def register_post_tool_use_failure(self, fn, *, name=None):
+        self._hooks[HookEvent.POST_TOOL_USE_FAILURE].append(
+            Hook(name=name or "anonymous", event=HookEvent.POST_TOOL_USE_FAILURE,
+                 kind="programmatic", fn=fn))
+
+    def run_post_tool_use_failure(self, payload: dict) -> None:
+        """通知型：工具调用失败（result 含 error）时触发。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.POST_TOOL_USE_FAILURE]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "post_tool_use_failure",
+                        tool=payload.get("tool"), error=payload.get("error"),
+                        error_type=payload.get("error_type"),
+                    )
+            except Exception as e:
+                logger.warning("POST_TOOL_USE_FAILURE hook %s 异常: %s", hook.name, e)
+
+    def register_subagent_start(self, fn, *, name=None):
+        self._hooks[HookEvent.SUBAGENT_START].append(
+            Hook(name=name or "anonymous", event=HookEvent.SUBAGENT_START,
+                 kind="programmatic", fn=fn))
+
+    def run_subagent_start(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.SUBAGENT_START]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "subagent_start",
+                        subagent=payload.get("subagent"), goal=payload.get("goal"),
+                        spawn_depth=payload.get("spawn_depth"),
+                    )
+            except Exception as e:
+                logger.warning("SUBAGENT_START hook %s 异常: %s", hook.name, e)
+
+    def register_subagent_stop(self, fn, *, name=None):
+        self._hooks[HookEvent.SUBAGENT_STOP].append(
+            Hook(name=name or "anonymous", event=HookEvent.SUBAGENT_STOP,
+                 kind="programmatic", fn=fn))
+
+    def run_subagent_stop(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.SUBAGENT_STOP]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "subagent_stop",
+                        subagent=payload.get("subagent"), goal=payload.get("goal"),
+                        success=payload.get("success"),
+                    )
+            except Exception as e:
+                logger.warning("SUBAGENT_STOP hook %s 异常: %s", hook.name, e)
+
+    def register_task_created(self, fn, *, name=None):
+        self._hooks[HookEvent.TASK_CREATED].append(
+            Hook(name=name or "anonymous", event=HookEvent.TASK_CREATED,
+                 kind="programmatic", fn=fn))
+
+    def run_task_created(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.TASK_CREATED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "task_created",
+                        task_id=payload.get("task_id"), subject=payload.get("subject"),
+                        owner=payload.get("owner"),
+                    )
+            except Exception as e:
+                logger.warning("TASK_CREATED hook %s 异常: %s", hook.name, e)
+
+    def register_task_completed(self, fn, *, name=None):
+        self._hooks[HookEvent.TASK_COMPLETED].append(
+            Hook(name=name or "anonymous", event=HookEvent.TASK_COMPLETED,
+                 kind="programmatic", fn=fn))
+
+    def run_task_completed(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.TASK_COMPLETED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "task_completed",
+                        task_id=payload.get("task_id"),
+                        unblocked=payload.get("unblocked"),
+                    )
+            except Exception as e:
+                logger.warning("TASK_COMPLETED hook %s 异常: %s", hook.name, e)
+
+    def register_permission_request(self, fn, *, name=None):
+        self._hooks[HookEvent.PERMISSION_REQUEST].append(
+            Hook(name=name or "anonymous", event=HookEvent.PERMISSION_REQUEST,
+                 kind="programmatic", fn=fn))
+
+    def run_permission_request(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.PERMISSION_REQUEST]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "permission_request",
+                        command=payload.get("command"), reason=payload.get("reason"),
+                    )
+            except Exception as e:
+                logger.warning("PERMISSION_REQUEST hook %s 异常: %s", hook.name, e)
+
+    def register_permission_denied(self, fn, *, name=None):
+        self._hooks[HookEvent.PERMISSION_DENIED].append(
+            Hook(name=name or "anonymous", event=HookEvent.PERMISSION_DENIED,
+                 kind="programmatic", fn=fn))
+
+    def run_permission_denied(self, payload: dict) -> None:
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.PERMISSION_DENIED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "permission_denied",
+                        command=payload.get("command"), reason=payload.get("reason"),
+                        deny_type=payload.get("deny_type"),
+                    )
+            except Exception as e:
+                logger.warning("PERMISSION_DENIED hook %s 异常: %s", hook.name, e)
