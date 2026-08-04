@@ -29,6 +29,10 @@ class AgentDefinition:
     isolation: Optional[str] = None                          # "worktree" | None
     max_turns: Optional[int] = None
     system_prompt: str = ""
+    # Task C1 新增：memory/skills/mcpServers 三字段
+    memory: bool = False                                  # frontmatter "memory: true"
+    skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
+    mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
 
 
 def _user_agents_dir() -> Path:
@@ -61,6 +65,9 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             isolation=fm.get("isolation"),
             max_turns=fm.get("maxTurns"),
             system_prompt=body.strip(),
+            memory=bool(fm.get("memory", False)),
+            skills=fm.get("skills") or [],
+            mcp_servers=fm.get("mcpServers") or [],
         )
     except Exception as e:
         logger.warning("解析子代理定义失败 %s: %s", skill_md, e)

@@ -493,6 +493,45 @@ def _run_child(
             system_prompt = _build_child_system_prompt(
                 goal, context, role, override=custom_def.system_prompt)
 
+        # === Task C1: memory 字段 — child 独立记忆目录 ===
+        # 默认继承父 store（None 则 child 自己新建默认 store）
+        child_memory_store = kwargs.get("memory_store")
+        if custom_def and custom_def.memory:
+            from constants import get_omnimate_home
+            agent_memory_home = get_omnimate_home() / ".agent-memory" / custom_def.name
+            try:
+                agent_memory_home.mkdir(parents=True, exist_ok=True)
+                from agent.memory_store import MemoryStore
+                child_memory_store = MemoryStore(omnimate_home=agent_memory_home)
+                logger.info(
+                    "子代理 %s 使用独立记忆目录: %s",
+                    custom_def.name, agent_memory_home,
+                )
+            except Exception as e:
+                logger.warning("创建子代理独立记忆目录失败（用父 store）: %s", e)
+
+        # === Task C1: skills 字段 — 预装技能正文到 system_prompt ===
+        # 注意：必须在 system_prompt 最终确定之后、AIAgent 构造之前
+        if custom_def and custom_def.skills:
+            try:
+                from agent.skill_commands import parse_frontmatter
+                from constants import all_skills_dirs
+                for skill_name in custom_def.skills:
+                    found = False
+                    for d in all_skills_dirs():
+                        p = Path(d) / skill_name / "SKILL.md"
+                        if p.exists():
+                            _, body = parse_frontmatter(p.read_text(encoding="utf-8"))
+                            system_prompt += (
+                                f"\n\n## 预装技能：{skill_name}\n{body.strip()}\n"
+                            )
+                            found = True
+                            break
+                    if not found:
+                        logger.warning("子代理预装技能未找到: %s", skill_name)
+            except Exception as e:
+                logger.warning("子代理预装技能失败（继续）: %s", e)
+
         # disabled_tools 透传：AIAgent.__init__ 无此参数，走 config 透传
         # （get_tool_definitions 运行时从 self.config 读 disabled_tools，见 D2）
         child_config = None
@@ -501,6 +540,14 @@ def _run_child(
             parent_cfg = kwargs.get("config")
             child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
             child_config["disabled_tools"] = disabled
+
+        # === Task C1: mcp_servers 字段 — child 只暴露列出的 MCP server ===
+        # 必须在 child_config 构造之后、AIAgent 构造之前
+        if custom_def and custom_def.mcp_servers:
+            if child_config is None:
+                parent_cfg = kwargs.get("config")
+                child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
+            child_config["mcp_server_filter"] = custom_def.mcp_servers
 
         child = AIAgent(
             base_url=base_url,
@@ -514,6 +561,7 @@ def _run_child(
             spawn_depth=child_spawn_depth,
             permission_mode=child_perm_mode,
             config=child_config,
+            memory_store=child_memory_store,
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）

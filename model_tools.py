@@ -57,8 +57,17 @@ def get_tool_definitions(
 
     # 如果启用 mcp toolset，动态发现所有 mcp__ 前缀工具
     if "mcp" in enabled_toolsets:
+        # Task C1: child agent 可通过 config["mcp_server_filter"] 限定可见的 MCP server
+        mcp_filter = (agent.config.get("mcp_server_filter")
+                      if agent and isinstance(getattr(agent, "config", None), dict)
+                      else None)
         for name in registry.list_all():
             if name.startswith("mcp__") and name not in tool_names:
+                # name 格式 mcp__<server>__<tool>，filter 存在时只保留 filter 里的 server
+                if mcp_filter:
+                    parts = name.split("__", 2)
+                    if len(parts) >= 2 and parts[1] not in mcp_filter:
+                        continue
                 tool_names.append(name)
 
     # 去重（保序）
