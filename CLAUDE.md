@@ -219,6 +219,10 @@ uv sync                                 # 同步已声明依赖
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
 | Hooks 5 种 handler 类型 | `agent/hook_exec.py:dispatch_hook`（command/http/mcp_tool/prompt/agent）；声明式配置解析在 `agent/hook_loader.py:_parse_hook`；aux_router 注入 `set_aux_router_provider`（cli.py 接线） |
+| acceptEdits 权限模式 | `agent/permission.py:PermissionChecker.check`（acceptEdits 分支 + `_is_safe_fs_in_cwd` + `_SHELL_OPS` 复合命令守卫）；自动批 cwd 内 safe-fs + 写入，守 fatal 底线 |
+| 内置子代理 Explore/Plan | `agent/builtin_agents/{explore,plan}.md`（scan_agent_defs 默认加载，用户/项目可 override）；`toolsets["explore"]` 只读工具集 |
+| 自定义子代理 memory/skills/mcpServers | `agent/agent_defs.py:AgentDefinition`（3 字段）+ `tools/delegate_tool.py:_run_child`（独立记忆目录 ~/.OmniMate/.agent-memory/<name>/ + 预装技能 + mcp_server_filter） |
+| ToolSearch（MCP lazy schema） | `tools/tool_search_tool.py` + `tools/registry.py:get_catalog_entry` + `model_tools.py:get_tool_definitions`（拆 built-in 完整/mcp__ 精简目录） |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -232,6 +236,10 @@ uv sync                                 # 同步已声明依赖
 - **bypassPermissions 仍保留 fatal 底线** —— `rm -rf /` / `mkfs` / fork bomb / `dd` 覆盖磁盘在任何权限模式下都拒绝（`check_fatal_irreversible`）；bypass 只跳过审批，不是裸奔。
 - **自定义子代理项目级覆盖用户级** —— `<cwd>/.claude/agents/` 同名定义覆盖 `~/.OmniMate/agents/`（与 skills 多目录优先级一致）。
 - **`_skill_tool_scope` 会话内持久** —— load_skill 触发的 allowed/disabled tools 作用域当前无清除机制（技能切换覆盖语义），slash 注入路径暂未接入。
+- **acceptEdits 守 cwd 边界 + fatal 底线** —— cwd 内 safe-fs 命令（mkdir/touch/mv/cp/rm/del）+ cwd 内写入自动批；shell 复合操作符（&&/||/;/|/反引号/$()）一律交原闸门；`rm -rf /` 等系统级破坏在任何模式都拒。
+- **MCP schema 按需加载（ToolSearch）** —— mcp__ 工具默认只发精简目录条目（name+描述+hint），LLM 调 `tool_search(query)` 取详细参数；built-in 工具仍发完整 schema。
+- **子代理 memory 独立目录** —— `memory: true` 时子代理记忆写到 `~/.OmniMate/.agent-memory/<name>/`，与主记忆库隔离，不参与 curator 维护。
+- **mcp_server_filter 仅 schema 层** —— 自定义子代理 `mcpServers` 字段只过滤 LLM 可见 schema，registry 仍注册全部 MCP 工具（手动 dispatch 仍命中，对齐 Claude Code 语义）。
 
 ## 测试策略
 
