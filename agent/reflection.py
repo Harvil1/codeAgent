@@ -1,10 +1,11 @@
 """任务级反思引擎（CCALS-P0-2）。
 
 每个 run_conversation 结束后调一次，用 aux_llm（便宜模型）从对话轨迹中提炼
-3 类经验，自动 memory_save 写入对应分类：
+4 类经验，自动 memory_save 写入对应分类：
   - user 维度：新偏好、习惯、输出要求
   - feedback 维度：有效策略、需避开的坑、工具组合技巧
   - project 维度：项目规则、技术栈决策、业务逻辑
+  - reference 维度：外部系统指针（Linear/Slack/GitHub/URL/共享路径）
 
 设计：
 - aux_llm 不可用 → no-op（fail-open，不影响主流程）
@@ -30,10 +31,15 @@ REFLECTION_PROMPT_TEMPLATE = """你是经验提炼助手。从以下对话轨迹
 {existing_memories}
 </existing_memories>
 
-请提炼 0-5 条**值得长期记住**的经验,分三类:
+请提炼 0-5 条**值得长期记住**的经验,分四类:
 - user：用户偏好、习惯、输出要求
 - feedback：有效策略、需避开的坑、工具组合技巧
 - project：项目规则、技术栈决策、业务逻辑
+- **reference**: 外部系统指针——对话中提到的、值得跨会话记住的外部资源位置。
+  例：Linear 工单 ID（PROJ-123）、Slack 频道（#incident-xxx）、GitHub repo
+  （owner/repo）、文档 URL（https://...）、共享路径（/share/docs/xxx）。
+  提炼时机：用户明确指向某外部资源作为后续工作上下文。
+  不要把一次性查阅的 URL 算 reference（那不入记忆）。
 
 要求:
 1. 只输出真正非平凡的、跨会话有用的经验
@@ -43,7 +49,7 @@ REFLECTION_PROMPT_TEMPLATE = """你是经验提炼助手。从以下对话轨迹
    - supersedes: 被推翻的旧记忆 name
    - confidence: 1.0(最新观察覆盖旧观察)
 5. 每条字段:
-   - type: user / feedback / project 之一
+   - type: user / feedback / project / reference 之一
    - name: ≤20 字标题(L0)
    - description: ≤40 字索引钩子(L0.5)
    - summary: 80-100 字摘要层(L1)
@@ -168,7 +174,7 @@ def run_reflection(
 
     # 过滤+规范化每条
     valid = []
-    valid_types = {"user", "feedback", "project"}
+    valid_types = {"user", "feedback", "project", "reference"}
     for item in result:
         if not isinstance(item, dict):
             continue
