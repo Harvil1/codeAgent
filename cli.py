@@ -486,7 +486,7 @@ class RuntimeContext:
             stream_callback=stream_callback,  # === 04 NEW: 流式输出 ===
             ask_user_bridge=_make_ask_user_bridge(),  # ask_user CLI 桥接
             checkpoint_manager=self.checkpoint_mgr,  # === Checkpoint NEW ===
-            permission_mode=perm_mode,  # === B2 NEW: 透传给 AIAgent ===
+            permission_mode=self.config.get("security", {}).get("permission_mode", "default"),  # === B2 NEW: 透传给 AIAgent ===
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
