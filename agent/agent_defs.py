@@ -33,6 +33,7 @@ class AgentDefinition:
     memory: bool = False                                  # frontmatter "memory: true"
     skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
     mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
+    effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
 
 
 def _user_agents_dir() -> Path:
@@ -68,6 +69,7 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             memory=bool(fm.get("memory", False)),
             skills=fm.get("skills") or [],
             mcp_servers=fm.get("mcpServers") or [],
+            effort=fm.get("effort"),
         )
     except Exception as e:
         logger.warning("解析子代理定义失败 %s: %s", skill_md, e)

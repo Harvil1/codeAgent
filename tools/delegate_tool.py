@@ -564,6 +564,7 @@ def _run_child(
             system_prompt_override=system_prompt,
             spawn_depth=child_spawn_depth,
             permission_mode=child_perm_mode,
+            effort_level=(custom_def.effort if custom_def else None) or getattr(parent_agent, "effort_level", None),
             config=child_config,
             memory_store=child_memory_store,
         )

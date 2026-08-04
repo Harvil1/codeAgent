@@ -102,6 +102,7 @@ class AIAgent:
         self.auth_token = auth_token
         self.model = model
         self.model_format = model_format
+        self.effort_level = effort_level
         self.fallback_model = fallback_model
 
         # 备用 LLM client（主 client 重试耗尽时切换）

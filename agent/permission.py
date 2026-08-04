@@ -673,7 +673,7 @@ class PermissionChecker:
         # 闸门 1:受保护路径硬拒（任何模式下都拒——安全底线）
         prot = is_protected_path(path)
         if prot:
-            return PermissionResult(False, f"受保护路径: {prot}", "protected")
+            return self._deny(str(path), f"受保护路径: {prot}", "protected")
 
         if not write:
             return PermissionResult(True, "ok", "ok")
@@ -694,11 +694,7 @@ class PermissionChecker:
         # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
         wprot = is_write_protected_path(path)
         if wprot:
-            return PermissionResult(
-                False,
-                f"写保护(项目代码): {wprot}",
-                "protected",
-            )
+            return self._deny(str(path), f"写保护(项目代码): {wprot}", "protected")
 
         # 闸门 3:其他全通过(用户授权)。
         # bypassPermissions 模式下同样全通过（写白名单约束在 safe_path 中已弱化为"其他全通过"，
