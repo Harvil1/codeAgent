@@ -223,6 +223,10 @@ uv sync                                 # 同步已声明依赖
 | 内置子代理 Explore/Plan | `agent/builtin_agents/{explore,plan}.md`（scan_agent_defs 默认加载，用户/项目可 override）；`toolsets["explore"]` 只读工具集 |
 | 自定义子代理 memory/skills/mcpServers | `agent/agent_defs.py:AgentDefinition`（3 字段）+ `tools/delegate_tool.py:_run_child`（独立记忆目录 ~/.OmniMate/.agent-memory/<name>/ + 预装技能 + mcp_server_filter） |
 | ToolSearch（MCP lazy schema） | `tools/tool_search_tool.py` + `tools/registry.py:get_catalog_entry` + `model_tools.py:get_tool_definitions`（拆 built-in 完整/mcp__ 精简目录） |
+| Skills context:fork | `agent/skill_fork.py:run_skill_in_fork`（slash 触发 + load_skill 提示）；scan_skill_commands 读 frontmatter context 字段 |
+| Hooks 18 种事件 | `agent/hooks.py:HookEvent`（11 核心 + round3 加 POST_TOOL_USE_FAILURE/SUBAGENT_START+STOP/TASK_CREATED+COMPLETED/PERMISSION_REQUEST+DENIED）|
+| /rewind 4 模式 | `cli.py:_handle_rewind_command`（全恢复/只对话/只代码/从此压缩）|
+| reflection reference 型 | `agent/reflection.py:REFLECTION_PROMPT_TEMPLATE`（4 类：user/feedback/project/reference）|
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -240,6 +244,8 @@ uv sync                                 # 同步已声明依赖
 - **MCP schema 按需加载（ToolSearch）** —— mcp__ 工具默认只发精简目录条目（name+描述+hint），LLM 调 `tool_search(query)` 取详细参数；built-in 工具仍发完整 schema。
 - **子代理 memory 独立目录** —— `memory: true` 时子代理记忆写到 `~/.OmniMate/.agent-memory/<name>/`，与主记忆库隔离，不参与 curator 维护。
 - **mcp_server_filter 仅 schema 层** —— 自定义子代理 `mcpServers` 字段只过滤 LLM 可见 schema，registry 仍注册全部 MCP 工具（手动 dispatch 仍命中，对齐 Claude Code 语义）。
+- **context:fork 同步等待** —— 技能子代理跑完才回主循环（对齐官方 `background:false`）；子代理用 minimal 工具集，spawn_depth+1 防递归。
+- **Hooks 通知型事件 fail-open** —— round3 加的 7 个事件都是通知型，hook 异常只 log 不影响主流程。
 
 ## 测试策略
 
