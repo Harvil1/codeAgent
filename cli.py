@@ -1290,21 +1290,34 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
         return
     sid = snaps[idx]["id"]
 
-    # 恢复文件
-    restored = mgr.restore_files(sid)
-    if restored:
-        console.print(f"[green]已恢复 {len(restored)} 个文件[/green]")
-        for p in restored:
-            console.print(f"  [dim]{p}[/dim]")
-    else:
-        console.print("[yellow]该快照没有可恢复的文件[/yellow]")
-
-    # 可选恢复对话
+    # 4 模式菜单（对齐 Claude Code /rewind）
+    console.print(
+        f"[bold]快照 {sid[:19]} 含 {len(snaps[idx]['files'])} 文件 / "
+        f"{snaps[idx]['msg_count']} 条对话。恢复模式：[/bold]\n"
+        "  [cyan]1[/cyan] 全恢复（代码+对话）\n"
+        "  [cyan]2[/cyan] 只恢复对话\n"
+        "  [cyan]3[/cyan] 只恢复代码\n"
+        "  [cyan]4[/cyan] 从此压缩（截断到该点 + LLM 摘要）"
+    )
     try:
-        choice = console.input("[bold]也恢复对话到该时点？(y/N) > [/bold] ").strip().lower()
+        mode = console.input("[bold]选 [1-4] / 回车取消 > [/bold] ").strip()
     except (EOFError, KeyboardInterrupt):
         return
-    if choice in ("y", "yes"):
+    if mode not in ("1", "2", "3", "4"):
+        return
+
+    if mode == "1" or mode == "3":
+        # 恢复代码
+        restored = mgr.restore_files(sid)
+        if restored:
+            console.print(f"[green]已恢复 {len(restored)} 个文件[/green]")
+            for p in restored:
+                console.print(f"  [dim]{p}[/dim]")
+        else:
+            console.print("[yellow]该快照没有可恢复的文件[/yellow]")
+
+    if mode == "1" or mode == "2":
+        # 恢复对话
         conv = mgr.get_conversation(sid)
         if conv and rt.agent:
             rt.agent.conversation_history = conv
@@ -1312,6 +1325,9 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
             console.print(f"[green]已恢复对话（{len(conv)} 条消息）[/green]")
         else:
             console.print("[yellow]该快照没有对话副本[/yellow]")
+
+    if mode == "4":
+        _summarize_rewind(rt, sid)
 
 
 def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
