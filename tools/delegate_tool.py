@@ -291,7 +291,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     futures = {}
     try:
         for i, task in enumerate(tasks):
-            goal = task.get("goal", "")
+            goal = task.get("goal", "") or task.get("prompt", "")
             context = task.get("context", "")
             role = task.get("role", "leaf")
 

@@ -1,6 +1,6 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
-11 种 event（P2-13 扩展后）：
+18 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7）：
   核心 6 种：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
            + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2）
   新增 5 种（P2-13）：SESSION_START / SESSION_END
