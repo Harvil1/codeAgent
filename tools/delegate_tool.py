@@ -454,6 +454,10 @@ def _run_child(
     parent_agent = kwargs.get("agent_ref")
 
     child = None
+    # round3 D2 NEW: SUBAGENT_START/STOP 用的标志（False 默认，try 末尾设 True）
+    _fork_success = False
+    # round3 D2 NEW: 父 agent 的 hooks_registry（用于 SUBAGENT_START/STOP 审计）
+    _parent_hooks = getattr(parent_agent, "hooks_registry", None) if parent_agent else None
     try:
         # 工具集选择（对齐 Claude Code Agent subagent_type）
         # - 自定义名：custom_def 已在 worktree 分支前加载，按定义配置 toolsets/model/perm/maxTurns
@@ -587,6 +591,18 @@ def _run_child(
             aux_llm_router=progress_aux,
             interval=progress_interval,
         ):
+            # round3 D2 NEW: SUBAGENT_START（child.chat 前触发，fail-open）
+            if _parent_hooks is not None:
+                try:
+                    _parent_hooks.run_subagent_start({
+                        "session_id": kwargs.get("session_id", ""),
+                        "subagent": stype,
+                        "goal": goal,
+                        "spawn_depth": child_spawn_depth,
+                    })
+                except Exception:
+                    pass  # fail-open
+
             # 运行子代理
             result = child.chat(f"请执行任务: {goal}")
 
@@ -607,6 +623,9 @@ def _run_child(
         if summary_only and len(result) > 500:
             result = _summarize_child_result(result, child.llm_client, child.model)
 
+        # round3 D2 NEW: 子代理成功标志（finally 里据此触发 SUBAGENT_STOP）
+        _fork_success = True
+
         return result
     finally:
         # batch1-T4: 从父 agent._children 移除
@@ -623,6 +642,18 @@ def _run_child(
             except Exception:
                 pass
             workspace_cleanup()
+
+        # round3 D2 NEW: SUBAGENT_STOP（无论成功失败都触发，fail-open）
+        if _parent_hooks is not None:
+            try:
+                _parent_hooks.run_subagent_stop({
+                    "session_id": kwargs.get("session_id", ""),
+                    "subagent": stype,
+                    "goal": goal,
+                    "success": _fork_success,
+                })
+            except Exception:
+                pass  # fail-open
 
 
 def _summarize_child_result(result: str, client, model: str) -> str:

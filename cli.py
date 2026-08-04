@@ -188,6 +188,7 @@ class RuntimeContext:
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
                 mode=perm_mode,
+                hooks_registry=self.hooks_registry,  # round3 D2 NEW: 权限审计 hook
             ))
         except Exception as e:
             logger.debug("权限检查器初始化失败（用默认）: %s", e)

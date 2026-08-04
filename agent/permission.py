@@ -436,6 +436,7 @@ class PermissionChecker:
         whitelist_file=None,
         paths_whitelist_file=None,
         mode: str = "default",  # "default" | "bypassPermissions" | "acceptEdits"
+        hooks_registry=None,  # round3 D2 NEW: 权限审计 hook
     ):
         """
         参数：
@@ -453,6 +454,8 @@ class PermissionChecker:
                   - "acceptEdits": cwd 内 safe-fs（mkdir/touch/mv/cp/rm/del）命令和
                     cwd 内写入自动放行，其他命令走原三道闸门（fatal 底线 + 自我保护 +
                     受保护路径仍生效）。适合 agent 连续编辑代码场景。
+            hooks_registry: 可选的 HookRegistry，用于触发 PERMISSION_REQUEST /
+                           PERMISSION_DENIED 审计事件。fail-open：hook 异常不影响权限判断。
         """
         self.approval_callback = approval_callback
         self._approved = set()  # 会话内缓存（命令）
@@ -469,6 +472,25 @@ class PermissionChecker:
         if mode not in ("default", "bypassPermissions", "acceptEdits"):
             raise ValueError(f"非法 permission_mode: {mode}")
         self.mode = mode
+        # round3 D2 NEW: hooks registry 引用（可选，None=不触发审计 hook）
+        self._hooks_registry = hooks_registry
+
+    def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
+        """round3 D2 NEW: 统一 deny helper。
+
+        触发 PERMISSION_DENIED 审计 hook（fail-open）后返回 PermissionResult(False)。
+        所有 check() 的拒绝路径都走这个 helper，保证审计事件不遗漏。
+        """
+        if self._hooks_registry is not None:
+            try:
+                self._hooks_registry.run_permission_denied({
+                    "command": command,
+                    "reason": reason,
+                    "deny_type": deny_type,
+                })
+            except Exception:
+                pass  # fail-open：hook 异常不影响权限判断
+        return PermissionResult(False, reason, deny_type)
 
     def _load_whitelist(self):
         """加载持久化白名单。"""
@@ -561,10 +583,10 @@ class PermissionChecker:
         # 这两道检查在任何 mode（包括 bypassPermissions）下都执行
         self_violation = check_self_modification(command, cwd)
         if self_violation:
-            return PermissionResult(False, f"自我保护: {self_violation}", "deny")
+            return self._deny(command, f"自我保护: {self_violation}", "deny")
         fatal = check_fatal_irreversible(command)
         if fatal:
-            return PermissionResult(False, f"硬底线: {fatal}", "deny")
+            return self._deny(command, f"硬底线: {fatal}", "deny")
 
         # bypassPermissions 模式:跳过闸门 1/2/3,直接放行剩余所有命令
         # 适用场景:Claude Code 兼容的 --dangerously-skip-permissions,
@@ -579,7 +601,7 @@ class PermissionChecker:
         # 闸门 1：硬拒绝
         deny = check_command_deny(command)
         if deny:
-            return PermissionResult(False, f"硬拒绝: {deny}", "deny")
+            return self._deny(command, f"硬拒绝: {deny}", "deny")
 
         # 闸门 2：破坏性命令（需要审批）
         destructive = check_destructive(command)
@@ -591,11 +613,21 @@ class PermissionChecker:
                 return PermissionResult(True, "已批准（白名单）", "approval")
 
             if self.approval_callback is None:
-                return PermissionResult(
-                    False,
+                return self._deny(
+                    command,
                     f"破坏性命令需用户确认: {destructive}",
                     "destructive",
                 )
+
+            # round3 D2 NEW: PERMISSION_REQUEST 审计（进入用户审批前）
+            if self._hooks_registry is not None:
+                try:
+                    self._hooks_registry.run_permission_request({
+                        "command": command,
+                        "reason": destructive,
+                    })
+                except Exception:
+                    pass  # fail-open
 
             try:
                 approved = bool(self.approval_callback(command))
@@ -603,7 +635,7 @@ class PermissionChecker:
                 approved = False
 
             if not approved:
-                return PermissionResult(False, "用户拒绝", "approval")
+                return self._deny(command, "用户拒绝", "approval")
 
             # 批准：加入会话缓存 + 持久化白名单
             self._approved.add(cmd_key)

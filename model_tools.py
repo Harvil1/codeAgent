@@ -177,6 +177,7 @@ def handle_function_call(
         team_coordinator=team_coordinator,   # === P4a-T6 NEW ===
         team_name=team_name,             # === P4a-T6 NEW ===
         agent_ref=agent_ref,             # === P4b-T2 NEW ===
+        hooks_registry=hooks_registry,    # round3 D2 NEW: 透传给 task_tools 等下游 handler
     )
 
     # === P2-T7 NEW: POST_TOOL_USE hook ===
@@ -185,6 +186,22 @@ def handle_function_call(
             function_name, function_args, result,
             session_id=session_id or "",
         )
+
+    # === round3 D2 NEW: POST_TOOL_USE_FAILURE ===
+    # 在 POST_TOOL_USE hook 之后检测 result 是否含 error/error_type，
+    # 触发失败审计 hook。fail-open：hook 异常绝不影响主流程。
+    if hooks_registry and hooks_enabled:
+        try:
+            parsed = json.loads(result) if isinstance(result, str) else None
+            if isinstance(parsed, dict) and ("error" in parsed or "error_type" in parsed):
+                hooks_registry.run_post_tool_use_failure({
+                    "session_id": session_id or "",
+                    "tool": function_name,
+                    "error": parsed.get("error", ""),
+                    "error_type": parsed.get("error_type", ""),
+                })
+        except Exception:
+            pass  # fail-open
 
     return result
 

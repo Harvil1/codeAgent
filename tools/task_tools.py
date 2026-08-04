@@ -346,6 +346,23 @@ def _handle_task_create(args: dict, **kwargs) -> str:
         blocked_by=args.get("blocked_by"),
         owner=args.get("owner"),
     )
+
+    # round3 D2 NEW: TASK_CREATED hook（fail-open）
+    _hooks = kwargs.get("hooks_registry")
+    if _hooks is None:
+        _agent = kwargs.get("agent_ref")
+        _hooks = getattr(_agent, "hooks_registry", None) if _agent else None
+    if _hooks is not None:
+        try:
+            _hooks.run_task_created({
+                "session_id": kwargs.get("session_id", ""),
+                "task_id": task["id"],
+                "subject": task.get("subject", ""),
+                "owner": task.get("owner"),
+            })
+        except Exception:
+            pass  # fail-open
+
     return json.dumps({"success": True, "task": task}, ensure_ascii=False)
 
 
@@ -415,6 +432,23 @@ def _handle_task_complete(args: dict, task, **kwargs) -> str:
         {"id": t["id"], "subject": t.get("subject", ""), "status": t.get("status", "")}
         for t in store.find_ready()
     ]
+
+    # round3 D2 NEW: TASK_COMPLETED hook（fail-open）
+    _hooks = kwargs.get("hooks_registry")
+    if _hooks is None:
+        _agent = kwargs.get("agent_ref")
+        _hooks = getattr(_agent, "hooks_registry", None) if _agent else None
+    if _hooks is not None:
+        try:
+            _hooks.run_task_completed({
+                "session_id": kwargs.get("session_id", ""),
+                "task_id": task["id"],
+                "subject": task.get("subject", ""),
+                "unblocked": ready,
+            })
+        except Exception:
+            pass  # fail-open
+
     return json.dumps({
         "success": True,
         "task": completed,
