@@ -2142,10 +2142,28 @@ def run_interactive(resume_last: bool = False):
         elif cmd_name in rt.skill_commands:
             skill_info = rt.skill_commands[cmd_name]
             rest_msg = user_input[len(cmd_name):].strip()
-            user_input = execute_skill(
-                skill_info["skill_md_path"],
-                rest_msg or "(执行此技能)",
-            )
+            # round3: context:fork 技能在隔离子代理跑
+            if skill_info.get("context") == "fork" and getattr(rt, "agent", None) is not None:
+                from pathlib import Path as _P
+                from agent.skill_commands import parse_frontmatter as _pf
+                from agent.skill_fork import run_skill_in_fork
+                _raw = _P(skill_info["skill_md_path"]).read_text(encoding="utf-8")
+                _, _body_only = _pf(_raw)
+                _fork_result = run_skill_in_fork(
+                    skill_name=skill_info["name"],
+                    skill_body=_body_only,
+                    user_query=rest_msg or "(执行此技能)",
+                    agent_ref=rt.agent,
+                )
+                user_input = (
+                    f"[技能 {skill_info['name']} 在隔离子代理执行完毕]\n\n"
+                    f"{_fork_result}"
+                )
+            else:
+                user_input = execute_skill(
+                    skill_info["skill_md_path"],
+                    rest_msg or "(执行此技能)",
+                )
             # 记录技能使用
             bump_use(skills_dir(), skill_info["name"])
             console.print(f"[dim][已触发技能: {skill_info['name']}][/dim]")

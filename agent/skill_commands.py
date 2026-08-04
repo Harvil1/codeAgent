@@ -65,6 +65,7 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
                     "description": frontmatter.get("description", ""),
                     "skill_md_path": str(skill_md),
                     "skill_dir": str(skill_md.parent),
+                    "context": frontmatter.get("context"),  # round3: None | "fork"
                 }
             except Exception as e:
                 logger.warning("解析技能失败 %s: %s", skill_md, e)

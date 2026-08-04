@@ -191,6 +191,17 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
 
     bump_view(usage_dir, name)  # 加载也计入 view 计数
 
+    # round3: context:fork 技能提示 LLM 用 subagent 跑
+    if frontmatter.get("context") == "fork":
+        return json.dumps({
+            "name": name,
+            "body": body.strip(),
+            "path": str(skill_md),
+            "fork_required": True,
+            "hint": ("该技能声明 context:fork，应在隔离子代理里执行。"
+                     "请用 subagent 工具派生子代理，把上述技能正文作为子代理指令运行。"),
+        }, ensure_ascii=False)
+
     # allowed-tools / disallowed-tools：技能触发时临时调整可用工具集
     allowed = frontmatter.get("allowed-tools")
     disallowed = frontmatter.get("disallowed-tools")
