@@ -92,9 +92,24 @@ def get_tool_definitions(
     global _last_resolved_tool_names
     _last_resolved_tool_names = tool_names
 
-    # 从 registry 获取（check_fn 过滤）
+    # 拆分 built-in 和 mcp__：
+    # - built-in 工具发完整 schema（数量少、高频，schema 本来就不大）
+    # - mcp__ 工具发精简目录条目（省 token，LLM 用 tool_search 按需取详细参数）
+    # 注意：上面的 mcp_server_filter 已经过滤过 tool_names 里的 mcp__ 名，
+    # 这里只是把过滤后的 mcp__ 名走 catalog 路径，两者不冲突。
+    builtin_names = [n for n in tool_names if not n.startswith("mcp__")]
+    mcp_names = [n for n in tool_names if n.startswith("mcp__")]
+
     runtime_ctx = {"agent": agent} if agent is not None else None
-    return registry.get_definitions(tool_names, quiet=True, runtime_ctx=runtime_ctx)
+    definitions = registry.get_definitions(builtin_names, quiet=True, runtime_ctx=runtime_ctx)
+
+    # mcp__ 用目录条目（精简：name + 短描述 + hint）
+    for name in mcp_names:
+        cat = registry.get_catalog_entry(name)
+        if cat is not None:
+            definitions.append({"type": "function", "function": cat})
+
+    return definitions
 
 
 def handle_function_call(

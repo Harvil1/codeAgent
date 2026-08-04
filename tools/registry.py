@@ -308,6 +308,30 @@ class ToolRegistry:
 
         return definitions
 
+    def get_catalog_entry(self, name: str) -> Optional[dict]:
+        """返回精简目录条目（name + 短描述 + hint），无详细 parameters。
+
+        用于 ToolSearch：LLM 看目录知道工具存在，需要时调 tool_search 取完整 schema。
+        与 get_definitions 的区别：
+        - get_definitions 返回完整 schema（含详细 parameters）— 用于 built-in 工具
+        - get_catalog_entry 返回精简条目（parameters 为空对象）— 用于 MCP 工具
+        """
+        with self._lock:
+            entry = self._tools.get(name)
+        if entry is None:
+            return None
+        # check_fn 过滤（不可用的不进目录）
+        if entry.check_fn and not _check_fn_cached(entry.check_fn):
+            return None
+        desc = (entry.schema.get("description", "") or "")[:60]
+        # hint 里的关键字用工具短名（去掉 mcp__<server>__ 前缀）
+        short_name = name.split("__")[-1] if "__" in name else name
+        return {
+            "name": name,
+            "description": f"{desc} [调 tool_search('{short_name}') 取详细参数]",
+            "parameters": {"type": "object", "properties": {}},
+        }
+
     def list_all(self) -> List[str]:
         """返回所有已注册的工具名。"""
         with self._lock:

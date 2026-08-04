@@ -41,6 +41,8 @@ _CORE_TOOLS = [
     "web_fetch",
     # 网络搜索（对齐 Claude Code WebSearch，Tavily 后端，check_fn 门控）
     "web_search",
+    # MCP 工具 schema 按需加载（对齐 Claude Code ToolSearch）
+    "tool_search",
     # 后台任务（Phase 2b，check_fn 门控：无 bg 组件时自动隐藏）
     "bg_start", "bg_status", "bg_result", "bg_list", "bg_stop",
     # Team 多 agent 协作（Phase 4a）
