@@ -91,6 +91,18 @@ def _parse_frontmatter(text: str) -> tuple[Optional[dict], str]:
         return None, text
 
 
+def _format_frontmatter(meta: dict) -> str:
+    """把 dict 序列化成 frontmatter 文本（`---\\n...yaml...\\n---\\n`）。
+
+    与 `_parse_frontmatter` 对称。主要用于测试 fixture 构造老格式 .md 文件
+    （测 legacy 迁移到 jsonl 的逻辑），以及任何需要写 frontmatter 的工具脚本。
+    meta 为空 dict 时返回空串（不带 frontmatter）。
+    """
+    if not meta:
+        return ""
+    return "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + "---\n"
+
+
 class MemoryStore:
     """主题组织的多文件记忆存储。"""
 

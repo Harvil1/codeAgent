@@ -9,6 +9,14 @@
 
 import sys
 
+# Windows 控制台默认 GBK，遇 emoji/特殊字符（\u26a0 等）会 UnicodeEncodeError 崩。
+# 启动时强制 stdout/stderr 为 utf-8 + errors='replace'，保证任意 unicode 都能输出（不可编码字符替换为 ?）。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass  # 某些环境（重定向/捕获）不支持 reconfigure，忽略
+
 from constants import get_omnimate_home, skills_dir, logs_dir
 
 # 启动前确保 agent home 目录结构存在

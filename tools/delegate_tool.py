@@ -681,9 +681,11 @@ registry.register(
     emoji="🤝",
 )
 # 兼容 alias：历史会话/记忆里的 delegate_task 调用仍可 dispatch 命中
+# toolset="_compat"：dispatch 按名字命中（不依赖 toolset），但 resolve_toolset("core")
+# 不会包含它——LLM 只看到 subagent，delegate_task 仅给老调用兜底
 registry.register(
     name="delegate_task",
-    toolset="core",
+    toolset="_compat",
     schema=DELEGATE_TASK_SCHEMA,
     handler=_handle_delegate_task,
     schema_overrides_fn=_delegate_schema_overrides,
