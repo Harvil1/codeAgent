@@ -1145,7 +1145,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/permission":
-        # B2 NEW: /permission [default|bypass]
+        # B2 NEW: /permission [default|bypass|acceptEdits]
         # 不带参数 → 显示当前模式；带参数 → 切换（同步改 checker.mode + rt.agent.permission_mode）
         arg = args.strip().lower() if args else ""
         from agent.permission import get_default_checker
@@ -1155,18 +1155,24 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             console.print(f"当前权限模式: [cyan]{current}[/cyan]")
             console.print(
                 "[dim]用法: /permission default 切回默认（带审批闸门） | "
-                "/permission bypass 切到 bypassPermissions（跳过审批，仍挡 fatal 根删除）[/dim]"
+                "/permission bypass 切到 bypassPermissions（跳过审批，仍挡 fatal 根删除） | "
+                "/permission accept 切到 acceptEdits（自动批 cwd 内编辑/fs 命令）[/dim]"
             )
             return True
-        if arg in ("default", "bypass", "bypasspermissions"):
-            new_mode = "bypassPermissions" if arg != "default" else "default"
+        if arg in ("default", "bypass", "bypasspermissions", "acceptedits", "accept"):
+            if arg == "default":
+                new_mode = "default"
+            elif arg in ("bypass", "bypasspermissions"):
+                new_mode = "bypassPermissions"
+            else:  # acceptedits / accept
+                new_mode = "acceptEdits"
             if checker is not None:
                 checker.mode = new_mode
             if getattr(rt, "agent", None) is not None:
                 rt.agent.permission_mode = new_mode
             console.print(f"[green]权限模式切换为: {new_mode}[/green]")
         else:
-            console.print("[yellow]用法: /permission [default|bypass][/yellow]")
+            console.print("[yellow]用法: /permission [default|bypass|acceptEdits][/yellow]")
         return True
 
     if name == "/agents":
@@ -1361,7 +1367,7 @@ def _show_help():
         "[cyan]/stats[/cyan]     会话统计（跨会话聚合）\n"
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
-        "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass]）\n"
+        "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass|acceptEdits]）\n"
         "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.OmniMate/agents/*.md）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"

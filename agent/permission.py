@@ -167,6 +167,46 @@ def check_fatal_irreversible(command: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# acceptEdits 模式：safe-fs 命令识别（mkdir/touch/mv/cp/rm/del 在 cwd 内）
+# ---------------------------------------------------------------------------
+# acceptEdits 模式下自动放行的 safe-fs 命令动词
+_SAFE_FS_VERBS = {"mkdir", "touch", "mv", "cp", "rm", "del"}
+
+
+def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
+    """acceptEdits 用：命令是 safe-fs 动词（mkdir/touch/mv/cp/rm/del）且
+    所有路径参数都在 cwd 内 → 返回 True（可自动批）。
+
+    保守：任何一个路径解析失败或在 cwd 外 → False（交给原闸门判断）。
+    """
+    if not command or not cwd:
+        return False
+    parts = command.split()
+    if not parts:
+        return False
+    # 取动词（处理 /usr/bin/mkdir 这种绝对路径形式）
+    verb = parts[0].replace("\\", "/").split("/")[-1].lower()
+    if verb not in _SAFE_FS_VERBS:
+        return False
+    try:
+        cwd_path = Path(cwd).resolve()
+    except (OSError, ValueError):
+        return False
+    for tok in parts[1:]:
+        if tok.startswith("-"):
+            continue  # flag（如 -rf, -p）
+        if not tok:
+            continue
+        try:
+            p = Path(tok)
+            resolved = p.resolve() if p.is_absolute() else (cwd_path / p).resolve()
+            resolved.relative_to(cwd_path)  # 不在 cwd 下会抛 ValueError
+        except (ValueError, OSError, RuntimeError):
+            return False  # 路径在 cwd 外或解析失败 → 不自动批
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 闸门 2：破坏性命令模式（需用户审批才能执行）
 # ---------------------------------------------------------------------------
 
@@ -386,7 +426,7 @@ class PermissionChecker:
         approval_callback: Optional[Callable[[str], bool]] = None,
         whitelist_file=None,
         paths_whitelist_file=None,
-        mode: str = "default",  # "default" | "bypassPermissions"
+        mode: str = "default",  # "default" | "bypassPermissions" | "acceptEdits"
     ):
         """
         参数：
@@ -401,6 +441,9 @@ class PermissionChecker:
                   - "bypassPermissions": 跳过闸门 1/2/3,直接放行所有命令;
                     但仍保留闸门 0(自我保护 + fatal 硬底线)。
                     用于 Claude Code 兼容的 --dangerously-skip-permissions 场景。
+                  - "acceptEdits": cwd 内 safe-fs（mkdir/touch/mv/cp/rm/del）命令和
+                    cwd 内写入自动放行，其他命令走原三道闸门（fatal 底线 + 自我保护 +
+                    受保护路径仍生效）。适合 agent 连续编辑代码场景。
         """
         self.approval_callback = approval_callback
         self._approved = set()  # 会话内缓存（命令）
@@ -413,9 +456,9 @@ class PermissionChecker:
         self._approved_paths = set()
         if paths_whitelist_file:
             self._load_paths_whitelist()
-        # 权限模式（default / bypassPermissions）
-        if mode not in ("default", "bypassPermissions"):
-            raise ValueError(f"未知权限模式: {mode}（支持: default / bypassPermissions）")
+        # 权限模式（default / bypassPermissions / acceptEdits）
+        if mode not in ("default", "bypassPermissions", "acceptEdits"):
+            raise ValueError(f"非法 permission_mode: {mode}")
         self.mode = mode
 
     def _load_whitelist(self):
@@ -520,6 +563,10 @@ class PermissionChecker:
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
 
+        # acceptEdits: safe-fs 命令在 cwd 内自动放行；其他命令走原闸门
+        if effective_mode == "acceptEdits" and _is_safe_fs_in_cwd(command, cwd):
+            return PermissionResult(True, "acceptEdits: safe-fs in cwd", "auto")
+
         # 闸门 1：硬拒绝
         deny = check_command_deny(command)
         if deny:
@@ -589,6 +636,18 @@ class PermissionChecker:
 
         if not write:
             return PermissionResult(True, "ok", "ok")
+
+        # acceptEdits: cwd 内写入自动放行
+        # 受保护路径已在闸门 1 拒掉（~/.ssh 等仍拒），此处只处理 cwd 内合法写入。
+        if effective_mode == "acceptEdits":
+            import os
+            try:
+                cwd_path = Path(os.getcwd()).resolve()
+                resolved = Path(path).expanduser().resolve()
+                resolved.relative_to(cwd_path)
+                return PermissionResult(True, "acceptEdits: write in cwd", "auto")
+            except (ValueError, OSError, RuntimeError):
+                pass  # cwd 外 → 继续走下面的写保护/白名单检查
 
         # 闸门 2:写保护路径(项目代码目录)→ 拒
         # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
