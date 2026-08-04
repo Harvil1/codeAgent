@@ -105,6 +105,7 @@ DELEGATE_TASK_SCHEMA = {
                     "custom=显式 enabled_toolsets；"
                     "或自定义子代理名（扫描 ~/.OmniMate/agents/*.md 和 ./.claude/agents/*.md 的 name 字段）。"
                     "自定义名时按定义的 model/tools/permissionMode/isolation/maxTurns 配置子代理。"
+                    "或内置名 explore（只读研究）/ plan（只出计划）。"
                 ),
             },
             "goal": {

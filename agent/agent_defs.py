@@ -40,6 +40,11 @@ def _project_agents_dir() -> Path:
     return Path.cwd() / ".claude" / "agents"
 
 
+def _builtin_agents_dir() -> Path:
+    """内置子代理定义目录（随项目分发）：agent/builtin_agents/。"""
+    return Path(__file__).parent / "builtin_agents"
+
+
 def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
     try:
         content = skill_md.read_text(encoding="utf-8")
@@ -63,9 +68,9 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
 
 
 def scan_agent_defs() -> Dict[str, AgentDefinition]:
-    """扫描两个目录，项目级覆盖用户级。"""
+    """扫描内置 + 用户 + 项目三个目录，后者覆盖前者。"""
     defs: Dict[str, AgentDefinition] = {}
-    for d in [_user_agents_dir(), _project_agents_dir()]:
+    for d in [_builtin_agents_dir(), _user_agents_dir(), _project_agents_dir()]:
         if not d.exists():
             continue
         for md in sorted(d.glob("*.md")):

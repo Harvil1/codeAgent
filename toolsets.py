@@ -98,6 +98,19 @@ TOOLSETS: Dict[str, dict] = {
         ],
         "includes": [],
     },
+    "explore": {
+        "description": "只读探索（Explore 子代理用）：读/搜/抓网页/查会话，无修改类",
+        "tools": [
+            "read_file",
+            "search_files",
+            "web_fetch",
+            "session_search",
+            "skills_list",
+            "skill_view",
+            "load_skill",
+        ],
+        "includes": [],
+    },
 }
 
 
