@@ -257,86 +257,61 @@ class AnthropicClient(LLMClient):
         effort_map = {"max": "max", "high": "high", "medium": "high"}
         return {"effort": effort_map.get(self.effort_level, "high")}
 
-    def chat_completions(self, messages, *, tools=None, **kwargs):
-        """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
-        # 1. 分离 system 消息 + 合并连续 tool 消息(Anthropic 要求)
-        system_parts = []
-        conversation = self._convert_messages_to_anthropic(messages)
-        for m in messages:
-            if m.get("role") == "system":
-                content = m.get("content", "")
-                if content:
-                    system_parts.append(content)
+    def _build_anthropic_kwargs(
+        self,
+        messages: list,
+        tools: Optional[List[dict]],
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        """构造 Anthropic API 调用参数（chat_completions 和 stream 共用）。
 
+        含：system 拼接、消息转换、工具转换、思考模式 + output_config。
+        抽出这个 helper 消除两个 chat_completions* 方法的重复（~25 行）。
+        """
+        system_parts = [
+            m.get("content", "")
+            for m in messages
+            if m.get("role") == "system" and m.get("content")
+        ]
         system = "\n\n".join(system_parts) if system_parts else None
-
-        # 2. 转换工具格式
+        conversation = self._convert_messages_to_anthropic(messages)
         anthropic_tools = self._convert_tools(tools) if tools else None
 
-        # 3. 构造调用参数
-        max_tokens = kwargs.get("max_tokens", 4096)
-        create_kwargs = {
+        kwargs: Dict[str, Any] = {
             "model": self.model,
             "system": system,
             "messages": conversation,
             "max_tokens": max_tokens,
         }
         if anthropic_tools:
-            create_kwargs["tools"] = anthropic_tools
+            kwargs["tools"] = anthropic_tools
+
         # effort_level:思考模式(DeepSeek 格式:thinking 开关 + output_config 强度)
         thinking = self._build_thinking_config()
-        output_config = self._build_output_config()
         if thinking:
-            create_kwargs["thinking"] = thinking
+            kwargs["thinking"] = thinking
         # output_config 是 DeepSeek 扩展参数,用 extra_body 传(不在 Anthropic SDK 标准字段里)
-        extra_body = {}
+        output_config = self._build_output_config()
         if output_config:
-            extra_body["output_config"] = output_config
-        if extra_body:
-            create_kwargs["extra_body"] = extra_body
+            kwargs["extra_body"] = {"output_config": output_config}
 
-        # 4. 调用 Anthropic
+        return kwargs
+
+    def chat_completions(self, messages, *, tools=None, **kwargs):
+        """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
+        max_tokens = kwargs.get("max_tokens", 4096)
+        create_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
         response = self.client.messages.create(**create_kwargs)
-
-        # 5. 包装成 OpenAI 兼容响应
         return self._wrap_response(response)
 
     def chat_completions_stream(self, messages, *, tools=None, **kwargs):
         """Anthropic 原生流式：messages.stream。"""
-        system_parts = []
-        conversation = self._convert_messages_to_anthropic(messages)
-        for m in messages:
-            if m.get("role") == "system":
-                content = m.get("content", "")
-                if content:
-                    system_parts.append(content)
-        system = "\n\n".join(system_parts) if system_parts else None
-        anthropic_tools = self._convert_tools(tools) if tools else None
+        max_tokens = kwargs.get("max_tokens", 4096)
+        stream_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
 
         # 累积 tool_use（Anthropic 流式按 block 增量，需要聚合 id+name+完整 input）
         tool_buffers: Dict[int, Dict[str, Any]] = {}
         current_tool_idx: Optional[int] = None
-
-        # 构造 stream 参数
-        max_tokens = kwargs.get("max_tokens", 4096)
-        stream_kwargs = {
-            "model": self.model,
-            "system": system,
-            "messages": conversation,
-            "max_tokens": max_tokens,
-        }
-        if anthropic_tools:
-            stream_kwargs["tools"] = anthropic_tools
-        # effort_level:思考模式(DeepSeek 格式)
-        thinking = self._build_thinking_config()
-        output_config = self._build_output_config()
-        if thinking:
-            stream_kwargs["thinking"] = thinking
-        extra_body = {}
-        if output_config:
-            extra_body["output_config"] = output_config
-        if extra_body:
-            stream_kwargs["extra_body"] = extra_body
 
         with self.client.messages.stream(**stream_kwargs) as stream:
             for event in stream:

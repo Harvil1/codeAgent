@@ -34,6 +34,8 @@ _ALWAYS_KEEP = {
     "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "OS",
     "OMNIMATE_HOME",  # 让子进程能找到 agent home
 }
+# 模块加载时预计算大写集合（避免 build_safe_env 每次循环都重建 set）
+_ALWAYS_KEEP_UPPER = {k.upper() for k in _ALWAYS_KEEP}
 
 
 def _looks_secret(name: str) -> bool:
@@ -82,7 +84,7 @@ def build_safe_env(
     safe: Dict[str, str] = {}
     for name, value in inherited.items():
         # 永远保留的良性变量
-        if name.upper() in {k.upper() for k in _ALWAYS_KEEP}:
+        if name.upper() in _ALWAYS_KEEP_UPPER:
             safe[name] = value
             continue
         # 显式 allow 的(技能声明 required-secrets)
