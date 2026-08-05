@@ -255,6 +255,7 @@ def build_system_prompt_layers(
         for pmd in project_mds:
             try:
                 content = pmd.read_text(encoding="utf-8")
+                content = _expand_imports(content, pmd.parent)
                 if content.strip():
                     # 显示相对路径，便于调试（绝对路径太长）
                     try:
@@ -353,6 +354,95 @@ def _paths_match(paths: list, cwd: str) -> bool:
         if fnmatch.fnmatch(cwd_norm, f"*/{pat}") or fnmatch.fnmatch(cwd_norm, pat):
             return True
     return False
+
+
+def _expand_imports(
+    content: str,
+    base_dir: Path,
+    depth: int = 0,
+    _visited: Optional[set] = None,
+) -> str:
+    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（对齐 Claude Code `@import` 语义）。
+
+    规则：
+    - `@path/to/file` 相对 base_dir 解析，递归展开（max_depth=5）
+    - `@~/foo/bar` 展开 home 目录
+    - **跳过 code span 和 code block**（避免 `@anthropic-ai/sdk` 被误判）
+    - 文件不存在 / 不是文件 → 原样保留（不抛错）
+    - 同一文件多次引用只展开一次（防环）
+    """
+    import re
+    if _visited is None:
+        _visited = set()
+    if depth > 5:
+        logger.warning("@import 递归深度超过 5，跳过剩余展开")
+        return content
+
+    pattern = re.compile(r"@(~?[\w./-]+)")
+
+    def _resolve_and_read(path_str: str):
+        # `@foo` 单 token 没 / 也没 ~  → 当作 @username，不当 import
+        if not path_str.startswith("~") and "/" not in path_str \
+                and not path_str.endswith((".md", ".txt", ".rst")):
+            return None
+        target = Path(path_str).expanduser() if path_str.startswith("~") \
+            else (base_dir / path_str).resolve()
+        if not target.is_file():
+            return None
+        key = str(target)
+        if key in _visited:
+            return f"<!-- @import 已展开过: {path_str} -->"
+        _visited.add(key)
+        try:
+            return target.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning("@import 读取失败 %s: %s", target, e)
+            return None
+
+    def _expand_text_segment(text: str) -> str:
+        """扫描文本段里的 @path（已经被切除了 code span/block）。"""
+        def replace(m):
+            path_str = m.group(1)
+            inner = _resolve_and_read(path_str)
+            if inner is None:
+                return m.group(0)  # 原样
+            # 递归展开引用文件里的 @path
+            return _expand_imports(inner, (base_dir / path_str).resolve().parent
+                                   if not path_str.startswith("~")
+                                   else Path(path_str).expanduser().parent,
+                                   depth + 1, _visited)
+        return pattern.sub(replace, text)
+
+    # 按行扫描，跳过 fenced code block；inline code span 用正则切分保护
+    out_lines = []
+    in_fence = False
+    fence_marker = None
+    inline_code_re = re.compile(r"(`[^`]*`)")
+
+    for line in content.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = None
+            out_lines.append(line)
+            continue
+        if in_fence:
+            out_lines.append(line)
+            continue
+        # 不在 code block：拆出 inline code span 保护，剩余段做 @path 展开
+        segments = inline_code_re.split(line)
+        processed = [
+            seg if (seg.startswith("`") and seg.endswith("`") and len(seg) >= 2)
+            else _expand_text_segment(seg)
+            for seg in segments
+        ]
+        out_lines.append("".join(processed))
+    return "\n".join(out_lines)
 
 
 def _scan_project_memory_files(cwd: Path) -> List[Path]:
