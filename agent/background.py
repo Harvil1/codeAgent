@@ -9,7 +9,7 @@
 - 并发上限默认 5
 - P1-3: stall_timeout > 0 时启用停滞看门狗（45 秒无 stdout 增长 → 通知 LLM）
 
-跨平台：subprocess 必须 text=True, encoding="utf-8"（CLAUDE.md 强制）。
+跨平台：subprocess 必须 text=True, encoding="utf-8"（OMNIMATE.md 强制）。
 """
 import copy
 import logging

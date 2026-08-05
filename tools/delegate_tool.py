@@ -103,7 +103,7 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "子代理类型：general-purpose=通用（minimal 工具集）；"
                     "custom=显式 enabled_toolsets；"
-                    "或自定义子代理名（扫描 ~/.OmniMate/agents/*.md 和 ./.claude/agents/*.md 的 name 字段）。"
+                    "或自定义子代理名（扫描 ~/.OmniMate/agents/*.md 和 ./.omnimate/agents/*.md 的 name 字段）。"
                     "自定义名时按定义的 model/tools/permissionMode/isolation/maxTurns 配置子代理。"
                     "或内置名 explore（只读研究）/ plan（只出计划）。"
                 ),
@@ -431,7 +431,7 @@ def _run_child(
         if custom_def is None:
             raise RuntimeError(
                 f"未找到子代理定义: {stype}"
-                f"（检查 ~/.OmniMate/agents/ 和 ./.claude/agents/）"
+                f"（检查 ~/.OmniMate/agents/ 和 ./.omnimate/agents/）"
             )
 
     # 可选：隔离工作区（自定义 .md 定义 isolation=worktree 也开启）

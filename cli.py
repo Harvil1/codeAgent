@@ -1177,13 +1177,13 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/agents":
-        # E2 NEW: 列出自定义子代理定义（~/.OmniMate/agents + ./.claude/agents）
+        # E2 NEW: 列出自定义子代理定义（~/.OmniMate/agents + ./.omnimate/agents）
         from agent.agent_defs import scan_agent_defs
         defs = scan_agent_defs()
         if not defs:
             console.print(
                 "[yellow]无自定义子代理。[/yellow] "
-                "在 [cyan]~/.OmniMate/agents/[/cyan] 或 [cyan]./.claude/agents/[/cyan] "
+                "在 [cyan]~/.OmniMate/agents/[/cyan] 或 [cyan]./.omnimate/agents/[/cyan] "
                 "放 .md 文件（frontmatter 含 name/description/tools/maxTurns 等）。"
             )
             return True

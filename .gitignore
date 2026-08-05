@@ -31,5 +31,5 @@ backend/
 /.playwright-mcp/
 /.impeccable/
 /.codegraph/
-/.claude/
+/.omnimate/
 /dist/

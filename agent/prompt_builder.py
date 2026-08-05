@@ -8,7 +8,7 @@
 
 05 升级：拆成 stable/context/volatile 三层，让 prompt cache 命中率最大化。
 - stable：跨会话不变（身份、指导）
-- context：单会话内不变（记忆、技能、CLAUDE.md）
+- context：单会话内不变（记忆、技能、OMNIMATE.md）
 - volatile：每轮可变（todo、reminder）
 """
 
@@ -140,7 +140,7 @@ class SystemPromptLayers:
     """三层系统提示（05）。
 
     - stable: 跨会话不变（身份、指导、工具文档）
-    - context: 单会话内不变（记忆索引、技能索引、CLAUDE.md）
+    - context: 单会话内不变（记忆索引、技能索引、OMNIMATE.md）
     - volatile: 每轮可变（todo、reminder、extra_instructions）
 
     API 厂商 prompt cache 按"前缀哈希"匹配，分层能让 stable 跨会话命中、
@@ -178,7 +178,7 @@ def build_system_prompt_layers(
 
     分层动机：
       - stable：跨会话不变（同版本同一台机器，几乎 100% 命中 cache）
-      - context：单会话内不变（记忆/技能/CLAUDE.md，会话内 80%+ 命中）
+      - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内 80%+ 命中）
       - volatile：每轮可变（todo / reminder），不期望 cache 命中
 
     language: "zh"（默认）或 "en"。只影响身份声明和输出约定。

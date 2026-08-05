@@ -6,7 +6,7 @@
   第 2 阶段(run_memory_review,LLM 合并 + 矛盾检测):
     LLM 在 type 桶内找重复/矛盾,改写 body + 归档。
 
-设计原则(沿用 CLAUDE.md "完全可逆"):
+设计原则(沿用 OMNIMATE.md "完全可逆"):
   - 永不物理删除
   - archived 是终态,移到 .archive/
   - 所有改动可回滚(.archive/ 完整保留)
