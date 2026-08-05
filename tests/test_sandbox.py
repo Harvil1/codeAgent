@@ -412,11 +412,13 @@ def test_seatbelt_profile_escapes_paths(tmp_path, monkeypatch):
     # 直接检测注入的指纹 —— 未转义的 " 紧跟 1+ 个 ) 再跟 (allow file-write
     # （即 evil 路径成功闭合 subpath 并注入了新规则）。
     # 转义后 " 变成 \"，negative lookbehind (?<!\\) 排除转义版本。
+    # 逐行检测（避免误匹配合法多行规则间的换行）。
     import re
-    injection_pattern = re.compile(r'(?<!\\)"\s*\)+\s*\(\s*allow\s+file-write')
-    assert not injection_pattern.search(content), (
-        f"profile 检测到未转义的注入指纹（\") + (allow file-write）: {content}"
-    )
+    injection_pattern = re.compile(r'(?<!\\)"\)+[ \t]*\([ \t]*allow[ \t]+file-write')
+    for line in content.splitlines():
+        assert not injection_pattern.search(line), (
+            f"profile 单行检测到注入指纹: {line}\n--- 完整内容 ---\n{content}"
+        )
 
     # 验证转义函数本身
     assert _seatbelt_escape_path('a"b') == 'a\\"b'
