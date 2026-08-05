@@ -152,7 +152,14 @@ def _handle_terminal(args: dict, **kwargs) -> str:
     # === OS 沙箱 wrapper 注入 ===
     # sandbox_mode="on" 时把 command 包进 bwrap/seatbelt argv；
     # 不可用 → fail-open 警告并降级到原 shell=True 路径
-    sandbox_mode = kwargs.get("sandbox_mode", "off")
+    # C1 fix: sandbox_mode 优先从 kwargs 读（测试/子代理透传）；
+    # 缺省时从默认 PermissionChecker 读（生产路径：/sandbox on 设到 checker 上）
+    sandbox_mode = kwargs.get("sandbox_mode")
+    if sandbox_mode is None:
+        try:
+            sandbox_mode = checker.sandbox_mode
+        except AttributeError:
+            sandbox_mode = "off"
     wrapped_argv = None
     sandbox_active = False
     if sandbox_mode == "on":
@@ -170,7 +177,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 )
                 if is_available():
                     # 收集 writable_roots：cwd + ~/.OmniMate + config 扩展
-                    from pathlib import Path
+                    # I5 fix: 移除冗余 inline import（Path 已在模块顶部导入）
                     writable_roots = []
                     try:
                         from constants import get_omnimate_home

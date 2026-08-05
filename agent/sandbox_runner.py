@@ -122,7 +122,10 @@ def _bwrap_wrap(
             argv += ["--ro-bind", d, d]
 
     # /tmp 走沙箱内 tmpfs（不泄漏宿主 /tmp）
-    argv += ["--tmpfs", "/tmp"]
+    # I2 fix: cwd 自身在 /tmp 下时跳过 tmpfs（避免 bind/tmpfs 冲突）
+    _cwd_str = str(cwd)
+    if not (_cwd_str == "/tmp" or _cwd_str.startswith("/tmp/")):
+        argv += ["--tmpfs", "/tmp"]
 
     # 可写目录：cwd 必须在首位
     writable = [cwd] + [r for r in writable_roots if r and r != cwd]
@@ -147,8 +150,8 @@ def wrap_command(
     """把 shell 命令包装成沙箱 argv。
 
     调用约定：调用方（terminal_tool）负责收集 writable_roots，
-    默认应含 cwd + ~/.OmniMate + config["security"]["sandbox_writable_roots"]。
-    本函数不重复添加 cwd（只在 bwrap/seatbelt 内部把 cwd bind 进可写区）。
+    默认应含 ~/.OmniMate + config["security"]["sandbox_writable_roots"]。
+    cwd 由本函数内部自动加入可写区首位（调用方不需要在 writable_roots 里传 cwd）。
 
     返回 argv 列表，传给 subprocess.run(argv, shell=False)。
     平台不支持 / 依赖缺失时抛 SandboxUnavailableError。
@@ -182,6 +185,15 @@ def wrap_command(
 # ---------------------------------------------------------------------------
 
 # profile 模板（最小化规则集，避免版本特定语法）
+def _seatbelt_escape_path(p: str) -> str:
+    """转义 Seatbelt profile 路径中的特殊字符（防注入）。
+
+    Seatbelt profile 是 Scheme 方言；插入用户/agent 控制的路径时，
+    需转义反斜杠和双引号，防止破坏 profile 语法或注入额外规则。
+    """
+    return p.replace("\\", "\\\\").replace('"', '\\"')
+
+
 _SEATBELT_PROFILE_TEMPLATE = """\
 (version 1)
 (deny default)
@@ -235,7 +247,7 @@ def _write_seatbelt_profile(
     rules = []
     for root in all_writable:
         # subpath 规则：允许写该目录及其子路径
-        rules.append(f'(allow file-write* (subpath "{root}"))')
+        rules.append(f'(allow file-write* (subpath "{_seatbelt_escape_path(root)}"))')
     write_rules_block = "\n".join(rules) if rules else ";; (无额外可写路径)"
 
     content = _SEATBELT_PROFILE_TEMPLATE.format(write_rules=write_rules_block)

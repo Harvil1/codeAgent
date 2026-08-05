@@ -332,3 +332,103 @@ def test_terminal_gui_command_skips_sandbox(monkeypatch):
     )
     # GUI 路径用 shell=True
     assert captured["shell"] is True
+
+
+# ---------------------------------------------------------------------------
+# Final review fixes: C1 / I1 / I2
+# ---------------------------------------------------------------------------
+
+def test_terminal_reads_sandbox_mode_from_default_checker(monkeypatch):
+    """C1 fix: 不传 sandbox_mode kwarg 时，从默认 PermissionChecker 读。
+
+    生产链路 agent/__init__.py → handle_function_call → dispatch 不传 sandbox_mode,
+    必须从 PermissionChecker.sandbox_mode 读才不致 feature 失效。
+    """
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+    from agent.permission import PermissionChecker, get_default_checker, set_default_checker
+
+    # 保存原 checker
+    original = get_default_checker()
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["shell"] = kwargs.get("shell", False)
+        captured["is_list"] = isinstance(cmd, list)
+
+        class R:
+            stdout = "ok"
+            stderr = ""
+            returncode = 0
+        return R()
+
+    try:
+        # 临时换默认 checker，开 sandbox
+        temp_checker = PermissionChecker()
+        temp_checker.set_sandbox_mode("on")
+        set_default_checker(temp_checker)
+
+        monkeypatch.setattr(sr, "is_available", lambda: True)
+        monkeypatch.setattr(sr, "wrap_command",
+                            lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
+        monkeypatch.setattr(tt.subprocess, "run", fake_run)
+        monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+        # 不传 sandbox_mode kwarg —— 模拟生产路径
+        tt._handle_terminal(
+            {"command": "echo hi"},
+            omnimate_home="/tmp/fake_home",
+        )
+        assert captured["shell"] is False
+        assert captured["is_list"] is True
+    finally:
+        set_default_checker(original)
+
+
+def test_seatbelt_profile_escapes_paths(tmp_path, monkeypatch):
+    """I1 fix: 含特殊字符的路径要被转义（防 profile 注入）。"""
+    from agent.sandbox_runner import _write_seatbelt_profile, _seatbelt_escape_path
+    monkeypatch.setattr("constants.get_omnimate_home", lambda: tmp_path)
+
+    # 模拟恶意路径：尝试闭合 subpath 并注入额外 allow
+    evil_path = '/tmp/evil")) (allow file-write* (subpath "/etc'
+    profile = _write_seatbelt_profile(cwd=evil_path, writable_roots=[])
+    content = profile.read_text(encoding="utf-8")
+
+    # 转义验证：evil_path 里的 " 必须以 \" 形式出现在 profile 里（Scheme 转义）
+    # 确保不会因原始 " 构成 Scheme 语法边界 → 注入额外规则
+    # 关键标志：未转义的裸 " 后跟 ) 应不存在
+    # （转义后会变成 \")，即不应出现 `(")` 这样闭合 subpath 后紧跟 `)` 的模式
+    import re
+    # 找所有 allow file-write* (subpath "...") 形式（正常应只有 1 条规则行）
+    # 转义后 evil_path 整体作为一个字符串字面量，仍是一条 allow 规则
+    rule_lines = [ln for ln in content.splitlines()
+                  if "(allow file-write*" in ln and "subpath" in ln]
+    assert len(rule_lines) == 1, (
+        f"profile 注入泄漏（应只有 1 条 allow 规则行）: {content}"
+    )
+
+    # 验证转义函数本身
+    assert _seatbelt_escape_path('a"b') == 'a\\"b'
+    assert _seatbelt_escape_path('a\\b') == 'a\\\\b'
+
+
+def test_bwrap_wrap_cwd_under_tmp_skips_tmpfs():
+    """I2 fix: cwd 在 /tmp 下时跳过 --tmpfs /tmp（避免 bind/tmpfs 冲突）。"""
+    from agent.sandbox_runner import _bwrap_wrap
+
+    def _has_tmpfs(argv):
+        return any(argv[i] == "--tmpfs" and argv[i + 1] == "/tmp"
+                   for i in range(len(argv) - 1))
+
+    # cwd 是 /tmp
+    argv = _bwrap_wrap("x", cwd="/tmp", writable_roots=[])
+    assert not _has_tmpfs(argv), f"cwd=/tmp 时不应加 --tmpfs /tmp: {argv}"
+
+    # cwd 在 /tmp 下
+    argv2 = _bwrap_wrap("x", cwd="/tmp/work", writable_roots=[])
+    assert not _has_tmpfs(argv2), f"cwd=/tmp/work 时不应加 --tmpfs /tmp: {argv2}"
+
+    # 正常 cwd（不在 /tmp 下）仍应加 --tmpfs /tmp
+    argv3 = _bwrap_wrap("x", cwd="/home/user/proj", writable_roots=[])
+    assert _has_tmpfs(argv3), f"正常 cwd 应加 --tmpfs /tmp: {argv3}"

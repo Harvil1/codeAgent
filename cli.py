@@ -1197,15 +1197,26 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                     f"[yellow]⚠️  沙箱不可用：{availability_reason()}\n"
                     "仍会切换到 on 模式（fail-open 降级，命令照常执行）[/yellow]"
                 )
-            checker.set_sandbox_mode("on")
-            console.print(
-                "[green]sandbox: on[/green]\n"
-                "[dim]terminal 工具命令将走 bwrap（Linux）/ sandbox-exec（macOS）。"
-                "写文件被限制在 cwd + ~/.OmniMate + 配置的 sandbox_writable_roots。[/dim]"
-            )
+            # I4 fix: 对不支持 set_sandbox_mode 的退化 checker 防御
+            if hasattr(checker, "set_sandbox_mode"):
+                checker.set_sandbox_mode("on")
+                console.print(
+                    "[green]sandbox: on[/green]\n"
+                    "[dim]terminal 工具命令将走 bwrap（Linux）/ sandbox-exec（macOS）。"
+                    "写文件被限制在 cwd + ~/.OmniMate + 配置的 sandbox_writable_roots。[/dim]"
+                )
+            else:
+                console.print(
+                    "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
+                )
         elif arg in ("off", "disable"):
-            checker.set_sandbox_mode("off")
-            console.print("[green]sandbox: off[/green]")
+            if hasattr(checker, "set_sandbox_mode"):
+                checker.set_sandbox_mode("off")
+                console.print("[green]sandbox: off[/green]")
+            else:
+                console.print(
+                    "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
+                )
         else:  # status 或无参数
             mode = getattr(checker, "sandbox_mode", "off")
             if is_available():
