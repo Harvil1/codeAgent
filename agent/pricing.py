@@ -44,6 +44,23 @@ PRICING: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
 }
 
 
+def _normalize_openrouter(provider: str, model: str) -> Tuple[str, str]:
+    """拆 openrouter/<provider>/<model> 形式，返回 (real_provider, real_model)。
+
+    非	openrouter 或路径段不足时原样返回。
+    """
+    if provider != "openrouter" or "/" not in model:
+        return provider, model
+    parts = model.split("/", 2)
+    if len(parts) >= 3:
+        # ["openrouter", "deepseek", "deepseek-chat"]
+        return parts[1], parts[2]
+    if len(parts) == 2:
+        # ["openrouter", "gpt-4o"]（无中间 provider，用第一个当 model 名）
+        return provider, parts[1]
+    return provider, model
+
+
 def get_pricing(provider: str, model: str) -> Optional[Tuple[float, float, float, float]]:
     """查询 (provider, model) 的价格。
 
@@ -56,16 +73,7 @@ def get_pricing(provider: str, model: str) -> Optional[Tuple[float, float, float
     p = (provider or "").lower()
     m = (model or "").lower()
 
-    # 处理 openrouter/<provider>/<model> 形式
-    if p == "openrouter" and "/" in m:
-        parts = m.split("/", 2)
-        if len(parts) >= 3:
-            # ["openrouter", "deepseek", "deepseek-chat"]
-            p = parts[1]
-            m = parts[2]
-        elif len(parts) == 2:
-            # ["openrouter", "gpt-4o"]（无中间 provider，用第一个当 model 名）
-            m = parts[1]
+    p, m = _normalize_openrouter(p, m)
 
     provider_table = PRICING.get(p)
     if not provider_table:

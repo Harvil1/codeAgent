@@ -10,7 +10,6 @@
 import json
 import logging
 import re
-import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -60,7 +59,8 @@ def maybe_offload(
         perm = safe_path(target_path, write=True, allowed_roots=[offload_dir.resolve()])
         if not perm.allowed:
             raise OSError(f"safe_path 拒绝: {perm.reason}")
-        _write_atomically(target_path, content)
+        from agent.atomic_io import atomic_write_text_lite
+        atomic_write_text_lite(target_path, content)
     except OSError as e:
         target_desc = str(target_path) if target_path else str(offload_dir / safe_id)
         logger.warning("offload 写入失败 (%s)，降级为截断: %s", target_desc, e)
@@ -91,33 +91,6 @@ def _resolve_unique_path(offload_dir: Path, tool_call_id: str) -> Path:
         if not candidate.exists():
             return candidate
         counter += 1
-
-
-def _write_atomically(path: Path, content: str) -> None:
-    """原子写入：先写临时文件再 replace，防半写状态。
-
-    异常路径下（replace 失败、权限拒绝等）清理临时文件，避免 .tmp 垃圾堆积。
-    """
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=path.parent,
-            encoding="utf-8",
-            delete=False,
-            suffix=".tmp",
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        tmp_path.replace(path)  # 原子 rename
-    except Exception:
-        # replace 抛异常时清理临时文件，避免磁盘上留下 *.tmp 垃圾
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
 
 
 def finalize_tool_output(

@@ -5,7 +5,6 @@
 """
 import json
 import logging
-import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -80,18 +79,8 @@ def _write_jsonl(path: Path, messages: list, *, session_id: str, reason: str) ->
     }, ensure_ascii=False))
 
     content = "\n".join(lines) + "\n"
-    _write_atomically(path, content)
-
-
-def _write_atomically(path: Path, content: str) -> None:
-    """原子写入（同 output_offload 的实现）。"""
-    with tempfile.NamedTemporaryFile(
-        mode="w", dir=path.parent, encoding="utf-8",
-        delete=False, suffix=".tmp",
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
+    from agent.atomic_io import atomic_write_text_lite
+    atomic_write_text_lite(path, content)
 
 
 def _update_latest_pointer(transcripts_dir: Path, target: Path) -> None:

@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 
 def atomic_write_text(
@@ -29,6 +29,9 @@ def atomic_write_text(
     PermissionError（WinError 5）。这是 OS 行为，重试可恢复——读者
     很快释放句柄。POSIX 没有这个限制（rename 即使文件打开也成功）。
     失败时清理临时文件。
+
+    适用场景：低频关键写入（MEMORY.md / settings.json / config.yaml）。
+    高频小写入请用 atomic_write_text_lite（无 fsync、无重试，更快）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,4 +62,42 @@ def atomic_write_text(
             os.unlink(tmp_path)
         except OSError:
             pass
+        raise
+
+
+def atomic_write_text_lite(
+    path: Union[str, Path],
+    content: str,
+    *,
+    encoding: str = "utf-8",
+) -> None:
+    """原子写入（轻量版）：tempfile + Path.replace，无 fsync、无重试。
+
+    与 atomic_write_text 的差异：
+    - 不调 fsync（崩溃恢复可能丢最近一次写入，但性能更好）
+    - 不重试 Windows PermissionError（调用方需自行处理或容忍偶发失败）
+
+    适用场景：高频小写入（offload 大输出落盘、transcript 快照）。
+    异常路径下（replace 失败、权限拒绝等）清理临时文件，避免 .tmp 垃圾堆积。
+    """
+    path = Path(path)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=path.parent,
+            encoding=encoding,
+            delete=False,
+            suffix=".tmp",
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)  # 原子 rename
+    except BaseException:
+        # replace 抛异常时清理临时文件，避免磁盘上留下 *.tmp 垃圾
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         raise
