@@ -89,3 +89,86 @@ def reset_availability_cache() -> None:
     """清缓存（测试用）。"""
     global _availability_cache
     _availability_cache = None
+
+
+# ---------------------------------------------------------------------------
+# Linux: Bubblewrap (bwrap)
+# ---------------------------------------------------------------------------
+
+# 系统目录只读 bind（保证命令能跑：bash / glibc / 配置文件等）
+_BWRAP_RO_DIRS = [
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
+    "/etc", "/dev", "/proc", "/sys",
+    # /tmp 走 bwrap 内部 tmpfs（不 bind 宿主 /tmp，避免泄漏）
+]
+
+
+def _bwrap_wrap(
+    command: str,
+    *,
+    cwd: str,
+    writable_roots: List[str],
+) -> List[str]:
+    """构造 bwrap argv（Linux）。
+
+    返回 argv 列表，调用方用 subprocess.run(argv, shell=False)。
+    """
+    argv: List[str] = ["bwrap", "--die-with-parent", "--new-session"]
+
+    # 系统目录只读 bind（只 bind 存在的）
+    for d in _BWRAP_RO_DIRS:
+        p = Path(d)
+        if p.exists():
+            argv += ["--ro-bind", d, d]
+
+    # /tmp 走沙箱内 tmpfs（不泄漏宿主 /tmp）
+    argv += ["--tmpfs", "/tmp"]
+
+    # 可写目录：cwd 必须在首位
+    writable = [cwd] + [r for r in writable_roots if r and r != cwd]
+    for r in writable:
+        argv += ["--bind", r, r]
+
+    # 末尾：bash -c command
+    argv += ["--", "bash", "-c", command]
+    return argv
+
+
+# ---------------------------------------------------------------------------
+# 公开入口：wrap_command
+# ---------------------------------------------------------------------------
+
+def wrap_command(
+    command: str,
+    *,
+    cwd: str,
+    writable_roots: List[str],
+) -> List[str]:
+    """把 shell 命令包装成沙箱 argv。
+
+    调用约定：调用方（terminal_tool）负责收集 writable_roots，
+    默认应含 cwd + ~/.OmniMate + config["security"]["sandbox_writable_roots"]。
+    本函数不重复添加 cwd（只在 bwrap/seatbelt 内部把 cwd bind 进可写区）。
+
+    返回 argv 列表，传给 subprocess.run(argv, shell=False)。
+    平台不支持 / 依赖缺失时抛 SandboxUnavailableError。
+
+    内部分支：
+      - Linux:  _bwrap_wrap()
+      - macOS:  _seatbelt_wrap()（Task 3 实现）
+      - 其他:   抛 SandboxUnavailableError
+    """
+    if sys.platform == "linux":
+        if not shutil.which("bwrap"):
+            raise SandboxUnavailableError(
+                "未安装 bwrap（Bubblewrap）。Debian/Ubuntu: sudo apt install bubblewrap"
+            )
+        return _bwrap_wrap(command, cwd=cwd, writable_roots=writable_roots)
+
+    if sys.platform == "darwin":
+        # macOS 分支在 Task 3 实现，先抛占位
+        raise SandboxUnavailableError("macOS 沙箱尚未实现（Task 3 引入）")
+
+    raise SandboxUnavailableError(
+        f"不支持的平台: {sys.platform}（仅支持 Linux + macOS）"
+    )
