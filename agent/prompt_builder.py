@@ -247,6 +247,26 @@ def build_system_prompt_layers(
             context_parts.append(hints_block)
     except Exception as e:
         logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
+
+    # 项目记忆：递归扫 cwd → root 收集 OMNIMATE.md
+    # 对齐 Claude Code 的 "recursive CLAUDE.md lookup" 语义
+    try:
+        project_mds = _scan_project_memory_files(Path.cwd())
+        for pmd in project_mds:
+            try:
+                content = pmd.read_text(encoding="utf-8")
+                if content.strip():
+                    # 显示相对路径，便于调试（绝对路径太长）
+                    try:
+                        rel = pmd.relative_to(Path.cwd())
+                    except ValueError:
+                        rel = pmd
+                    context_parts.append(f"## 项目记忆: {rel}\n{content}")
+            except Exception as e:
+                logger.warning("读取项目记忆失败 %s: %s", pmd, e)
+    except Exception as e:
+        logger.debug("项目记忆扫描失败(可忽略): %s", e)
+
     if context_files:
         for cf in context_files:
             cf = Path(cf)
@@ -333,6 +353,37 @@ def _paths_match(paths: list, cwd: str) -> bool:
         if fnmatch.fnmatch(cwd_norm, f"*/{pat}") or fnmatch.fnmatch(cwd_norm, pat):
             return True
     return False
+
+
+def _scan_project_memory_files(cwd: Path) -> List[Path]:
+    """从 cwd 向上扫到磁盘根或 .git 目录，收集所有 OMNIMATE.md。
+
+    返回顺序：**从根到 cwd**（外层先注入，内层覆盖语义）。
+    停止规则：遇到含 .git 的目录就停（含该层），不再向上。
+    这是 monorepo 友好的设计：在子项目里跑 omnimate 时，
+    扫到 monorepo 根（含 .git）就停，不会越过到无关目录。
+
+    对齐 Claude Code "从 cwd 向上递归读 CLAUDE.md" 的语义，
+    但品牌用 OMNIMATE.md。
+    """
+    found: List[Path] = []
+    try:
+        current = Path(cwd).resolve()
+    except Exception:
+        return found
+    while True:
+        omninate_md = current / "OMNIMATE.md"
+        if omninate_md.exists():
+            found.append(omninate_md)
+        # .git 所在层 = 仓库根，含这一层即可，不再向上
+        if (current / ".git").exists():
+            break
+        parent = current.parent
+        if parent == current:
+            break  # 磁盘根
+        current = parent
+    found.reverse()  # 从根到 cwd
+    return found
 
 
 def _build_skill_index(skills_dirs) -> str:
