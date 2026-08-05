@@ -15,14 +15,27 @@
 - event 名不合法 → raise ValueError
 - 单个 hook 缺 name / command → 跳过 + log warning（不阻塞其他）
 - 文件不存在 → 静默返回 0（不强制用户配置）
+
+阶段 4 新增：SnapshotCache —— 启动加载后锁定 raw 配置，
+运行期不重读磁盘。对齐 Claude Code "hook 配置在会话启动时锁定，运行期修改不立即生效" 的安全语义。
 """
+import copy
 import json
 import logging
 from pathlib import Path
+from typing import Dict, Optional
 
 from agent.hooks import Hook, HookEvent, HookScriptConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SnapshotCache：启动时锁定，运行期只读（防篡改）
+# ---------------------------------------------------------------------------
+
+_snapshot_cache: Optional[Dict] = None  # {event_str: [hook_dict, ...]}
+_snapshot_settings_path: Optional[Path] = None
 
 
 def load_declarative_hooks(registry, settings_path: Path) -> int:
@@ -30,7 +43,10 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
 
     返回加载成功的 hook 数量。
     文件不存在 = 静默返回 0。
+    末尾把 raw 配置存到 SnapshotCache（防篡改）。
     """
+    global _snapshot_cache, _snapshot_settings_path
+
     if not settings_path.exists():
         return 0
 
@@ -65,7 +81,38 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
             if hook is not None:
                 registry.register_declarative(hook)
                 count += 1
+
+    # 阶段 4：deepcopy 锁定，运行期不重读
+    _snapshot_cache = copy.deepcopy(raw)
+    _snapshot_settings_path = settings_path
     return count
+
+
+def get_snapshot() -> Dict:
+    """启动时锁定的 hook 配置快照（运行期不变）。"""
+    return _snapshot_cache or {}
+
+
+def get_disk_version() -> Dict:
+    """重新读盘返回当前磁盘版本（用于 /hooks diff 检测）。
+
+    文件不存在/解析失败 → 返回 {}。
+    """
+    if not _snapshot_settings_path or not _snapshot_settings_path.exists():
+        return {}
+    try:
+        config = json.loads(_snapshot_settings_path.read_text(encoding="utf-8"))
+        return config.get("hooks", {}) if isinstance(config, dict) else {}
+    except Exception as e:
+        logger.debug("读取磁盘 hook 配置失败: %s", e)
+        return {}
+
+
+def reset_snapshot() -> None:
+    """测试用：重置 snapshot 状态。"""
+    global _snapshot_cache, _snapshot_settings_path
+    _snapshot_cache = None
+    _snapshot_settings_path = None
 
 
 def _parse_hook(h_cfg: dict, event: HookEvent):

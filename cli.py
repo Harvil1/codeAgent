@@ -1176,6 +1176,36 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             console.print("[yellow]用法: /permission [default|bypass|acceptEdits][/yellow]")
         return True
 
+    if name == "/hooks":
+        # 阶段 4 NEW：展示会话启动时锁定的 hook 快照 + 磁盘 diff 检测
+        from agent.hook_loader import get_snapshot, get_disk_version
+        snap = get_snapshot()
+        if not snap:
+            console.print(
+                "[yellow]无声明式 hook（~/.OmniMate/.hooks/settings.json 未配置或为空）[/yellow]"
+            )
+            return True
+        console.print(
+            "[bold]当前会话生效的 hook（启动时锁定，运行期改配置不立即生效 — 防篡改）：[/bold]"
+        )
+        for event, hook_list in snap.items():
+            console.print(f"  [cyan]{event}[/cyan] ({len(hook_list)} 个)")
+            for h in hook_list:
+                htype = h.get("type", "command")
+                hname = h.get("name", "?")
+                console.print(f"    - {hname} (type={htype})")
+        # 磁盘 diff 检测
+        disk = get_disk_version()
+        if disk != snap:
+            console.print(
+                "\n[yellow]⚠ 磁盘 settings.json 与会话快照不一致[/yellow]\n"
+                "[dim]提示：hook 配置在会话启动时锁定，运行期修改不会立即生效。"
+                "重启会话才会加载新配置（防篡改）。[/dim]"
+            )
+        else:
+            console.print("[dim]（磁盘配置与会话快照一致）[/dim]")
+        return True
+
     if name == "/agents":
         # E2 NEW: 列出自定义子代理定义（~/.OmniMate/agents + ./.omnimate/agents）
         from agent.agent_defs import scan_agent_defs
@@ -1376,7 +1406,7 @@ def _show_help():
         "[bold]可用命令[/bold]\n\n"
         "[cyan]/new[/cyan]       开始新对话\n"
         "[cyan]/skills[/cyan]    列出技能（/skills rate <name> <1-5> | /skills recommend）\n"
-        "[cyan]/memory[/cyan]    查看记忆\n"
+        "[cyan]/memory[/cyan]    查看记忆（输入 m 编辑 MEMORY.md / u 编辑 USER.md）\n"
         "[cyan]/sessions[/cyan]  列出历史会话\n"
         "[cyan]/resume[/cyan]    恢复历史会话（/resume [序号]）\n"
         "[cyan]/search[/cyan]    搜索历史对话（/search <关键词>）\n"
@@ -1385,6 +1415,7 @@ def _show_help():
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
         "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass|acceptEdits]）\n"
+        "[cyan]/hooks[/cyan]    查看会话启动时锁定的 hook 快照（含磁盘 diff 检测）\n"
         "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.OmniMate/agents/*.md）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
