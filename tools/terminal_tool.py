@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,8 @@ from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import get_default_checker
 from tools._common import get_mode_override_from_kwargs
 from tools.registry import registry
+
+logger = logging.getLogger(__name__)
 
 
 # 输出截断阈值（防止爆 context）
@@ -146,6 +149,52 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             "command": command,
         }, ensure_ascii=False)
 
+    # === OS 沙箱 wrapper 注入 ===
+    # sandbox_mode="on" 时把 command 包进 bwrap/seatbelt argv；
+    # 不可用 → fail-open 警告并降级到原 shell=True 路径
+    sandbox_mode = kwargs.get("sandbox_mode", "off")
+    wrapped_argv = None
+    sandbox_active = False
+    if sandbox_mode == "on":
+        # GUI 命令强制跳过 sandbox（GUI 程序在沙箱里启不来）
+        is_gui_launch = bool(_GUI_LAUNCH_RE.match(command)) or any(
+            kw in command.lower() for kw in _GUI_PROCESS_KEYWORDS
+        )
+        if is_gui_launch:
+            logger.warning("GUI 命令跳过 OS 沙箱: %s", command[:80])
+        else:
+            try:
+                from agent.sandbox_runner import (
+                    wrap_command, is_available, availability_reason,
+                    SandboxUnavailableError,
+                )
+                if is_available():
+                    # 收集 writable_roots：cwd + ~/.OmniMate + config 扩展
+                    from pathlib import Path
+                    writable_roots = []
+                    try:
+                        from constants import get_omnimate_home
+                        writable_roots.append(str(get_omnimate_home()))
+                    except Exception:
+                        writable_roots.append(str(Path.home() / ".OmniMate"))
+                    cfg = kwargs.get("config") or {}
+                    extra = ((cfg.get("security") or {}).get("sandbox_writable_roots") or [])
+                    writable_roots.extend(extra)
+
+                    wrapped_argv = wrap_command(
+                        command, cwd=cwd, writable_roots=writable_roots,
+                    )
+                    sandbox_active = True
+                else:
+                    logger.warning(
+                        "OS 沙箱不可用（%s），fail-open 降级到原路径",
+                        availability_reason(),
+                    )
+            except SandboxUnavailableError as e:
+                logger.warning("OS 沙箱 wrapper 构造失败，fail-open: %s", e)
+            except Exception as e:
+                logger.warning("OS 沙箱 wrapper 异常，fail-open: %s", e)
+
     try:
         # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防泄漏给子进程
         from agent.sandbox_env import build_safe_env
@@ -178,7 +227,21 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 "command": command,
                 "cwd": cwd,
             }, ensure_ascii=False)
+        elif sandbox_active and wrapped_argv:
+            # OS 沙箱路径：用包装后的 argv，shell=False
+            result = subprocess.run(
+                wrapped_argv,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=safe_env,
+                encoding="utf-8",
+                errors="replace",
+            )
         else:
+            # 原路径：sandbox off 或 fail-open
             result = subprocess.run(
                 command,
                 shell=True,

@@ -217,3 +217,118 @@ def test_seatbelt_profile_filename_unique(tmp_path, monkeypatch):
     p1 = _write_seatbelt_profile(cwd="/x", writable_roots=[])
     p2 = _write_seatbelt_profile(cwd="/x", writable_roots=[])
     assert p1 != p2
+
+
+# ---------------------------------------------------------------------------
+# Task 5: terminal_tool 注入 sandbox wrapper（集成测试）
+# ---------------------------------------------------------------------------
+
+def test_terminal_with_sandbox_off_uses_shell_true(monkeypatch):
+    """sandbox off → subprocess.run 用 shell=True（原路径）。"""
+    import tools.terminal_tool as tt
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["shell"] = kwargs.get("shell", False)
+        captured["cmd"] = cmd
+        class R:
+            stdout = "ok"
+            stderr = ""
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(tt.subprocess, "run", fake_run)
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+    result = tt._handle_terminal({"command": "echo hi"}, sandbox_mode="off")
+    assert captured["shell"] is True
+    import json
+    parsed = json.loads(result)
+    assert parsed["stdout"] == "ok"
+
+
+def test_terminal_with_sandbox_on_uses_argv(monkeypatch):
+    """sandbox on + 可用 → subprocess.run 用 argv + shell=False。"""
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["shell"] = kwargs.get("shell", False)
+        captured["cmd"] = cmd
+        captured["is_list"] = isinstance(cmd, list)
+        class R:
+            stdout = "ok"
+            stderr = ""
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(sr, "is_available", lambda: True)
+    monkeypatch.setattr(sr, "wrap_command",
+                        lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
+    monkeypatch.setattr(tt.subprocess, "run", fake_run)
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+    result = tt._handle_terminal(
+        {"command": "echo hi"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    assert captured["shell"] is False
+    assert captured["is_list"] is True
+    assert captured["cmd"][0] == "bwrap"
+
+
+def test_terminal_with_sandbox_on_unavailable_falls_back(monkeypatch):
+    """sandbox on 但不可用 → fail-open 回退到 shell=True。"""
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["shell"] = kwargs.get("shell", False)
+        class R:
+            stdout = "ok"
+            stderr = ""
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(sr, "is_available", lambda: False)
+    monkeypatch.setattr(sr, "availability_reason", lambda: "未安装 bwrap")
+    monkeypatch.setattr(tt.subprocess, "run", fake_run)
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+    tt._handle_terminal(
+        {"command": "echo hi"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    assert captured["shell"] is True  # 回退到原路径
+
+
+def test_terminal_gui_command_skips_sandbox(monkeypatch):
+    """GUI 命令（start / Chrome 等）跳过 sandbox，走原路径。"""
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["shell"] = kwargs.get("shell", False)
+        class R:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(sr, "is_available", lambda: True)
+    monkeypatch.setattr(sr, "wrap_command",
+                        lambda cmd, **kw: ["bwrap", "bash", "-c", cmd])
+    monkeypatch.setattr(tt.subprocess, "run", fake_run)
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+    tt._handle_terminal(
+        {"command": "start notepad.exe"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    # GUI 路径用 shell=True
+    assert captured["shell"] is True
