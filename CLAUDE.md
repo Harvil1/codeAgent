@@ -41,7 +41,7 @@ OmniMate 是基于 `D:\project\hermes-agent-main\replication-guide\` 复刻指�
 3. **完全可逆** —— 自动归档系统**永不删除**，只能移到 `.archive/`。Task System 用软删除（`status="deleted"`），文件保留可恢复。这让 agent 敢于自动管理自己的知识库。
 4. **用户意图优先于算法** —— `pinned` 的技能免疫所有 curator 自动转换。权限闸门里用户审批的命令进会话缓存不重复询问。算法可以错，用户的明确判断不能被覆盖。
 5. **发现 ≠ 可见** —— 工具注册（登记到 `registry`）和暴露给 LLM（`resolve_toolset` → `get_definitions`）是两步。`check_fn` 让工具根据运行时环境动态出现/消失（MCP 工具用这个机制：server 断开时自动隐藏）。
-6. **安全默认 > 事后补救** —— `terminal` 工具默认走三道权限闸门（黑名单 → 规则 → 审批），`write_file` 默认走路径白名单（cwd + `~/.agent`）。要"放开"必须显式配置，不能默认放开。
+6. **安全默认 > 事后补救** —— `terminal` 工具默认走三道权限闸门（黑名单 → 规则 → 审批），`write_file` 默认走路径白名单（cwd + `~/.OmniMate`）。要"放开"必须显式配置，不能默认放开。
 
 ## 模块依赖链（从底层到上层）
 
@@ -85,7 +85,7 @@ cli.py                  ← RuntimeContext 聚合所有组件
 |---|---|---|---|---|
 | 形态 | Python 代码 | Markdown 文件 | 短文本条目 | JSON 任务对象 |
 | 创建者 | 开发者 | Agent + 用户 + 开发者 | Agent | Agent |
-| 持久化 | 永久（代码） | `~/.agent/skills/` | `~/.agent/MEMORY.md` | `~/.agent/.tasks/` |
+| 持久化 | 永久（代码） | `~/.OmniMate/skills/` | `~/.OmniMate/MEMORY.md` | `~/.OmniMate/.tasks/` |
 | 跨会话 | 是 | 是 | 是 | 是 |
 | 注入位置 | 工具 schema | user 消息（触发时） | system prompt | 工具调用 |
 
@@ -110,6 +110,45 @@ terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提�
 
 ⚠️ **不要为了"方便"绕过这些检查**。如果某工具确实需要写到 cwd 外，通过 `kwargs` 接收 `omnimate_home` 并在 safe_path 的 `allowed_roots` 里显式声明。
 
+## OS 沙箱（对齐 Claude Code `/sandbox`）
+
+terminal_tool 命令执行叠加 OS 内核级强制隔离，作为权限闸门之后的硬防线：
+
+- **Linux**：Bubblewrap（bwrap）—— 用户命名空间 + bind mount
+- **macOS**：Seatbelt（sandbox-exec）—— Apple 沙箱 profile
+- **Windows**：不支持原生（用户走 WSL2/Docker），`is_available()` 返回 False
+
+### 触发
+
+```
+/sandbox on       开启 OS 沙箱（命令包进 bwrap/sandbox-exec）
+/sandbox off      关闭（默认）
+/sandbox status   查看当前状态
+```
+
+### 关键文件
+
+| 想修改什么 | 看这里 |
+|---|---|
+| 沙箱 wrapper 构造（跨平台） | `agent/sandbox_runner.py` |
+| is_available / availability_reason | `agent/sandbox_runner.py` |
+| terminal 注入 wrapper 的位置 | `tools/terminal_tool.py:_handle_terminal`（sandbox_mode 分支） |
+| sandbox_mode 字段 + set_sandbox_mode | `agent/permission.py:PermissionChecker` |
+| /sandbox 命令处理 | `cli.py:_handle_command`（name == "/sandbox"） |
+| 配置默认值 | `config.py:DEFAULT_CONFIG["security"]` |
+
+### 设计原则
+
+- **叠加层**：不替换 PermissionChecker / safe_path / worktree，是新增层
+- **fail-open**：不可用时警告并降级到原 `shell=True` 路径
+- **GUI 命令跳过**：`start`/Chrome 等 GUI 程序在沙箱里启不来，强制走原路径
+- **网络不隔离**：bwrap 不加 `--unshare-net`（用户决策）
+- **只防写不防读**：第一版只挡写敏感路径（读保护留后续迭代）
+
+### 可写目录范围
+
+默认允许写入：`cwd` + `~/.OmniMate`，可通过 `config["security"]["sandbox_writable_roots"]` 扩展。
+
 ## 韧性机制（重试 + 备用模型 + max_tokens 升级 + 529 早切）
 
 `agent/llm_retry.py:call_with_retry` 被 `AIAgent.run_conversation` 用于每次 LLM 调用：
@@ -127,14 +166,14 @@ terminal 输出：超过 50000 字符截断，保留前后各一半 + 续写提�
 | 层 | Task System |
 |---|---|
 | 文件 | `agent/task_store.py` + `tools/task_tools.py` |
-| 持久化 | `~/.agent/.tasks/{id}.json`（跨会话） |
+| 持久化 | `~/.OmniMate/.tasks/{id}.json`（跨会话） |
 | 依赖 | DAG（`blocked_by` + `can_start` + `find_ready`） |
 | 约束 | 状态机 pending→in_progress→completed |
 | 工具 | `task_create` / `task_update` / `task_complete` / `task_list` 等 |
 
 ## 扩展机制（MCP + worktree + load_skill）
 
-- **MCP**：`~/.agent/.mcp.json` 配置外部 server，启动时 `tools/mcp_tool.py:initialize_mcp` 连接 + 注册。工具以 `mcp__<server>__<tool>` 前缀暴露，`check_fn` 在 server 断开时自动隐藏。`enabled_toolsets` 要含 `"mcp"` 才对 LLM 可见。
+- **MCP**：`~/.OmniMate/.mcp.json` 配置外部 server，启动时 `tools/mcp_tool.py:initialize_mcp` 连接 + 注册。工具以 `mcp__<server>__<tool>` 前缀暴露，`check_fn` 在 server 断开时自动隐藏。`enabled_toolsets` 要含 `"mcp"` 才对 LLM 可见。
 - **worktree 隔离**：`tools/worktree.py:create_isolated_workspace`。`subagent(isolated_workspace=True)` 让子代理在独立 git worktree 或临时目录跑，互不干扰。
 - **load_skill**：两级加载。system prompt 只放技能索引（名字+描述），LLM 按需调 `load_skill(name)` 获取完整正文（去 frontmatter）。区别于 `skill_view`（含 frontmatter，用户视角）。
 - **summary_only**：`subagent(summary_only=True)`（默认）时，子代理结果超 500 字用 LLM 压缩成 300 字摘要，节省父代理 context。
@@ -178,7 +217,7 @@ uv sync                                 # 同步已声明依赖
 - **文件 I/O**：必须指定 `encoding="utf-8"`（Windows 默认 cp1252 会乱码）。ruff 规则 `PLW1514` 强制。
 - **命令执行安全**：不要绕过 `PermissionChecker` 和 `safe_path`。新增工具如果需要写文件，通过 `omnimate_home` 参数 + `safe_path(write=True, allowed_roots=[...])` 显式声明允许的目录。
 - **默认 provider**：DeepSeek（`base_url=https://api.deepseek.com/v1`，模型 `deepseek-chat`，env `DEEPSEEK_API_KEY`）。在 `config.yaml` / `.env` 切换其他 OpenAI 兼容 provider。
-- **agent home**：默认 `~/.agent`，可用 `AGENT_HOME` 环境变量覆盖（profile 隔离机制）。
+- **agent home**：默认 `~/.OmniMate`，可用 `AGENT_HOME` 环境变量覆盖（profile 隔离机制）。
 - **工具结果契约**：所有 handler 返回 JSON 字符串，错误用 `{"error": "...", "error_type": "..."}`。
 
 
@@ -226,6 +265,7 @@ uv sync                                 # 同步已声明依赖
 | Skills context:fork | `agent/skill_fork.py:run_skill_in_fork`（slash 触发 + load_skill 提示）；scan_skill_commands 读 frontmatter context 字段 |
 | Hooks 18 种事件 | `agent/hooks.py:HookEvent`（11 核心 + round3 加 POST_TOOL_USE_FAILURE/SUBAGENT_START+STOP/TASK_CREATED+COMPLETED/PERMISSION_REQUEST+DENIED）|
 | /rewind 4 模式 | `cli.py:_handle_rewind_command`（全恢复/只对话/只代码/从此压缩）|
+| OS 沙箱（bwrap/Seatbelt） | `agent/sandbox_runner.py` + `tools/terminal_tool.py`（_handle_terminal sandbox 注入） |
 | reflection reference 型 | `agent/reflection.py:REFLECTION_PROMPT_TEMPLATE`（4 类：user/feedback/project/reference）|
 
 ## 已知约束（设计如此，不是 bug）
