@@ -1536,6 +1536,71 @@ def _show_memory(rt: RuntimeContext):
     if not rt.memory_store.user_entries:
         console.print("  [dim]（空）[/dim]")
 
+    # 菜单：编辑 MEMORY.md / USER.md（对齐 Claude Code /memory 命令体验）
+    console.print(
+        "\n[dim]输入 [cyan]m[/cyan] 编辑 MEMORY.md，[cyan]u[/cyan] 编辑 USER.md，"
+        "其他键返回[/dim]"
+    )
+    choice = console.input("> ").strip().lower()
+    if choice == "m":
+        _open_in_editor(get_omnimate_home() / "MEMORY.md")
+    elif choice == "u":
+        _open_in_editor(get_omnimate_home() / "USER.md")
+
+
+def _open_in_editor(path: Path) -> None:
+    """用 $EDITOR（Windows fallback notepad）打开文件。"""
+    import subprocess
+    editor = os.environ.get("EDITOR") or ("notepad" if sys.platform == "win32" else "vi")
+    try:
+        subprocess.Popen([editor, str(path)])
+        console.print(f"[green]已用 {editor} 打开 {path}[/green]")
+        console.print("[dim]编辑保存后会话重新加载生效（保护 prompt cache）。[/dim]")
+    except Exception as e:
+        console.print(f"[red]打开编辑器失败: {e}[/red]")
+        console.print(f"[yellow]手动编辑：{path}[/yellow]")
+
+
+def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
+    """`#` 快捷写记忆：弹菜单选类型，直接调 MemoryStore.save。
+
+    对齐 Claude Code 的 `#` shortcut 体验。
+    """
+    if not rt.memory_store:
+        console.print("[yellow]记忆系统未启用，无法保存[/yellow]")
+        return
+    if not text:
+        return
+
+    console.print(f"[dim]内容：[/dim] {text}")
+    console.print(
+        "[bold]选择类型：[/bold] "
+        "[cyan]1[/cyan]=user  [cyan]2[/cyan]=feedback  "
+        "[cyan]3[/cyan]=project  [cyan]4[/cyan]=reference  [cyan]5[/cyan]=other"
+    )
+    choice = console.input("> ").strip()
+    type_map = {
+        "1": "user", "2": "feedback", "3": "project",
+        "4": "reference", "5": "other",
+    }
+    mtype = type_map.get(choice, "other")
+    # name 用前 30 字符（同 topic 同 name 会更新而非新建）
+    name = text[:30].replace("\n", " ")
+    try:
+        entry_id = rt.memory_store.save(
+            name=name,
+            description=text,
+            type=mtype,
+            body=text,
+            topic="quick",
+        )
+        console.print(
+            f"[green]已保存记忆（type={mtype}, id={entry_id}）[/green]\n"
+            f"[dim]下次会话注入生效（保护 prompt cache）。[/dim]"
+        )
+    except Exception as e:
+        console.print(f"[red]保存失败: {e}[/red]")
+
 
 def _list_sessions(rt: RuntimeContext):
     if not rt.session_store:
@@ -2113,6 +2178,15 @@ def run_interactive(resume_last: bool = False):
             break
 
         if not user_input:
+            continue
+
+        # 0. `#` 快捷写记忆（对齐 Claude Code 体验）
+        if user_input.startswith("#"):
+            text = user_input[1:].strip()
+            if text:
+                _quick_save_memory(rt, text)
+            else:
+                console.print("[yellow]用法：# <记忆内容>（如 # 项目用 pytest）[/yellow]")
             continue
 
         # 1. 处理 slash 命令
