@@ -190,6 +190,13 @@ class RuntimeContext:
                 mode=perm_mode,
                 hooks_registry=self.hooks_registry,  # round3 D2 NEW: 权限审计 hook
             ))
+            # Task 7: 灌入 config["security"]["sandbox_mode"]
+            from agent.permission import get_default_checker
+            _checker = get_default_checker()
+            if _checker is not None:
+                sandbox_mode = self.config.get("security", {}).get("sandbox_mode", "off")
+                if sandbox_mode in ("off", "on"):
+                    _checker.set_sandbox_mode(sandbox_mode)
         except Exception as e:
             logger.debug("权限检查器初始化失败（用默认）: %s", e)
 

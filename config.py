@@ -204,6 +204,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "dangerous_commands": [],
         "redact_secrets": True,
         "permission_mode": "default",    # "default" | "bypassPermissions" | "acceptEdits"
+        # OS 沙箱（对齐 Claude Code /sandbox）
+        "sandbox_mode": "off",           # "off" | "on"（启动时灌进 PermissionChecker）
+        "sandbox_writable_roots": [],    # 额外允许写的目录（默认 cwd + ~/.OmniMate 已含）
     },
 
     # 显示
