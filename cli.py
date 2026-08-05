@@ -2171,13 +2171,21 @@ def _auto_resume_last(rt: RuntimeContext):
     _show_history_messages(rt)
 
 
-def run_interactive(resume_last: bool = False):
+def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     """启动交互式 CLI。
 
     参数：
         resume_last: True 时自动恢复最近会话（-c/--continue 触发）；
                      False 时提示用户选择。
+        cli_agents: 阶段 6 NEW —— `--agents '{json}'` 传入的子代理定义。
+                    优先级介于用户级和项目级之间（对齐 Claude Code `--agents`）。
     """
+    # 阶段 6 NEW: 注入 CLI 子代理到 scan_agent_defs 的来源链
+    if cli_agents:
+        from agent.agent_defs import inject_cli_agents
+        n = inject_cli_agents(cli_agents)
+        console.print(f"[dim]已从 CLI --agents 注入 {n} 个子代理[/dim]")
+
     console.print(Panel(
         "[bold blue]自学习 AI Agent[/bold blue]\n"
         "输入消息开始对话。[cyan]/help[/cyan] 查看命令，[cyan]/quit[/cyan] 退出。",

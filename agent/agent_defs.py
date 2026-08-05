@@ -1,8 +1,8 @@
-"""自定义子代理 .md 定义扫描（对齐 Claude Code .claude/agents/*.md）。
+"""自定义子代理 .md 定义扫描。
 
 扫描两个目录：
   - ~/.OmniMate/agents/（用户级，跨项目）
-  - <cwd>/.claude/agents/（项目级，入库共享，覆盖用户级）
+  - <cwd>/.omnimate/agents/（项目级，入库共享，覆盖用户级）
 
 frontmatter 字段：name / description / model / tools / disallowedTools /
 permissionMode / isolation / maxTurns。
@@ -42,7 +42,7 @@ def _user_agents_dir() -> Path:
 
 
 def _project_agents_dir() -> Path:
-    return Path.cwd() / ".claude" / "agents"
+    return Path.cwd() / ".omnimate" / "agents"
 
 
 def _builtin_agents_dir() -> Path:
@@ -77,16 +77,87 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
 
 
 def scan_agent_defs() -> Dict[str, AgentDefinition]:
-    """扫描内置 + 用户 + 项目三个目录，后者覆盖前者。"""
+    """扫描内置 + 用户 + CLI 注入 + 项目四个来源，后者覆盖前者。
+
+    优先级（低 → 高）：
+      1. 内置（agent/builtin_agents/）
+      2. 用户级（~/.OmniMate/agents/）
+      3. CLI 注入（`--agents '{json}'`，对齐 Claude Code 的 --agents flag）
+      4. 项目级（<cwd>/.omnimate/agents/）
+    """
     defs: Dict[str, AgentDefinition] = {}
-    for d in [_builtin_agents_dir(), _user_agents_dir(), _project_agents_dir()]:
+    for d in [_builtin_agents_dir(), _user_agents_dir()]:
         if not d.exists():
             continue
         for md in sorted(d.glob("*.md")):
             ad = _parse_one(md)
             if ad and ad.name:
                 defs[ad.name] = ad  # 后扫的覆盖先扫的
+    # 阶段 6 NEW: CLI 注入的子代理（优先级介于 user 和 project 之间）
+    for name, ad in _cli_injected.items():
+        defs[name] = ad
+    # 项目级最高优先级
+    proj_dir = _project_agents_dir()
+    if proj_dir.exists():
+        for md in sorted(proj_dir.glob("*.md")):
+            ad = _parse_one(md)
+            if ad and ad.name:
+                defs[ad.name] = ad
     return defs
+
+
+# ---------------------------------------------------------------------------
+# 阶段 6 NEW: CLI 动态注入（--agents '{json}'）
+# ---------------------------------------------------------------------------
+
+_cli_injected: Dict[str, AgentDefinition] = {}
+
+
+def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
+    """注入 CLI `--agents '{json}'` 传入的子代理定义。
+
+    参数 cli_agents：{name: {description, prompt, tools, model, ...}}，
+    对齐 Claude Code `claude --agents '{json}'` 格式。
+    返回成功解析的数量。同 session 内幂等：可多次调用替换。
+    """
+    _cli_injected.clear()
+    count = 0
+    if not cli_agents or not isinstance(cli_agents, dict):
+        return 0
+    for name, cfg in cli_agents.items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            ad = AgentDefinition(
+                name=name,
+                description=cfg.get("description", ""),
+                model=cfg.get("model"),
+                tools=cfg.get("tools") or [],
+                disallowed_tools=cfg.get("disallowedTools") or [],
+                permission_mode=cfg.get("permissionMode"),
+                isolation=cfg.get("isolation"),
+                max_turns=cfg.get("maxTurns"),
+                system_prompt=cfg.get("prompt", "").strip(),
+                memory=bool(cfg.get("memory", False)),
+                skills=cfg.get("skills") or [],
+                mcp_servers=cfg.get("mcpServers") or [],
+                effort=cfg.get("effort"),
+            )
+            _cli_injected[name] = ad
+            count += 1
+        except Exception as e:
+            logger.warning("CLI 注入子代理 '%s' 解析失败: %s", name, e)
+    return count
+
+
+def get_cli_injected() -> Dict[str, AgentDefinition]:
+    """测试用：返回当前 CLI 注入的子代理。"""
+    return dict(_cli_injected)
+
+
+def clear_cli_injected() -> None:
+    """测试用：清空 CLI 注入。"""
+    _cli_injected.clear()
 
 
 def get_agent_def(name: str) -> Optional[AgentDefinition]:

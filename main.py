@@ -9,6 +9,9 @@
 
 import sys
 
+# 阶段 6 NEW: --agents '{json}' 解析需要 json
+import json
+
 # Windows 控制台默认 GBK，遇 emoji/特殊字符（\u26a0 等）会 UnicodeEncodeError 崩。
 # 启动时强制 stdout/stderr 为 utf-8 + errors='replace'，保证任意 unicode 都能输出（不可编码字符替换为 ?）。
 try:
@@ -42,19 +45,45 @@ except Exception as e:
 
 
 def main():
-    """主入口。"""
+    """主入口。
+
+    支持的调用形式（向后兼容）：
+        python main.py                         # 交互模式
+        python main.py -c / --continue         # 自动恢复最近会话
+        python main.py chat <msg>              # 非交互一次性问答
+        python main.py --agents '{json}'       # CLI 注入子代理（阶段 6 NEW）
+        python main.py --agents '{json}' chat <msg>
+    """
     args = sys.argv[1:]
+    cli_agents_raw = None
+
+    # 提取 --agents 参数（不破坏旧的 chat/-c/--continue 逻辑）
+    if "--agents" in args:
+        idx = args.index("--agents")
+        if idx + 1 >= len(args):
+            print("--agents 需要一个 JSON 参数", file=sys.stderr)
+            sys.exit(2)
+        try:
+            cli_agents_raw = json.loads(args[idx + 1])
+        except json.JSONDecodeError as e:
+            print(f"--agents 参数不是合法 JSON: {e}", file=sys.stderr)
+            sys.exit(2)
+        # 从 args 里移除 --agents 及其值，让旧逻辑正常工作
+        args = args[:idx] + args[idx + 2:]
 
     # 非交互模式：python main.py chat "你好"
     if args and args[0] == "chat":
         from cli import run_one_shot
+        if cli_agents_raw:
+            from agent.agent_defs import inject_cli_agents
+            inject_cli_agents(cli_agents_raw)
         run_one_shot(" ".join(args[1:]))
         return
 
     # 交互模式：检查 -c / --continue 标志
     resume_last = "-c" in args or "--continue" in args
     from cli import run_interactive
-    run_interactive(resume_last=resume_last)
+    run_interactive(resume_last=resume_last, cli_agents=cli_agents_raw)
 
 
 if __name__ == "__main__":
