@@ -476,6 +476,9 @@ class PermissionChecker:
         self.mode = mode
         # round3 D2 NEW: hooks registry 引用（可选，None=不触发审计 hook）
         self._hooks_registry = hooks_registry
+        # OS 沙箱模式（off | on）；运行时通过 set_sandbox_mode() 切换
+        # 实际 wrapper 注入由 terminal_tool 负责（基于本字段的值决定走哪条路径）
+        self.sandbox_mode = "off"
 
     def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
         """round3 D2 NEW: 统一 deny helper。
@@ -714,6 +717,21 @@ class PermissionChecker:
     def reset_cache(self):
         """清空会话内缓存（不影响持久化白名单）。"""
         self._approved.clear()
+
+    def set_sandbox_mode(self, mode: str) -> None:
+        """切换 OS 沙箱模式（/sandbox 命令调）。
+
+        参数：
+            mode: "off" 关闭（默认）或 "on" 开启。
+                  on 时 terminal_tool 会把命令包进 bwrap/seatbelt wrapper。
+                  不可用时走 fail-open 降级（警告 + 原路径）。
+
+        异常：
+            ValueError: mode 不在 ("off", "on") 中。
+        """
+        if mode not in ("off", "on"):
+            raise ValueError(f"非法 sandbox_mode: {mode}（仅支持 off / on）")
+        self.sandbox_mode = mode
 
 
 # 全局默认 checker（无审批，只走闸门 1/2）
