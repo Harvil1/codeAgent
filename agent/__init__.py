@@ -22,6 +22,7 @@
 
 import json
 import logging
+import os
 from typing import Optional
 
 from agent.budget import IterationBudget
@@ -118,6 +119,9 @@ class AIAgent:
         self.max_iterations = max_iterations
         self.enabled_toolsets = enabled_toolsets or ["core"]
         self.session_id = session_id
+        # 阶段 5 NEW: 创建会话级 env 文件并暴露路径给 hook（对齐 Claude Code CLAUDE_ENV_FILE）
+        self._session_env_path = None
+        self._setup_session_env_file()
         self.memory_store = memory_store
         self.memory_manager = memory_manager
         self.session_store = session_store
@@ -317,6 +321,32 @@ class AIAgent:
 
         幂等：多次调用安全。每个子清理都包 try/except，互不影响。
         """
+        # 阶段 5 NEW: 清理 session env 文件 + unset 环境变量
+        try:
+            if getattr(self, "_session_env_path", None):
+                self._session_env_path.unlink(missing_ok=True)
+                self._session_env_path = None
+            if "OMNIMATE_ENV_FILE" in os.environ:
+                del os.environ["OMNIMATE_ENV_FILE"]
+        except Exception as e:
+            logger.warning("清理 session env 文件失败: %s", e)
+
+    def _setup_session_env_file(self):
+        """会话启动时创建 .session/{session_id}.env 并设 OMNIMATE_ENV_FILE 环境变量。
+
+        SessionStart hook 执行时能从 os.environ 读到这个路径，
+        往里写 `export K=V` 行。terminal_tool 后续会 merge。
+        """
+        try:
+            from constants import session_env_file
+            env_path = session_env_file(self.session_id)
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            if not env_path.exists():
+                env_path.touch()
+            os.environ["OMNIMATE_ENV_FILE"] = str(env_path)
+            self._session_env_path = env_path
+        except Exception as e:
+            logger.warning("创建 session env file 失败: %s", e)
     def interrupt(self):
         """请求中断（由 CLI 的 Ctrl+C 处理器调用）。
 
@@ -593,7 +623,7 @@ class AIAgent:
 
         05 升级：分 stable/context 两层缓存，volatile 每次取最新。
         - stable：跨会话不变（身份、指导），几乎 100% 命中 prompt cache
-        - context：单会话内不变（记忆/技能/CLAUDE.md）
+        - context：单会话内不变（记忆/技能/OMNIMATE.md）
         - volatile：每轮可变（reminder），不入缓存
         """
         if not self._system_prompt_built:

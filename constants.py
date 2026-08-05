@@ -147,3 +147,23 @@ def env_file() -> Path:
 def sessions_db_path() -> Path:
     """会话数据库路径。"""
     return get_omnimate_home() / "sessions.db"
+
+
+def session_dir() -> Path:
+    """会话级临时数据目录（env 文件等）。
+
+    阶段 5 NEW：OMNIMATE_ENV_FILE 持久化目录（对齐 Claude Code 的 CLAUDE_ENV_FILE）。
+    SessionStart hook 可以 echo 'export K=V' >> $OMNIMATE_ENV_FILE，
+    terminal_tool 后续执行命令时会 merge 这个文件到 subprocess env。
+    """
+    return get_omnimate_home() / ".session"
+
+
+def session_env_file(session_id: str) -> Path:
+    """会话级 env 文件路径（OMNIMATE_ENV_FILE）。"""
+    sid = session_id or "default"
+    # 清理非法字符（防 path traversal）
+    safe_sid = "".join(c for c in sid if c.isalnum() or c in "-_")
+    if not safe_sid:
+        safe_sid = "default"
+    return session_dir() / f"{safe_sid}.env"

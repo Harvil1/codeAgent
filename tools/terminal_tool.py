@@ -82,6 +82,43 @@ def _get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
     return None
 
 
+def _load_session_env_overrides() -> dict:
+    """从 $OMNIMATE_ENV_FILE 读 export K=V 行返回 dict（对齐 Claude Code CLAUDE_ENV_FILE）。
+
+    SessionStart hook 写入的 env 持久化到这个文件，terminal_tool 每次执行
+    命令前 merge 到 subprocess env，让 hook 设的环境变量对后续命令可见
+    （nvm/pyenv/conda 用户刚需）。
+    """
+    env_path = os.environ.get("OMNIMATE_ENV_FILE")
+    if not env_path:
+        return {}
+    try:
+        p = Path(env_path)
+        if not p.is_file():
+            return {}
+        overrides = {}
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 支持 `export K=V` 和 `K=V`
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip()
+            # 去掉包围引号
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            if k:
+                overrides[k] = v
+        return overrides
+    except Exception:
+        return {}
+
+
 def _handle_terminal(args: dict, **kwargs) -> str:
     """实际执行终端命令。
 
@@ -121,6 +158,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 沙箱环境变量:洗掉密钥类(API key/数据库密码等),防泄漏给子进程
         from agent.sandbox_env import build_safe_env
         safe_env = build_safe_env()
+        # 阶段 5 NEW: merge OMNIMATE_ENV_FILE 里的 hook 写入的 env 覆盖
+        safe_env.update(_load_session_env_overrides())
 
         # 检测 GUI 程序启动命令(start / Chrome / 浏览器等)
         # GUI 程序不退出 → subprocess 管道永远等 → 卡死
