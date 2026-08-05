@@ -13,11 +13,19 @@ from typing import Optional
 
 from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import get_default_checker
+from tools._common import get_mode_override_from_kwargs
 from tools.registry import registry
 
 
 # 输出截断阈值（防止爆 context）
 MAX_OUTPUT_CHARS = 50000
+
+# GUI 程序关键字（命中后 subprocess 不建管道，避免子进程继承管道卡死）
+_GUI_PROCESS_KEYWORDS = (
+    "chrome.exe", "firefox.exe", "msedge.exe",
+    "notepad.exe", "explorer.exe",
+)
+_GUI_LAUNCH_RE = re.compile(r"^\s*start\s", re.IGNORECASE)
 
 
 def check_terminal_requirements() -> bool:
@@ -64,22 +72,6 @@ TERMINAL_SCHEMA = {
         "required": ["command"],
     },
 }
-
-
-def _get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
-    """从工具调用的 kwargs 里提取子代理 permission_mode override。
-
-    必修 1：工具读 kwargs["agent_ref"].permission_mode，作为本次 check 的 mode override。
-    线程安全：mode override 只影响本次调用，不修改全局 checker 状态。
-    返回 "bypassPermissions" / "default" / None（无 agent_ref 时）。
-    """
-    agent_ref = kwargs.get("agent_ref")
-    if agent_ref is None:
-        return None
-    mode = getattr(agent_ref, "permission_mode", None)
-    if mode in ("default", "bypassPermissions"):
-        return mode
-    return None
 
 
 def _load_session_env_overrides() -> dict:
@@ -144,7 +136,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
     # 必修 1：子代理 permission_mode 透传——从 agent_ref.permission_mode 提取 mode override，
     # 让子代理按自己的 mode 做权限决策（不污染全局 checker，线程安全）。
     checker = kwargs.get("permission_checker") or get_default_checker()
-    mode_override = _get_mode_override_from_kwargs(kwargs)
+    mode_override = get_mode_override_from_kwargs(kwargs)
     perm = checker.check(command, cwd=cwd, mode_override=mode_override)
     if not perm.allowed:
         return json.dumps({
@@ -164,13 +156,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 检测 GUI 程序启动命令(start / Chrome / 浏览器等)
         # GUI 程序不退出 → subprocess 管道永远等 → 卡死
         # 修复:不创建管道(DEVNULL),start 命令立即返回
-        is_gui_launch = bool(re.match(
-            r'^\s*start\s', command, re.IGNORECASE
-        )) or any(
-            kw in command.lower() for kw in [
-                'chrome.exe', 'firefox.exe', 'msedge.exe',
-                'notepad.exe', 'explorer.exe',
-            ]
+        is_gui_launch = bool(_GUI_LAUNCH_RE.match(command)) or any(
+            kw in command.lower() for kw in _GUI_PROCESS_KEYWORDS
         )
 
         if is_gui_launch:

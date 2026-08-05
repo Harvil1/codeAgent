@@ -14,23 +14,8 @@ from typing import Optional
 
 from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import safe_path
+from tools._common import get_mode_override_from_kwargs
 from tools.registry import registry
-
-
-def _get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
-    """从工具调用的 kwargs 里提取子代理 permission_mode override。
-
-    必修 1：工具读 kwargs["agent_ref"].permission_mode，作为本次 check 的 mode override。
-    线程安全：mode override 只影响本次调用，不修改全局 checker 状态。
-    返回 "bypassPermissions" / "default" / None（无 agent_ref 时）。
-    """
-    agent_ref = kwargs.get("agent_ref")
-    if agent_ref is None:
-        return None
-    mode = getattr(agent_ref, "permission_mode", None)
-    if mode in ("default", "bypassPermissions"):
-        return mode
-    return None
 
 
 def _content_hash(text: str) -> str:
@@ -200,7 +185,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     # 必修 1：子代理 permission_mode 透传（bypassPermissions 放行白名单外路径）。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
-    mode_override = _get_mode_override_from_kwargs(kwargs)
+    mode_override = get_mode_override_from_kwargs(kwargs)
     perm = checker.check_path(path_str, write=True, mode_override=mode_override)
     if not perm.allowed:
         return json.dumps(
@@ -454,7 +439,7 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
     # 必修 1：子代理 permission_mode 透传。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
-    mode_override = _get_mode_override_from_kwargs(kwargs)
+    mode_override = get_mode_override_from_kwargs(kwargs)
     perm = checker.check_path(path_str, write=True, mode_override=mode_override)
     if not perm.allowed:
         return json.dumps(

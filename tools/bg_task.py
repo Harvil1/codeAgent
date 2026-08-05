@@ -98,13 +98,43 @@ BG_STOP_SCHEMA = {
 # handler
 # ---------------------------------------------------------------------------
 
-def _handle_bg_start(args: dict, **kwargs) -> str:
+_BG_UNAVAILABLE_ERR = json.dumps({
+    "error": "background manager not available",
+    "error_type": "bg_unavailable",
+}, ensure_ascii=False)
+
+
+def _require_bg_manager(kwargs):
+    """从 kwargs 取 bg_manager，不可用时返回 (None, err_json)。"""
     bg_manager = kwargs.get("bg_manager")
     if bg_manager is None:
-        return json.dumps({
-            "error": "background manager not available",
-            "error_type": "bg_unavailable",
+        return None, _BG_UNAVAILABLE_ERR
+    return bg_manager, None
+
+
+def _require_task_id(args, tool_name):
+    """从 args 取 task_id，空时返回 (None, err_json)。"""
+    task_id = args.get("task_id")
+    if not task_id:
+        return None, json.dumps({
+            "error": f"{tool_name} requires 'task_id'",
+            "error_type": "invalid_args",
         }, ensure_ascii=False)
+    return task_id, None
+
+
+def _task_not_found_err(task_id):
+    """构造 task not found 错误 JSON。"""
+    return json.dumps({
+        "error": f"task not found: {task_id}",
+        "error_type": "bg_task_not_found",
+    }, ensure_ascii=False)
+
+
+def _handle_bg_start(args: dict, **kwargs) -> str:
+    bg_manager, err = _require_bg_manager(kwargs)
+    if err:
+        return err
     command = args.get("command")
     if not command or not isinstance(command, list):
         return json.dumps({
@@ -134,24 +164,15 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
 
 
 def _handle_bg_status(args: dict, **kwargs) -> str:
-    bg_manager = kwargs.get("bg_manager")
-    if bg_manager is None:
-        return json.dumps({
-            "error": "background manager not available",
-            "error_type": "bg_unavailable",
-        }, ensure_ascii=False)
-    task_id = args.get("task_id")
-    if not task_id:
-        return json.dumps({
-            "error": "bg_status requires 'task_id'",
-            "error_type": "invalid_args",
-        }, ensure_ascii=False)
+    bg_manager, err = _require_bg_manager(kwargs)
+    if err:
+        return err
+    task_id, err = _require_task_id(args, "bg_status")
+    if err:
+        return err
     task = bg_manager.status(task_id)
     if task is None:
-        return json.dumps({
-            "error": f"task not found: {task_id}",
-            "error_type": "bg_task_not_found",
-        }, ensure_ascii=False)
+        return _task_not_found_err(task_id)
     runtime = None
     if task.started_at:
         from datetime import datetime
@@ -166,24 +187,15 @@ def _handle_bg_status(args: dict, **kwargs) -> str:
 
 
 def _handle_bg_result(args: dict, **kwargs) -> str:
-    bg_manager = kwargs.get("bg_manager")
-    if bg_manager is None:
-        return json.dumps({
-            "error": "background manager not available",
-            "error_type": "bg_unavailable",
-        }, ensure_ascii=False)
-    task_id = args.get("task_id")
-    if not task_id:
-        return json.dumps({
-            "error": "bg_result requires 'task_id'",
-            "error_type": "invalid_args",
-        }, ensure_ascii=False)
+    bg_manager, err = _require_bg_manager(kwargs)
+    if err:
+        return err
+    task_id, err = _require_task_id(args, "bg_result")
+    if err:
+        return err
     task = bg_manager.result(task_id)
     if task is None:
-        return json.dumps({
-            "error": f"task not found: {task_id}",
-            "error_type": "bg_task_not_found",
-        }, ensure_ascii=False)
+        return _task_not_found_err(task_id)
     return json.dumps({
         "task_id": task.task_id,
         "status": task.status,
@@ -196,12 +208,9 @@ def _handle_bg_result(args: dict, **kwargs) -> str:
 
 
 def _handle_bg_list(args: dict, **kwargs) -> str:
-    bg_manager = kwargs.get("bg_manager")
-    if bg_manager is None:
-        return json.dumps({
-            "error": "background manager not available",
-            "error_type": "bg_unavailable",
-        }, ensure_ascii=False)
+    bg_manager, err = _require_bg_manager(kwargs)
+    if err:
+        return err
     tasks = bg_manager.list_tasks()
     summaries = [
         {
@@ -217,24 +226,15 @@ def _handle_bg_list(args: dict, **kwargs) -> str:
 
 
 def _handle_bg_stop(args: dict, **kwargs) -> str:
-    bg_manager = kwargs.get("bg_manager")
-    if bg_manager is None:
-        return json.dumps({
-            "error": "background manager not available",
-            "error_type": "bg_unavailable",
-        }, ensure_ascii=False)
-    task_id = args.get("task_id")
-    if not task_id:
-        return json.dumps({
-            "error": "bg_stop requires 'task_id'",
-            "error_type": "invalid_args",
-        }, ensure_ascii=False)
+    bg_manager, err = _require_bg_manager(kwargs)
+    if err:
+        return err
+    task_id, err = _require_task_id(args, "bg_stop")
+    if err:
+        return err
     ok = bg_manager.stop(task_id)
     if not ok:
-        return json.dumps({
-            "error": f"task not found: {task_id}",
-            "error_type": "bg_task_not_found",
-        }, ensure_ascii=False)
+        return _task_not_found_err(task_id)
     task = bg_manager.status(task_id)
     return json.dumps({
         "task_id": task_id,
