@@ -166,9 +166,96 @@ def wrap_command(
         return _bwrap_wrap(command, cwd=cwd, writable_roots=writable_roots)
 
     if sys.platform == "darwin":
-        # macOS 分支在 Task 3 实现，先抛占位
-        raise SandboxUnavailableError("macOS 沙箱尚未实现（Task 3 引入）")
+        if not shutil.which("sandbox-exec"):
+            raise SandboxUnavailableError(
+                "未找到 sandbox-exec（macOS 系统自带，正常不会缺）"
+            )
+        return _seatbelt_wrap(command, cwd=cwd, writable_roots=writable_roots)
 
     raise SandboxUnavailableError(
         f"不支持的平台: {sys.platform}（仅支持 Linux + macOS）"
     )
+
+
+# ---------------------------------------------------------------------------
+# macOS: Seatbelt (sandbox-exec)
+# ---------------------------------------------------------------------------
+
+# profile 模板（最小化规则集，避免版本特定语法）
+_SEATBELT_PROFILE_TEMPLATE = """\
+(version 1)
+(deny default)
+
+;; 基础系统调用放行
+(allow process-fork)
+(allow process-exec)
+(allow signal*)
+(allow sysctl*)
+(allow process-info* (target self))
+(allow mach-lookup*)
+(allow ipc-posix*)
+
+;; 文件读全放开（第一版只防写）
+(allow file-read*)
+
+;; 文件写：默认拒，仅放行 cwd + writable_roots
+(deny file-write*)
+{write_rules}
+
+;; 网络全放开（用户决策：不做网络隔离）
+(allow network*)
+(allow network-outbound*)
+(allow network-inbound*)
+"""
+
+
+def _write_seatbelt_profile(
+    *,
+    cwd: str,
+    writable_roots: List[str],
+) -> Path:
+    """生成 .sb profile 文件到 ~/.OmniMate/.sandbox/<uuid>.sb。
+
+    返回 profile 路径。文件名用 uuid 避免并发冲突。
+    """
+    import uuid
+    try:
+        from constants import get_omnimate_home
+    except ImportError:
+        # 测试环境兜底
+        get_omnimate_home = lambda: Path.home() / ".OmniMate"  # noqa: E731
+
+    sandbox_dir = get_omnimate_home() / ".sandbox"
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+
+    profile_path = sandbox_dir / f"seatbelt-{uuid.uuid4().hex[:8]}.sb"
+
+    # 构造 write rules
+    all_writable = [cwd] + [r for r in writable_roots if r and r != cwd]
+    rules = []
+    for root in all_writable:
+        # subpath 规则：允许写该目录及其子路径
+        rules.append(f'(allow file-write* (subpath "{root}"))')
+    write_rules_block = "\n".join(rules) if rules else ";; (无额外可写路径)"
+
+    content = _SEATBELT_PROFILE_TEMPLATE.format(write_rules=write_rules_block)
+    profile_path.write_text(content, encoding="utf-8")
+    return profile_path
+
+
+def _seatbelt_wrap(
+    command: str,
+    *,
+    cwd: str,
+    writable_roots: List[str],
+) -> List[str]:
+    """构造 sandbox-exec argv（macOS）。
+
+    返回 argv 列表：["sandbox-exec", "-p", profile_path, "bash", "-c", command]
+    """
+    profile_path = _write_seatbelt_profile(cwd=cwd, writable_roots=writable_roots)
+    return [
+        "sandbox-exec",
+        "-p", str(profile_path),
+        "bash", "-c", command,
+    ]

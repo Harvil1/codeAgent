@@ -145,3 +145,75 @@ def test_bwrap_wrap_no_unshare_net():
     from agent.sandbox_runner import _bwrap_wrap
     argv = _bwrap_wrap("x", cwd="/tmp/a", writable_roots=[])
     assert "--unshare-net" not in argv
+
+
+# ---------------------------------------------------------------------------
+# Task 3: macOS Seatbelt
+# ---------------------------------------------------------------------------
+
+def test_seatbelt_profile_has_deny_default(tmp_path, monkeypatch):
+    """生成的 .sb 文件必须含 (deny default)。"""
+    from agent.sandbox_runner import _write_seatbelt_profile
+    # 把 omnimate home 指到临时目录，避免污染
+    monkeypatch.setattr(
+        "constants.get_omnimate_home",
+        lambda: tmp_path,
+    )
+    profile = _write_seatbelt_profile(
+        cwd="/Users/test/proj",
+        writable_roots=["/Users/test/.OmniMate"],
+    )
+    content = profile.read_text(encoding="utf-8")
+    assert "(deny default)" in content or "(deny default)" in content.replace("\n", " ")
+    assert "(version 1)" in content
+
+
+def test_seatbelt_profile_allows_cwd_write(tmp_path, monkeypatch):
+    """profile 必须允许 cwd 子路径写入。"""
+    from agent.sandbox_runner import _write_seatbelt_profile
+    monkeypatch.setattr("constants.get_omnimate_home", lambda: tmp_path)
+    profile = _write_seatbelt_profile(
+        cwd="/Users/test/proj",
+        writable_roots=[],
+    )
+    content = profile.read_text(encoding="utf-8")
+    assert "/Users/test/proj" in content
+    assert "file-write" in content
+
+
+def test_seatbelt_profile_allows_writable_roots(tmp_path, monkeypatch):
+    """每个 writable_root 都进 allow file-write。"""
+    from agent.sandbox_runner import _write_seatbelt_profile
+    monkeypatch.setattr("constants.get_omnimate_home", lambda: tmp_path)
+    profile = _write_seatbelt_profile(
+        cwd="/Users/test/proj",
+        writable_roots=["/Users/test/.OmniMate", "/tmp/logs"],
+    )
+    content = profile.read_text(encoding="utf-8")
+    assert "/Users/test/.OmniMate" in content
+    assert "/tmp/logs" in content
+
+
+def test_seatbelt_wrap_returns_sandbox_exec_argv(tmp_path, monkeypatch):
+    """wrap_command 在 macOS 返回 sandbox-exec argv。"""
+    import agent.sandbox_runner as mod
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/sandbox-exec" if name == "sandbox-exec" else None)
+    monkeypatch.setattr("constants.get_omnimate_home", lambda: tmp_path)
+    mod._availability_cache = None
+    argv = mod.wrap_command("ls", cwd="/Users/test/proj", writable_roots=[])
+    assert argv[0] == "sandbox-exec"
+    assert "-p" in argv
+    # 末尾含 bash -c
+    assert "bash" in argv
+    assert "-c" in argv
+    assert "ls" in argv
+
+
+def test_seatbelt_profile_filename_unique(tmp_path, monkeypatch):
+    """两次调用生成不同 .sb 文件名（uuid）。"""
+    from agent.sandbox_runner import _write_seatbelt_profile
+    monkeypatch.setattr("constants.get_omnimate_home", lambda: tmp_path)
+    p1 = _write_seatbelt_profile(cwd="/x", writable_roots=[])
+    p2 = _write_seatbelt_profile(cwd="/x", writable_roots=[])
+    assert p1 != p2
