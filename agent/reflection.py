@@ -218,13 +218,17 @@ def apply_reflection(
     existing = memory_store.list_all()
     existing_keys = {(e.type, e.name) for e in existing}
 
+    # X14 fix: 两阶段——先全部 save，再统一处理 supersedes。
+    # 之前在 save 循环内 supersede，导致"批内新写入"不在 existing 快照里，
+    # 同批后写入的 insight 想 supersede 同批刚写入的会失效。
     written = 0
+    written_records = []  # [(ins, mem_id)] 记录写入的，用于阶段 2 supersede
     for ins in insights:
         key = (ins["type"], ins["name"])
         if key in existing_keys:
             continue
         try:
-            memory_store.save(
+            mem_id = memory_store.save(
                 name=ins["name"],
                 description=ins["description"],
                 type=ins["type"],
@@ -235,27 +239,46 @@ def apply_reflection(
             )
             existing_keys.add(key)
             written += 1
-
-            # 批次 D: 处理矛盾(supersedes)— 降低被推翻的旧记忆 confidence
-            supersedes = ins.get("supersedes")
-            if supersedes:
-                for old_entry in existing:
-                    if old_entry.name == supersedes:
-                        try:
-                            memory_store.update(
-                                old_entry.id,
-                                confidence=0.1,
-                                body=f"[已被 '{ins['name']}' 推翻] " + (old_entry.body or ""),
-                            )
-                            logger.info(
-                                "记忆 '%s' 被 '%s' 推翻,confidence 降到 0.1",
-                                supersedes, ins["name"],
-                            )
-                        except Exception:
-                            pass
-                        break
+            written_records.append((ins, mem_id))
         except Exception as e:
             logger.warning("反思写入 memory 失败（跳过）: %s", e)
+
+    # 阶段 2：处理 supersedes（X5 fix: 加 type 一致性 + X14 fix: 含批内新写入）
+    for ins, _ in written_records:
+        supersedes = ins.get("supersedes")
+        if not supersedes or supersedes == ins["name"]:
+            continue
+        target_id = None
+        target_body = ""
+        # 先在 existing（旧记忆）找，X5 fix: 必须 name + type 都匹配
+        for old_entry in existing:
+            if (old_entry.name == supersedes
+                    and old_entry.type == ins["type"]):
+                target_id = old_entry.id
+                target_body = old_entry.body or ""
+                break
+        # X14 fix: 再在批内新写入里找（同批刚 save 的也能被 supersede）
+        if target_id is None:
+            for other_ins, other_id in written_records:
+                if (other_ins["name"] == supersedes
+                        and other_ins["type"] == ins["type"]
+                        and other_ins["name"] != ins["name"]):
+                    target_id = other_id
+                    target_body = other_ins.get("body", "")
+                    break
+        if target_id:
+            try:
+                memory_store.update(
+                    target_id,
+                    confidence=0.1,
+                    body=f"[已被 '{ins['name']}' 推翻] " + target_body,
+                )
+                logger.info(
+                    "记忆 '%s' 被 '%s' 推翻,confidence 降到 0.1",
+                    supersedes, ins["name"],
+                )
+            except Exception:
+                pass
 
     if written:
         logger.info("反思写入 %d 条新经验", written)

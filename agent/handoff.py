@@ -155,7 +155,7 @@ def _compute_checksum(transcript: List[dict]) -> str:
 # 性能从 5×N 次降到 N 次（N = 消息数 × 内容长度）。
 # 命名组同时让错误信息更可读（"命中：<openai>" 而不是裸正则）。
 SECRET_PATTERN = re.compile(
-    r"(?P<openai>sk-[A-Za-z0-9]{20,})"
+    r"(?P<openai>sk-[A-Za-z0-9_\-]{20,})"
     r"|(?P<bearer>Bearer\s+[A-Za-z0-9_\-\.]{20,})"
     r"|(?P<api_key>api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
     r"|(?P<token>token[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"

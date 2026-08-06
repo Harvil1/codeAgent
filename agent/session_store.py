@@ -271,15 +271,17 @@ class SessionStore:
             """
             params: list = [session_id]
             if limit:
-                # 取最后 N 条
+                # X8 fix: 子查询按 rowid DESC 取最后 N 条，外层按 rowid ASC 恢复时序。
+                # 之前用 timestamp DESC 排序，同秒多条消息（如 assistant + tool result）
+                # 会乱序，破坏 tool_call 配对 → API 400。
                 query = """
                     SELECT * FROM (
                         SELECT role, content, tool_calls, tool_call_id, name,
                                timestamp, turn_index
                         FROM messages
                         WHERE session_id = ?
-                        ORDER BY rowid
-                    ) ORDER BY timestamp DESC LIMIT ?
+                        ORDER BY rowid DESC LIMIT ?
+                    ) ORDER BY rowid ASC
                 """
                 params.append(limit)
 

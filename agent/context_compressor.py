@@ -111,12 +111,18 @@ def _fix_tool_call_pairs(messages: list) -> list:
     补漏位置必须在 assistant(tc) 后的连续 result 序列末尾，**不能** append 到
     messages 末尾——否则中间隔了其他消息，仍违反 immediately after → 仍 400。
     """
-    # 第一遍：收集所有合法 tool_call_ids（来自 assistant(tool_calls)）
+    # 第一遍：原辅助（保留兼容性，但 X13 fix 后实际用 seen_so_far）
+    # 收集全部 tool_call_ids 仍用于"已知 id 集合"，但反向孤儿检查用 seen_so_far
     seen_tool_call_ids = set()
     for msg in messages:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 seen_tool_call_ids.add(tc.get("id"))
+
+    # X13 fix: 反向孤儿按"截至当前位置"判断（seen_so_far 逐步累加）。
+    # 之前用全局 seen_tool_call_ids 漏判错序：tool(B) 在 assistant(tc B) 之前
+    # 也通过检查（因为 B 在全局集合里），导致 API 400。
+    seen_so_far = set()
 
     # 第二遍：单遍构建，pending 跟踪当前 assistant(tc) 缺的 result id。
     # 遇到非 tool 消息（user/system/新 assistant）时立刻把 pending 补完，
@@ -155,10 +161,13 @@ def _fix_tool_call_pairs(messages: list) -> list:
                 tid = tc.get("id")
                 if tid:
                     pending_tool_calls[tid] = tc["function"]["name"]
+                    # X13 fix: 累加到 seen_so_far（之后的位置才能引用这个 id）
+                    seen_so_far.add(tid)
             fixed.append(msg)
         elif msg.get("role") == "tool":
             call_id = msg.get("tool_call_id")
-            if call_id not in seen_tool_call_ids:
+            # X13 fix: 反向孤儿按"截至当前位置"判断（seen_so_far），不用全局集合
+            if call_id not in seen_so_far:
                 # 反向孤儿：tool result 但前面没对应 tool_calls → 删掉
                 dropped_orphans += 1
                 continue
