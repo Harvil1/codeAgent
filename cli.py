@@ -240,6 +240,10 @@ class RuntimeContext:
         # === ⑮ NEW: Handoff bundle 存储 ===
         self.handoff_store = None  # 在 initialize() 中真正初始化
 
+        # X2 fix: atexit 兜底 shutdown（即使主循环异常/SystemExit 也会清理 SQLite 锁等）
+        import atexit
+        atexit.register(self.shutdown)
+
     def _make_memory_review_agent_factory(self):
         """构造 Memory Curator 第 2 阶段的后台 review agent 工厂。
 
@@ -512,6 +516,14 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
                 aux_llm_router = None
+                # X4 fix: 关闭临时创建的 main_client，避免 HTTP 连接池泄漏
+                try:
+                    if main_client is not None:
+                        close_fn = getattr(main_client, "close", None)
+                        if callable(close_fn):
+                            close_fn()
+                except Exception as close_err:
+                    logger.warning("关闭临时 main_client 失败（忽略）: %s", close_err)
 
         # === 04 NEW: 流式输出 callback ===
         # config["streaming"]["enabled"] 默认 True（CLI 边生成边打印）

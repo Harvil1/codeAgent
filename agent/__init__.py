@@ -331,6 +331,17 @@ class AIAgent:
         except Exception as e:
             logger.warning("清理 session env 文件失败: %s", e)
 
+        # X3 fix: 关闭 LLM client（HTTP 连接池），避免进程退出前泄漏
+        for client_attr in ("llm_client", "fallback_llm_client", "_vision_client"):
+            client = getattr(self, client_attr, None)
+            if client is not None:
+                try:
+                    close_fn = getattr(client, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+                except Exception as e:
+                    logger.warning("关闭 %s 失败（忽略）: %s", client_attr, e)
+
     def _setup_session_env_file(self):
         """会话启动时创建 .session/{session_id}.env 并设 OMNIMATE_ENV_FILE 环境变量。
 

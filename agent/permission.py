@@ -404,9 +404,9 @@ def safe_path(
                 return PermissionResult(True, "白名单内", "ok")
             resolved.relative_to(root)
             return PermissionResult(True, "白名单内", "ok")
-        except ValueError:
-            continue
         except (OSError, ValueError):
+            # X17 fix: 合并 OSError + ValueError 到一个 except
+            # 之前两段连续 except 是死代码（ValueError 已被前者捕获）
             continue
 
     return PermissionResult(

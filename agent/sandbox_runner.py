@@ -240,6 +240,12 @@ def _write_seatbelt_profile(
     sandbox_dir = get_omnimate_home() / ".sandbox"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
 
+    # X15 fix: 写新 profile 前清理 7 天前的老 profile（避免 .sb 文件无限堆积）
+    try:
+        _cleanup_old_seatbelt_profiles(sandbox_dir, max_age_days=7)
+    except Exception as e:
+        logger.warning("清理旧 seatbelt profile 失败（忽略）: %s", e)
+
     profile_path = sandbox_dir / f"seatbelt-{uuid.uuid4().hex[:8]}.sb"
 
     # 构造 write rules
@@ -253,6 +259,28 @@ def _write_seatbelt_profile(
     content = _SEATBELT_PROFILE_TEMPLATE.format(write_rules=write_rules_block)
     profile_path.write_text(content, encoding="utf-8")
     return profile_path
+
+
+def _cleanup_old_seatbelt_profiles(sandbox_dir: Path, *, max_age_days: int = 7) -> int:
+    """X15 fix: 清理超过 max_age_days 天的 .sb profile 文件。
+
+    返回删除的文件数。失败单个文件不阻断其他清理。
+    """
+    import time
+    if not sandbox_dir.exists():
+        return 0
+    threshold = time.time() - max_age_days * 86400
+    deleted = 0
+    for p in sandbox_dir.glob("seatbelt-*.sb"):
+        try:
+            if p.stat().st_mtime < threshold:
+                p.unlink(missing_ok=True)
+                deleted += 1
+        except Exception as e:
+            logger.debug("清理 profile %s 失败（忽略）: %s", p, e)
+    if deleted:
+        logger.info("清理了 %d 个过期 seatbelt profile（>=%d 天）", deleted, max_age_days)
+    return deleted
 
 
 def _seatbelt_wrap(

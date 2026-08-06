@@ -223,7 +223,10 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             with path.open("a", encoding="utf-8") as f:
                 f.write(content + "\n")
         else:
-            path.write_text(content, encoding="utf-8")
+            # X16 fix: 改用 atomic_write_text（tempfile + os.replace + fsync）
+            # 之前 path.write_text 非原子，写到一半崩溃会留半截文件
+            from agent.atomic_io import atomic_write_text
+            atomic_write_text(path, content)
 
         _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
 
