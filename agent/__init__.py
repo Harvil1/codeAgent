@@ -142,6 +142,8 @@ class AIAgent:
 
         # 预算耗尽后的"最后一次机会"
         self._budget_grace_call = False
+        # S8 fix 配套：grace 只能触发一次（防 dispatch→grace→dispatch 无限循环）
+        self._grace_triggered = False
 
         # 系统提示：会话开始时构建一次，后续缓存
         self._system_prompt_built = system_prompt_override is not None
@@ -693,6 +695,9 @@ class AIAgent:
         # 避免长会话（多轮用户消息累计消耗）中途耗尽后静默断开
         # （曾导致：tool 调用后 consume() 返回 False → break → 无提示回"你:"）。
         self.iteration_budget.reset()
+        # S8 配套：每条用户消息独立 grace 机会（_grace_triggered 防同一消息内循环）
+        self._grace_triggered = False
+        self._budget_grace_call = False
 
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
@@ -736,6 +741,11 @@ class AIAgent:
             if not self._budget_grace_call:
                 if not self.iteration_budget.consume():
                     break
+            else:
+                # S8 fix: grace call 跑完后清标志（防无限循环）
+                # 之前 _budget_grace_call 永远是 False（死代码），现在 dispatch 后会置 True，
+                # 这里在 grace 进入时立刻清，保证 grace 只触发一次
+                self._budget_grace_call = False
 
             # 组装 messages + 注入 bg/cron/team/plan_mode 等临时消息
             # S9 fix: 每轮重新 drain（之前只循环前 drain 一次，
@@ -791,6 +801,16 @@ class AIAgent:
                 )
                 if not should_continue:
                     break  # P4b-T2: idle 已请求
+                # S8 fix: dispatch 后如果预算耗尽，置 grace 让下轮 LLM 看到工具结果
+                # 之前 _budget_grace_call 是死代码（__init__ 设 False 后永不置 True），
+                # 导致 LLM 刚调工具还没消化结果就因预算耗尽退出，体验差
+                # 配套：_grace_triggered 保证整个会话只触发一次（防 dispatch→grace→dispatch 无限循环）
+                if self.iteration_budget.remaining <= 0 and not self._grace_triggered:
+                    self._budget_grace_call = True
+                    self._grace_triggered = True
+                    logger.info(
+                        "迭代预算耗尽，触发 grace call 让 LLM 看到本轮工具结果再结束"
+                    )
                 # 继续循环，让 LLM 看到工具结果
                 continue
 
