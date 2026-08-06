@@ -54,6 +54,104 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 启动期校验/容错（Bug #2/#3 fix）
+# ---------------------------------------------------------------------------
+
+def _validate_model_config(config: dict) -> None:
+    """Bug #2 fix: 校验 config['model'] 必填字段，缺失时 SystemExit(2) + 友好提示。
+
+    之前 cli.py:254/417/474 直接索引 config["model"]["name"]/["provider"]，
+    缺字段时抛 KeyError 不友好（对比 api_key 缺失有友好提示，不一致）。
+
+    本函数补齐：缺 name/provider 或值为空 → SystemExit(2) + 红字提示。
+    完整 config 不抛。
+    """
+    model_cfg = config.get("model") or {}
+    if not isinstance(model_cfg, dict):
+        console.print("[red]配置错误：settings.json 的 model 字段不是对象[/red]")
+        raise SystemExit(2)
+
+    name = model_cfg.get("name") or ""
+    provider = model_cfg.get("provider") or ""
+
+    if not name:
+        console.print(
+            "[red]配置错误：settings.json 缺少 model.name（模型名）[/red]\n"
+            f"[dim]请编辑 [bold]{get_omnimate_home() / 'settings.json'}[/bold] "
+            "填 models.<name>.name，例如 \"deepseek-chat\"[/dim]"
+        )
+        raise SystemExit(2)
+    if not provider:
+        console.print(
+            f"[red]配置错误：settings.json 缺少 model.provider（厂商）[/red]\n"
+            f"[dim]model.name={name} 已就绪，请补 provider，如 \"deepseek\"/\"anthropic\"[/dim]"
+        )
+        raise SystemExit(2)
+
+
+def _run_memory_curator_once(memory_dir, *, config: dict) -> None:
+    """Bug #3 fix: memory curator 主体，try/finally 保证 state 写盘。
+
+    之前 cli.py:300-338 的 daemon 线程函数中途崩溃时 state 未保存，
+    导致下次启动重复跑（浪费 LLM tokens）。提取为模块级 + try/finally，
+    每次完成或失败都 save_memory_curator_state。
+
+    失败信息写入 last_run_summary，便于排查。
+    """
+    import datetime
+    from agent.memory_curator import (
+        apply_automatic_transitions,
+        load_memory_curator_state,
+        save_memory_curator_state,
+        run_memory_review,
+    )
+
+    state = load_memory_curator_state(memory_dir)
+    review_summary = ""
+
+    try:
+        counts = apply_automatic_transitions(memory_dir)
+        review_summary = f"第 1 阶段: {counts}"
+
+        # 第 2 阶段（主模型 review）——失败时保留第 1 阶段结果
+        try:
+            # factory 由调用方在 RuntimeContext 注入；这里若没注入就跳过
+            # 通过参数透传：本函数只负责"主体逻辑 + state 保存"
+            factory = config.pop("_curator_factory", None) if isinstance(config, dict) else None
+            if factory is not None:
+                review_report = run_memory_review(
+                    memory_dir, agent_factory=factory, config=config,
+                )
+                review_summary = (
+                    f"第 1 阶段: {counts}; "
+                    f"第 2 阶段: reviewed={review_report['buckets_reviewed']}, "
+                    f"actions={review_report['executed_actions']}, "
+                    f"errors={review_report['errors']}"
+                )
+        except Exception as e:
+            logger.warning("第 2 阶段失败(保留第 1 阶段结果): %s", e)
+            review_summary = f"第 1 阶段: {counts}; 第 2 阶段失败: {e}"
+
+    except Exception as e:
+        # 第 1 阶段就崩——记录失败信息到 state
+        logger.warning("Memory Curator 第 1 阶段失败: %s", e)
+        review_summary = f"第 1 阶段失败: {e}"
+
+    finally:
+        # Bug #3 核心修复：无论中途是否崩，state 都写盘
+        state["last_run_at"] = datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+        state["last_run_summary"] = review_summary
+        try:
+            save_memory_curator_state(memory_dir, state)
+            logger.info("Memory Curator state 已保存: %s", review_summary)
+        except Exception as save_err:
+            # save 自己失败只能 log（不能阻塞主流程）
+            logger.error("Memory Curator state 保存失败: %s", save_err)
+
+
+# ---------------------------------------------------------------------------
 # 运行时初始化
 # ---------------------------------------------------------------------------
 
@@ -177,6 +275,9 @@ class RuntimeContext:
 
     def initialize(self):
         """初始化所有组件。"""
+        # Bug #2 fix: 启动最早校验 model.name/provider（缺字段友好提示）
+        _validate_model_config(self.config)
+
         # 0. 设置权限检查器（注入破坏性命令审批 callback + 持久化白名单）
         # B2: perm_mode 在 try 外定义，AIAgent 构造处（行 460+）也要用
         perm_mode = self.config.get("security", {}).get("permission_mode", "default")
@@ -288,52 +389,22 @@ class RuntimeContext:
         # === Memory Curator 后台触发(照搬 skill curator 模式) ===
         try:
             from constants import get_omnimate_home
-            from agent.memory_curator import (
-                should_run_now_memory,
-                apply_automatic_transitions,
-                run_memory_review,
-            )
+            from agent.memory_curator import should_run_now_memory
             memory_dir = get_omnimate_home() / ".memory"
             if memory_dir.exists() and should_run_now_memory(memory_dir, config=self.config):
-                import threading, datetime
+                import threading
 
                 def _run_memory_curator():
+                    # Bug #3 fix: 调提取出的 _run_memory_curator_once，
+                    # try/finally 保证 state 写盘（即使中途崩溃）。
+                    # factory 通过 config 字典临时透传（避免破坏函数签名）。
+                    cfg_copy = dict(self.config) if isinstance(self.config, dict) else {}
                     try:
-                        counts = apply_automatic_transitions(memory_dir)
-                        # 第 2 阶段(主模型 review)
-                        review_summary = f"第 1 阶段: {counts}"
-                        try:
-                            factory = self._make_memory_review_agent_factory()
-                            review_report = run_memory_review(
-                                memory_dir,
-                                agent_factory=factory,
-                                config=self.config,
-                            )
-                            review_summary = (
-                                f"第 1 阶段: {counts}; "
-                                f"第 2 阶段: reviewed={review_report['buckets_reviewed']}, "
-                                f"actions={review_report['executed_actions']}, "
-                                f"errors={review_report['errors']}"
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "第 2 阶段失败(保留第 1 阶段结果): %s", e,
-                            )
-                            review_summary = (
-                                f"第 1 阶段: {counts}; 第 2 阶段失败: {e}"
-                            )
-                        # 写状态
-                        from agent.memory_curator import (
-                            load_memory_curator_state,
-                            save_memory_curator_state,
-                        )
-                        state = load_memory_curator_state(memory_dir)
-                        state["last_run_at"] = datetime.datetime.now(
-                            datetime.timezone.utc
-                        ).isoformat()
-                        state["last_run_summary"] = review_summary
-                        save_memory_curator_state(memory_dir, state)
-                        logger.info("Memory Curator 完成: %s", review_summary)
+                        cfg_copy["_curator_factory"] = self._make_memory_review_agent_factory()
+                    except Exception:
+                        pass  # factory 创建失败也能跑（只跳过第 2 阶段）
+                    try:
+                        _run_memory_curator_once(memory_dir, config=cfg_copy)
                     except Exception as e:
                         logger.warning("Memory Curator 后台运行失败: %s", e)
 

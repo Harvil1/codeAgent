@@ -36,12 +36,23 @@ from agent.settings import ensure_default_settings
 ensure_default_settings()
 
 # 初始化 MCP（如果有 .mcp.json 配置）
-try:
-    from tools.mcp_tool import initialize_mcp
-    initialize_mcp()
-except Exception as e:
-    import logging
-    logging.getLogger(__name__).debug("MCP 初始化失败（可忽略）: %s", e)
+def _init_mcp_safely():
+    """Bug #1 fix: MCP 初始化包裹函数，失败时用户终端可见。
+
+    之前只 debug log，用户看不到 mcp__ 工具为何消失。
+    现在 console 警告（不阻断启动，MCP 是可选扩展）。
+    """
+    try:
+        from tools.mcp_tool import initialize_mcp
+        initialize_mcp()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("MCP 初始化失败（可忽略）: %s", e)
+        # 用户终端可见（用 print，main.py 顶部 stdout 已强制 utf-8）
+        print(f"⚠️  MCP 初始化失败（可忽略）: {e}", file=sys.stderr)
+
+
+_init_mcp_safely()
 
 
 def main():
