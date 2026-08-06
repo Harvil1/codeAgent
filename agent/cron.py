@@ -11,7 +11,7 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -231,7 +231,8 @@ class CronScheduler:
             logger.warning("cron job '%s' 缺 message 字段，跳过", job_id)
             return None
         # === CronRecurringExpiry NEW: 老格式兼容 ===
-        created_at = h.get("created_at") or datetime.now().isoformat(timespec="seconds")
+        # X10 fix: created_at 默认用 UTC（避免跨时区/DST age 跳变）
+        created_at = h.get("created_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
         recurring = h.get("recurring", True)
         # P1-7: last_fired_at 兼容（老 jobs.json 缺时为空，首次 _tick 后才填）
         last_fired_at = h.get("last_fired_at", "")
@@ -315,7 +316,14 @@ class CronScheduler:
                 })
                 fired_any = True
 
-            # === CronRecurringExpiry NEW: 记录一次性任务 ===
+                # X11 fix: 一次性 job 触发后立刻 disable + persist（不等循环末尾）
+                # 避免进程被 kill 后下次启动 catch_up 重复触发
+                if not job.recurring:
+                    job.enabled = False
+                    self._persist_jobs_unlocked()
+                    logger.info("cron 一次性 job %s 触发后立即 disable", job.id)
+
+            # === CronRecurringExpiry NEW: 记录一次性任务（已立刻 disable，仍 add 用于末尾 log 统计） ===
             if not job.recurring:
                 fired_oneshot_ids.add(job.id)
 

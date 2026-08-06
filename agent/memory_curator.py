@@ -34,6 +34,8 @@ def _parse_iso(value) -> Optional[datetime.datetime]:
 def apply_automatic_transitions(
     memory_dir: Path,
     now: Optional[datetime.datetime] = None,
+    *,
+    store=None,
 ) -> Dict[str, int]:
     """第 1 阶段:确定性状态转换。纯函数,无 LLM。
 
@@ -60,7 +62,10 @@ def apply_automatic_transitions(
 
     # 用 memory_dir 的 parent 当 omnimate_home
     omnimate_home = memory_dir.parent
-    store = MemoryStore(omnimate_home=omnimate_home)
+    # X1 fix: 优先用传入的 store（共享主 agent 实例，threading.Lock 跨线程互斥）
+    # 之前每次新建 MemoryStore，与主 agent 实例不同，并发写同一 topic.jsonl 会丢数据
+    if store is None:
+        store = MemoryStore(omnimate_home=omnimate_home)
 
     # S5 fix: 用标准接口 list_all() 拿所有条目，不再扫老 .md 文件（dead code）
     # 之前直接读 markdown 文件但 MemoryStore 写 .jsonl + 索引 MEMORY.md，扫不到任何条目

@@ -59,7 +59,7 @@ class BackgroundManager:
         notification_stdout_cap: int = 500,
         result_stdout_cap: int = 5000,
         default_timeout: float = 600.0,
-        stall_timeout: float = 0.0,
+        stall_timeout: float = 45.0,  # X12 fix: 默认 45s 看门狗开（之前 0 等于禁用）
     ):
         self._tasks: dict = {}
         self._lock = threading.Lock()

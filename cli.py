@@ -89,12 +89,14 @@ def _validate_model_config(config: dict) -> None:
         raise SystemExit(2)
 
 
-def _run_memory_curator_once(memory_dir, *, config: dict) -> None:
+def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
     """Bug #3 fix: memory curator 主体，try/finally 保证 state 写盘。
 
     之前 cli.py:300-338 的 daemon 线程函数中途崩溃时 state 未保存，
     导致下次启动重复跑（浪费 LLM tokens）。提取为模块级 + try/finally，
     每次完成或失败都 save_memory_curator_state。
+
+    X1 fix: 加 store 参数（共享主 agent 实例避免跨实例 race）。
 
     失败信息写入 last_run_summary，便于排查。
     """
@@ -110,7 +112,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict) -> None:
     review_summary = ""
 
     try:
-        counts = apply_automatic_transitions(memory_dir)
+        counts = apply_automatic_transitions(memory_dir, store=store)
         review_summary = f"第 1 阶段: {counts}"
 
         # 第 2 阶段（主模型 review）——失败时保留第 1 阶段结果
@@ -401,6 +403,7 @@ class RuntimeContext:
                 def _run_memory_curator():
                     # Bug #3 fix: 调提取出的 _run_memory_curator_once，
                     # try/finally 保证 state 写盘（即使中途崩溃）。
+                    # X1 fix: 传主 store 实例避免跨实例 race（threading.Lock 同实例生效）。
                     # factory 通过 config 字典临时透传（避免破坏函数签名）。
                     cfg_copy = dict(self.config) if isinstance(self.config, dict) else {}
                     try:
@@ -408,7 +411,9 @@ class RuntimeContext:
                     except Exception:
                         pass  # factory 创建失败也能跑（只跳过第 2 阶段）
                     try:
-                        _run_memory_curator_once(memory_dir, config=cfg_copy)
+                        _run_memory_curator_once(
+                            memory_dir, config=cfg_copy, store=self.memory_store,
+                        )
                     except Exception as e:
                         logger.warning("Memory Curator 后台运行失败: %s", e)
 
