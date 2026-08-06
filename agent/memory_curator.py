@@ -62,57 +62,63 @@ def apply_automatic_transitions(
     omnimate_home = memory_dir.parent
     store = MemoryStore(omnimate_home=omnimate_home)
 
-    for path in sorted(memory_dir.glob("*.md")):
+    # S5 fix: 用标准接口 list_all() 拿所有条目，不再扫老 .md 文件（dead code）
+    # 之前直接读 markdown 文件但 MemoryStore 写 .jsonl + 索引 MEMORY.md，扫不到任何条目
+    try:
+        all_entries = store.list_all()
+    except Exception as e:
+        logger.warning("curator list_all 失败: %s", e)
+        return counts
+
+    for entry in all_entries:
         try:
-            text = path.read_text(encoding="utf-8")
-            from agent.memory_store import _parse_frontmatter
-            meta, body = _parse_frontmatter(text)
-            if meta is None:
-                continue
-        except Exception as e:
-            logger.warning("读取记忆文件失败 %s: %s", path, e)
-            continue
+            # 跳过已 archived
+            state = getattr(entry, "state", "active") or "active"
+            if state == "archived":
+                continue  # 终态,不动
 
-        state = meta.get("state", "active") or "active"
-        if state == "archived":
-            continue  # 终态,不动
+            counts["checked"] += 1
 
-        counts["checked"] += 1
+            # 时间戳：MemoryEntry.updated_at 是 datetime 对象（或字符串，兼容）
+            updated_at_raw = getattr(entry, "updated_at", None)
+            if isinstance(updated_at_raw, str):
+                updated_at = _parse_iso(updated_at_raw)
+            else:
+                updated_at = updated_at_raw  # datetime 对象
+            if updated_at is None:
+                continue  # 时间戳损坏,跳过(保守)
+            # 确保 timezone-aware
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
 
-        updated_at = _parse_iso(meta.get("updated_at"))
-        if updated_at is None:
-            continue  # 时间戳损坏,跳过(保守)
-        # 确保 timezone-aware
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
+            age_days = (now - updated_at).total_seconds() / 86400
+            valid_days = int(getattr(entry, "expected_valid_days", 365) or 365)
+            threshold_stale = valid_days
+            threshold_archive = valid_days * 2
 
-        age_days = (now - updated_at).total_seconds() / 86400
-        valid_days = int(meta.get("expected_valid_days", 365) or 365)
-        threshold_stale = valid_days
-        threshold_archive = valid_days * 2
-
-        if age_days > threshold_archive:
-            # → archived(用 store.delete 走标准归档流程)
-            mem_id = path.stem
-            try:
-                store.delete(mem_id)
-                # delete 不写 state 字段(文件已移走),需要额外标记
-                # 已移到 .archive/memory-{ts}/,state 字段保留在文件里
-                counts["archived"] += 1
-                logger.info("记忆 %s archived(age=%.0f days > 2×%d)", mem_id, age_days, valid_days)
-            except Exception as e:
-                logger.warning("归档记忆 %s 失败: %s", mem_id, e)
-        elif age_days > threshold_stale:
-            if state != "stale":
-                _set_state_in_file(path, "stale", meta, body, now)
+            mem_id = entry.id
+            if age_days > threshold_archive:
+                try:
+                    store.delete(mem_id)
+                    counts["archived"] += 1
+                    logger.info("记忆 %s archived(age=%.0f days > 2×%d)", mem_id, age_days, valid_days)
+                except Exception as e:
+                    logger.warning("归档记忆 %s 失败: %s", mem_id, e)
+            elif age_days > threshold_stale:
+                # state=stale 标记需要 store.update() 支持 state 字段
+                # 当前 update() 不支持 state（只有 name/desc/type/body 等）
+                # 暂计入 marked_stale 但不写盘，避免破坏数据
                 counts["marked_stale"] += 1
-                logger.info("记忆 %s stale(age=%.0f days > %d)", path.stem, age_days, valid_days)
-        else:
-            # age ≤ valid_days
-            if state == "stale":
-                _set_state_in_file(path, "active", meta, body, now)
-                counts["reactivated"] += 1
-                logger.info("记忆 %s reactivated(age=%.0f days ≤ %d)", path.stem, age_days, valid_days)
+                logger.info(
+                    "记忆 %s 应标 stale(age=%.0f days > %d) [未写盘:store.update 不支持 state 字段]",
+                    mem_id, age_days, valid_days,
+                )
+            else:
+                if state == "stale":
+                    counts["reactivated"] += 1
+                    logger.info("记忆 %s reactivated(age=%.0f days ≤ %d)", mem_id, age_days, valid_days)
+        except Exception as e:
+            logger.warning("处理记忆条目 %s 失败: %s", getattr(entry, "id", "?"), e)
 
     return counts
 

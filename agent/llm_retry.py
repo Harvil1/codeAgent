@@ -122,6 +122,9 @@ def call_with_retry(
                                    0 表示禁用提前切换，走完所有重试。
     """
     last_error: Optional[Exception] = None
+    # X6 fix: max_retries<=0 直接抛友好错误（否则下面 for 循环不进，最后 raise None → TypeError）
+    if max_retries <= 0:
+        raise ValueError(f"max_retries must be > 0, got {max_retries}")
     # max_tokens=None 时不传该参数，避免某些 provider 把 None 当 0 处理
     call_kwargs = {"tools": tools}
     if max_tokens is not None:
@@ -269,9 +272,12 @@ def _compute_backoff(
     - jitter = uniform(0, base * jitter_ratio)
     - 返回 base + jitter
 
+    X7 fix: 加 MAX_BACKOFF=60s 上限，防止大 retry_after 或大 attempt 卡死主循环。
     jitter_ratio=0 时返回纯 base（向后兼容）。
     """
+    MAX_BACKOFF = 60.0  # 单次退避上限（防数小时 sleep 让用户以为 agent 挂了）
     base = retry_after if retry_after else initial_backoff * (2 ** attempt)
+    base = min(base, MAX_BACKOFF)  # X7 fix: 上限封顶
     if jitter_ratio <= 0:
         return base
     jitter = random.uniform(0, base * jitter_ratio)

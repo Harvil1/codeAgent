@@ -685,7 +685,7 @@ class AIAgent:
 
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
-        injected = self._drain_injected_messages()
+        # S9 fix: 不在此 drain（每轮 while 内重新 drain，避免多轮 tool_calls 中途消息收不到）
         memories_text = self._initial_memory_recall(user_message)
 
         # 组装实际入 history 的 user_content（记忆前置包裹）
@@ -727,6 +727,9 @@ class AIAgent:
                     break
 
             # 组装 messages + 注入 bg/cron/team/plan_mode 等临时消息
+            # S9 fix: 每轮重新 drain（之前只循环前 drain 一次，
+            # 多轮 tool_calls 中途新到的 bg/cron/team 消息进不去 LLM 上下文）
+            injected = self._drain_injected_messages()
             messages = self._assemble_turn_messages(system_prompt, injected)
 
             # 上下文压缩（接近 token 上限时触发，可能重建 system_prompt）

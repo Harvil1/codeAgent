@@ -17,7 +17,7 @@ import shutil
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -63,7 +63,8 @@ def _generate_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # S6 fix: 用 UTC，避免与 curator 的 UTC 比较时偏差（local vs UTC 错 8 小时）
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _split_entry_id(entry_id: str) -> Tuple[str, str]:
