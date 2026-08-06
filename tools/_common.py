@@ -16,6 +16,7 @@ def get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
     if agent_ref is None:
         return None
     mode = getattr(agent_ref, "permission_mode", None)
-    if mode in ("default", "bypassPermissions"):
+    # S2 fix: acceptEdits 必须透传，否则模式静默降级到 default（功能失效）
+    if mode in ("default", "bypassPermissions", "acceptEdits"):
         return mode
     return None

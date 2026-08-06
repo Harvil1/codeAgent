@@ -133,6 +133,17 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         timeout = 120.0
     cwd = args.get("cwd") or os.getcwd()
 
+    # S4 fix: cwd 必须过 safe_path（之前可在 ~/.ssh 跑 cat * 读私钥）
+    from agent.permission import safe_path
+    cwd_perm = safe_path(cwd, write=False)
+    if not cwd_perm.allowed:
+        return json.dumps({
+            "error": f"权限拒绝: cwd {cwd_perm.reason}",
+            "error_type": "permission_denied",
+            "gate": cwd_perm.gate,
+            "cwd": cwd,
+        }, ensure_ascii=False)
+
     # 权限检查（闸门 1/2/3）
     # 优先用注入的 permission_checker（cli.py 注入带 callback 的），
     # 没有则用全局默认（无 callback）。

@@ -308,6 +308,17 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     if not pattern:
         return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
 
+    # S3 fix: search_files 必须过 safe_path（之前可读 ~/.ssh/id_rsa 私钥片段）
+    from agent.permission import safe_path
+    perm = safe_path(search_path, write=False)
+    if not perm.allowed:
+        return json.dumps({
+            "error": f"权限拒绝: {perm.reason}",
+            "error_type": "permission_denied",
+            "gate": perm.gate,
+            "path": str(search_path),
+        }, ensure_ascii=False)
+
     if not search_path.exists():
         return json.dumps({"error": f"路径不存在: {search_path}"}, ensure_ascii=False)
 

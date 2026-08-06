@@ -11,6 +11,7 @@ handler 通过 kwargs 接收 bg_manager（由 agent 透传）。
 """
 import json
 import logging
+import os
 from pathlib import Path
 
 from config import load_config
@@ -141,7 +142,41 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
             "error": "bg_start requires 'command' as non-empty list",
             "error_type": "invalid_args",
         }, ensure_ascii=False)
+
+    # S1 fix: bg_start 必须过权限闸门（含 fatal 底线）
+    # 之前完全跳过 PermissionChecker，可借 bg_start 跑 rm -rf / 绕 fatal 底线
+    import shlex
+    from agent.permission import (
+        get_default_checker, check_fatal_irreversible,
+    )
+    from tools._common import get_mode_override_from_kwargs
+
+    command_str = " ".join(shlex.quote(str(c)) for c in command)
     cwd_raw = args.get("cwd")
+    cwd_for_check = cwd_raw or os.getcwd()
+
+    # 闸门 0b: fatal 不可逆（任何 mode 都挡）
+    fatal = check_fatal_irreversible(command_str)
+    if fatal:
+        return json.dumps({
+            "error": f"权限拒绝: 硬底线: {fatal}",
+            "error_type": "permission_denied",
+            "gate": "deny",
+            "command": command_str,
+        }, ensure_ascii=False)
+
+    # 三道闸门
+    checker = kwargs.get("permission_checker") or get_default_checker()
+    mode_override = get_mode_override_from_kwargs(kwargs)
+    perm = checker.check(command_str, cwd=cwd_for_check, mode_override=mode_override)
+    if not perm.allowed:
+        return json.dumps({
+            "error": f"权限拒绝: {perm.reason}",
+            "error_type": "permission_denied",
+            "gate": perm.gate,
+            "command": command_str,
+        }, ensure_ascii=False)
+
     cwd = Path(cwd_raw) if cwd_raw else None
     detach = bool(args.get("detach", False))
     timeout = args.get("timeout")

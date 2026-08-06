@@ -341,17 +341,32 @@ class SessionStore:
             )
 
     def delete_session(self, session_id: str) -> None:
-        """删除会话（级联删除消息和 FTS 索引）。"""
+        """删除会话（级联删除消息和 FTS 索引）。
+
+        S7 fix: 用显式 BEGIN/COMMIT 包两条 DELETE，
+        避免自动提交模式下中途崩溃留孤儿 messages。
+        """
         with self._get_conn() as conn:
-            # 先删消息（触发 FTS 清理 trigger）
-            conn.execute(
-                "DELETE FROM messages WHERE session_id = ?",
-                (session_id,),
-            )
-            conn.execute(
-                "DELETE FROM sessions WHERE id = ?",
-                (session_id,),
-            )
+            # 显式开事务（isolation_level=None 模式下不会自动 BEGIN）
+            conn.execute("BEGIN")
+            try:
+                # 先删消息（触发 FTS 清理 trigger）
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM sessions WHERE id = ?",
+                    (session_id,),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                # 任意异常 → ROLLBACK，session 和 messages 都不变
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
     # ------------------------------------------------------------------
     # P2-12 NEW: resume / fork
