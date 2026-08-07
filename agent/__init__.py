@@ -530,16 +530,22 @@ class AIAgent:
 
         # === P0-3 NEW: max_tokens 升级重试 ===
         # finish_reason=length 表示输出被 max_tokens 截断。
+        # DeepSeek-reasoner 纯 thinking（content 空 + reasoning 有值）也算截断——
+        # thinking 用完 max_tokens，content 没空间输出，但 finish_reason 可能是 "stop"。
         # 策略：先升级 max_tokens 重试（非流式，避免重复发 partial content），
-        # 升级后仍 length 才放弃，让主循环处理（如续写提示）。
+        # 升级后仍空才放弃，让主循环处理。
+        is_pure_thinking = (
+            not full_content and not tool_calls_out and bool(reasoning_content)
+        )
         if (
-            finish_reason == "length"
+            (finish_reason == "length" or is_pure_thinking)
             and self._max_tokens_escalator is not None
             and not self._max_tokens_escalator.has_escalated
         ):
             new_max = self._max_tokens_escalator.escalate()
+            trigger_reason = "纯 thinking（content 空）" if is_pure_thinking else "finish_reason=length"
             logger.info(
-                "max_tokens 截断（finish_reason=length），升级到 %d 重试", new_max
+                "max_tokens 截断（%s），升级到 %d 重试", trigger_reason, new_max
             )
             try:
                 from agent.llm_retry import call_with_retry
