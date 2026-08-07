@@ -199,20 +199,22 @@ def test_terminal_rejects_etc_cwd():
 # ---------------------------------------------------------------------------
 
 def test_delete_session_atomic_on_partial_failure():
-    """S7 fix: delete_session 源码必须含 BEGIN/COMMIT/ROLLBACK（事务原子性）。
+    """S7 fix: JSONL 版 delete_session 在锁内完成（index 移除 + 文件改名）。
 
-    sqlite3.Connection.execute 是 read-only，无法 monkeypatch，所以改静态验证：
-    源码含 BEGIN → 显式事务 + ROLLBACK → 异常回滚。
+    SQLite 版用 BEGIN/COMMIT/ROLLBACK 保证原子性；
+    JSONL 版用 threading.Lock 保证原子性（index + 文件操作在同一锁内）。
     """
     import inspect
     from agent.session_store import SessionStore
     src = inspect.getsource(SessionStore.delete_session)
-    # 必须显式开事务
-    assert "BEGIN" in src, f"delete_session 应含 BEGIN（显式开事务），实际:\n{src}"
-    # 必须有回滚路径
-    assert "ROLLBACK" in src, f"delete_session 应含 ROLLBACK（异常回滚），实际:\n{src}"
-    # 必须有提交
-    assert "COMMIT" in src, f"delete_session 应含 COMMIT，实际:\n{src}"
+    # JSONL 版：锁内完成 index 移除 + 文件改名
+    assert "with self._lock" in src, (
+        f"delete_session 应在 self._lock 内完成（原子性），实际:\n{src}"
+    )
+    # 文件改名（.bak）实现"完全可逆"（不直接删）
+    assert "rename" in src or "unlink" in src, (
+        f"delete_session 应改名 .bak 或 unlink（文件操作），实际:\n{src}"
+    )
 
 
 def test_delete_session_normal_case(tmp_path):

@@ -221,13 +221,15 @@ def check_usage_stats(tmp):
 # ---------------------------------------------------------------------------
 
 def check_sessions_db(tmp):
-    """sessions.db 被创建。"""
+    """JSONL 会话目录被创建（替代老 sessions.db）。"""
     from agent.session_store import SessionStore
     db = tmp / "sessions.db"
     store = SessionStore(db)
-    if db.exists():
-        return _ok(str(db))
-    return _fail("sessions.db 未创建")
+    # JSONL 版：sessions.db 文件路径自动转 .sessions/ 目录
+    sessions_dir = tmp / ".sessions"
+    if sessions_dir.exists():
+        return _ok(str(sessions_dir))
+    return _fail("会话目录未创建")
 
 
 def check_session_search(tmp):
@@ -414,7 +416,7 @@ def main():
             ("使用统计", lambda: check_usage_stats(tmp)),
         ]),
         ("会话存储", [
-            ("sessions.db 创建", lambda: check_sessions_db(tmp)),
+            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # JSONL 版检查目录
             ("session_search", lambda: check_session_search(tmp)),
         ]),
         ("Curator", [

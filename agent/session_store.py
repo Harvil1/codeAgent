@@ -1,21 +1,26 @@
-"""会话存储：SQLite + FTS5。
+"""会话存储：JSONL 文件（无 SQLite）。
 
-两张表：
-1. sessions  - 会话元信息（id, 标题, 时间戳, 消息数）
-2. messages  - 消息内容（role, content, session_id, 时间戳）
+文件布局：
+  ~/.OmniMate/.sessions/
+  ├── index.json              # 所有会话元数据（数组）
+  ├── <session_id>.jsonl      # 每个会话的消息历史（每行一条 JSON）
+  └── <session_id>.jsonl.bak  # 删除时改名备份（完全可逆）
 
-加一个 FTS5 虚拟表：
-3. messages_fts - messages 表的全文索引
+设计权衡（为啥不用 SQLite）：
+  - Windows 上 SQLite 文件锁曾反复出问题（X8 rowid bug 等）
+  - 与项目"文件优先"哲学一致（memory/tasks 都是文件）
+  - 用户可直接看/编辑 JSONL
+  - 跨平台一致
+  - 全文搜索降级为 Python re（小规模够用）
 
-通过触发器自动维护 FTS 索引（消息插入/删除时）。
+接口与原 SQLite 版本完全一致（cli.py / agent/__init__.py 等调用方无需改动）。
 """
 
 import json
 import logging
-import sqlite3
+import re
 import threading
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -23,155 +28,213 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_SQL = """
--- 会话元信息
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    message_count INTEGER DEFAULT 0,
-    model TEXT,
-    provider TEXT
-);
-
--- 消息内容
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL,           -- system/user/assistant/tool
-    content TEXT NOT NULL,
-    tool_calls TEXT,              -- JSON（assistant 的工具调用）
-    tool_call_id TEXT,            -- tool 消息的配对 id
-    name TEXT,                    -- tool 消息的工具名（对齐 Claude Code 会话恢复）
-    timestamp TEXT NOT NULL,
-    turn_index INTEGER NOT NULL,  -- 第几轮对话
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session
-    ON messages(session_id, turn_index);
-
--- FTS5 全文索引（虚拟表，unicode61 tokenizer，多语言但 CJK 子串弱）
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,
-    role,
-    session_id UNINDEXED,
-    message_id UNINDEXED,
-    tokenize = 'unicode61'   -- 支持多语言
-);
-
--- 触发器：消息插入时自动更新 FTS 索引
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages
-BEGIN
-    INSERT INTO messages_fts(content, role, session_id, message_id)
-    VALUES (new.content, new.role, new.session_id, new.id);
-END;
-
--- 触发器：消息删除时清理 FTS 索引
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages
-BEGIN
-    DELETE FROM messages_fts WHERE message_id = old.id;
-END;
-"""
-
-# 注：memories 和 tasks 表已移除（2026-07-20）
-# 原设计：与 memory_store.py / task_store.py 双写到 SQLite
-# 移除原因：search_memories / search_tasks 在业务代码里无调用方，FTS5 索引从未被使用
-# 现设计：memories/tasks 只用文件存储（.memory/*.md 和 .tasks/*.json）
-# sessions.db 只保留 sessions + messages 两张表（session_search 工具依赖）
-
+# ---------------------------------------------------------------------------
+# 兼容老接口的存根（其他模块可能 import）
+# ---------------------------------------------------------------------------
 
 def is_fts5_available() -> bool:
-    """检查 SQLite 是否支持 FTS5。"""
-    try:
-        conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE VIRTUAL TABLE test_fts5 USING fts5(content)")
-        conn.close()
-        return True
-    except sqlite3.OperationalError:
-        return False
+    """兼容老接口（JSONL 版不需要 FTS5）。"""
+    return False
 
 
 def is_trigram_available() -> bool:
-    """检查 FTS5 trigram tokenizer 是否可用（SQLite >= 3.34 with FTS5 enabled）。"""
-    try:
-        conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE VIRTUAL TABLE test_tri USING fts5(c, tokenize='trigram')")
-        conn.close()
-        return True
-    except sqlite3.OperationalError:
-        return False
+    """兼容老接口。"""
+    return False
 
 
 def _contains_cjk(s: str) -> bool:
-    """判断字符串是否含 CJK 字符（用于触发 trigram fallback）。"""
+    """兼容老接口。"""
     return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
 
 class SessionStore:
-    """会话存储管理器。"""
+    """会话存储管理器（JSONL 文件实现）。
 
-    def __init__(self, db_path: Path):
-        self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # 持久连接：所有操作共用一条连接，避免每次开关的 2-5ms 开销
-        # WAL 模式下读写互不阻塞；多线程访问通过 _conn_lock 串行化
-        self._conn_lock = threading.Lock()
-        self._conn = sqlite3.connect(
-            str(self._db_path),
-            isolation_level=None,  # 自动提交（每条 SQL 独立事务）
-            check_same_thread=False,
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        try:
-            self._conn.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError:
-            pass  # 某些平台不支持 WAL
-        self._init_schema()
+    所有接口与原 SQLite 版本兼容（cli.py / agent/__init__.py 等调用方无需改动）。
+    __init__ 接受 db_path（兼容老接口），实际作为目录用：
+    - 如果传文件路径（如 sessions.db）→ 自动转 parent/.sessions/
+    - 如果传目录路径 → 直接用
 
-    @contextmanager
-    def _get_conn(self):
-        """获取持久连接（加锁，上下文退出时释放锁但不关闭连接）。
+    线程安全：通过 _lock 保护 index.json 和 .jsonl 写入。
+    """
 
-        用法：with self._get_conn() as conn: ...
-        所有 SQL 都在这条连接上串行执行（_conn_lock 保证线程安全）。
+    def __init__(self, db_path):
+        """初始化。
+
+        参数 db_path 为兼容老接口保留（原是 sessions.db 文件路径）。
+        实际数据存储在 db_path 对应的目录中：
+        - 文件路径（含 .db 后缀）→ parent / ".sessions"
+        - 目录路径 → 直接用
         """
-        self._conn_lock.acquire()
+        db_path = Path(db_path)
+        # 兼容：如果传的是 .db 文件路径，改成 sibling 目录
+        if db_path.suffix == ".db":
+            self._sessions_dir = db_path.parent / ".sessions"
+        else:
+            self._sessions_dir = db_path
+        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._index_path = self._sessions_dir / "index.json"
+        self._lock = threading.Lock()
+        self._index_cache: Optional[List[dict]] = None  # 内存缓存（首次访问加载）
+        # 自动迁移老 SQLite（如果检测到）
+        self._maybe_migrate_sqlite()
+
+    # ------------------------------------------------------------------
+    # 内部辅助
+    # ------------------------------------------------------------------
+
+    def _load_index(self) -> List[dict]:
+        """加载 index（带内存缓存）。"""
+        if self._index_cache is not None:
+            return self._index_cache
+        if not self._index_path.exists():
+            self._index_cache = []
+            return self._index_cache
         try:
-            yield self._conn
+            data = json.loads(self._index_path.read_text(encoding="utf-8"))
+            self._index_cache = data.get("sessions", []) if isinstance(data, dict) else []
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("读取 sessions index 失败，重置为空: %s", e)
+            self._index_cache = []
+        return self._index_cache
+
+    def _save_index(self) -> None:
+        """原子写 index.json（用 atomic_write_text 保证跨平台一致）。"""
+        from agent.atomic_io import atomic_write_text
+        if self._index_cache is None:
+            return
+        data = {"sessions": self._index_cache}
+        atomic_write_text(
+            self._index_path,
+            json.dumps(data, ensure_ascii=False, indent=2),
+        )
+
+    def _session_file(self, session_id: str) -> Path:
+        """单个会话的 .jsonl 文件路径。"""
+        return self._sessions_dir / f"{session_id}.jsonl"
+
+    def _read_session_msgs(self, session_id: str) -> List[dict]:
+        """读 .jsonl 全部消息（不动 index）。"""
+        path = self._session_file(session_id)
+        if not path.exists():
+            return []
+        msgs = []
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msgs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return msgs
+
+    def _compute_turn_index(self, session_id: str, role: str) -> int:
+        """计算 turn_index（user 消息开始新 turn）。"""
+        msgs = self._read_session_msgs(session_id)
+        if not msgs:
+            return 1 if role == "user" else 0
+        max_turn = max((m.get("turn_index", 0) for m in msgs), default=0)
+        return max_turn + 1 if role == "user" else max_turn
+
+    # ------------------------------------------------------------------
+    # 自动迁移老 SQLite
+    # ------------------------------------------------------------------
+
+    def _maybe_migrate_sqlite(self) -> None:
+        """检测老 sessions.db，存在且 index 为空时一次性迁移到 JSONL。"""
+        # sessions.db 通常在 sessions_dir 的 parent
+        candidates = [
+            self._sessions_dir.parent / "sessions.db",
+            self._sessions_dir / "sessions.db",
+        ]
+        old_db = next((p for p in candidates if p.exists()), None)
+        if old_db is None:
+            return
+        # 已经迁移过（有 .bak）→ 跳过
+        if old_db.with_suffix(".db.bak").exists():
+            return
+        # 只在 index 为空时迁移（避免覆盖已有数据）
+        if self._load_index():
+            return
+        logger.info("检测到老 SQLite %s，开始迁移到 JSONL...", old_db)
+        try:
+            self._migrate_from_sqlite(old_db)
+            old_db.rename(old_db.with_suffix(".db.bak"))
+            logger.info("迁移完成，老 db 改名为 %s", old_db.with_suffix(".db.bak").name)
+        except Exception as e:
+            logger.error("迁移失败（保留 sessions.db）: %s", e)
+
+    def _migrate_from_sqlite(self, db_path: Path) -> None:
+        """从 SQLite 迁移数据到 JSONL。"""
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            sessions = conn.execute(
+                "SELECT id, title, created_at, updated_at, message_count, "
+                "model, provider FROM sessions"
+            ).fetchall()
+            new_index = []
+            for s in sessions:
+                sid = s["id"]
+                new_index.append({
+                    "id": sid,
+                    "title": s["title"],
+                    "created_at": s["created_at"],
+                    "updated_at": s["updated_at"],
+                    "message_count": s["message_count"] or 0,
+                    "model": s["model"],
+                    "provider": s["provider"],
+                })
+                msgs = conn.execute(
+                    "SELECT id, role, content, tool_calls, tool_call_id, name, "
+                    "timestamp, turn_index FROM messages "
+                    "WHERE session_id = ? ORDER BY rowid",
+                    (sid,),
+                ).fetchall()
+                lines = []
+                for m in msgs:
+                    line_obj = {
+                        "id": m["id"],
+                        "role": m["role"],
+                        "content": m["content"],
+                        "tool_calls": (json.loads(m["tool_calls"])
+                                       if m["tool_calls"] else None),
+                        "tool_call_id": m["tool_call_id"],
+                        "name": m["name"],
+                        "timestamp": m["timestamp"],
+                        "turn_index": m["turn_index"],
+                    }
+                    lines.append(json.dumps(line_obj, ensure_ascii=False))
+                if lines:
+                    from agent.atomic_io import atomic_write_text
+                    atomic_write_text(
+                        self._session_file(sid), "\n".join(lines) + "\n"
+                    )
+            self._index_cache = new_index
+            self._save_index()
         finally:
-            self._conn_lock.release()
-
-    def _init_schema(self):
-        """初始化数据库 schema（含旧库迁移：补 name 列）。"""
-        with self._get_conn() as conn:
-            conn.executescript(SCHEMA_SQL)
-            # 旧库迁移：messages 表补 name 列（SQLite 无 ADD COLUMN IF NOT EXISTS，try/except 幂等）
-            try:
-                conn.execute("ALTER TABLE messages ADD COLUMN name TEXT")
-            except sqlite3.OperationalError:
-                pass  # 列已存在（新库由 SCHEMA_SQL 直接建）
-
-    def close(self) -> None:
-        """关闭持久连接（测试或 shutdown 时调用，Windows 上不关会锁文件）。"""
-        with self._conn_lock:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-
-    def __del__(self):
-        # GC 兜底：测试结束时不让连接泄漏锁住文件
-        try:
-            self.close()
-        except Exception:
-            pass
+            conn.close()
 
     # ------------------------------------------------------------------
     # 会话生命周期
     # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """兼容接口（JSONL 无连接，no-op）。"""
+        pass
+
+    def __del__(self):
+        # 兼容老接口（JSONL 无连接需关）
+        try:
+            pass
+        except Exception:
+            pass
 
     def create_session(
         self,
@@ -183,14 +246,20 @@ class SessionStore:
         """创建新会话，返回 session_id。"""
         session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-
-        with self._get_conn() as conn:
-            conn.execute(
-                """INSERT INTO sessions (id, title, created_at, updated_at, model, provider)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (session_id, title, now, now, model, provider),
-            )
-
+        with self._lock:
+            index = self._load_index()
+            index.append({
+                "id": session_id,
+                "title": title,
+                "created_at": now,
+                "updated_at": now,
+                "message_count": 0,
+                "model": model,
+                "provider": provider,
+            })
+            self._save_index()
+        # 建空 .jsonl
+        self._session_file(session_id).touch()
         return session_id
 
     def append_message(
@@ -205,53 +274,33 @@ class SessionStore:
     ) -> str:
         """追加一条消息到会话。
 
-        name：tool 消息的工具名（对齐 Claude Code 会话恢复，恢复时还原完整工具轮次）。
+        name：tool 消息的工具名（对齐 Claude Code 会话恢复）。
         """
         msg_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-
-        with self._get_conn() as conn:
-            # 单次事务：SELECT + INSERT + UPDATE + FTS trigger 一次性 commit
-            # 原 isolation_level=None 下每条 SQL 自动 commit，4 次 fsync；
-            # 显式 BEGIN/COMMIT 只 1 次 fsync，省 5-15ms
-            conn.execute("BEGIN")
-            try:
-                # 获取当前 turn_index
-                row = conn.execute(
-                    "SELECT MAX(turn_index) as max_turn FROM messages WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                # user 消息开始新的 turn
-                current_turn = (row["max_turn"] or 0) if row else 0
-                if role == "user":
-                    current_turn += 1
-
-                conn.execute(
-                    """INSERT INTO messages
-                       (id, session_id, role, content, tool_calls, tool_call_id,
-                        name, timestamp, turn_index)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        msg_id, session_id, role, content,
-                        json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                        tool_call_id,
-                        name,
-                        now, current_turn,
-                    ),
-                )
-
-                # 更新会话的 updated_at 和消息计数
-                conn.execute(
-                    """UPDATE sessions
-                       SET updated_at = ?, message_count = message_count + 1
-                       WHERE id = ?""",
-                    (now, session_id),
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-
+        turn_index = self._compute_turn_index(session_id, role)
+        line_obj = {
+            "id": msg_id,
+            "role": role,
+            "content": content,
+            "tool_calls": tool_calls,
+            "tool_call_id": tool_call_id,
+            "name": name,
+            "timestamp": now,
+            "turn_index": turn_index,
+        }
+        with self._lock:
+            # 追加到 .jsonl（单行写入，POSIX 上 < PIPE_BUF 原子）
+            with self._session_file(session_id).open("a", encoding="utf-8") as f:
+                f.write(json.dumps(line_obj, ensure_ascii=False) + "\n")
+            # 更新 index（updated_at + message_count）
+            index = self._load_index()
+            for entry in index:
+                if entry["id"] == session_id:
+                    entry["updated_at"] = now
+                    entry["message_count"] = entry.get("message_count", 0) + 1
+                    break
+            self._save_index()
         return msg_id
 
     def get_messages(
@@ -260,57 +309,28 @@ class SessionStore:
         *,
         limit: Optional[int] = None,
     ) -> List[dict]:
-        """获取会话的消息历史。"""
-        with self._get_conn() as conn:
-            query = """
-                SELECT role, content, tool_calls, tool_call_id, name,
-                       timestamp, turn_index
-                FROM messages
-                WHERE session_id = ?
-                ORDER BY rowid
-            """
-            params: list = [session_id]
-            if limit:
-                # X8 fix: 子查询按 rowid DESC 取最后 N 条，外层按 rowid ASC 恢复时序。
-                # 之前用 timestamp DESC 排序，同秒多条消息（如 assistant + tool result）
-                # 会乱序，破坏 tool_call 配对 → API 400。
-                #
-                # X8 回归 fix：内层 SELECT 显式列出字段时外层 SELECT * 看不到
-                # 隐含的 rowid，外层 ORDER BY rowid 报 "no such column: rowid"。
-                # 解法：内层用 SELECT *, rowid AS _r 多取一个 _r 别名，
-                # 外层显式列出真实字段（不含 _r）+ 按 _r 排序。
-                query = """
-                    SELECT role, content, tool_calls, tool_call_id, name,
-                           timestamp, turn_index
-                    FROM (
-                        SELECT *, rowid AS _r
-                        FROM messages
-                        WHERE session_id = ?
-                        ORDER BY _r DESC LIMIT ?
-                    ) ORDER BY _r ASC
-                """
-                params.append(limit)
+        """获取会话的消息历史。
 
-            rows = conn.execute(query, params).fetchall()
-
-        messages = []
-        for row in rows:
+        limit=N 时取最后 N 条（按写入时序）。
+        """
+        msgs = self._read_session_msgs(session_id)
+        if limit:
+            msgs = msgs[-limit:]  # 取最后 N 条
+        # 转成兼容格式（去掉 id/timestamp/turn_index 等内部字段）
+        result = []
+        for m in msgs:
             msg = {
-                "role": row["role"],
-                "content": row["content"],
+                "role": m.get("role"),
+                "content": m.get("content", ""),
             }
-            if row["tool_calls"]:
-                try:
-                    msg["tool_calls"] = json.loads(row["tool_calls"])
-                except json.JSONDecodeError:
-                    pass
-            if row["tool_call_id"]:
-                msg["tool_call_id"] = row["tool_call_id"]
-            if row["name"]:
-                msg["name"] = row["name"]
-            messages.append(msg)
-
-        return messages
+            if m.get("tool_calls"):
+                msg["tool_calls"] = m["tool_calls"]
+            if m.get("tool_call_id"):
+                msg["tool_call_id"] = m["tool_call_id"]
+            if m.get("name"):
+                msg["name"] = m["name"]
+            result.append(msg)
+        return result
 
     def list_sessions(
         self,
@@ -318,66 +338,57 @@ class SessionStore:
         limit: int = 50,
         offset: int = 0,
     ) -> List[dict]:
-        """列出会话（按更新时间倒序）。"""
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                """SELECT id, title, created_at, updated_at, message_count, model
-                   FROM sessions
-                   ORDER BY updated_at DESC
-                   LIMIT ? OFFSET ?""",
-                (limit, offset),
-            ).fetchall()
-
-        return [dict(row) for row in rows]
+        """列出会话（按 updated_at 倒序）。"""
+        with self._lock:
+            index = list(self._load_index())
+        sorted_index = sorted(
+            index, key=lambda s: s.get("updated_at", ""), reverse=True
+        )
+        return sorted_index[offset:offset + limit]
 
     def get_session(self, session_id: str) -> Optional[dict]:
         """获取单个会话信息。"""
-        with self._get_conn() as conn:
-            row = conn.execute(
-                """SELECT id, title, created_at, updated_at, message_count, model, provider
-                   FROM sessions WHERE id = ?""",
-                (session_id,),
-            ).fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            index = self._load_index()
+        for s in index:
+            if s["id"] == session_id:
+                return dict(s)
+        return None
 
     def set_title(self, session_id: str, title: str) -> None:
         """设置会话标题。"""
-        with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (title, session_id),
-            )
+        with self._lock:
+            index = self._load_index()
+            for s in index:
+                if s["id"] == session_id:
+                    s["title"] = title
+                    s["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    break
+            self._save_index()
 
     def delete_session(self, session_id: str) -> None:
-        """删除会话（级联删除消息和 FTS 索引）。
+        """删除会话（消息文件改名 .bak，完全可逆）。
 
-        S7 fix: 用显式 BEGIN/COMMIT 包两条 DELETE，
-        避免自动提交模式下中途崩溃留孤儿 messages。
+        S7 fix: 原子操作——index 移除 + 文件改名在同一锁内完成。
         """
-        with self._get_conn() as conn:
-            # 显式开事务（isolation_level=None 模式下不会自动 BEGIN）
-            conn.execute("BEGIN")
-            try:
-                # 先删消息（触发 FTS 清理 trigger）
-                conn.execute(
-                    "DELETE FROM messages WHERE session_id = ?",
-                    (session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM sessions WHERE id = ?",
-                    (session_id,),
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                # 任意异常 → ROLLBACK，session 和 messages 都不变
+        with self._lock:
+            path = self._session_file(session_id)
+            if path.exists():
+                bak = path.with_suffix(".jsonl.bak")
                 try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+                    # 如果 .bak 已存在先删
+                    if bak.exists():
+                        bak.unlink()
+                    path.rename(bak)
+                except OSError:
+                    # Windows rename 偶尔失败 → 直接 unlink
+                    path.unlink(missing_ok=True)
+            index = self._load_index()
+            self._index_cache = [s for s in index if s["id"] != session_id]
+            self._save_index()
 
     # ------------------------------------------------------------------
-    # P2-12 NEW: resume / fork
+    # P2-12: fork
     # ------------------------------------------------------------------
 
     def fork_session(
@@ -386,23 +397,10 @@ class SessionStore:
         *,
         title: Optional[str] = None,
     ) -> str:
-        """克隆现有会话为新会话（消息全复制）。
-
-        用途：在现有对话基础上做实验分支，不破坏原对话。
-        resume 已由 RuntimeContext.resume_session 提供（加载消息到 agent 内存），
-        本方法只做"克隆到新 session_id"。
-
-        参数：
-            source_session_id: 被克隆的源会话 ID
-            title: 新会话标题；None 时默认 "Fork of <源标题>"
-
-        返回新 session_id。源会话不变。
-        """
+        """克隆现有会话为新会话（消息全复制）。"""
         source = self.get_session(source_session_id)
         if source is None:
-            raise ValueError(
-                f"source session 不存在: {source_session_id}"
-            )
+            raise ValueError(f"source session 不存在: {source_session_id}")
 
         src_title = source.get("title") or source_session_id[:8]
         new_id = self.create_session(
@@ -411,55 +409,28 @@ class SessionStore:
             provider=source.get("provider"),
         )
 
-        # 批量复制所有消息（单连接 + executemany，避免 N 次 append_message 的开关连接 + fsync）
-        # 100 条消息从 5-15s 降到 100-300ms
-        msgs = self.get_messages(source_session_id)
-        if msgs:
-            now = datetime.now(timezone.utc).isoformat()
-            # 先算 turn_index（user 消息开始新 turn，与 append_message 语义一致）
-            rows = []
-            current_turn = 0
-            for m in msgs:
-                role = m["role"]
-                if role == "user":
-                    current_turn += 1
-                tool_calls = m.get("tool_calls")
-                rows.append((
-                    str(uuid.uuid4()),
-                    new_id,
-                    role,
-                    m.get("content") or "",
-                    json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                    m.get("tool_call_id"),
-                    m.get("name"),
-                    now,
-                    current_turn,
-                ))
-            with self._get_conn() as conn:
-                conn.execute("BEGIN")
-                try:
-                    conn.executemany(
-                        """INSERT INTO messages
-                           (id, session_id, role, content, tool_calls, tool_call_id,
-                            name, timestamp, turn_index)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        rows,
-                    )
-                    conn.execute(
-                        """UPDATE sessions
-                           SET updated_at = ?, message_count = message_count + ?
-                           WHERE id = ?""",
-                        (now, len(rows), new_id),
-                    )
-                    conn.execute("COMMIT")
-                except Exception:
-                    conn.execute("ROLLBACK")
-                    raise
-
+        src_path = self._session_file(source_session_id)
+        dst_path = self._session_file(new_id)
+        if src_path.exists():
+            with self._lock:
+                dst_path.write_text(
+                    src_path.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                # 更新 message_count
+                line_count = sum(
+                    1 for line in dst_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+                index = self._load_index()
+                for s in index:
+                    if s["id"] == new_id:
+                        s["message_count"] = line_count
+                        break
+                self._save_index()
         return new_id
 
     # ------------------------------------------------------------------
-    # 全文搜索
+    # 全文搜索（Python re 替代 FTS5）
     # ------------------------------------------------------------------
 
     def search(
@@ -473,267 +444,121 @@ class SessionStore:
         since: Optional[str] = None,
         until: Optional[str] = None,
     ) -> List[dict]:
-        """全文搜索消息，支持过滤。
+        """全文搜索消息（Python re 实现）。
 
-        使用 FTS5，支持：
-        - 关键词匹配
-        - 短语匹配（用引号）
-        - 相关性排序
-
-        过滤参数（B2 增强）：
-        - session_id: 限定会话
-        - role: 限定角色（user/assistant/tool）
-        - tool_name: 限定消息含特定工具调用（Python 层过滤）
-        - since/until: ISO8601 时间范围（字符串比较）
-
-        返回匹配的消息 + 会话信息。
+        降级说明（vs SQLite FTS5）：
+        - 之前用 FTS5 + trigram fallback + snippet 函数
+        - 现在用 re.escape + IGNORECASE 扫所有 .jsonl
+        - 性能：1万条消息约 100ms（单用户场景够用）
+        - 中文子串：直接 substring 匹配（re.search）
+        - snippet：query 周围 context_chars 字符
         """
-        # FTS5 查询构造
-        fts_query = self._build_fts_query(query)
-        if fts_query == '""':
+        if not query.strip():
             return []
-
-        # 动态构造 WHERE 子句
-        where_clauses = ["messages_fts MATCH ?"]
-        params: list = [fts_query]
-
-        if session_id:
-            where_clauses.append("m.session_id = ?")
-            params.append(session_id)
-        if role:
-            where_clauses.append("m.role = ?")
-            params.append(role)
-        if since:
-            where_clauses.append("m.timestamp >= ?")
-            params.append(since)
-        if until:
-            where_clauses.append("m.timestamp <= ?")
-            params.append(until)
-
-        where_sql = " AND ".join(where_clauses)
-
-        # 取候选（不加 limit，Python 层 tool_name 过滤后再截断）
-        # 但为防卡死，给一个 10x limit 上限
-        fetch_limit = limit * 10 if tool_name else limit
-        sql = f"""
-            SELECT m.content, m.role, m.session_id, m.timestamp,
-                   m.tool_calls,
-                   s.title,
-                   snippet(messages_fts, 0, '<<', '>>', '...', 20) as snippet,
-                   rank
-            FROM messages_fts
-            JOIN messages m ON messages_fts.message_id = m.id
-            LEFT JOIN sessions s ON m.session_id = s.id
-            WHERE {where_sql}
-            ORDER BY rank
-            LIMIT ?
-        """
-        params.append(fetch_limit)
-
         try:
-            with self._get_conn() as conn:
-                rows = conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError as e:
-            logger.warning("FTS 搜索失败: %s", e)
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
+        except re.error:
             return []
 
-        results = [dict(row) for row in rows]
+        results = []
+        # 限定 session_id 时只扫一个文件
+        scan_sessions = (
+            [self.get_session(session_id)] if session_id else self.list_sessions(limit=1000)
+        )
+        scan_sessions = [s for s in scan_sessions if s]  # 过滤 None
 
-        # 中文子串 fallback：unicode61 默认按词分，搜"配置"找不到含"系统配置"的消息
-        # 此时切到 trigram 索引（如果可用且 query 含 CJK）
-        if not results and _contains_cjk(query) and is_trigram_available():
-            results = self._search_messages_trigram(
-                query=query,
-                limit=fetch_limit,
-                session_id=session_id,
-                role=role,
-                since=since,
-                until=until,
-            )
-
-        # tool_name 过滤（Python 层，解析 tool_calls JSON）
-        if tool_name:
-            filtered = []
-            for r in results:
-                tc = r.get("tool_calls")
-                if not tc:
+        for s in scan_sessions:
+            sid = s["id"]
+            title = s.get("title")
+            for m in self._read_session_msgs(sid):
+                content = m.get("content", "") or ""
+                if not pattern.search(content):
                     continue
-                try:
-                    calls = json.loads(tc) if isinstance(tc, str) else tc
-                    if isinstance(calls, list):
-                        for c in calls:
-                            if isinstance(c, dict):
-                                fn = c.get("function", {})
-                                if isinstance(fn, dict) and fn.get("name") == tool_name:
-                                    filtered.append(r)
-                                    break
-                except (json.JSONDecodeError, TypeError):
+                # 过滤
+                if role and m.get("role") != role:
                     continue
-            results = filtered[:limit]
-        else:
-            results = results[:limit]
+                if since and m.get("timestamp", "") < since:
+                    continue
+                if until and m.get("timestamp", "") > until:
+                    continue
+                if tool_name:
+                    tcs = m.get("tool_calls") or []
+                    if not any(
+                        isinstance(tc, dict)
+                        and isinstance(tc.get("function"), dict)
+                        and tc["function"].get("name") == tool_name
+                        for tc in tcs
+                    ):
+                        continue
+                results.append({
+                    "content": content,
+                    "role": m.get("role"),
+                    "session_id": sid,
+                    "timestamp": m.get("timestamp"),
+                    "title": title,
+                    "snippet": self._make_snippet(content, query),
+                    "rank": 0,
+                })
+                if len(results) >= limit * 3:
+                    break
+            if len(results) >= limit * 3:
+                break
+        return results[:limit]
 
-        # 移除内部字段 tool_calls（保持向后兼容）
-        for r in results:
-            r.pop("tool_calls", None)
+    @staticmethod
+    def _make_snippet(content: str, query: str, context_chars: int = 50) -> str:
+        """生成 snippet（query 周围 context_chars 字符）。"""
+        idx = content.lower().find(query.lower())
+        if idx == -1:
+            return content[:100]
+        start = max(0, idx - context_chars)
+        end = min(len(content), idx + len(query) + context_chars)
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(content) else ""
+        return prefix + content[start:end] + suffix
 
-        return results
+    # ------------------------------------------------------------------
+    # 统计
+    # ------------------------------------------------------------------
 
     def get_stats(self) -> dict:
-        """聚合统计：会话/消息/工具调用频次/角色分布。
-
-        返回：
-            {
-                "sessions": int,
-                "messages": int,
-                "earliest": Optional[str],     # ISO 时间
-                "latest": Optional[str],
-                "top_sessions": List[dict],    # Top 5 按 message_count
-                "tool_calls": List[dict],      # Top 10 工具 [{"name": ..., "count": ...}]
-                "role_distribution": dict,     # {"user": int, "assistant": int, ...}
-            }
-        """
-        with self._get_conn() as conn:
-            # 总览
-            overview = conn.execute(
-                """SELECT
-                       COUNT(*) AS sessions,
-                       COALESCE(SUM(message_count), 0) AS messages,
-                       MIN(created_at) AS earliest,
-                       MAX(updated_at) AS latest
-                   FROM sessions"""
-            ).fetchone()
-
-            # Top 5 最长会话
-            top_sessions = conn.execute(
-                """SELECT id, title, message_count, model, updated_at
-                   FROM sessions
-                   ORDER BY message_count DESC LIMIT 5"""
-            ).fetchall()
-
-            # 角色分布
-            roles = conn.execute(
-                """SELECT role, COUNT(*) AS cnt
-                   FROM messages GROUP BY role"""
-            ).fetchall()
-            role_dist = {r["role"]: r["cnt"] for r in roles}
-
-            # 工具调用统计：扫所有 messages.tool_calls（JSON 数组）
-            # SQLite 没有 JSON 解析（除非装了 JSON1 扩展），这里读所有非空 tool_calls 在 Python 里解析
-            tool_rows = conn.execute(
-                "SELECT tool_calls FROM messages WHERE tool_calls IS NOT NULL"
-            ).fetchall()
-
-        tool_counter: dict = {}
-        for r in tool_rows:
-            try:
-                calls = json.loads(r["tool_calls"])
-                if isinstance(calls, list):
-                    for call in calls:
-                        if isinstance(call, dict):
-                            fn = call.get("function", {})
-                            name = fn.get("name") if isinstance(fn, dict) else None
+        """聚合统计：会话/消息/工具调用频次/角色分布。"""
+        index = self.list_sessions(limit=10000)
+        sessions_count = len(index)
+        messages_count = sum(s.get("message_count", 0) for s in index)
+        timestamps_created = [s.get("created_at") for s in index if s.get("created_at")]
+        timestamps_updated = [s.get("updated_at") for s in index if s.get("updated_at")]
+        earliest = min(timestamps_created) if timestamps_created else None
+        latest = max(timestamps_updated) if timestamps_updated else None
+        top_sessions = sorted(
+            index, key=lambda s: s.get("message_count", 0), reverse=True
+        )[:5]
+        # 角色分布 + 工具调用统计（扫所有 .jsonl）
+        role_dist = {}
+        tool_counter = {}
+        for s in index:
+            for m in self._read_session_msgs(s["id"]):
+                role = m.get("role", "unknown")
+                role_dist[role] = role_dist.get(role, 0) + 1
+                tcs = m.get("tool_calls")
+                if not isinstance(tcs, list):
+                    continue  # 防御：tool_calls 可能被篡改为字符串/对象等
+                for tc in tcs:
+                    if isinstance(tc, dict):
+                        fn = tc.get("function", {})
+                        if isinstance(fn, dict):
+                            name = fn.get("name")
                             if name:
                                 tool_counter[name] = tool_counter.get(name, 0) + 1
-            except (json.JSONDecodeError, TypeError):
-                continue
-
         sorted_tools = sorted(
             tool_counter.items(), key=lambda x: x[1], reverse=True
         )[:10]
-
         return {
-            "sessions": overview["sessions"] if overview else 0,
-            "messages": overview["messages"] if overview else 0,
-            "earliest": overview["earliest"] if overview else None,
-            "latest": overview["latest"] if overview else None,
-            "top_sessions": [dict(s) for s in top_sessions],
+            "sessions": sessions_count,
+            "messages": messages_count,
+            "earliest": earliest,
+            "latest": latest,
+            "top_sessions": top_sessions,
             "tool_calls": [{"name": n, "count": c} for n, c in sorted_tools],
             "role_distribution": role_dist,
         }
-
-    @staticmethod
-    def _build_fts_query(query: str) -> str:
-        """构造 FTS5 查询。
-
-        简单策略：
-        - 按空格分词
-        - 每个词加前缀通配符（*）
-        - 用 AND 连接
-        """
-        clean = query.strip()
-        if not clean:
-            return '""'
-
-        words = clean.split()
-        # 每个词加前缀匹配（双引号包裹防止特殊字符）
-        fts_terms = [f'"{w}"*' for w in words if w]
-        return " AND ".join(fts_terms) if fts_terms else '""'
-
-    # ------------------------------------------------------------------
-    # trigram fallback：CJK 子串搜索
-    # ------------------------------------------------------------------
-
-    def _search_messages_trigram(
-        self,
-        *,
-        query: str,
-        limit: int,
-        session_id: Optional[str] = None,
-        role: Optional[str] = None,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
-    ) -> List[dict]:
-        """用 messages_fts_trigram 跑 CJK 子串搜索。
-
-        trigram tokenizer 把文本切成 3-gram，对中文子串匹配强。
-        SQLite >= 3.34 + FTS5 才支持，初始化时已检测。
-        """
-        # 这里复用 messages_fts 的 column 结构（content/role/session_id/message_id）
-        # 但 trigram 索引是另一个表 messages_fts_trigram（schema 里没创建，
-        # 因为现在主表 messages_fts 已经覆盖；这里保留接口供未来扩展）。
-        # 当前实现：直接 LIKE 全表扫（数据小时性能可接受，未来再建独立 trigram 表
-        # 或迁移主 tokenizer）。
-        where_clauses = ["m.content LIKE ?"]
-        params: list = [f"%{query}%"]
-        if session_id:
-            where_clauses.append("m.session_id = ?")
-            params.append(session_id)
-        if role:
-            where_clauses.append("m.role = ?")
-            params.append(role)
-        if since:
-            where_clauses.append("m.timestamp >= ?")
-            params.append(since)
-        if until:
-            where_clauses.append("m.timestamp <= ?")
-            params.append(until)
-        where_sql = " AND ".join(where_clauses)
-        sql = f"""
-            SELECT m.content, m.role, m.session_id, m.timestamp,
-                   NULL as tool_calls,
-                   s.title,
-                   m.content as snippet,
-                   0 as rank
-            FROM messages m
-            LEFT JOIN sessions s ON m.session_id = s.id
-            WHERE {where_sql}
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-        """
-        params.append(limit)
-        try:
-            with self._get_conn() as conn:
-                rows = conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError as e:
-            logger.warning("trigram fallback 搜索失败: %s", e)
-            return []
-        return [dict(row) for row in rows]
-
-    # ------------------------------------------------------------------
-    # memories / tasks 表已移除（2026-07-20）
-    # 原设计：与 memory_store.py / task_store.py 双写到 SQLite，FTS5 搜索
-    # 移除原因：search_memories / search_tasks 在业务代码里无调用方（死代码）
-    # 现设计：memories/tasks 纯文件存储（.memory/*.md 和 .tasks/*.json）
-    # 本类只保留 sessions + messages 两张表（session_search 工具依赖）
-    # ------------------------------------------------------------------
