@@ -2456,8 +2456,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             if not getattr(rt.agent, "_stream_callback", None):
                 console.print(response)
             elif response and response.startswith(
-                ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数")
+                ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+                 "[模型只产出了思考过程", "[LLM 返回了空响应")
             ):
+                # 流式模式下兜底消息（空响应/思考模型/grace exit/预算耗尽/LLM失败）
+                # 不走 stream_callback，必须主动 print，否则用户看到"AI:"后空白
                 console.print(f"[yellow]{response}[/yellow]")
 
             # 5. 保存助手响应到 session
