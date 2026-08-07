@@ -1473,8 +1473,37 @@ class AIAgent:
 
         如果 STOP hook 触发 force_msg，会设置 self._stop_hook_forced = True，
         主循环看到这个标志应 continue（而非 return）。
+
+        空响应处理（防"突然断开"bug）：
+        - content 空 + reasoning_content 有值 → 用 reasoning 作为回复（思考模型纯 thinking）
+        - 完全空（content + reasoning 都空）→ 友好兜底消息（不静默返回空串）
         """
         final_content = assistant_msg.content or ""
+
+        # 空响应处理：reasoning_content fallback + 完全空兜底
+        if not final_content:
+            reasoning = getattr(assistant_msg, "reasoning_content", None)
+            if reasoning:
+                # 思考模型纯 thinking 响应：reasoning 对用户有价值，作为回复
+                final_content = (
+                    "[模型只产出了思考过程，未给最终回复。以下是思考内容：]\n\n"
+                    f"<thinking>\n{reasoning}\n</thinking>"
+                )
+                logger.info(
+                    "LLM 返回纯 thinking 响应（content 空 + reasoning_content 有值），"
+                    "用 reasoning 作为回复"
+                )
+            else:
+                # 完全空响应（content + reasoning 都空）：友好兜底
+                # 之前这里静默返回空串，用户看到"突然断开"以为 agent 崩了
+                final_content = (
+                    "[LLM 返回了空响应（content 和 reasoning_content 都为空）。"
+                    "可能是网络抖动、流式断连或 provider bug。请重试。]"
+                )
+                logger.warning(
+                    "LLM 返回完全空响应（content + reasoning_content 都空），"
+                    "可能是网络问题或模型 bug；返回友好兜底消息（不静默返回空串）"
+                )
 
         self.conversation_history.append({
             "role": "assistant",
