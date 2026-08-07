@@ -426,8 +426,17 @@ class AIAgent:
         thinking_signature = None
 
         try:
+            # 从 config 读 max_tokens（用户在 settings.json llm 块配 "max_tokens": 8192）
+            # 不配就不传，让 API 用默认值（换模型不用改代码）
+            _extra = {}
+            _cfg_mt = (
+                (self.config or {}).get("model", {}).get("max_tokens")
+                or (self.config or {}).get("llm", {}).get("max_tokens")
+            )
+            if _cfg_mt:
+                _extra["max_tokens"] = _cfg_mt
             for delta in self.llm_client.chat_completions_stream(
-                messages, tools=tools,
+                messages, tools=tools, **_extra,
             ):
                 # 内容流式
                 delta_text = delta.get("content") or ""
