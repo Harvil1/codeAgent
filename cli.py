@@ -18,6 +18,7 @@
   /quit              退出
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -2448,7 +2449,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     logger.warning("checkpoint 快照失败: %s", e)
             # 先打 AI: 前缀,让流式输出在这个前缀之后显示
             console.print("[bold green]AI:[/bold green]")
-            response = rt.agent.run_conversation(user_input)
+            # Task E1: run_conversation 已改 async（T_D4）。
+            # 保持 run_interactive 同步签名（run_skill_in_fork 等下游依赖同步上下文），
+            # 每次调用用 asyncio.run 驱动一次完整的 async run_conversation。
+            # 全量 async 改造留到 Plan 2B（届时 skill_fork 也改 async，可消除嵌套 asyncio.run）。
+            response = asyncio.run(rt.agent.run_conversation(user_input))
             # 流式模式(stream_callback 已设)的内容已经在 run_conversation 过程中显示,
             # 不再重复 print。非流式模式(无 callback)才 print response。
             # 但 LLM 失败/预算耗尽等兜底文案不走流式（没有内容增量），必须显示，
@@ -2496,7 +2501,8 @@ def run_one_shot(message: str):
         # 恢复时 assistant 的 tool_calls 前面没有 user 消息，违反 API 消息协议）
         if rt.session_store and rt.session_id:
             rt.session_store.append_message(rt.session_id, "user", message)
-        response = rt.agent.run_conversation(message)
+        # Task E1: run_conversation 已改 async（T_D4），同步入口用 asyncio.run 驱动。
+        response = asyncio.run(rt.agent.run_conversation(message))
         print(response)
         if rt.session_store and rt.session_id:
             rt.session_store.append_message(rt.session_id, "assistant", response)
@@ -2506,3 +2512,66 @@ def run_one_shot(message: str):
     finally:
         # === P2b-T6 NEW: 退出前清理后台任务 ===
         rt.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Task E1: 主入口函数
+# ---------------------------------------------------------------------------
+# 设计决策：把原 main.py 内联的参数解析 + 分发逻辑抽到 cli.main，
+# 这样 main.py 只负责 stdout 编码 + MCP 初始化 + 调 cli.main。
+#
+# 不在 cli.main 外层套 asyncio.run 包装的原因：
+#   run_interactive / run_one_shot 保持同步签名，内部用 asyncio.run 驱动
+#   async run_conversation（避免破坏 run_skill_in_fork 等下游同步调用链）。
+#   若 cli.main 再套一层 asyncio.run，会与内部的 asyncio.run 嵌套报错：
+#       "asyncio.run() cannot be called from a running event loop"
+#   所以本 task 的 asyncio.run 包装发生在 run_one_shot / run_interactive 内部
+#   （紧贴 async run_conversation 调用点），cli.main 只是同步分发器。
+#
+# Plan 2B 会把 run_interactive / run_one_shot / run_skill_in_fork 全改 async，
+# 届时 cli.main 才真正需要 asyncio.run 包装（且不嵌套）。
+
+def main(argv: list = None) -> None:
+    """CLI 主入口（Task E1 抽出，供 main.py 调用）。
+
+    参数：
+        argv: 命令行参数列表（None 时用 sys.argv，便于测试）
+
+    支持的调用形式：
+        python main.py                         # 交互模式
+        python main.py -c / --continue         # 自动恢复最近会话
+        python main.py chat <msg>              # 非交互一次性问答
+        python main.py --agents '{json}'       # CLI 注入子代理（阶段 6 NEW）
+        python main.py --agents '{json}' chat <msg>
+    """
+    if argv is None:
+        argv = sys.argv
+    args = argv[1:]
+    cli_agents_raw = None
+
+    # 提取 --agents 参数（不破坏旧的 chat/-c/--continue 逻辑）
+    if "--agents" in args:
+        idx = args.index("--agents")
+        if idx + 1 >= len(args):
+            print("--agents 需要一个 JSON 参数", file=sys.stderr)
+            sys.exit(2)
+        try:
+            import json
+            cli_agents_raw = json.loads(args[idx + 1])
+        except json.JSONDecodeError as e:
+            print(f"--agents 参数不是合法 JSON: {e}", file=sys.stderr)
+            sys.exit(2)
+        # 从 args 里移除 --agents 及其值，让旧逻辑正常工作
+        args = args[:idx] + args[idx + 2:]
+
+    # 非交互模式：python main.py chat "你好"
+    if args and args[0] == "chat":
+        if cli_agents_raw:
+            from agent.agent_defs import inject_cli_agents
+            inject_cli_agents(cli_agents_raw)
+        run_one_shot(" ".join(args[1:]))
+        return
+
+    # 交互模式：检查 -c / --continue 标志
+    resume_last = "-c" in args or "--continue" in args
+    run_interactive(resume_last=resume_last, cli_agents=cli_agents_raw)
