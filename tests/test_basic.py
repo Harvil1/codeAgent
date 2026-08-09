@@ -15,6 +15,22 @@ from toolsets import resolve_toolset
 from config import load_config, _deep_merge
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_registry():
+    """每个测试自动隔离全局 registry 状态。
+
+    test_basic.py 注册测试工具（test_tool_basic / test_tool_bad / test_tool_dict）
+    到全局 registry 单例。如不清理，后续测试（如 test_all_tools_classified）
+    会看到这些测试工具，误判为"未分类工具"而 fail。
+
+    本 fixture 在每个测试前 snapshot registry._tools，测试后恢复。
+    """
+    snapshot = dict(registry._tools)
+    yield
+    registry._tools.clear()
+    registry._tools.update(snapshot)
+
+
 # ---------------------------------------------------------------------------
 # IterationBudget
 # ---------------------------------------------------------------------------
