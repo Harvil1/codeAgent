@@ -1,8 +1,9 @@
 # agent/context_pipeline.py
-"""分层压缩管线：L1 snip / L2 micro / L4 llm + reactive。
+"""分层压缩管线：L1 snip / L2 micro / L3.5 contextCollapse / L4 llm + reactive。
 
 替代 context_compressor.maybe_compress 的单层 LLM 摘要。
 设计详见 docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3。
+Task P1.1（spec §7.1）补 L3.5 contextCollapse：按 token 占用比折叠早期段，不动 system prompt。
 """
 import json
 import logging
@@ -266,6 +267,111 @@ def offload_large_tool_results(
     return out, changed
 
 
+def apply_context_collapse(
+    messages: list,
+    *,
+    threshold_ratio: float = 0.8,
+    context_window: int = 128_000,
+    keep_recent_turns: int = 3,
+) -> Tuple[list, bool]:
+    """L3.5 contextCollapse：基于 token 占用比折叠早期对话段。
+
+    Task P1.1（spec §7.1）。**轻量、无损、可逆**——比 L4 llm_compact（调 LLM 有损摘要）
+    便宜得多，放在 L1 snip + L2 micro 之后、L4 llm_compact 之前做兜底。
+
+    触发：``estimate_message_tokens(messages) / context_window > threshold_ratio``
+    动作：
+        1. 拆 system（**不碰**，保护 prompt cache key）
+        2. 找出所有 pinned 消息（``content`` 以 ``[pinned]`` 开头，或显式 ``pinned: True``）
+           → 保护不折叠
+        3. 保留最近 ``keep_recent_turns`` 轮（1 轮 = user + assistant = 2 条）
+        4. 其余的"中间段"折叠成一个 ``{"role": "user", "content": "[context_collapse: ...]"}`` 占位
+        5. 最终顺序：system + pinned + 占位 + 最近 N 轮
+        6. 调用 ``_fix_tool_call_pairs`` 兜底（避免孤儿 tool result）
+
+    可逆性：原文由 ``snapshot_if_needed``（compress_if_needed 编排在 L4 前调用）
+    或 ``.transcripts/latest.jsonl`` 保留，占位本身提示用户/LLM 去那里找。
+
+    幂等：已含 ``[context_collapse:`` 占位 → 直接返回 ``(messages, False)``。
+
+    Args:
+        messages: 完整消息列表（含开头的 system）
+        threshold_ratio: 0-1，估算 token / context_window 超过该比例才触发
+        context_window: 模型上下文窗口大小（tokens）；默认 128K（DeepSeek/OpenAI 常见值）
+        keep_recent_turns: 保留最近多少**轮**对话（1 轮 = user + assistant = 2 条）
+
+    Returns:
+        (新消息列表, 是否发生变化)。新列表是浅拷贝；原列表不被修改。
+    """
+    # 幂等：已是折叠态 → 不二次折叠
+    if any(
+        "[context_collapse:" in str(m.get("content", ""))
+        for m in messages
+    ):
+        return messages, False
+
+    # 估算 token；没超阈值直接 noop
+    est_tokens = estimate_message_tokens(messages)
+    if est_tokens / max(context_window, 1) <= threshold_ratio:
+        return messages, False
+
+    system, conv = _split_system(messages)
+    if len(conv) < (keep_recent_turns * 2 + 2):
+        # 对话太少，没什么可折叠
+        return messages, False
+
+    # 拆 pinned + 中间段 + 最近 N 轮
+    # 最近 N 轮 = conv 末尾 keep_recent_turns*2 条（允许放宽边界以保 tool_call 成对：
+    # 如果 tail 开头是 tool_result，往前扩到对应的 assistant(tool_calls)）
+    tail_len = keep_recent_turns * 2
+    tail_start = len(conv) - tail_len
+    while tail_start > 0 and _is_tool_result(conv[tail_start]) and tail_start > 1:
+        tail_start -= 1  # 往前找配对的 assistant(tool_calls)
+
+    head_region = conv[:tail_start]  # 可折叠区域
+    tail_region = conv[tail_start:]  # 最近 N 轮（保护）
+
+    # 从 head_region 中挑出 pinned 消息（保留原位序）
+    pinned = []
+    collapsible_indices = []
+    for idx, m in enumerate(head_region):
+        content = m.get("content", "")
+        is_pinned = (
+            (isinstance(content, str) and content.startswith("[pinned]"))
+            or bool(m.get("pinned"))
+        )
+        if is_pinned:
+            pinned.append((idx, m))
+        else:
+            collapsible_indices.append(idx)
+
+    if not collapsible_indices:
+        # 全是 pinned，没什么可折叠
+        return messages, False
+
+    folded_turns = len(collapsible_indices) // 2  # 粗略：2 条 = 1 轮
+    placeholder = {
+        "role": "user",
+        "content": (
+            f"[context_collapse: 已折叠 {folded_turns} 轮早期对话"
+            f"（{len(collapsible_indices)} 条消息），"
+            "完整记录见 .transcripts/latest.jsonl]"
+        ),
+    }
+
+    # 重组：system + pinned 段（按原序）+ 占位 + tail
+    new_conv = [m for _, m in pinned] + [placeholder] + tail_region
+    new_conv = _fix_tool_call_pairs(new_conv)
+    new_messages = _reassemble(system, new_conv)
+
+    saved_tokens = est_tokens - estimate_message_tokens(new_messages)
+    logger.info(
+        "L3.5 context_collapse: conv %d → %d (folded %d msgs, saved ~%d tokens)",
+        len(conv), len(new_conv), len(collapsible_indices), saved_tokens,
+    )
+    return new_messages, True
+
+
 async def llm_compact(
     messages: list,
     *,
@@ -391,8 +497,13 @@ async def compress_if_needed(
 ) -> Tuple[list, bool]:
     """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
 
-    顺序：L1 snip → L2 micro → (条件) transcript 快照 → L4 llm。
+    顺序：L1 snip → L2 micro → L2.6 总量预算 → **L3.5 contextCollapse** → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
+
+    L3.5（Task P1.1，spec §7.1）：``features.context_collapse.enabled=True`` 时，
+    按 ``est_tokens / context_window > threshold_ratio`` 触发，折叠早期段为占位
+    （无损、可逆；保护 system prompt + pinned）。
+    放在 L4 llm_compact 前做兜底——便宜得多，能少调 LLM 摘要。
 
     L4 预算用 session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
 
@@ -475,6 +586,36 @@ async def compress_if_needed(
                         i, len(content), len(new_content),
                     )
 
+    # L3.5 contextCollapse（Task P1.1，spec §7.1）
+    # 触发条件：flag 开 + est_tokens / context_window > threshold_ratio（默认 0.8）
+    # 无损、可逆（折叠段在 .transcripts/latest.jsonl），保护 system prompt + pinned
+    # 放在 L4 前——便宜得多，能挡掉很多 L4 调用
+    c35 = False
+    from agent.feature_flags import is_feature_enabled, get_feature_config
+    if is_feature_enabled(config, "context_collapse"):
+        cc_cfg = get_feature_config(config, "context_collapse")
+        cc_threshold = cc_cfg.get("threshold_ratio", 0.8)
+        # context_window：优先 config 显式声明的值；否则按模型推断
+        context_window = config.get("context_collapse_context_window")
+        if not context_window:
+            if model and "[1m]" in str(model):
+                context_window = 1_000_000
+            else:
+                context_window = 128_000  # DeepSeek/OpenAI 常见值
+        # 折叠前先把 transcript 快照（L3.5 虽无损但好习惯，保持可读回）
+        # 注意：L3.5 不像 L4 那样有损，这里不强制 force
+        messages, c35 = apply_context_collapse(
+            messages,
+            threshold_ratio=cc_threshold,
+            context_window=context_window,
+            keep_recent_turns=config.get("context_collapse_keep_recent_turns", 3),
+        )
+        if c35:
+            logger.info(
+                "L3.5 contextCollapse 触发（ratio=%.2f, window=%d）",
+                cc_threshold, context_window,
+            )
+
     # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
     c4 = False
     max_attempts = config.get("max_compress_attempts", 3)
@@ -534,7 +675,7 @@ async def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c1 or c2 or c26 or c4
+    changed = c1 or c2 or c26 or c35 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)
