@@ -217,16 +217,49 @@ class HookRegistry:
         self._stop_fire_count = 0
         self._consumed.clear()  # P3.6: 同步清消费记录
 
+    # ---- P3.5/P3.6 helpers ----
+
+    def _is_consumed(self, hook: "Hook") -> bool:
+        """P3.6: once=True 的 hook 是否已被消费。"""
+        return hook.once and id(hook) in self._consumed
+
+    def _mark_consumed_if_once(self, hook: "Hook") -> None:
+        """P3.6: 声明式 hook 跑完后如果是 once，标记为已消费。"""
+        if hook.once:
+            self._consumed.add(id(hook))
+
+    def _matches_if_condition(self, hook: "Hook", tool_name: str, args: dict) -> bool:
+        """P3.5: 声明式 hook 的 if 条件过滤。
+
+        - hook.script 无 if_condition → True（无条件匹配）
+        - 有 if_condition → 调 agent.hook_filter.match_if_condition
+        - 程序式 hook 不走这里（调用方应只在 declarative 时调）
+        """
+        if hook.script is None:
+            return True
+        cond = getattr(hook.script, "if_condition", None)
+        if not cond:
+            return True
+        from agent.hook_filter import match_if_condition
+        return match_if_condition(tool_name, args, cond)
+
     # ---- 执行：USER_PROMPT_SUBMIT ----
     def run_user_prompt_submit(self, prompt: str, *, session_id: str) -> str:
-        """链式：每个 hook 看到前一个的输出。失败 fail-open。"""
+        """链式：每个 hook 看到前一个的输出。失败 fail-open。
+
+        P3.6: 声明式 hook 支持 once（跑一次后消费）。
+        """
         for hook in self._hooks[HookEvent.USER_PROMPT_SUBMIT]:
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     new_prompt = hook.fn(prompt)
                 else:
                     # declarative hook
                     new_prompt = self._invoke_declarative_user_prompt(hook, prompt, session_id)
+                    self._mark_consumed_if_once(hook)
                 if new_prompt is not None:
                     prompt = new_prompt
             except Exception as e:
@@ -256,17 +289,27 @@ class HookRegistry:
 
         - deny: Optional[str]，非 None 时拒绝
         - modified_args: Optional[dict]，非 None 时累计替换 args
+
+        P3.5: 声明式 hook 支持 if 条件过滤（permission rule 语法）。
+        P3.6: 声明式 hook 支持 once（跑一次后消费）。
         """
         deny_reason = None
         modified_args = None
         current_args = args
         for hook in self._hooks[HookEvent.PRE_TOOL_USE]:
+            # P3.5/P3.6: 声明式 hook 的 if 条件 + once 消费检查
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
+                if not self._matches_if_condition(hook, tool_name, current_args):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     result = hook.fn(tool_name, current_args)
                 else:
                     # declarative hook
                     result = self._invoke_declarative_pre_tool(hook, tool_name, current_args, session_id)
+                    self._mark_consumed_if_once(hook)
                 if result is None:
                     continue
                 if "deny" in result:
@@ -306,14 +349,23 @@ class HookRegistry:
     # ---- 执行：POST_TOOL_USE ----
     def run_post_tool_use(self, tool_name: str, args: dict, result: str,
                           *, session_id: str) -> str:
-        """链式：每个 hook 看到前一个的输出。"""
+        """链式：每个 hook 看到前一个的输出。
+
+        P3.5/P3.6: 声明式 hook 支持 if 条件过滤 + once 消费。
+        """
         for hook in self._hooks[HookEvent.POST_TOOL_USE]:
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
+                if not self._matches_if_condition(hook, tool_name, args):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     new_result = hook.fn(tool_name, args, result)
                 else:
                     new_result = self._invoke_declarative_post_tool(
                         hook, tool_name, args, result, session_id)
+                    self._mark_consumed_if_once(hook)
                 if new_result is not None:
                     result = new_result
             except Exception as e:
@@ -339,17 +391,24 @@ class HookRegistry:
 
     # ---- 执行：STOP ----
     def run_stop(self, *, session_id: str, max_fires: int = 3) -> Optional[str]:
-        """首个非 None 胜出。超过 max_fires 强制返回 None（防失控）。"""
+        """首个非 None 胜出。超过 max_fires 强制返回 None（防失控）。
+
+        P3.6: 声明式 hook 支持 once（跑一次后消费）。
+        """
         if self._stop_fire_count >= max_fires:
             logger.info("STOP hook 触发上限（%d/%d），本次跳过",
                         self._stop_fire_count, max_fires)
             return None
         for hook in self._hooks[HookEvent.STOP]:
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     msg = hook.fn()
                 else:
                     msg = self._invoke_declarative_stop(hook, session_id)
+                    self._mark_consumed_if_once(hook)
                 if msg is not None:
                     self._stop_fire_count += 1
                     return msg

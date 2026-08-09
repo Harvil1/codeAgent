@@ -124,6 +124,16 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
 
     ht = h_cfg.get("type", "command")
     timeout = h_cfg.get("timeout", 10.0)
+    # P3.5 NEW: if 条件过滤（仅 4 个工具相关事件生效，其他事件忽略）
+    if_cond = h_cfg.get("if")
+    if if_cond and event.value not in (
+        "pre_tool_use", "post_tool_use", "post_tool_use_failure", "permission_request"
+    ):
+        logger.warning(
+            "hook '%s' if 条件 '%s' 不适用事件 %s（仅 tool 相关事件支持），已忽略",
+            name, if_cond, event.value,
+        )
+        if_cond = None
 
     if ht == "command":
         command = h_cfg.get("command")
@@ -131,13 +141,14 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
             logger.warning("hook '%s' 缺 command（或非 list），跳过", name)
             return None
         script = HookScriptConfig(handler_type="command", command=command, timeout=timeout,
-                                  env=h_cfg.get("env"))
+                                  env=h_cfg.get("env"), if_condition=if_cond)
     elif ht == "http":
         url = h_cfg.get("url")
         if not url:
             logger.warning("hook '%s' (http) 缺 url，跳过", name)
             return None
-        script = HookScriptConfig(handler_type="http", url=url, timeout=timeout)
+        script = HookScriptConfig(handler_type="http", url=url, timeout=timeout,
+                                  if_condition=if_cond)
     elif ht == "mcp_tool":
         server = h_cfg.get("server")
         tool = h_cfg.get("tool")
@@ -145,13 +156,14 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
             logger.warning("hook '%s' (mcp_tool) 缺 server/tool，跳过", name)
             return None
         script = HookScriptConfig(handler_type="mcp_tool", mcp_server=server,
-                                  mcp_tool=tool, timeout=timeout)
+                                  mcp_tool=tool, timeout=timeout, if_condition=if_cond)
     elif ht == "prompt":
         prompt = h_cfg.get("prompt")
         if not prompt:
             logger.warning("hook '%s' (prompt) 缺 prompt，跳过", name)
             return None
-        script = HookScriptConfig(handler_type="prompt", prompt=prompt, timeout=timeout)
+        script = HookScriptConfig(handler_type="prompt", prompt=prompt, timeout=timeout,
+                                  if_condition=if_cond)
     elif ht == "agent":
         prompt = h_cfg.get("prompt") or ""
         agent_name = h_cfg.get("agent")
@@ -159,7 +171,8 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
             logger.warning("hook '%s' (agent) 缺 prompt/agent，跳过", name)
             return None
         script = HookScriptConfig(handler_type="agent", prompt=prompt,
-                                  agent_name=agent_name, timeout=timeout)
+                                  agent_name=agent_name, timeout=timeout,
+                                  if_condition=if_cond)
     else:
         logger.warning("hook '%s' 未知 type '%s'，跳过", name, ht)
         return None
@@ -170,4 +183,7 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
         kind="declarative",
         script=script,
         fail_closed=h_cfg.get("fail_closed", False),
+        # P3.5 NEW: if 条件过滤（permission rule 语法）
+        once=h_cfg.get("once", False),  # P3.6 NEW: 一次性 hook
+        use_sandbox=h_cfg.get("use_sandbox", False),  # P3.8 NEW: 套 sandbox
     )
