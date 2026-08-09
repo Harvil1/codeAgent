@@ -112,7 +112,7 @@ def get_tool_definitions(
     return definitions
 
 
-def handle_function_call(
+async def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
     *,
@@ -130,7 +130,7 @@ def handle_function_call(
     team_name=None,              # === P4a-T6 NEW ===
     agent_ref=None,              # === P4b-T2 NEW ===
 ) -> str:
-    """分发工具调用，返回 JSON 字符串结果。
+    """async 分发工具调用，返回 JSON 字符串结果。
 
     这是 agent 调用工具的入口。
     context 参数会被透传给工具 handler（按需取用）。
@@ -140,6 +140,11 @@ def handle_function_call(
     POST_TOOL_USE hook 在 dispatch 后执行：可改写 result 字符串。
     hooks_registry=None 或 config.hooks.enabled=False 时跳过所有 hook
     （完全向后兼容）。
+
+    改造说明（Task C2）：
+    - def → async def
+    - registry.dispatch 加 await（dispatch 在 Task C1 已改 async）
+    - 其他逻辑（hook / 类型转换 / error 处理）不变
     """
     ensure_tools_discovered()
 
@@ -162,7 +167,8 @@ def handle_function_call(
             function_args = modified_args
 
     # 分发到 registry（传递上下文给 handler）
-    result = registry.dispatch(
+    # Task C2: dispatch 已是 async（Task C1），此处加 await
+    result = await registry.dispatch(
         function_name,
         function_args,
         task_id=task_id,
