@@ -515,6 +515,7 @@ class AIAgent:
                 messages,
                 tools=tools,
                 fallback_llm_client=self.fallback_llm_client,
+                config=self.config,
             )
             # 流式回调已经错过，但至少把完整内容回放给 callback
             choice_msg = response.choices[0].message
@@ -571,6 +572,7 @@ class AIAgent:
                     tools=tools,
                     fallback_llm_client=self.fallback_llm_client,
                     max_tokens=new_max,
+                    config=self.config,
                 )
                 retried_choice = retried.choices[0]
                 retried_msg = retried_choice.message
@@ -1202,6 +1204,7 @@ class AIAgent:
                 messages,
                 tools=tool_schemas if tool_schemas else None,
                 fallback_llm_client=self.fallback_llm_client,
+                config=self.config,
             )
             # P0-3: 非流式路径也支持 max_tokens 升级
             if (detect_length_finish(response)
@@ -1216,6 +1219,7 @@ class AIAgent:
                         tools=tool_schemas if tool_schemas else None,
                         fallback_llm_client=self.fallback_llm_client,
                         max_tokens=new_max,
+                        config=self.config,
                     )
                 except Exception as esc_err:
                     logger.warning(
