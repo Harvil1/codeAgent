@@ -97,6 +97,7 @@ TOOLSETS: Dict[str, dict] = {
             "load_skill",
             "session_search",
             "exit_plan_mode",
+            "plan_mode_v2_dispatch",  # P6: 多 Agent 并行（flag plan_mode_v2_parallel 门控）
         ],
         "includes": [],
     },

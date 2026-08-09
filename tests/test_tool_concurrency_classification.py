@@ -66,6 +66,7 @@ UNSAFE_TOOLS = {
     "skill_manage",     # 创建/更新/归档/删除技能文件
     # Plan Mode（状态变更）
     "exit_plan_mode",   # 触发审批流程
+    "plan_mode_v2_dispatch",  # P6: 起 N 个子代理 + 合并，串行更稳
     # 任务类（写入）
     "task_create",
     "task_update",

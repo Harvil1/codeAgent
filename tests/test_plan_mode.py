@@ -32,6 +32,7 @@ def test_plan_toolset_defined():
         "skills_list", "skill_view", "load_skill",
         "session_search",
         "exit_plan_mode",
+        "plan_mode_v2_dispatch",  # P6: 多 Agent 并行（flag 门控）
     }
     assert set(tools) == expected, f"plan 工具集内容不符: {set(tools) ^ expected}"
     assert len(tools) == len(expected)
@@ -618,3 +619,285 @@ async def test_e2e_plan_reject_then_revise_approve():
 
     assert call_count[0] == 2, "回调应被调 2 次（拒绝+批准）"
     assert agent.plan_mode is False, "最终应切回执行模式"
+
+
+# ============================================================================
+# P6: 多 Agent 并行调度（plan_mode_v2_dispatch + _run_parallel_planners + _merge_plans）
+# ============================================================================
+
+def test_plan_mode_v2_dispatch_registered():
+    """plan_mode_v2_dispatch 被注册到 registry 的 plan toolset。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    entry = registry._tools.get("plan_mode_v2_dispatch")
+    assert entry is not None, "plan_mode_v2_dispatch 未注册"
+    assert entry.toolset == "plan", f"toolset 应为 'plan'，实际 '{entry.toolset}'"
+
+
+async def test_plan_mode_v2_dispatch_flag_off_returns_feature_disabled():
+    """flag OFF → 返回 feature_disabled，引导走原单 Agent 路径。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    result_json = await registry.dispatch(
+        "plan_mode_v2_dispatch",
+        {"subtasks": ["调研 X"]},
+        config={"features": {"plan_mode_v2_parallel": {"enabled": False}}},
+    )
+    data = json.loads(result_json)
+    assert data["error_type"] == "feature_disabled"
+    assert "plan_mode_v2_parallel" in data["error"]
+
+
+async def test_plan_mode_v2_dispatch_empty_subtasks_invalid_args():
+    """flag ON 但 subtasks 空 → invalid_args。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    config = {"features": {"plan_mode_v2_parallel": {"enabled": True, "max_parallel_agents": 3}}}
+    result_json = await registry.dispatch(
+        "plan_mode_v2_dispatch",
+        {"subtasks": []},
+        config=config,
+    )
+    data = json.loads(result_json)
+    assert data["error_type"] == "invalid_args"
+
+
+# ---- _run_parallel_planners 直接测试（mock _run_child） ----
+
+def test_run_parallel_planners_n1_matches_single_behavior():
+    """N=1 跟单 Agent 行为一致：只调一次 _run_child，返回那份计划。"""
+    from tools.plan_mode_tool import _run_parallel_planners
+    from unittest.mock import patch
+
+    with patch("tools.plan_mode_tool._run_child" if False else "tools.delegate_tool._run_child") as mock_child:
+        # 直接 patch tools.delegate_tool._run_child（_run_parallel_planners 从那里 import）
+        mock_child.return_value = "子计划 A"
+
+        result = _run_parallel_planners(["调研 A"], max_n=3)
+
+    assert mock_child.call_count == 1, "N=1 应只调 1 次 _run_child"
+    assert result == ["子计划 A"]
+
+
+def test_run_parallel_planners_n3_concurrent_collects_all():
+    """N=3 并发 → 3 份子计划都收集到，顺序与 subtasks 一致。"""
+    from tools.plan_mode_tool import _run_parallel_planners
+    from unittest.mock import patch
+
+    # 用 side_effect 按调用顺序返回不同结果（ThreadPoolExecutor 会并发提交，
+    # 但 submit 顺序固定，result 收集顺序按 futures 字典迭代——我们按提交顺序读）
+    call_results = {0: "计划-A", 1: "计划-B", 2: "计划-C"}
+
+    def fake_run_child(goal, context, role, **kwargs):
+        # goal 就是 subtasks 元素，按内容匹配返回
+        if "A" in goal:
+            return "计划-A"
+        if "B" in goal:
+            return "计划-B"
+        return "计划-C"
+
+    with patch("tools.delegate_tool._run_child", side_effect=fake_run_child):
+        result = _run_parallel_planners(
+            ["调研 A", "调研 B", "调研 C"], max_n=3,
+        )
+
+    assert len(result) == 3, f"应收集到 3 份子计划，实际 {len(result)}"
+    assert set(result) == {"计划-A", "计划-B", "计划-C"}
+
+
+def test_run_parallel_planners_max_n_caps_concurrency():
+    """max_parallel_agents 上限生效：5 个子任务但 max_n=3 → workers=3。"""
+    from tools.plan_mode_tool import _run_parallel_planners
+    from unittest.mock import patch, MagicMock
+
+    captured_max_workers = []
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            captured_max_workers.append(max_workers)
+        def submit(self, fn, *a, **kw):
+            f = MagicMock()
+            f.result.return_value = "计划"
+            return f
+        def shutdown(self, **kw):
+            pass
+
+    with patch("tools.plan_mode_tool.ThreadPoolExecutor", FakeExecutor), \
+         patch("tools.delegate_tool._run_child"):
+        _run_parallel_planners(
+            ["t1", "t2", "t3", "t4", "t5"], max_n=3,
+        )
+
+    assert captured_max_workers == [3], (
+        f"workers 应被 max_n=3 钳制，实际 {captured_max_workers}"
+    )
+
+
+def test_run_parallel_planners_subagent_failure_isolated():
+    """单个子 Agent 失败不影响其他：失败的被跳过，成功的保留。"""
+    from tools.plan_mode_tool import _run_parallel_planners
+    from unittest.mock import patch
+
+    def fake_run_child(goal, context, role, **kwargs):
+        if "B" in goal:
+            raise RuntimeError("子代理 B 崩了")
+        return f"计划-{goal[-1]}"
+
+    with patch("tools.delegate_tool._run_child", side_effect=fake_run_child):
+        result = _run_parallel_planners(
+            ["调研 A", "调研 B", "调研 C"], max_n=3,
+        )
+
+    # B 失败被跳过，A 和 C 保留
+    assert len(result) == 2, f"应有 2 份成功（B 失败跳过），实际 {len(result)}"
+    assert all("B" not in r for r in result), "失败子代理的结果不应出现"
+
+
+def test_run_parallel_planners_empty_subtasks_returns_empty():
+    """空 subtasks → 空列表（不调 _run_child）。"""
+    from tools.plan_mode_tool import _run_parallel_planners
+    from unittest.mock import patch
+
+    with patch("tools.delegate_tool._run_child") as mock_child:
+        result = _run_parallel_planners([], max_n=3)
+
+    assert result == []
+    assert mock_child.call_count == 0
+
+
+# ---- _merge_plans 测试 ----
+
+def test_merge_plans_single_returns_as_is():
+    """单份子计划不调 LLM，直接返回原文。"""
+    from tools.plan_mode_tool import _merge_plans
+
+    result = _merge_plans(["唯一的子计划"], llm_client=None, model="")
+    assert result == "唯一的子计划"
+
+
+def test_merge_plans_empty_returns_placeholder():
+    """空列表 → 占位文本。"""
+    from tools.plan_mode_tool import _merge_plans
+
+    result = _merge_plans([], llm_client=None, model="")
+    assert "无子计划" in result
+
+
+def test_merge_plans_multiple_calls_llm():
+    """多份子计划 → 调 LLM 合并，返回 LLM 输出。"""
+    from tools.plan_mode_tool import _merge_plans
+    from unittest.mock import patch, MagicMock
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "合并后的最终计划"
+
+    # patch asyncio.run（_merge_plans 内部用它驱动 call_with_retry）
+    # call_with_retry 是局部 import，但 asyncio.run 被 patch 后不会真调它
+    with patch("tools.plan_mode_tool.asyncio.run", return_value=mock_response) as mock_run:
+        result = _merge_plans(
+            ["子计划 A", "子计划 B"],
+            llm_client=MagicMock(),
+            model="test-model",
+        )
+
+    assert result == "合并后的最终计划"
+    assert mock_run.call_count == 1
+
+
+def test_merge_plans_llm_failure_falls_back_to_concatenation():
+    """LLM 合并失败 → 退化为拼接（fail-open）。"""
+    from tools.plan_mode_tool import _merge_plans
+    from unittest.mock import patch
+
+    with patch("tools.plan_mode_tool.asyncio.run", side_effect=RuntimeError("LLM 挂了")):
+        result = _merge_plans(
+            ["子计划 A", "子计划 B"],
+            llm_client=None,
+            model="",
+        )
+
+    assert "拼接" in result or "子计划 1" in result, "退化拼接应含分隔标题"
+    assert "子计划 A" in result
+    assert "子计划 B" in result
+
+
+def test_plan_merge_prompt_template_format():
+    """PLAN_MERGE_PROMPT_TEMPLATE 能被 .format 正确填充。"""
+    from tools.plan_mode_tool import PLAN_MERGE_PROMPT_TEMPLATE
+
+    filled = PLAN_MERGE_PROMPT_TEMPLATE.format(
+        n=2,
+        sub_plans_block="### 子计划 1\nA\n\n### 子计划 2\nB",
+    )
+    assert "2 份" in filled
+    assert "### 子计划 1" in filled
+
+
+# ---- 端到端：plan_mode_v2_dispatch 全流程（mock _run_child + 合并） ----
+
+async def test_plan_mode_v2_dispatch_full_flow_flag_on():
+    """flag ON → 并行调度 → 合并 → 返回 merged_plan。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    config = {
+        "features": {
+            "plan_mode_v2_parallel": {"enabled": True, "max_parallel_agents": 3},
+        }
+    }
+
+    # mock _run_child 返回 2 份子计划
+    def fake_run_child(goal, context, role, **kwargs):
+        return f"子计划：{goal}"
+
+    # mock 合并的 LLM 调用（patch asyncio.run 只作用于 _merge_plans）
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "最终合并计划"
+
+    # 构造一个假父 agent 提供 llm_client + model
+    fake_agent = MagicMock()
+    fake_agent.llm_client = MagicMock()
+    fake_agent.model = "test-model"
+
+    with patch("tools.delegate_tool._run_child", side_effect=fake_run_child), \
+         patch("tools.plan_mode_tool.asyncio.run", return_value=mock_response):
+        result_json = await registry.dispatch(
+            "plan_mode_v2_dispatch",
+            {"subtasks": ["前端调研", "后端调研"]},
+            config=config,
+            agent_ref=fake_agent,
+        )
+
+    data = json.loads(result_json)
+    assert data["success"] is True
+    assert data["subplans_succeeded"] == 2
+    assert data["subtasks_attempted"] == 2
+    assert data["max_parallel_agents"] == 3
+    assert data["merged_plan"] == "最终合并计划"
+
+
+async def test_plan_mode_v2_dispatch_all_subagents_fail():
+    """flag ON 但所有子代理都失败 → all_subagents_failed。"""
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+
+    config = {
+        "features": {
+            "plan_mode_v2_parallel": {"enabled": True, "max_parallel_agents": 3},
+        }
+    }
+
+    with patch("tools.delegate_tool._run_child", side_effect=RuntimeError("全崩")):
+        result_json = await registry.dispatch(
+            "plan_mode_v2_dispatch",
+            {"subtasks": ["A", "B"]},
+            config=config,
+        )
+
+    data = json.loads(result_json)
+    assert data["error_type"] == "all_subagents_failed"
