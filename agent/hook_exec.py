@@ -115,6 +115,40 @@ def _is_handler_allowed(handler_type: str) -> bool:
     return is_feature_enabled(config, flag_name)
 
 
+def _wrap_with_sandbox(hook) -> list:
+    """P3.8: 把 hook 命令用 sandbox_runner 包装。
+
+    平台不支持/二进制未装时 fail-open 返回原始 command（log warning）。
+    返回 argv list。
+    """
+    from agent import sandbox_runner
+    try:
+        # hook.script.command 是 list[str]（如 ["/bin/sh", "-c", "..."]），
+        # sandbox_runner.wrap_command 接受 str（shell 命令），
+        # 我们把 list 拼成 shell 命令字符串。
+        raw_cmd = hook.script.command
+        if isinstance(raw_cmd, list):
+            # 简单拼接：用 shlex.quote 保护每个参数
+            import shlex
+            shell_cmd = " ".join(shlex.quote(str(x)) for x in raw_cmd)
+        else:
+            shell_cmd = str(raw_cmd)
+
+        import os as _os
+        cwd = _os.getcwd()
+        writable_roots = []  # hook 命令默认只可写 cwd
+        return sandbox_runner.wrap_command(
+            shell_cmd, cwd=cwd, writable_roots=writable_roots,
+        )
+    except Exception as e:
+        # fail-open：沙箱不可用 → 降级到无沙箱（与 terminal_tool 同语义）
+        logger.warning(
+            "hook %s use_sandbox=True 但沙箱不可用，降级到无沙箱: %s",
+            hook.name, e,
+        )
+        return hook.script.command
+
+
 # ============================================================================
 # 总入口：dispatch_hook
 # ============================================================================
@@ -171,6 +205,9 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
 
     返回：
         解析后的 dict（可能为空 dict 表示 allow），或 None（任何故障）
+
+    P3.8: hook.use_sandbox=True 时，命令被 sandbox_runner 包装（仅 Unix 可用）。
+          Windows/平台不支持时 fail-open 降级到无沙箱（log warning）。
     """
     if hook.script is None:
         logger.warning("hook %s 缺 script 配置", hook.name)
@@ -183,9 +220,15 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
     payload_json = json.dumps(payload, ensure_ascii=False)
     env = {**os.environ, **(hook.script.env or {})}
 
+    # P3.8: 可选 sandbox 包装
+    argv = hook.script.command
+    use_sandbox = getattr(hook, "use_sandbox", False)
+    if use_sandbox:
+        argv = _wrap_with_sandbox(hook)
+
     try:
         proc = subprocess.run(
-            hook.script.command,
+            argv,
             input=payload_json,
             capture_output=True,
             text=True,
