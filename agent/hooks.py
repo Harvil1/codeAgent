@@ -326,7 +326,11 @@ class HookRegistry:
         return deny_reason, modified_args
 
     def _invoke_declarative_pre_tool(self, hook, tool_name, args, session_id):
-        """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。"""
+        """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。
+
+        P3.7: 处理 exit code 2 blocking 协议。
+            dispatch_hook 返回 {"action": "block", "reason": stderr} → 转 {"deny": reason}
+        """
         from agent.hook_exec import dispatch_hook
         payload = {
             "event": "pre_tool_use",
@@ -340,7 +344,8 @@ class HookRegistry:
         if result is None:
             return None
         action = result.get("action", "allow")
-        if action == "deny":
+        # P3.7: block（exit 2）转 deny
+        if action in ("deny", "block"):
             return {"deny": result.get("reason", "unspecified")}
         if action == "modify":
             return {"modify_args": result.get("args", args)}

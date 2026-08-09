@@ -404,7 +404,7 @@ def test_p36_once_consumed_per_hook():
 
 def test_p37_exit_code_2_treated_as_block():
     """command hook exit 2 + stderr → 返回 {"action": "block", "reason": stderr}。"""
-    from agent.hook_exec import run_script_hook, HookBlockedError
+    from agent.hook_exec import run_script_hook
     hook = Hook(
         name="h", event=HookEvent.PRE_TOOL_USE, kind="declarative",
         script=HookScriptConfig(
@@ -413,7 +413,7 @@ def test_p37_exit_code_2_treated_as_block():
                      "import sys; sys.stderr.write('forbidden'); sys.exit(2)"],
         ),
     )
-    # 默认（raise_on_block=False）返回特殊 block dict
+    # exit 2 → 返回特殊 block dict（不是 None，与 fail-open 区分）
     result = run_script_hook(hook, {"event": "pre_tool_use"})
     assert result is not None
     assert result.get("action") == "block"

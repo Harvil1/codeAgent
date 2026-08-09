@@ -201,6 +201,13 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
         return None
 
     if proc.returncode != 0:
+        # P3.7: exit code 2 = blocking 协议（对齐 claude-code-main）
+        # stderr 作为阻塞原因，返回特殊 dict 让调用方识别为 block。
+        # 与 fail-open（None）区分：None = 静默失败，block = 主动拒绝。
+        if proc.returncode == 2:
+            stderr = (proc.stderr or "").strip()
+            logger.info("hook %s exit 2 (block): %s", hook.name, stderr[:200])
+            return {"action": "block", "reason": stderr or "hook blocked (exit 2)"}
         logger.warning("hook %s exit %d: %s",
                        hook.name, proc.returncode, (proc.stderr or "")[:200])
         return None
