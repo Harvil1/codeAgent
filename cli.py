@@ -2503,7 +2503,13 @@ def run_one_shot(message: str):
             rt.session_store.append_message(rt.session_id, "user", message)
         # Task E1: run_conversation 已改 async（T_D4），同步入口用 asyncio.run 驱动。
         response = asyncio.run(rt.agent.run_conversation(message))
-        print(response)
+        # 流式输出（streaming.enabled 默认 True）已经实时打印过内容；
+        # 这里只换行收尾，避免重复打印完整响应。非流式模式才 print(response)。
+        streaming_enabled = rt.config.get("streaming", {}).get("enabled", True)
+        if streaming_enabled:
+            print()  # 流式结束换行
+        else:
+            print(response)
         if rt.session_store and rt.session_id:
             rt.session_store.append_message(rt.session_id, "assistant", response)
     except Exception as e:
