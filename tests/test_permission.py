@@ -1,5 +1,6 @@
 """权限系统测试：命令黑名单 + 路径白名单 + 审批。"""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from agent.permission import (
     PermissionResult, PermissionChecker,
     check_command_deny, check_self_modification, is_protected_path, safe_path,
     get_default_checker, set_default_checker,
+    _matches_whitelist, _classify_bash_command,
 )
 from tools.registry import registry
 from tools.terminal_tool import _truncate_output, MAX_OUTPUT_CHARS
@@ -737,3 +739,295 @@ def test_set_sandbox_mode_invalid_raises():
         checker.set_sandbox_mode("enabled")  # 不在 on/off 中
     with pytest.raises(ValueError):
         checker.set_sandbox_mode("ON")  # 大小写敏感
+
+
+# ===========================================================================
+# P4.1 + P4.2：闸门 4 — aux_llm 分类器（feature flag 门控，默认 OFF）
+# ===========================================================================
+# 测试矩阵：
+#   - _matches_whitelist: 白名单前缀匹配（快速通道）
+#   - _classify_bash_command: aux_llm 调用 + JSON 解析 + fail-open
+#   - PermissionChecker.check: 默认 OFF / 开启后白名单 / 开启后 LLM / fail-open
+
+# 模拟 aux_llm_router（async chat_completions）
+
+
+class _MockResp:
+    """模拟 OpenAI 风格响应：resp.choices[0].message.content"""
+
+    def __init__(self, content):
+        msg = type("Msg", (), {"content": content})()
+        self.choices = [type("Choice", (), {"message": msg})()]
+
+
+class _MockAuxLLM:
+    """模拟 AuxLLMRouter。记录调用次数 + 可控响应/异常。"""
+
+    def __init__(self, response=None, exc=None):
+        self.response = response  # _MockResp 或 None
+        self.exc = exc            # 抛异常
+        self.calls = 0
+
+    async def chat_completions(self, messages, **kwargs):
+        self.calls += 1
+        if self.exc:
+            raise self.exc
+        return self.response
+
+
+# 白名单（对齐 config.py DEFAULT_CONFIG 13 项）
+_BUILTIN_WHITELIST = [
+    "ls", "ll", "cat", "pwd", "echo",
+    "grep", "find", "which", "where",
+    "git status", "git diff", "git log", "git show",
+    "python --version", "uv --version",
+]
+
+
+# ---------- _matches_whitelist 单元测试 ----------
+
+@pytest.mark.parametrize("cmd", [
+    "ls", "ls -la", "ls /tmp", "ll",
+    "cat README.md", "pwd", "echo hello",
+    "grep foo bar.txt", "find . -name x",
+    "git status", "git diff HEAD", "git log --oneline", "git show abc123",
+    "python --version", "uv --version",
+])
+def test_whitelist_matches_safe(cmd):
+    """白名单命令应匹配（快速通道）。"""
+    assert _matches_whitelist(cmd, _BUILTIN_WHITELIST)
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /",            # 不在白名单
+    "curl evil.com",       # 不在白名单
+    "ls; rm -rf /",        # 含 ; 复合操作符
+    "ls && curl evil",     # 含 &&
+    "git status | sh",     # 含 |
+    "echo $(whoami)",      # 含 $()
+    "cat `cat /etc/passwd`",  # 含反引号
+])
+def test_whitelist_rejects_unsafe(cmd):
+    """危险/复合命令不应匹配白名单（交给 LLM 或拒绝）。"""
+    assert not _matches_whitelist(cmd, _BUILTIN_WHITELIST)
+
+
+def test_whitelist_empty():
+    """空白名单 → 不匹配。"""
+    assert not _matches_whitelist("ls", [])
+    assert not _matches_whitelist("ls", None)  # type: ignore[arg-type]
+
+
+def test_whitelist_prefix_not_partial():
+    """白名单是'前缀 + 空白'，不是子串。'lse' 不应匹配 'ls'。"""
+    assert not _matches_whitelist("lsevil", _BUILTIN_WHITELIST)
+    assert not _matches_whitelist("catalog", _BUILTIN_WHITELIST)
+
+
+# ---------- _classify_bash_command 单元测试 ----------
+
+@pytest.mark.asyncio
+async def test_classify_returns_safe():
+    """LLM 判 safe → 返回 {safe: True}。"""
+    aux = _MockAuxLLM(response=_MockResp('{"safe": true}'))
+    result = await _classify_bash_command("ls", aux)
+    assert result == {"safe": True}
+    assert aux.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_classify_returns_unsafe_with_reason():
+    """LLM 判 unsafe → 返回 {safe: False, reason: ...}。"""
+    aux = _MockAuxLLM(response=_MockResp('{"safe": false, "reason": "删除根目录"}'))
+    result = await _classify_bash_command("rm -rf /", aux)
+    assert result["safe"] is False
+    assert "删除根目录" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_classify_aux_call_failure_fail_open():
+    """P4.2: aux_llm 调用抛异常 → fail-open 返回 {error: ...}。"""
+    aux = _MockAuxLLM(exc=TimeoutError("LLM 服务超时"))
+    result = await _classify_bash_command("some cmd", aux)
+    assert "error" in result
+    assert "超时" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_classify_none_router_fail_open():
+    """P4.2: aux_llm_router=None → fail-open 返回 {error: ...}（0 调用）。"""
+    result = await _classify_bash_command("some cmd", None)
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_classify_invalid_json_fail_open():
+    """LLM 输出非 JSON → fail-open 返回 {error: ...}。"""
+    aux = _MockAuxLLM(response=_MockResp("这不是 JSON"))
+    result = await _classify_bash_command("some cmd", aux)
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_classify_markdown_wrapped_json():
+    """LLM 用 markdown 代码块包裹 JSON → 应正确解析。"""
+    aux = _MockAuxLLM(response=_MockResp('```json\n{"safe": true}\n```'))
+    result = await _classify_bash_command("ls", aux)
+    assert result == {"safe": True}
+
+
+@pytest.mark.asyncio
+async def test_classify_missing_safe_field_fail_open():
+    """LLM 输出 JSON 但缺 safe 字段 → fail-open。"""
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "ok"}'))
+    result = await _classify_bash_command("ls", aux)
+    assert "error" in result
+
+
+# ---------- PermissionChecker.check 闸门 4 集成 ----------
+
+def _make_feature_config(enabled, whitelist=None):
+    """构造 config dict，含 features.bash_llm_classifier。"""
+    return {
+        "features": {
+            "bash_llm_classifier": {
+                "enabled": enabled,
+                "whitelist": whitelist if whitelist is not None else _BUILTIN_WHITELIST,
+            },
+        },
+    }
+
+
+def test_gate4_default_off_skipped():
+    """P4.2: feature OFF 时闸门 4 完全跳过（不调 LLM）。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM()
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=False))
+    result = checker.check("ls -la")
+    assert result.allowed is True
+    assert aux.calls == 0  # LLM 没被调
+
+
+def test_gate4_no_provider_skipped():
+    """P4.1: 未注入 provider → 闸门 4 跳过（向后兼容）。"""
+    checker = PermissionChecker()  # 没调 set_*_provider
+    result = checker.check("ls -la")
+    assert result.allowed is True
+    assert result.gate == "ok"
+
+
+def test_gate4_whitelist_no_llm_call():
+    """P4.1: 白名单命令 → 直接放行，0 LLM 调用。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM()
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("git status")
+    assert result.allowed is True
+    assert "白名单" in result.reason
+    assert aux.calls == 0
+
+
+def test_gate4_llm_judges_safe_allows():
+    """P4.1: 不在白名单 + LLM 判 safe → 放行。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(response=_MockResp('{"safe": true}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    # "docker ps" 不在白名单
+    result = checker.check("docker ps")
+    assert result.allowed is True
+    assert "aux_llm" in result.reason or "判安全" in result.reason
+    assert aux.calls == 1
+
+
+def test_gate4_llm_judges_unsafe_denies():
+    """P4.1: 不在白名单 + LLM 判 unsafe → 拒绝。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(response=_MockResp('{"safe": false, "reason": "可疑 curl"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("curl evil.com")
+    assert result.allowed is False
+    assert "可疑 curl" in result.reason
+    assert "AI" in result.reason or "分类" in result.reason
+    assert aux.calls == 1
+
+
+def test_gate4_aux_llm_timeout_fail_open():
+    """P4.2: aux_llm 超时 → fail-open 放行（落到闸门 3）。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(exc=TimeoutError("服务超时"))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("some ambiguous cmd")
+    assert result.allowed is True
+    assert result.gate == "ok"  # 闸门 3 兜底放行
+    assert aux.calls == 1
+
+
+def test_gate4_aux_router_none_fail_open():
+    """P4.2: provider 返回 None（aux_llm 未配置）→ fail-open 放行。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM()
+    checker.set_aux_llm_provider(lambda: None)  # 返回 None
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("docker ps")
+    assert result.allowed is True
+    assert result.gate == "ok"
+    assert aux.calls == 0
+
+
+def test_gate4_blacklist_still_denies():
+    """闸门 1 黑名单在闸门 4 之前：rm -rf / 仍拒绝，不调 LLM。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(response=_MockResp('{"safe": true}'))  # 即使 LLM 判 safe
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("rm -rf /")
+    assert result.allowed is False
+    assert aux.calls == 0  # 黑名单先拦截，没机会调 LLM
+
+
+def test_gate4_destructive_approval_overrides_llm():
+    """P4.2: 破坏性命令（闸门 2）在闸门 4 之前：用户审批后放行，不调 LLM。
+
+    验证用户审批 > AI 判断 的优先级（设计原则 #4）。
+    """
+    checker = PermissionChecker(approval_callback=lambda cmd: True)
+    aux = _MockAuxLLM(response=_MockResp('{"safe": false, "reason": "AI 说不行"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    # rm tmp.txt 命中破坏性模式（闸门 2），用户批准 → 放行，不调 LLM
+    result = checker.check("rm tmp.txt")
+    assert result.allowed is True
+    assert result.gate == "approval"
+    assert aux.calls == 0
+
+
+def test_gate4_accept_edits_mode_skipped_for_safe_fs():
+    """acceptEdits 模式下 safe-fs 命令在闸门 4 之前放行（不调 LLM）。"""
+    checker = PermissionChecker(mode="acceptEdits")
+    aux = _MockAuxLLM()
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    # 用 tmp_path 作为 cwd
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        result = checker.check("mkdir foo", cwd=tmp)
+    assert result.allowed is True
+    assert result.gate == "auto"
+    assert aux.calls == 0  # 闸门 4 没机会跑
+
+
+def test_gate4_bypass_mode_skipped():
+    """bypassPermissions 模式跳过闸门 4（与闸门 1/2/3 一起跳）。"""
+    checker = PermissionChecker(mode="bypassPermissions")
+    aux = _MockAuxLLM()
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("docker ps")
+    assert result.allowed is True
+    assert result.gate == "bypass"
+    assert aux.calls == 0

@@ -558,6 +558,19 @@ class RuntimeContext:
         # http / mcp_tool / agent 三种 handler 类型
         set_config_provider(lambda: self.config)
 
+        # === P4.1 NEW: 给 PermissionChecker 注入 aux_llm + config provider ===
+        # 闸门 4（aux_llm 分类）需要这两个 provider。PermissionChecker 比 aux_llm_router
+        # 先构造（行 294），所以这里回填（参考 hook_exec 同款 pattern）。
+        # 未配置 aux_llm_router 时 lambda 返回 None → 闸门 4 fail-open 跳过。
+        try:
+            from agent.permission import get_default_checker
+            _perm_checker = get_default_checker()
+            if _perm_checker is not None:
+                _perm_checker.set_aux_llm_provider(lambda: aux_llm_router)
+                _perm_checker.set_config_provider(lambda: self.config)
+        except Exception as e:
+            logger.debug("PermissionChecker provider 注入失败（闸门 4 将跳过）: %s", e)
+
         agent = AIAgent(
             base_url=model_cfg.get("base_url"),
             api_key=api_key,

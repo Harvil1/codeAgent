@@ -4,17 +4,22 @@
   闸门 1：硬拒绝（危险命令、受保护路径）
   闸门 2：规则匹配（破坏性命令模式、工作目录外写入）
   闸门 3：用户审批（通过 callback 询问，带会话内缓存）
+  闸门 4：aux_llm 分类（feature flag 门控，默认 OFF）
 
 L1（黑名单）是零成本防线，防止灾难性误操作。
 L2（路径白名单）保护用户文件和密钥。
 L3（审批）给用户最终决定权，但会话内缓存避免重复询问。
+L4（LLM 分类）是可选的"慢速深审"：前三道闸门都放过、但也不在破坏性
+模式里的命令，由 aux_llm 再做一次语义判断。白名单 13 项快速通道跳过
+LLM 调用（ls/cat/git status 等明显安全）。fail-open：AI 调用失败放行。
 """
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.atomic_io import atomic_write_text
 
@@ -417,16 +422,127 @@ def safe_path(
 
 
 # ---------------------------------------------------------------------------
+# 闸门 4：aux_llm 分类器（feature flag 门控，默认 OFF）
+# ---------------------------------------------------------------------------
+#
+# 触发条件：前三道闸门都未拒绝也未要求审批（即落到 check() 末尾的"默认通过"）
+#           且 feature flag bash_llm_classifier.enabled=True。
+# 白名单快速通道（spec §4 决策 4）：命令匹配白名单前缀（如 "ls"、"git status"）
+#           则直接放行，0 LLM 调用。白名单从 config.features.bash_llm_classifier.whitelist 读。
+# AI 判断：safe → 放行；unsafe → 拒绝 + 原因。fail-open：LLM 调用失败 → 放行（log warning）。
+#
+# 注：aux_llm_router.chat_completions 是 async（Task D4）；
+#     PermissionChecker.check 是 sync 函数 → 用 asyncio.run 桥接
+#     （参考 progress.py:124 / reflection.py:150 的同款模式）。
+
+# 分类 prompt：要 LLM 输出严格 JSON，便于解析
+_CLASSIFY_PROMPT_TEMPLATE = (
+    "判断下面这条 bash/shell 命令是否安全执行（不破坏文件、不泄露数据、不改系统关键配置）。\n"
+    "只考虑命令本身的直接效果，不要推测用户的意图。\n\n"
+    "命令：{cmd}\n\n"
+    "输出严格 JSON（不要 markdown 代码块、不要额外解释）：\n"
+    '{{"safe": true}} 或 {{"safe": false, "reason": "<=40 字中文理由>"}}'
+)
+
+
+def _matches_whitelist(command: str, whitelist: List[str]) -> bool:
+    """检查命令是否匹配白名单前缀（快速通道，0 LLM 调用）。
+
+    判断规则（spec §4 决策 4）：
+    - 命令去除前导空白后，以白名单条目 + 空白/行尾 开头
+    - 例：白名单 "ls" 匹配 "ls -la"、"ls /tmp"；不匹配 "ls; rm -rf /"（含复合操作符）
+    - 含 shell 复合操作符（&&/||/;/|/反引号/$()）的命令不匹配（保守，交 LLM 判）
+    """
+    if not command or not whitelist:
+        return False
+    cmd = command.strip()
+    # 含复合操作符的命令不走快速通道（可能藏危险子命令）
+    if any(op in cmd for op in ("&&", "||", ";", "|", "`", "$(")):
+        return False
+    for entry in whitelist:
+        if not entry:
+            continue
+        # 精确匹配（命令就是白名单条目本身）
+        if cmd == entry:
+            return True
+        # 前缀 + 空白（"ls -la" 匹配 "ls" + " "）
+        if cmd.startswith(entry) and len(cmd) > len(entry) and cmd[len(entry)].isspace():
+            return True
+    return False
+
+
+async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str, Any]:
+    """调 aux_llm 判断命令是否安全。
+
+    Args:
+        command: 要判断的 shell 命令
+        aux_llm_router: AuxLLMRouter 实例（必须有 async chat_completions）
+
+    Returns:
+        Dict：
+        - {"safe": True} 判安全
+        - {"safe": False, "reason": "..."} 判不安全
+        - {"error": "..."} 调用失败（fail-open，调用方放行）
+
+    解析失败（LLM 没输出合法 JSON）→ 返回 {"error": "..."}，调用方 fail-open 放行。
+    """
+    if aux_llm_router is None:
+        # 没有 aux_llm → 不分类（check() 会 fail-open 放行）
+        return {"error": "aux_llm_router 未注入"}
+
+    prompt = _CLASSIFY_PROMPT_TEMPLATE.format(cmd=command)
+    try:
+        resp = await aux_llm_router.chat_completions(
+            [{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        # 调用本身抛异常 → fail-open
+        logger.warning("bash_llm_classifier: aux_llm 调用异常（fail-open 放行）: %s", e)
+        return {"error": f"aux_llm 调用异常: {e}"}
+
+    # 解析响应：resp.choices[0].message.content
+    try:
+        text = resp.choices[0].message.content or ""
+    except (AttributeError, IndexError, TypeError) as e:
+        logger.warning("bash_llm_classifier: aux_llm 响应格式异常（fail-open）: %s", e)
+        return {"error": f"响应格式异常: {e}"}
+
+    text = text.strip()
+    # 剥离可能的 markdown 代码块包裹（LLM 偶尔不听话）
+    if text.startswith("```"):
+        text = text.strip("`")
+        # 去掉可能的 "json" 语言标识
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "bash_llm_classifier: aux_llm 输出非 JSON（fail-open 放行）: %r", text[:100]
+        )
+        return {"error": f"输出非 JSON: {text[:80]}"}
+
+    if not isinstance(parsed, dict) or "safe" not in parsed:
+        logger.warning("bash_llm_classifier: aux_llm 输出缺 safe 字段: %r", text[:100])
+        return {"error": f"输出缺 safe 字段: {text[:80]}"}
+
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # 完整命令权限检查器（带审批缓存）
 # ---------------------------------------------------------------------------
 
 class PermissionChecker:
     """命令执行权限检查器。
 
-    三道闸门：
+    四道闸门：
       1. 硬拒绝（黑名单）
       2. 破坏性命令（rm/del 等）需用户审批
-      3. 其他命令默认通过
+      3. 用户审批（callback + 会话内缓存）
+      4. aux_llm 分类（feature flag 门控，默认 OFF）
 
     持久化白名单：用户批准过的破坏性命令存 JSON，跨会话不再询问。
     会话内缓存：本次会话批准过的命令不重复问（_approved）。
@@ -449,12 +565,12 @@ class PermissionChecker:
             paths_whitelist_file: 路径白名单 JSON（如 ~/.OmniMate/approved_paths.json）。
                                   用户批准过的写入路径，跨会话不再询问。
             mode: 权限模式。
-                  - "default": 三道闸门全开（黑名单 + 破坏性审批 + 默认通过）。
-                  - "bypassPermissions": 跳过闸门 1/2/3,直接放行所有命令;
+                  - "default": 四道闸门全开（黑名单 + 破坏性审批 + 默认通过 + 可选 LLM）。
+                  - "bypassPermissions": 跳过闸门 1/2/3/4,直接放行所有命令;
                     但仍保留闸门 0(自我保护 + fatal 硬底线)。
                     用于 Claude Code 兼容的 --dangerously-skip-permissions 场景。
                   - "acceptEdits": cwd 内 safe-fs（mkdir/touch/mv/cp/rm/del）命令和
-                    cwd 内写入自动放行，其他命令走原三道闸门（fatal 底线 + 自我保护 +
+                    cwd 内写入自动放行，其他命令走原闸门（fatal 底线 + 自我保护 +
                     受保护路径仍生效）。适合 agent 连续编辑代码场景。
             hooks_registry: 可选的 HookRegistry，用于触发 PERMISSION_REQUEST /
                            PERMISSION_DENIED 审计事件。fail-open：hook 异常不影响权限判断。
@@ -479,6 +595,29 @@ class PermissionChecker:
         # OS 沙箱模式（off | on）；运行时通过 set_sandbox_mode() 切换
         # 实际 wrapper 注入由 terminal_tool 负责（基于本字段的值决定走哪条路径）
         self.sandbox_mode = "off"
+        # === P4.1 NEW: 闸门 4 注入点（aux_llm + config）===
+        # PermissionChecker 在 cli.py 比 aux_llm_router 先构造，所以用 provider
+        # 延迟注入（参考 hook_exec 的 _AUX_ROUTER_PROVIDER 同款 pattern）。
+        # 默认 None：闸门 4 完全跳过（向后兼容，默认 OFF）。
+        self._aux_llm_provider: Optional[Callable[[], Any]] = None
+        self._config_provider: Optional[Callable[[], Dict[str, Any]]] = None
+
+    def set_aux_llm_provider(self, provider: Callable[[], Any]) -> None:
+        """注入 aux_llm_router provider（cli.py 在创建 aux_llm_router 后调）。
+
+        provider 是个 callable，返回 AuxLLMRouter 实例或 None。
+        用 provider 而不是直接传 router，是因为 PermissionChecker 比 aux_llm_router
+        先构造（参考 hook_exec.set_aux_router_provider 同款 pattern）。
+        """
+        self._aux_llm_provider = provider
+
+    def set_config_provider(self, provider: Callable[[], Dict[str, Any]]) -> None:
+        """注入 config provider（cli.py 在 RuntimeContext 构造完后调）。
+
+        provider 是个 callable，返回 config dict 或 None。
+        闸门 4 需要读 config.features.bash_llm_classifier 判断开关 + 白名单。
+        """
+        self._config_provider = provider
 
     def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
         """round3 D2 NEW: 统一 deny helper。
@@ -638,8 +777,85 @@ class PermissionChecker:
             self._save_whitelist()
             return PermissionResult(True, "已批准", "approval")
 
+        # 闸门 4：aux_llm 分类（feature flag 门控，默认 OFF）
+        # 前三道闸门都没拒绝也没要求审批的命令（非黑名单、非破坏性），
+        # 由 aux_llm 再做一次语义判断。白名单快速通道跳过 LLM 调用。
+        # fail-open：feature 关闭 / 未注入 provider / LLM 调用失败 → 放行。
+        result = self._check_llm_classifier(command)
+        if result is not None:
+            return result
+
         # 闸门 3：默认通过
         return PermissionResult(True, "ok", "ok")
+
+    def _check_llm_classifier(self, command: str) -> Optional[PermissionResult]:
+        """闸门 4 实现：调 aux_llm 分类命令。
+
+        Returns:
+            PermissionResult：放行 / 拒绝
+            None：闸门 4 未启用或 fail-open 放行交给闸门 3 处理（向后兼容）
+        """
+        # 1) 检查 provider 是否注入（默认 None → 跳过）
+        if self._config_provider is None or self._aux_llm_provider is None:
+            return None
+
+        # 2) 读 config + feature flag
+        try:
+            config = self._config_provider() or {}
+        except Exception as e:
+            logger.warning("bash_llm_classifier: config provider 异常（跳过）: %s", e)
+            return None
+
+        try:
+            from agent.feature_flags import is_feature_enabled, get_feature_config
+        except ImportError:
+            return None
+
+        if not is_feature_enabled(config, "bash_llm_classifier"):
+            return None  # feature 关闭 → 跳过
+
+        # 3) 白名单快速通道（0 LLM 调用）
+        cfg = get_feature_config(config, "bash_llm_classifier")
+        whitelist = cfg.get("whitelist", [])
+        if _matches_whitelist(command, whitelist):
+            return PermissionResult(True, "白名单快速通道", "whitelist")
+
+        # 4) 调 aux_llm 分类（async → sync 用 asyncio.run 桥接）
+        try:
+            aux_llm = self._aux_llm_provider()
+        except Exception as e:
+            logger.warning("bash_llm_classifier: aux_llm provider 异常（fail-open）: %s", e)
+            return None  # fail-open：交给闸门 3 放行
+
+        if aux_llm is None:
+            # provider 返回 None（aux_llm 未配置）→ fail-open
+            return None
+
+        try:
+            verdict = asyncio.run(_classify_bash_command(command, aux_llm))
+        except RuntimeError as e:
+            # asyncio.run 在已有事件循环的上下文里会抛 RuntimeError。
+            # PermissionChecker.check 通常在工具执行线程（无事件循环），但保险起见处理。
+            logger.warning("bash_llm_classifier: asyncio.run 失败（fail-open）: %s", e)
+            return None
+        except Exception as e:
+            logger.warning("bash_llm_classifier: 分类调用异常（fail-open）: %s", e)
+            return None
+
+        # 调用失败 → fail-open 放行（交给闸门 3）
+        if "error" in verdict:
+            return None
+
+        if verdict.get("safe", True):
+            return PermissionResult(True, "aux_llm 判安全", "llm_safe")
+
+        # AI 判 unsafe → 拒绝 + 原因
+        reason = verdict.get("reason", "AI 判定不安全")
+        return self._deny(
+            command,
+            f"AI 分类拒绝: {reason}",
+            "llm_unsafe",
+        )
 
     def check_path(
         self,
