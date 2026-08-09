@@ -188,7 +188,7 @@ class OpenAICompatClient(LLMClient):
 # ---------------------------------------------------------------------------
 
 class AnthropicClient(LLMClient):
-    """Anthropic 原生格式的 LLM client。
+    """Anthropic 原生格式的 LLM client（async）。
 
     Claude API 和 OpenAI 格式的关键差异：
     - system 是顶层参数（不在 messages 数组里）
@@ -196,6 +196,7 @@ class AnthropicClient(LLMClient):
     - 响应 content 是 block 数组（text/tool_use），不是单一字符串
 
     这里做双向转换，对外暴露 OpenAI 兼容接口。
+    底层使用 AsyncAnthropic，所有 LLM 调用走 async/await。
     """
 
     def __init__(
@@ -207,7 +208,7 @@ class AnthropicClient(LLMClient):
         auth_token: str = None,
         effort_level: str = None,
     ):
-        """创建 Anthropic client。
+        """创建 Anthropic async client。
 
         认证方式(二选一):
         - api_key:用 x-api-key header(Anthropic 官方)
@@ -219,7 +220,7 @@ class AnthropicClient(LLMClient):
         - "medium": 25% 给思考
         - "low" / None: 不思考(直接回答)
         """
-        import anthropic
+        from anthropic import AsyncAnthropic
         kwargs = {}
         if base_url:
             kwargs["base_url"] = base_url
@@ -230,7 +231,7 @@ class AnthropicClient(LLMClient):
             kwargs["api_key"] = api_key
         else:
             raise ValueError("AnthropicClient 需要 api_key 或 auth_token")
-        self.client = anthropic.Anthropic(**kwargs)
+        self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
 
@@ -300,15 +301,15 @@ class AnthropicClient(LLMClient):
 
         return kwargs
 
-    def chat_completions(self, messages, *, tools=None, **kwargs):
-        """把 OpenAI 格式的输入转成 Anthropic 格式，调用后包装返回。"""
+    async def chat_completions(self, messages, *, tools=None, **kwargs):
+        """async 调 anthropic.messages.create。"""
         max_tokens = kwargs.get("max_tokens", 4096)
         create_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
-        response = self.client.messages.create(**create_kwargs)
+        response = await self.client.messages.create(**create_kwargs)
         return self._wrap_response(response)
 
-    def chat_completions_stream(self, messages, *, tools=None, **kwargs):
-        """Anthropic 原生流式：messages.stream。"""
+    async def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+        """Anthropic 原生流式：async with messages.stream。"""
         max_tokens = kwargs.get("max_tokens", 4096)
         stream_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
 
@@ -316,8 +317,8 @@ class AnthropicClient(LLMClient):
         tool_buffers: Dict[int, Dict[str, Any]] = {}
         current_tool_idx: Optional[int] = None
 
-        with self.client.messages.stream(**stream_kwargs) as stream:
-            for event in stream:
+        async with self.client.messages.stream(**stream_kwargs) as stream:
+            async for event in stream:
                 evt_type = getattr(event, "type", "")
                 if evt_type == "content_block_start":
                     block = getattr(event, "content_block", None)
@@ -353,7 +354,7 @@ class AnthropicClient(LLMClient):
                     current_tool_idx = None
 
             # 流结束：聚合 tool_calls 一次性 yield
-            final_message = stream.get_final_message()
+            final_message = await stream.get_final_message()
             tool_calls_out = []
             for idx in sorted(tool_buffers.keys()):
                 buf = tool_buffers[idx]
