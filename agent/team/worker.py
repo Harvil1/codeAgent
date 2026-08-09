@@ -7,6 +7,7 @@
         [--autonomous] [--depth N]
 """
 import argparse
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -71,10 +72,16 @@ def main():
         team_cfg = config.get("team", {})
 
         def _run_work(task):
-            """每个 WORK 周期前清空 history（spec §9.3：WORK 周期独立）。"""
+            """每个 WORK 周期前清空 history（spec §9.3：WORK 周期独立）。
+
+            Task E2: run_conversation 已改 async（T_D4）。_run_work 是
+            AutonomousLifecycle 的 work_fn 回调，签名要求 sync Callable[[str], str]
+            （lifecycle.run 是同步状态机），所以内部用 asyncio.run 驱动一次
+            async run_conversation。每个周期独立 event loop，无嵌套风险。
+            """
             agent.conversation_history = []  # 清空，避免跨周期累积
             agent._idle_requested = False    # 已在 run_conversation 头部重置，但防御性
-            return agent.run_conversation(task)
+            return asyncio.run(agent.run_conversation(task))
 
         lifecycle = AutonomousLifecycle(
             work_fn=_run_work,
@@ -104,7 +111,10 @@ def main():
     else:
         # 一次性模式（Phase 4a）
         try:
-            response = agent.run_conversation(args.task)
+            # Task E2: run_conversation 已改 async（T_D4）。
+            # worker 是 CLI 子进程入口（coordinator.spawn 启动），main 保持同步签名，
+            # 在调用点用 asyncio.run 驱动 async run_conversation（对齐 E1 模式）。
+            response = asyncio.run(agent.run_conversation(args.task))
             bus.send(
                 from_=args.name, to="main",
                 type_="response", content=response or "",
