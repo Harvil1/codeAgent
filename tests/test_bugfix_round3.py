@@ -95,29 +95,30 @@ def test_run_conversation_redrains_each_iteration():
 # X6: call_with_retry max_retries=0 不能 raise None
 # ---------------------------------------------------------------------------
 
-def test_call_with_retry_rejects_zero_retries():
+async def test_call_with_retry_rejects_zero_retries():
     """X6 fix: max_retries=0 应抛 ValueError 或 RuntimeError，不能 raise None。"""
     from agent.llm_retry import call_with_retry
 
     fake_client = MagicMock()
 
     with pytest.raises((ValueError, RuntimeError)) as exc_info:
-        call_with_retry(fake_client, messages=[], max_retries=0)
+        await call_with_retry(fake_client, messages=[], max_retries=0)
     # 不能是 TypeError（raise None 导致的）
     assert not isinstance(exc_info.value, TypeError), (
         f"max_retries=0 不应导致 TypeError（raise None），实际: {exc_info.value}"
     )
 
 
-def test_call_with_retry_normal_path_still_works():
+async def test_call_with_retry_normal_path_still_works():
     """回归：max_retries>0 时正常路径仍工作。"""
     from agent.llm_retry import call_with_retry
+    from unittest.mock import AsyncMock
 
     fake_client = MagicMock()
     fake_response = MagicMock()
-    fake_client.chat_completions = MagicMock(return_value=fake_response)
+    fake_client.chat_completions = AsyncMock(return_value=fake_response)
 
-    result = call_with_retry(
+    result = await call_with_retry(
         fake_client,
         messages=[{"role": "user", "content": "hi"}],
         max_retries=3,
