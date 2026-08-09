@@ -266,7 +266,7 @@ def offload_large_tool_results(
     return out, changed
 
 
-def llm_compact(
+async def llm_compact(
     messages: list,
     *,
     llm_client,
@@ -276,9 +276,11 @@ def llm_compact(
     msg_threshold: int = 100,
     precomputed_tokens: Optional[int] = None,
 ) -> Tuple[list, bool]:
-    """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话。
+    """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话（async：_summarize_conversation 已改 async）。
 
     precomputed_tokens: 调用方预算的 token 数(避免重复遍历)。None 时内部算。
+
+    Task D4 fix: 改 async + await _summarize_conversation。
     """
     system, conv = _split_system(messages)
     if precomputed_tokens is not None:
@@ -293,7 +295,7 @@ def llm_compact(
     to_summarize = conv[:-keep_recent]
     keep = conv[-keep_recent:]
 
-    summary = _summarize_conversation(to_summarize, llm_client, model=model)
+    summary = await _summarize_conversation(to_summarize, llm_client, model=model)
     if not summary:
         return messages, False
 
@@ -376,7 +378,7 @@ def reactive_compact(
     return new_messages, True
 
 
-def compress_if_needed(
+async def compress_if_needed(
     messages: list,
     *,
     llm_client,
@@ -387,7 +389,7 @@ def compress_if_needed(
     session_id: str,
     hooks_registry=None,
 ) -> Tuple[list, bool]:
-    """分层压缩编排器。返回 (新消息, 是否发生变化)。
+    """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
 
     顺序：L1 snip → L2 micro → (条件) transcript 快照 → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
@@ -396,6 +398,8 @@ def compress_if_needed(
 
     hooks_registry：可选。非 None 时在压缩前后触发 PRE_COMPACT/POST_COMPACT
     事件；PRE_COMPACT 任一 hook 返回 abort 则跳过本次压缩。
+
+    Task D4 fix: 改 async + await llm_compact。
     """
     # PRE_COMPACT hook（可 abort）
     if hooks_registry is not None:
@@ -511,7 +515,7 @@ def compress_if_needed(
             except Exception as e:
                 logger.warning("transcript snapshot 失败（不阻塞 L4）: %s", e)
 
-        messages, c4 = llm_compact(
+        messages, c4 = await llm_compact(
             messages,
             llm_client=llm_client,
             model=model,

@@ -322,7 +322,10 @@ def run_curator_review(
                     enabled_toolsets=["core"],  # 给技能管理工具
                     is_background_review=True,
                 )
-                raw_output = review_agent.chat(prompt)
+                # Task D4 fix: AIAgent.chat 已改 async。run_curator_review 是 sync 函数，
+                # 可能由 threading 后台或 CLI sync 调用 → asyncio.run 驱动。
+                import asyncio
+                raw_output = asyncio.run(review_agent.chat(prompt))
 
                 # 解析结构化输出
                 consolidation_result = _parse_consolidation_output(raw_output)

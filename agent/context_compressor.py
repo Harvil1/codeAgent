@@ -16,16 +16,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _summarize_conversation(
+async def _summarize_conversation(
     messages: list,
     llm_client=None,
     *,
     model: str = None,
     summary_model: str = None,
 ) -> str:
-    """调用 LLM 总结对话历史。
+    """调用 LLM 总结对话历史（async：LLMClient.chat_completions 已改 async）。
 
     使用轻量模型（如果客户端可用），否则返回占位总结。
+
+    Task D4 fix: 改 async + await chat_completions。之前 sync 调 async 方法
+    返回 coroutine，被 except 捕获 TypeError 后降级成规则总结（silent degradation）。
     """
     # 格式化对话
     formatted = []
@@ -71,7 +74,7 @@ def _summarize_conversation(
         return _rule_based_summary(messages)
 
     try:
-        response = llm_client.chat_completions(
+        response = await llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
         )
         return response.choices[0].message.content

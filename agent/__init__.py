@@ -279,12 +279,14 @@ class AIAgent:
             (config or {}).get("reflection", {}).get("cooldown_turns", 3)
         )
 
-    def _retrieve_relevant_memories(self, query: str) -> str:
-        """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情。
+    async def _retrieve_relevant_memories(self, query: str) -> str:
+        """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情（async：retrieve_relevant 已改 async）。
 
         返回格式化文本(多条记忆的 name + description + summary)。
         fail-open:任何异常返回空串(不影响主循环)。
         只在 conversation_history 末尾是 user 消息时调用(每个用户输入 1 次)。
+
+        Task D4 fix: 改 async + await retrieve_relevant。
         """
         if not self.memory_store or not self.aux_llm_router:
             return ""
@@ -294,7 +296,7 @@ class AIAgent:
                 return ""  # 记忆太少不值得检索
 
             from agent.memory_retriever import retrieve_relevant
-            ids = retrieve_relevant(
+            ids = await retrieve_relevant(
                 query=query,
                 index_text=index_text,
                 llm_client=self.aux_llm_router,
@@ -720,7 +722,7 @@ class AIAgent:
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
         # S9 fix: 不在此 drain（每轮 while 内重新 drain，避免多轮 tool_calls 中途消息收不到）
-        memories_text = self._initial_memory_recall(user_message)
+        memories_text = await self._initial_memory_recall(user_message)
 
         # 组装实际入 history 的 user_content（记忆前置包裹）
         if memories_text:
@@ -772,12 +774,12 @@ class AIAgent:
             messages = self._assemble_turn_messages(system_prompt, injected)
 
             # 上下文压缩（接近 token 上限时触发，可能重建 system_prompt）
-            messages, system_prompt, _ = self._run_context_compression(
+            messages, system_prompt, _ = await self._run_context_compression(
                 messages, system_prompt,
             )
 
             # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
-            tool_schemas = self._prepare_toolset_and_injections(messages)
+            tool_schemas = await self._prepare_toolset_and_injections(messages)
 
             # 防孤儿兜底：发送前修复 tool_call 配对。任何来源的孤儿 tool_result
             # （压缩边界 / 流式断连 / 工具异常）都会让 Anthropic API 报 400：
@@ -899,8 +901,11 @@ class AIAgent:
             "team_messages_text": team_messages_text,
         }
 
-    def _initial_memory_recall(self, user_message: str) -> str:
-        """开场记忆检索（基于 user_message）。返回记忆正文（fail-open 返回空串）。"""
+    async def _initial_memory_recall(self, user_message: str) -> str:
+        """开场记忆检索（基于 user_message）。返回记忆正文（fail-open 返回空串）。
+
+        Task D4 fix: 改 async + await self.memory_retriever（retrieve_relevant 已 async）。
+        """
         if not (self.memory_retriever and self.memory_store
                 and self._cached_memory_index):
             return ""
@@ -910,7 +915,7 @@ class AIAgent:
             max_results = mem_cfg.get("retrieval_max_results", 5)
             # batch2-T3: 优先用 aux_llm_router 做检索（便宜模型）
             retrieval_client = self.aux_llm_router or self.llm_client
-            relevant_ids = self.memory_retriever(
+            relevant_ids = await self.memory_retriever(
                 query=user_message,
                 index_text=self._cached_memory_index,
                 llm_client=retrieval_client,
@@ -1029,18 +1034,20 @@ class AIAgent:
         except Exception as e:
             logger.debug("上下文管理提示注入失败（忽略）: %s", e)
 
-    def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
-        """接近 token 上限时压缩上下文。
+    async def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
+        """接近 token 上限时压缩上下文（async：compress_if_needed 已改 async）。
 
         返回 (messages, system_prompt, compressed: bool)。
         压缩后会重建 system prompt 并注入 <post_compress_brief>。
+
+        Task D4 fix: 改 async + await compress_if_needed。
         """
         if not self.compression_enabled:
             return messages, system_prompt, False
 
         from agent.context_pipeline import compress_if_needed
         ctx_cfg = self.config.get("context", {})
-        messages, compressed = compress_if_needed(
+        messages, compressed = await compress_if_needed(
             messages,
             llm_client=self.llm_client,
             model=self.model,
@@ -1110,10 +1117,12 @@ class AIAgent:
 
         return messages, system_prompt, True
 
-    def _prepare_toolset_and_injections(self, messages: list) -> list:
-        """刷新工具集（plan_mode 切换）+ 注入 retry_warning + 动态记忆 + PRE_LLM_CALL hook。
+    async def _prepare_toolset_and_injections(self, messages: list) -> list:
+        """刷新工具集（plan_mode 切换）+ 注入 retry_warning + 动态记忆 + PRE_LLM_CALL hook（async：_retrieve_relevant_memories 已改 async）。
 
         会原地修改 messages（追加 reminder）。返回 tool_schemas（可能被 hook 修改）。
+
+        Task D4 fix: 改 async + await _retrieve_relevant_memories。
         """
         from model_tools import get_tool_definitions
 
@@ -1146,7 +1155,7 @@ class AIAgent:
         if (self.aux_llm_router and self.memory_store
                 and self.conversation_history
                 and self.conversation_history[-1].get("role") == "user"):
-            relevant = self._retrieve_relevant_memories(
+            relevant = await self._retrieve_relevant_memories(
                 self.conversation_history[-1].get("content", "")
             )
             if relevant:

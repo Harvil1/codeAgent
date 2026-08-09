@@ -107,3 +107,109 @@ async def test_call_llm_with_escalation_non_stream_path(tmp_path):
     )
     assert response is not None
     assert response.choices[0].message.content == "你好，我是助手。"
+
+
+# ============================================================================
+# Task D4 fix 新增覆盖：async 压缩链 + 记忆检索链
+# 验证这些路径能拿到真实 LLM 响应（chat_completions 被 await，不是返回 coroutine）
+# ============================================================================
+
+def test_compress_if_needed_is_coroutine():
+    """compress_if_needed 必须是 async def（Task D4 fix）。"""
+    from agent.context_pipeline import compress_if_needed
+    assert inspect.iscoroutinefunction(compress_if_needed), (
+        "compress_if_needed 必须是 async def（Task D4 fix）"
+    )
+
+
+def test_llm_compact_is_coroutine():
+    """llm_compact 必须是 async def（Task D4 fix）。"""
+    from agent.context_pipeline import llm_compact
+    assert inspect.iscoroutinefunction(llm_compact), (
+        "llm_compact 必须是 async def（Task D4 fix）"
+    )
+
+
+def test_summarize_conversation_is_coroutine():
+    """_summarize_conversation 必须是 async def（Task D4 fix）。"""
+    from agent.context_compressor import _summarize_conversation
+    assert inspect.iscoroutinefunction(_summarize_conversation), (
+        "_summarize_conversation 必须是 async def（Task D4 fix）"
+    )
+
+
+def test_retrieve_relevant_is_coroutine():
+    """retrieve_relevant 必须是 async def（Task D4 fix）。"""
+    from agent.memory_retriever import retrieve_relevant
+    assert inspect.iscoroutinefunction(retrieve_relevant), (
+        "retrieve_relevant 必须是 async def（Task D4 fix）"
+    )
+
+
+def test_aux_llm_router_chat_completions_is_coroutine():
+    """AuxLLMRouter.chat_completions 必须是 async def（Task D4 fix）。"""
+    from agent.aux_llm import AuxLLMRouter
+    assert inspect.iscoroutinefunction(AuxLLMRouter.chat_completions), (
+        "AuxLLMRouter.chat_completions 必须是 async def（Task D4 fix）"
+    )
+
+
+async def test_compress_llm_actually_awaited(tmp_path):
+    """L4 压缩路径：chat_completions 被 await（能拿到真实响应）。
+
+    之前 sync 调 async 方法返回 coroutine，except 捕获 TypeError 后降级。
+    """
+    from agent.context_pipeline import llm_compact
+
+    # 构造 async mock client，记录被调用
+    call_count = [0]
+
+    class _AsyncClient:
+        async def chat_completions(self, msgs, **kw):
+            call_count[0] += 1
+            m = SimpleNamespace(content="这是真实 LLM 摘要")
+            return SimpleNamespace(choices=[SimpleNamespace(message=m)])
+
+    # 构造超阈值 messages
+    msgs = [{"role": "system", "content": "s"}]
+    msgs += [{"role": "user", "content": f"u{i}"} for i in range(80)]
+    msgs += [{"role": "assistant", "content": f"a{i}"} for i in range(80)]
+
+    out, changed = await llm_compact(
+        msgs, llm_client=_AsyncClient(), model="x",
+        token_threshold=10, keep_recent=5,
+    )
+    assert changed is True
+    assert call_count[0] == 1, "chat_completions 必须被 await 调用一次"
+    # summary 应含真实摘要（而不是规则提取的"[规则提取]"前缀）
+    placeholder_content = out[1]["content"]
+    assert "真实 LLM 摘要" in placeholder_content, (
+        "L4 应拿到真实 LLM 响应，不是降级到规则提取"
+    )
+
+
+async def test_memory_retrieval_llm_actually_awaited():
+    """记忆检索：chat_completions 被 await（能拿到真实响应）。
+
+    之前 sync 调 async 方法返回 coroutine，except 捕获 TypeError 后返回空 list。
+    """
+    from agent.memory_retriever import retrieve_relevant
+
+    call_count = [0]
+
+    class _AsyncClient:
+        async def chat_completions(self, msgs, **kw):
+            call_count[0] += 1
+            m = SimpleNamespace(content='["general#123", "debug#456"]')
+            return SimpleNamespace(choices=[SimpleNamespace(message=m)])
+
+    result = await retrieve_relevant(
+        query="如何配置 pytest",
+        index_text="- [pytest](.memory/general.md) — pytest 配置",
+        llm_client=_AsyncClient(),
+        model="test",
+    )
+    assert call_count[0] == 1, "chat_completions 必须被 await 调用一次"
+    assert result == ["general#123", "debug#456"], (
+        "记忆检索应返回真实 LLM 响应，不是空 list"
+    )

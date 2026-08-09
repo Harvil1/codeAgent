@@ -118,9 +118,12 @@ class ProgressReporter:
                 f"已经过了约 {self._tick_count * self.interval:.0f} 秒。"
                 f"用 10 个字以内简短描述一个等待中的进度提示（不要复述任务）："
             )
-            resp = self.aux_llm_router.chat_completions(
+            # Task D4 fix: aux_llm_router.chat_completions 已改 async。
+            # 本函数在 daemon thread 里跑（无事件循环），用 asyncio.run 驱动。
+            import asyncio
+            resp = asyncio.run(self.aux_llm_router.chat_completions(
                 [{"role": "user", "content": prompt}],
-            )
+            ))
             choice = resp.choices[0]
             text = getattr(choice.message, "content", None)
             if text and text.strip():

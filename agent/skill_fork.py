@@ -58,7 +58,10 @@ def run_skill_in_fork(
             except Exception:
                 pass
         try:
-            result = child.chat(user_query)
+            # Task D4 fix: AIAgent.chat 已改 async。run_skill_in_fork 是 sync 函数，
+            # 从 cli.py 同步调用（无事件循环）→ asyncio.run 驱动。
+            import asyncio
+            result = asyncio.run(child.chat(user_query))
             _fork_success = True
             return result or "(子代理无输出)"
         finally:

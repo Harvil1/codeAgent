@@ -605,7 +605,10 @@ def _run_child(
                     pass  # fail-open
 
             # 运行子代理
-            result = child.chat(f"请执行任务: {goal}")
+            # Task D4 fix: AIAgent.chat 已改 async。_run_child 在独立线程里跑
+            # （_delegate_sync / _delegate_async 均起 threading.Thread），无事件循环 → asyncio.run 驱动。
+            import asyncio
+            result = asyncio.run(child.chat(f"请执行任务: {goal}"))
 
         # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
         try:

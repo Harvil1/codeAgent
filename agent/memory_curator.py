@@ -478,7 +478,9 @@ def run_memory_review(
 
             # LLM 调用单批 try/except —— 一批失败不污染其他批
             try:
-                raw_output = review_agent.chat(prompt)
+                # Task D4 fix: AIAgent.chat 已改 async。run_memory_review 是 sync 函数。
+                import asyncio
+                raw_output = asyncio.run(review_agent.chat(prompt))
             except Exception as e:
                 logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
                 errors += 1

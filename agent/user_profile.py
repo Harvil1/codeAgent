@@ -47,9 +47,13 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
     prompt = PROFILE_PROMPT.format(memories=memories[:5000])
 
     try:
-        response = aux_llm.chat_completions(
+        # Task D4 fix: aux_llm.chat_completions 已改 async。
+        # build_and_save_profile 由 _bg() daemon thread 调用（无事件循环），
+        # 用 asyncio.run 驱动。
+        import asyncio
+        response = asyncio.run(aux_llm.chat_completions(
             [{"role": "user", "content": prompt}],
-        )
+        ))
         profile = (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("用户画像归纳失败(fail-open): %s", e)

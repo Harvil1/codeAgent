@@ -31,7 +31,7 @@ RETRIEVAL_PROMPT_TEMPLATE = """你是记忆检索助手。当前用户消息：
 """
 
 
-def retrieve_relevant(
+async def retrieve_relevant(
     *,
     query: str,
     index_text: str,
@@ -39,7 +39,11 @@ def retrieve_relevant(
     model: str,
     max_results: int = 5,
 ) -> List[str]:
-    """调 LLM 选 top-N 相关 memory_id。失败返回 []。"""
+    """调 LLM 选 top-N 相关 memory_id。失败返回 []（async：LLMClient.chat_completions 已改 async）。
+
+    Task D4 fix: 改 async + await chat_completions。之前 sync 调 async 方法
+    返回 coroutine，被 except 捕获 TypeError 后返回空 list（记忆检索静默失效）。
+    """
     if not query.strip() or not index_text.strip():
         return []
 
@@ -50,7 +54,7 @@ def retrieve_relevant(
     )
 
     try:
-        response = llm_client.chat_completions(
+        response = await llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
             model=model,
         )

@@ -134,10 +134,13 @@ class AuxLLMRouter:
         """是否配置了至少一个辅助 endpoint。"""
         return bool(self._endpoints)
 
-    def chat_completions(self, messages: list, **kwargs):
-        """依次尝试 endpoints，第一个成功就返回。
+    async def chat_completions(self, messages: list, **kwargs):
+        """依次尝试 endpoints，第一个成功就返回（async：LLMClient.chat_completions 已改 async）。
 
         熔断中的 endpoint 跳过。所有 endpoint 失败 → 降级到主 client。
+
+        Task D4 fix: 改 async def + await 内部 chat_completions 调用。
+        在线程上下文（无事件循环）调用的地方用 asyncio.run() 包装。
         """
         now = time.time()
         tried: List[tuple] = []
@@ -155,7 +158,7 @@ class AuxLLMRouter:
                 continue
 
             try:
-                resp = client.chat_completions(messages, **kwargs)
+                resp = await client.chat_completions(messages, **kwargs)
                 # 成功，重置失败计数
                 self._failure_counts[ep.name] = 0
                 return resp
@@ -183,7 +186,7 @@ class AuxLLMRouter:
                 "所有 aux endpoints 失败，降级到主 client。尝试: %s",
                 tried,
             )
-        return self._main_client.chat_completions(messages, **kwargs)
+        return await self._main_client.chat_completions(messages, **kwargs)
 
     # ------------------------------------------------------------------
     # 07 NEW: 熔断状态查询（测试 / 监控用）
