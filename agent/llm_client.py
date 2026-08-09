@@ -69,14 +69,14 @@ def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
 class LLMClient:
     """LLM 调用抽象基类。"""
 
-    def chat_completions(
+    async def chat_completions(
         self,
         messages: List[dict],
         *,
         tools: Optional[List[dict]] = None,
         **kwargs,
     ):
-        """调用 LLM，返回 OpenAI 兼容的响应结构。
+        """async 调用 LLM，返回 OpenAI 兼容的响应结构。
 
         返回对象必须有：
             response.choices[0].message.content  (str or None)
@@ -84,14 +84,14 @@ class LLMClient:
         """
         raise NotImplementedError
 
-    def chat_completions_stream(
+    async def chat_completions_stream(
         self,
         messages: List[dict],
         *,
         tools: Optional[List[dict]] = None,
         **kwargs,
     ):
-        """流式调用 LLM，yield dict chunk。
+        """async 流式调用 LLM，yield dict chunk。
 
         每个 chunk 是 dict（不是 SDK 对象，避免上层处理多种 SDK 差异）：
             {
@@ -104,7 +104,7 @@ class LLMClient:
         默认实现：调非流式接口后模拟一次性 yield（让无流式能力的 client 也能用）。
         子类重写真流式。
         """
-        resp = self.chat_completions(messages, tools=tools, **kwargs)
+        resp = await self.chat_completions(messages, tools=tools, **kwargs)
         choice = resp.choices[0]
         msg = choice.message
         usage_dict = _extract_openai_usage(getattr(resp, "usage", None))
