@@ -6,6 +6,10 @@ git 仓库：用 git worktree 创建（共享历史，独立分支和文件）
 借鉴 业界 的 worktree-task-isolation 机制，用于多子代理并行
 时不互相干扰文件。
 
+P3.4 新增：create_isolated_workspace 接受可选的 hook_registry 参数，
+在 worktree 创建/清理时触发 WORKTREE_CREATE / WORKTREE_REMOVE hook
+（通知型，审计/清理注册用，hook 异常 fail-open 不影响 worktree 主流程）。
+
 用法：
     path, cleanup = create_isolated_workspace(name="task-x")
     try:
@@ -110,6 +114,9 @@ def get_repo_root(path=None) -> Optional[Path]:
 def create_isolated_workspace(
     base_path=None,
     name: str = "workspace",
+    *,
+    hook_registry=None,
+    session_id: str = "",
 ) -> Tuple[Path, Callable]:
     """创建隔离工作区。
 
@@ -118,20 +125,33 @@ def create_isolated_workspace(
 
     git 仓库：用 git worktree 创建独立分支和工作目录。
     非 git：创建空临时目录（不拷贝文件）。
+
+    P3.4 新增可选参数：
+        hook_registry: HookRegistry 实例。传入时在创建/清理时触发
+                       WORKTREE_CREATE / WORKTREE_REMOVE 事件（fail-open）。
+        session_id: 触发 hook 时透传的 session_id（可选）。
     """
     base = Path(base_path) if base_path else Path.cwd()
 
     if is_git_repo(base):
         try:
-            return _create_git_worktree(base, name)
+            return _create_git_worktree(
+                base, name, hook_registry=hook_registry, session_id=session_id,
+            )
         except Exception as e:
             logger.warning("git worktree 创建失败，降级到临时目录: %s", e)
 
-    return _create_temp_workspace(name)
+    return _create_temp_workspace(
+        name, hook_registry=hook_registry, session_id=session_id,
+    )
 
 
-def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
-    """用 git worktree 创建独立工作区。"""
+def _create_git_worktree(base: Path, name: str, *,
+                         hook_registry=None, session_id: str = "") -> Tuple[Path, Callable]:
+    """用 git worktree 创建独立工作区。
+
+    P3.4: hook_registry 非 None 时触发 WORKTREE_CREATE / WORKTREE_REMOVE 事件（fail-open）。
+    """
     repo_root = get_repo_root(base) or base
     short_id = uuid.uuid4().hex[:8]
     branch = f"omnimate/{name}/{short_id}"
@@ -172,6 +192,14 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
         "name": name,
     })
 
+    # P3.4: 触发 WORKTREE_CREATE hook（fail-open）
+    _fire_worktree_hook(hook_registry, "create", {
+        "session_id": session_id,
+        "path": str(worktree_dir),
+        "branch": branch,
+        "workspace_type": "git",
+    })
+
     def cleanup(keep: bool = False):
         if keep:
             logger.info("保留 worktree: %s", worktree_dir)
@@ -209,11 +237,18 @@ def _create_git_worktree(base: Path, name: str) -> Tuple[Path, Callable]:
             "branch": branch,
             "worktree_dir": str(worktree_dir),
         })
+        # P3.4: 触发 WORKTREE_REMOVE hook（fail-open）
+        _fire_worktree_hook(hook_registry, "remove", {
+            "session_id": session_id,
+            "path": str(worktree_dir),
+            "branch": branch,
+        })
 
     return worktree_dir, cleanup
 
 
-def _create_temp_workspace(name: str) -> Tuple[Path, Callable]:
+def _create_temp_workspace(name: str, *,
+                           hook_registry=None, session_id: str = "") -> Tuple[Path, Callable]:
     """非 git 仓库时创建空临时目录。"""
     prefix = f"omnimate-{name}-"
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
@@ -225,12 +260,42 @@ def _create_temp_workspace(name: str) -> Tuple[Path, Callable]:
         "type": "temp",
     })
 
+    # P3.4: 触发 WORKTREE_CREATE hook（fail-open）
+    _fire_worktree_hook(hook_registry, "create", {
+        "session_id": session_id,
+        "path": str(tmp),
+        "workspace_type": "temp",
+    })
+
     def cleanup(keep: bool = False):
         if keep:
             return
         shutil.rmtree(tmp, ignore_errors=True)
+        # P3.4: 触发 WORKTREE_REMOVE hook（fail-open）
+        _fire_worktree_hook(hook_registry, "remove", {
+            "session_id": session_id,
+            "path": str(tmp),
+        })
 
     return tmp, cleanup
+
+
+def _fire_worktree_hook(hook_registry, action: str, payload: dict) -> None:
+    """P3.4: 触发 WORKTREE_CREATE / WORKTREE_REMOVE hook（fail-open）。
+
+    action: "create" | "remove"
+    hook_registry 为 None 时无操作。任何异常都吞掉（worktree 主流程不能被 hook 打断）。
+    """
+    if hook_registry is None:
+        return
+    try:
+        if action == "create":
+            hook_registry.run_worktree_create(payload)
+        elif action == "remove":
+            hook_registry.run_worktree_remove(payload)
+    except Exception as e:
+        logger.warning("WORKTREE_%s hook 触发异常（fail-open）: %s",
+                       action.upper(), e)
 
 
 def list_worktrees(base_path=None) -> list:
