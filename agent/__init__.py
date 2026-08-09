@@ -1340,11 +1340,13 @@ class AIAgent:
         except Exception as e:
             logger.warning("持久化 %s 消息失败: %s", role, e)
 
-    def _dispatch_tool_calls(self, assistant_msg, handle_function_call) -> bool:
+    async def _dispatch_tool_calls(self, assistant_msg, handle_function_call) -> bool:
         """执行 assistant_msg.tool_calls，处理 plan_approval + 失败统计 + idle 检查。
 
         assistant 消息（含 tool_calls + thinking 字段）会先追加到 history。
         返回 True 表示继续主循环，False 表示 idle 已请求需退出。
+
+        Task D3：改为 async（串行 await，不引入并发；并发分组在 Phase F）。
         """
         # 追加 assistant 消息（DeepSeek 工具调用回传要求 thinking 字段）
         assistant_entry = {
@@ -1394,7 +1396,7 @@ class AIAgent:
                 except Exception:
                     pass
 
-            result = handle_function_call(
+            result = await handle_function_call(
                 tool_name, tool_args,
                 session_id=self.session_id,
                 memory_store=self.memory_store,
