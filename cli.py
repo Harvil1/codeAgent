@@ -552,8 +552,11 @@ class RuntimeContext:
         # === F2 NEW: 注入 aux_llm_router provider 给 hook_exec ===
         # 声明式 hook 的 prompt/agent 类型 handler 需要通过 aux_llm 跑评估。
         # hook_exec 模块级 provider 注入点，未配置 aux 时 lambda 返回 None（fail-open）。
-        from agent.hook_exec import set_aux_router_provider
+        from agent.hook_exec import set_aux_router_provider, set_config_provider
         set_aux_router_provider(lambda: aux_llm_router)
+        # P3.2: 注入 config provider，让 dispatch_hook 能读 feature flag 门控
+        # http / mcp_tool / agent 三种 handler 类型
+        set_config_provider(lambda: self.config)
 
         agent = AIAgent(
             base_url=model_cfg.get("base_url"),

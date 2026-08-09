@@ -60,6 +60,62 @@ def _get_aux_router():
 
 
 # ============================================================================
+# config 注入（P3.2）：dispatch_hook 需要 config 读 feature flag 门控
+# http / mcp_tool / agent 三种 handler 类型。模块级 provider（与 aux_router 同模式），
+# cli.py 启动时注入 lambda: self.config，dispatch_hook 通过它拿 config dict。
+# 未注入 → 视为全部 handler 允许（向后兼容，避免破坏现有测试）。
+# ============================================================================
+_CONFIG_PROVIDER = None
+
+
+def set_config_provider(provider) -> None:
+    """注入一个返回 config dict（或 None）的 callable。
+
+    cli.py 在 RuntimeContext 构造完后调一次：
+        from agent.hook_exec import set_config_provider
+        set_config_provider(lambda: self.config)
+    """
+    global _CONFIG_PROVIDER
+    _CONFIG_PROVIDER = provider
+
+
+def _get_config():
+    """取注入的 config dict（可能为 None）。"""
+    if _CONFIG_PROVIDER is None:
+        return None
+    try:
+        return _CONFIG_PROVIDER()
+    except Exception as e:
+        logger.warning("config provider 抛异常（视为不可用）: %s", e)
+        return None
+
+
+# P3.2: handler_type → feature flag 名的映射
+_HANDLER_FLAG_MAP = {
+    "http": "hook_http_handler",
+    "mcp_tool": "hook_mcp_tool_handler",
+    "agent": "hook_agent_handler",
+}
+
+
+def _is_handler_allowed(handler_type: str) -> bool:
+    """检查该 handler_type 是否被 feature flag 允许。
+
+    - command / prompt：无 flag 门控，永远允许（基线 handler）
+    - http / mcp_tool / agent：需要对应 flag enabled
+    - config 未注入（None）：向后兼容，全部允许
+    """
+    flag_name = _HANDLER_FLAG_MAP.get(handler_type)
+    if flag_name is None:
+        return True  # command / prompt 无门控
+    config = _get_config()
+    if config is None:
+        return True  # 未注入 config（测试场景），全放开
+    from agent.feature_flags import is_feature_enabled
+    return is_feature_enabled(config, flag_name)
+
+
+# ============================================================================
 # 总入口：dispatch_hook
 # ============================================================================
 
@@ -68,10 +124,21 @@ def dispatch_hook(hook, payload: dict) -> Optional[dict]:
     """按 hook.script.handler_type 分发到对应执行器。
 
     所有执行器异常都被吞掉返回 None（fail-open），与原 run_script_hook 一致。
+
+    P3.2: http / mcp_tool / agent 三种 handler 受 feature flag 门控。
+    flag 未开启时直接返回 None（视为 skip），不调对应执行器。
+    command / prompt 永远允许（基线）。
     """
     if hook.script is None:
         return None
     ht = getattr(hook.script, "handler_type", "command") or "command"
+    # P3.2: flag 门控
+    if not _is_handler_allowed(ht):
+        logger.info(
+            "hook %s handler_type '%s' 被门控关闭（feature flag 未开启），跳过",
+            hook.name, ht,
+        )
+        return None
     try:
         if ht == "command":
             return run_script_hook(hook, payload)
