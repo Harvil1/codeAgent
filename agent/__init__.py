@@ -693,10 +693,10 @@ class AIAgent:
         self._system_prompt_built = False
         # _stable_prompt 保留（理论上整次会话内 stable 永不变）
 
-    def run_conversation(self, user_message: str) -> str:
+    async def run_conversation(self, user_message: str) -> str:
         """处理一条用户消息，返回助手最终响应。
 
-        这是整个系统的核心循环。同步执行，不异步。
+        这是整个系统的核心循环。Task D4: 改 async（核心循环 async 化）。
 
         重构后主循环结构（自顶向下阅读）：
             循环前：hook → drain 外部消息 → 开场记忆检索 → 追加 user history
@@ -790,7 +790,8 @@ class AIAgent:
                 logger.warning("发送前配对修复失败（忽略）: %s", pair_err)
 
             # 调 LLM（含 max_tokens 升级 + reactive_compact）
-            response = self._call_llm_with_escalation(
+            # Task D4: _call_llm_with_escalation 已改 async
+            response = await self._call_llm_with_escalation(
                 messages, tool_schemas, system_prompt,
             )
             if response is self._REACTIVE_RETRY:
@@ -814,7 +815,8 @@ class AIAgent:
 
             # 分支：有 tool_calls → 分发；无 tool_calls → 最终响应
             if assistant_msg.tool_calls:
-                should_continue = self._dispatch_tool_calls(
+                # Task D4: _dispatch_tool_calls 已改 async（T_D3）
+                should_continue = await self._dispatch_tool_calls(
                     assistant_msg, handle_function_call,
                 )
                 if not should_continue:
@@ -1165,7 +1167,7 @@ class AIAgent:
 
         return tool_schemas
 
-    def _call_llm_with_escalation(
+    async def _call_llm_with_escalation(
         self, messages: list, tool_schemas: list, system_prompt: str,
     ):
         """调 LLM，处理 max_tokens 升级 + reactive_compact。
@@ -1174,15 +1176,17 @@ class AIAgent:
             response 对象         - 正常返回
             self._REACTIVE_RETRY  - 触发了 reactive_compact，主循环应重试本轮
             None                  - LLM 错误（已写入 history），主循环应 break
+
+        Task D4: 改 async（_call_llm_streaming + call_with_retry 均已 async）。
         """
         try:
             if self._stream_callback is not None:
-                return self._call_llm_streaming(
+                return await self._call_llm_streaming(
                     messages=messages,
                     tools=tool_schemas if tool_schemas else None,
                 )
             from agent.llm_retry import call_with_retry, detect_length_finish
-            response = call_with_retry(
+            response = await call_with_retry(
                 self.llm_client,
                 messages,
                 tools=tool_schemas if tool_schemas else None,
@@ -1195,7 +1199,7 @@ class AIAgent:
                 new_max = self._max_tokens_escalator.escalate()
                 logger.info("max_tokens 截断（非流式），升级到 %d 重试", new_max)
                 try:
-                    response = call_with_retry(
+                    response = await call_with_retry(
                         self.llm_client,
                         messages,
                         tools=tool_schemas if tool_schemas else None,
@@ -1593,9 +1597,12 @@ class AIAgent:
         self._sync_memory(user_message, fallback)
         return fallback
 
-    def chat(self, message: str) -> str:
-        """简单接口：发一条消息，返回响应。"""
-        return self.run_conversation(message)
+    async def chat(self, message: str) -> str:
+        """简单接口：发一条消息，返回响应。
+
+        Task D4: 改 async（run_conversation 已 async）。
+        """
+        return await self.run_conversation(message)
 
     def _sync_memory(self, user_message: str, assistant_message: str) -> None:
         """异步同步一轮到外部记忆 provider（如有）。
