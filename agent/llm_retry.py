@@ -9,9 +9,9 @@
 借鉴 业界 的韧性机制。
 """
 
+import asyncio
 import logging
 import random
-import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def get_retry_after(error: Exception) -> Optional[float]:
     return None
 
 
-def call_with_retry(
+async def call_with_retry(
     llm_client,
     messages: list,
     *,
@@ -99,7 +99,7 @@ def call_with_retry(
     max_tokens: Optional[int] = None,
     consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
 ):
-    """带重试和备用 client 的 LLM 调用。
+    """带重试和备用 client 的 async LLM 调用。
 
     流程：
       1. 主 client 重试 max_retries 次（指数退避 + 抖动）
@@ -107,8 +107,14 @@ def call_with_retry(
       3. 全部失败后，如果有 fallback_llm_client，用备用 client 再试 1 次
       4. 都失败则抛最后错误
 
+    改造说明（Plan 2A Task D1）：原同步 `def` 改 `async def`；
+    `llm_client.chat_completions(...)` / `fallback_llm_client.chat_completions(...)`
+    加 await（LLMClient 已改 async，Task B1/B2/B3）；
+    `time.sleep(...)` 改 `await asyncio.sleep(...)`（不阻塞事件循环）。
+    退避/抖动/529 早切/max_tokens 升级逻辑不变。
+
     参数：
-        llm_client: LLMClient 实例（实现 chat_completions 方法）
+        llm_client: LLMClient 实例（async chat_completions 方法）
         messages: 消息列表
         tools: 工具 schema 列表（OpenAI 格式）
         max_retries: 最大重试次数
@@ -135,7 +141,7 @@ def call_with_retry(
     # 主 client 重试
     for attempt in range(max_retries):
         try:
-            return llm_client.chat_completions(messages, **call_kwargs)
+            return await llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
             if not is_retryable(e):
@@ -176,13 +182,13 @@ def call_with_retry(
                 "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
                 attempt + 1, max_retries, backoff, e,
             )
-            time.sleep(backoff)
+            await asyncio.sleep(backoff)
 
     # 主 client 重试耗尽（或被 529 阈值打断），尝试备用 client
     if fallback_llm_client is not None:
         logger.warning("切换备用 LLM client")
         try:
-            return fallback_llm_client.chat_completions(messages, **call_kwargs)
+            return await fallback_llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
             logger.error("备用 client 也失败: %s", e)
