@@ -230,6 +230,71 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "plan_mode": {
         "enabled": True,  # Plan Mode 总开关；False 时 /plan 命令报错"功能未启用"
     },
+
+    # ────────────────────────────────────────────────────────────
+    # Feature flags（spec 2026-08-09-claude-code-borrow-design §5.3）
+    # ────────────────────────────────────────────────────────────
+    # 所有 flag 默认 OFF（用户决策：装完默认关，但每项要有测试覆盖）。
+    # 用户通过 ~/.OmniMate/settings.json 的 features 节覆盖默认值。
+    # 启动时通过 _deep_merge 加载一次，运行时不热加载（保护 prompt cache）。
+    "features": {
+        # ── 批次 3 (5): Bash LLM 分类器 ──
+        "bash_llm_classifier": {
+            "enabled": False,
+            "model": "aux",          # 用 aux_llm 跑分类
+            "whitelist": [           # 白名单快速通道（spec §4 决策 4）
+                "ls", "ll", "cat", "pwd", "echo",
+                "grep", "find", "which", "where",
+                "git status", "git diff", "git log", "git show",
+                "python --version", "uv --version",
+            ],
+        },
+
+        # ── 批次 3 (1): 5 层压缩（补 L4 折叠） ──
+        "context_collapse": {
+            "enabled": False,
+            "threshold_ratio": 0.8,  # 上下文用到 80% 触发
+        },
+
+        # ── 批次 3 (1): 5 层压缩（补 L5 响应式回压） ──
+        "reactive_compact": {
+            "enabled": False,
+        },
+
+        # ── 批次 3 (2): Bash 持久重试（unattended） ──
+        "bash_unattended_retry": {
+            "enabled": False,
+            "max_hours": 24,         # 最多持续重试 24 小时
+        },
+
+        # ── 批次 3 (6): MCP HTTP transport ──
+        "mcp_http_transport": {
+            "enabled": False,
+            "default_timeout_sec": 30,
+        },
+
+        # ── 批次 3 (6): MCP WebSocket transport ──
+        "mcp_websocket_transport": {
+            "enabled": False,
+        },
+
+        # ── 批次 3 (7): Plan Mode V2 多 Agent 并行 ──
+        "plan_mode_v2_parallel": {
+            "enabled": False,
+            "max_parallel_agents": 3,  # 决策 6：上限 3
+        },
+
+        # ── 批次 3 (4): Hook handler 类型扩展 ──
+        "hook_http_handler": {
+            "enabled": False,
+        },
+        "hook_mcp_tool_handler": {
+            "enabled": False,
+        },
+        "hook_agent_handler": {
+            "enabled": False,
+        },
+    },
 }
 
 

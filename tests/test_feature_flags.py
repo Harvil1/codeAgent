@@ -106,3 +106,84 @@ def test_get_feature_config_handles_no_features_section():
     """config 没有 features 节 → 返回空字典。"""
     config = {"model": {}}
     assert get_feature_config(config, "any") == {}
+
+
+# ────────────────────────────────────────────────────────────
+# DEFAULT_CONFIG["features"] 节测试
+# ────────────────────────────────────────────────────────────
+
+from config import DEFAULT_CONFIG  # noqa: E402
+
+
+EXPECTED_FLAG_NAMES = {
+    "bash_llm_classifier",
+    "context_collapse",
+    "reactive_compact",
+    "bash_unattended_retry",
+    "mcp_http_transport",
+    "mcp_websocket_transport",
+    "plan_mode_v2_parallel",
+    "hook_http_handler",
+    "hook_mcp_tool_handler",
+    "hook_agent_handler",
+}
+
+
+def test_default_config_has_features_section():
+    """DEFAULT_CONFIG 必须有 features 节，且是 dict。"""
+    assert "features" in DEFAULT_CONFIG
+    assert isinstance(DEFAULT_CONFIG["features"], dict)
+
+
+def test_default_config_has_all_10_flags():
+    """DEFAULT_CONFIG["features"] 必须含全部 10 个 flag 名（防漏配）。"""
+    actual_names = set(DEFAULT_CONFIG["features"].keys())
+    missing = EXPECTED_FLAG_NAMES - actual_names
+    extra = actual_names - EXPECTED_FLAG_NAMES
+    assert not missing, f"DEFAULT_CONFIG 缺少 flag: {missing}"
+    assert not extra, f"DEFAULT_CONFIG 多了未声明的 flag: {extra}"
+
+
+def test_all_flags_default_off():
+    """所有 flag 默认必须 OFF（用户决策：装完默认关）。"""
+    for name in EXPECTED_FLAG_NAMES:
+        flag = DEFAULT_CONFIG["features"][name]
+        assert isinstance(flag, dict), f"{name} 应为 dict 形式"
+        assert flag.get("enabled") is False, f"{name} 默认必须 enabled=False"
+
+
+def test_bash_llm_classifier_has_required_fields():
+    """bash_llm_classifier 必须含 model + whitelist（批次 3 实现时依赖）。"""
+    flag = DEFAULT_CONFIG["features"]["bash_llm_classifier"]
+    assert "model" in flag
+    assert "whitelist" in flag
+    assert isinstance(flag["whitelist"], list)
+    assert "ls" in flag["whitelist"]  # 至少含基础命令
+
+
+def test_context_collapse_has_threshold():
+    """context_collapse 必须含 threshold_ratio。"""
+    flag = DEFAULT_CONFIG["features"]["context_collapse"]
+    assert "threshold_ratio" in flag
+    assert 0 < flag["threshold_ratio"] < 1
+
+
+def test_bash_unattended_retry_has_max_hours():
+    """bash_unattended_retry 必须含 max_hours。"""
+    flag = DEFAULT_CONFIG["features"]["bash_unattended_retry"]
+    assert "max_hours" in flag
+    assert flag["max_hours"] > 0
+
+
+def test_mcp_http_transport_has_timeout():
+    """mcp_http_transport 必须含 default_timeout_sec。"""
+    flag = DEFAULT_CONFIG["features"]["mcp_http_transport"]
+    assert "default_timeout_sec" in flag
+    assert flag["default_timeout_sec"] > 0
+
+
+def test_plan_mode_v2_has_max_parallel():
+    """plan_mode_v2_parallel 必须含 max_parallel_agents（决策 6）。"""
+    flag = DEFAULT_CONFIG["features"]["plan_mode_v2_parallel"]
+    assert "max_parallel_agents" in flag
+    assert 1 <= flag["max_parallel_agents"] <= 3
