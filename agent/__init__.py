@@ -405,12 +405,15 @@ class AIAgent:
     # 04 NEW: 流式调用 LLM
     # ------------------------------------------------------------------
 
-    def _call_llm_streaming(self, *, messages, tools):
-        """流式调用 LLM，每收到一个 chunk 调用 stream_callback。
+    async def _call_llm_streaming(self, *, messages, tools):
+        """async 流式调用 LLM，每收到一个 chunk 调用 stream_callback。
 
         流式失败时 fallback 到非流式重试（带备用 client）。
         返回值与非流式路径完全兼容（SimpleNamespace 包装的 OpenAI 响应结构），
         让 _record_llm_usage / hook / tool_calls 处理代码不用改。
+
+        注意：本方法是 **async function 返回 response 对象**（不是 async generator）。
+        流式事件通过 stream_callback 回调报告，最终结果用 return 返回。
 
         stream_callback 事件类型：
             {"type": "content", "delta": str, "accumulated": str}  # 文本增量
@@ -435,7 +438,7 @@ class AIAgent:
             )
             if _cfg_mt:
                 _extra["max_tokens"] = _cfg_mt
-            for delta in self.llm_client.chat_completions_stream(
+            async for delta in self.llm_client.chat_completions_stream(
                 messages, tools=tools, **_extra,
             ):
                 # 内容流式
@@ -503,7 +506,7 @@ class AIAgent:
                 "流式调用失败，fallback 到非流式重试: %s", stream_err
             )
             from agent.llm_retry import call_with_retry
-            response = call_with_retry(
+            response = await call_with_retry(
                 self.llm_client,
                 messages,
                 tools=tools,
@@ -558,7 +561,7 @@ class AIAgent:
             )
             try:
                 from agent.llm_retry import call_with_retry
-                retried = call_with_retry(
+                retried = await call_with_retry(
                     self.llm_client,
                     messages,
                     tools=tools,
