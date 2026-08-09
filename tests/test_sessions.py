@@ -166,7 +166,7 @@ def test_search_filtered_by_session(store_with_msgs):
         assert r["session_id"] == sid
 
 
-def test_session_search_tool():
+async def test_session_search_tool():
     """通过 registry.dispatch 调用 session_search 工具。"""
     import json
     import tempfile
@@ -180,7 +180,7 @@ def test_session_search_tool():
             store.append_message(sid, "user", "测试关键词 Python")
             store.append_message(sid, "assistant", "好的")
 
-            result = registry.dispatch(
+            result = await registry.dispatch(
                 "session_search",
                 {"query": "Python"},
                 session_store=store,
@@ -191,12 +191,12 @@ def test_session_search_tool():
             store.close()
 
 
-def test_session_search_tool_no_store():
+async def test_session_search_tool_no_store():
     """无 session_store 时返回错误。"""
     import json
     from tools.registry import registry
 
-    result = registry.dispatch(
+    result = await registry.dispatch(
         "session_search",
         {"query": "test"},
         # 不传 session_store
