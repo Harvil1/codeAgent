@@ -661,6 +661,10 @@ def _summarize_child_result(result: str, client, model: str) -> str:
     """用 LLM 把子代理结果总结成 300 字以内的摘要。
 
     摘要失败时返回原文（不阻塞委托流程）。
+
+    改造说明（T_D1 fix）：call_with_retry 改 async 后，本函数保持同步接口
+    （调用方 _run_child 在独立线程里跑，无事件循环），内部用 asyncio.run()
+    驱动 async call_with_retry。
     """
     prompt = (
         "把以下子代理执行结果总结成 300 字以内的摘要，保留：\n"
@@ -671,11 +675,12 @@ def _summarize_child_result(result: str, client, model: str) -> str:
         f"子代理结果：\n{result[:8000]}"
     )
     try:
+        import asyncio
         from agent.llm_retry import call_with_retry
-        response = call_with_retry(
+        response = asyncio.run(call_with_retry(
             client,  # child.llm_client（LLMClient 实例）
             [{"role": "user", "content": prompt}],
-        )
+        ))
         summary = response.choices[0].message.content
         return f"[摘要] {summary}\n\n[完整结果 {len(result)} 字符已省略]"
     except Exception as e:

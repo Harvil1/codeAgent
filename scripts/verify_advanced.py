@@ -11,13 +11,14 @@ P2：子代理摘要 + worktree 隔离
 P3：MCP + Task System
 """
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -34,6 +35,18 @@ def _ok(detail=""):
 
 def _fail(detail):
     return ("FAIL", detail)
+
+
+def _make_async_side_effect(sync_fn):
+    """把同步 lambda s: None 包装成 async coroutine function，
+    供 patch("agent.llm_retry.asyncio.sleep", side_effect=...) 使用。
+
+    asyncio.sleep 在 call_with_retry 里被 await，所以 side_effect 必须
+    返回 coroutine（否则 await 一个 None 会 TypeError）。
+    """
+    async def _wrapper(s):
+        sync_fn(s)
+    return _wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +181,10 @@ def check_retry_succeeds_eventually(monkeypatch_sleep):
     from unittest.mock import MagicMock
 
     monkeypatch_sleep(lambda s: None)
-    # call_with_retry 调用 llm_client.chat_completions(messages, tools=tools)
-    # 所以 mock 一个 LLMClient 风格的 client（不是 OpenAI SDK 风格）
+    # call_with_retry 改 async 后 await llm_client.chat_completions(...)，
+    # 所以 chat_completions 必须是 AsyncMock（await 才能拿到结果）。
     client = MagicMock()
+    client.chat_completions = AsyncMock()
     err = _make_api_error(429)
     ok_resp = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))]
@@ -178,14 +192,14 @@ def check_retry_succeeds_eventually(monkeypatch_sleep):
     client.chat_completions.side_effect = [err, err, ok_resp]
 
     try:
-        result = call_with_retry(
+        result = asyncio.run(call_with_retry(
             client,
             [{"role": "user", "content": "m"}],
             tools=[],
             max_retries=3,
             initial_backoff=0.001,
-        )
-        if client.chat_completions.call_count == 3:
+        ))
+        if client.chat_completions.await_count == 3:
             return _ok("重试 2 次后成功")
     except Exception as e:
         return _fail(f"重试失败: {e}")
@@ -197,27 +211,28 @@ def check_fallback_model(monkeypatch_sleep):
     from unittest.mock import MagicMock
 
     monkeypatch_sleep(lambda s: None)
-    # 主 client：3 次全失败
+    # 主 client：3 次全失败（chat_completions 是 AsyncMock，await 才返回）
     client = MagicMock()
+    client.chat_completions = AsyncMock()
     err = _make_api_error(429)
     client.chat_completions.side_effect = [err, err, err]
     # 备用 client：第 4 次成功（call_with_retry 用 fallback_llm_client 而非 fallback_model）
     fallback_client = MagicMock()
-    fallback_client.chat_completions.return_value = SimpleNamespace(
+    fallback_client.chat_completions = AsyncMock(return_value=SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content="backup", tool_calls=None))]
-    )
+    ))
 
     try:
-        result = call_with_retry(
+        result = asyncio.run(call_with_retry(
             client,
             [{"role": "user", "content": "main"}],
             tools=[],
             max_retries=3,
             initial_backoff=0.001,
             fallback_llm_client=fallback_client,
-        )
-        if (client.chat_completions.call_count == 3
-                and fallback_client.chat_completions.call_count == 1):
+        ))
+        if (client.chat_completions.await_count == 3
+                and fallback_client.chat_completions.await_count == 1):
             return _ok("切到备用 client")
     except Exception as e:
         return _fail(f"备用 client 失败: {e}")
@@ -254,13 +269,13 @@ def check_summarize_child_result():
     from unittest.mock import MagicMock
 
     long = "详细结果。" * 200  # 800 字符
-    # _summarize_child_result 调 call_with_retry(client, messages)
-    # call_with_retry 调 client.chat_completions(messages, tools=tools)
-    # 所以 mock 一个 LLMClient 风格的 client（不是 OpenAI SDK 风格）
+    # _summarize_child_result 保持同步接口，内部用 asyncio.run 驱动 async
+    # call_with_retry，后者 await client.chat_completions(...)。
+    # 所以 chat_completions 用 AsyncMock。
     client = MagicMock()
-    client.chat_completions.return_value = SimpleNamespace(
+    client.chat_completions = AsyncMock(return_value=SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content="压缩摘要"))]
-    )
+    ))
     result = _summarize_child_result(long, client, "model")
     if "[摘要]" in result and "压缩摘要" in result and long not in result:
         return _ok()
@@ -404,7 +419,12 @@ def main():
         os.environ[key] = value
 
     def monkeypatch_sleep(fn):
-        patcher = patch("agent.llm_retry.time.sleep", side_effect=fn)
+        # call_with_retry 改 async 后用 asyncio.sleep，不再是 time.sleep。
+        # unittest.mock 的 patch 对 asyncio.sleep 需用 async 包装（side_effect=fn
+        # 只对同步调用生效，asyncio.sleep 被 await，必须返回 coroutine）。
+        async def _async_noop(_s):
+            fn(_s)
+        patcher = patch("agent.llm_retry.asyncio.sleep", side_effect=_async_noop)
         patcher.start()
         return patcher
 
@@ -427,10 +447,10 @@ def main():
         ("P1 错误恢复", [
             ("retry 判断（429/400）", check_retry_judgment),
             ("重试后成功", lambda: check_retry_succeeds_eventually(
-                lambda fn: sleep_patchers.append(patch("agent.llm_retry.time.sleep", side_effect=fn)) or None
+                lambda fn: sleep_patchers.append(patch("agent.llm_retry.asyncio.sleep", side_effect=_make_async_side_effect(fn))) or None
             )),
             ("fallback_model 切换", lambda: check_fallback_model(
-                lambda fn: sleep_patchers.append(patch("agent.llm_retry.time.sleep", side_effect=fn)) or None
+                lambda fn: sleep_patchers.append(patch("agent.llm_retry.asyncio.sleep", side_effect=_make_async_side_effect(fn))) or None
             )),
         ]),
         ("P1 load_skill", [
