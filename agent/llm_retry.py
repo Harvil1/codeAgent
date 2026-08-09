@@ -12,13 +12,17 @@
 import asyncio
 import logging
 import random
-from typing import Optional
+import time
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_INITIAL_BACKOFF = 1.0  # 秒，指数退避起点
 DEFAULT_JITTER_RATIO = 0.25    # 抖动比例：sleep = base + uniform(0, base*ratio)
+
+# 持久重试（unattended）模式默认值（Task P2.1）
+DEFAULT_UNATTENDED_MAX_HOURS = 24  # 持续重试最长 24 小时
 
 # max_tokens 升级默认值（P0-3）
 # initial=None 表示不显式传 max_tokens，让 provider SDK 用模型默认值
@@ -98,6 +102,7 @@ async def call_with_retry(
     jitter_ratio: float = DEFAULT_JITTER_RATIO,
     max_tokens: Optional[int] = None,
     consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
+    config: Optional[Dict[str, Any]] = None,
 ):
     """带重试和备用 client 的 async LLM 调用。
 
@@ -113,6 +118,13 @@ async def call_with_retry(
     `time.sleep(...)` 改 `await asyncio.sleep(...)`（不阻塞事件循环）。
     退避/抖动/529 早切/max_tokens 升级逻辑不变。
 
+    持久重试模式（Task P2.1）：当 config 中 `bash_unattended_retry` flag 开启时，
+      - max_retries 视为无限（持续重试不因计数耗尽退出）
+      - 加 deadline = time.monotonic() + max_hours * 3600
+      - 循环改为 while（计数 < effective_max_retries）+ deadline 检查
+      - 普通 5xx/429 重试 / 529 早切 / fallback 逻辑保留
+      - flag OFF 或 config=None → 完全走原 max_retries 逻辑（向后兼容）
+
     参数：
         llm_client: LLMClient 实例（async chat_completions 方法）
         messages: 消息列表
@@ -126,11 +138,51 @@ async def call_with_retry(
                     主循环检测 finish_reason=length 后用 MaxTokensEscalator 升级此值。
         consecutive_529_threshold: 连续 529 次数达阈值即切 fallback（默认 3）。
                                    0 表示禁用提前切换，走完所有重试。
+        config: 配置字典（可选）。传入时检查 bash_unattended_retry flag：
+                开启则启用持久重试模式，max_retries 被视为无限，
+                加 max_hours（默认 24h）deadline 守护。
     """
     last_error: Optional[Exception] = None
     # X6 fix: max_retries<=0 直接抛友好错误（否则下面 for 循环不进，最后 raise None → TypeError）
-    if max_retries <= 0:
-        raise ValueError(f"max_retries must be > 0, got {max_retries}")
+    # 注意：unattended 模式下 max_retries 被改写为 inf，此校验仅对原模式生效。
+    # unattended 模式下原 max_retries 值被忽略，不走此分支。
+
+    # ── Task P2.1: 持久重试（unattended）模式接入 ──
+    # flag ON：max_retries=inf，加 deadline（time.monotonic 起算）
+    # flag OFF / config=None：原 max_retries 逻辑不变
+    unattended_enabled = False
+    deadline: Optional[float] = None
+    if config is not None:
+        from agent.feature_flags import is_feature_enabled, get_feature_config
+        if is_feature_enabled(config, "bash_unattended_retry"):
+            unattended_enabled = True
+            feature_cfg = get_feature_config(config, "bash_unattended_retry")
+            max_hours = feature_cfg.get("max_hours", DEFAULT_UNATTENDED_MAX_HOURS)
+            try:
+                max_hours = float(max_hours)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "bash_unattended_retry.max_hours 类型异常（%s），用默认 %dh",
+                    type(max_hours).__name__, DEFAULT_UNATTENDED_MAX_HOURS,
+                )
+                max_hours = float(DEFAULT_UNATTENDED_MAX_HOURS)
+            deadline = time.monotonic() + max_hours * 3600.0
+            logger.info(
+                "持久重试（unattended）模式已开启：max_retries=∞，deadline=%d 小时后",
+                int(max_hours),
+            )
+
+    # 计算生效的重试上限：unattended 模式下无限（用 float('inf') 比较）
+    # 用 float('inf') 而非改写 max_retries 变量类型（保持 int 语义清晰）。
+    if unattended_enabled:
+        effective_max_retries: float = float('inf')
+        # unattended 模式下跳过 max_retries<=0 的 ValueError 校验
+        # （因为原值可能任意，被忽略）
+    else:
+        if max_retries <= 0:
+            raise ValueError(f"max_retries must be > 0, got {max_retries}")
+        effective_max_retries = max_retries
+
     # max_tokens=None 时不传该参数，避免某些 provider 把 None 当 0 处理
     call_kwargs = {"tools": tools}
     if max_tokens is not None:
@@ -138,8 +190,18 @@ async def call_with_retry(
 
     consecutive_529 = 0  # 连续 529 计数器
 
-    # 主 client 重试
-    for attempt in range(max_retries):
+    # 主 client 重试（while 循环兼容 finite max_retries 和 unattended 无限模式）
+    attempt = 0
+    while attempt < effective_max_retries:
+        # unattended 模式：每次循环检查 deadline，超时退出
+        if unattended_enabled and deadline is not None:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "持久重试 deadline 到期（已重试 %d 次），退出主 client 重试",
+                    attempt,
+                )
+                break
+
         try:
             return await llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
@@ -167,8 +229,8 @@ async def call_with_retry(
                 and fallback_llm_client is not None
             ):
                 logger.warning(
-                    "连续 %d 次 529（过载），立即切备用 client（不耗尽 %d 次重试）",
-                    consecutive_529, max_retries,
+                    "连续 %d 次 529（过载），立即切备用 client（不耗尽重试）",
+                    consecutive_529,
                 )
                 break  # 跳出主 client 重试，进入 fallback 路径
 
@@ -178,13 +240,20 @@ async def call_with_retry(
                 retry_after=get_retry_after(e),
                 jitter_ratio=jitter_ratio,
             )
-            logger.warning(
-                "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
-                attempt + 1, max_retries, backoff, e,
-            )
+            if unattended_enabled:
+                logger.warning(
+                    "LLM 调用失败（unattended 尝试 %d，无重试上限），%.1fs 后重试: %s",
+                    attempt + 1, backoff, e,
+                )
+            else:
+                logger.warning(
+                    "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
+                    attempt + 1, max_retries, backoff, e,
+                )
             await asyncio.sleep(backoff)
+            attempt += 1
 
-    # 主 client 重试耗尽（或被 529 阈值打断），尝试备用 client
+    # 主 client 重试耗尽（或被 529 阈值打断 / deadline 到期），尝试备用 client
     if fallback_llm_client is not None:
         logger.warning("切换备用 LLM client")
         try:
