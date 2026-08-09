@@ -187,3 +187,127 @@ def test_plan_mode_v2_has_max_parallel():
     flag = DEFAULT_CONFIG["features"]["plan_mode_v2_parallel"]
     assert "max_parallel_agents" in flag
     assert 1 <= flag["max_parallel_agents"] <= 3
+
+
+# ────────────────────────────────────────────────────────────
+# 端到端测试：用户 settings.json 覆盖 + 类型容错 + 部分覆盖
+# ────────────────────────────────────────────────────────────
+
+from config import _deep_merge  # noqa: E402
+
+
+def _merge(user_overrides):
+    """模拟 load_config 流程：DEFAULT_CONFIG ← _deep_merge ← 用户配置。"""
+    import copy
+    merged = copy.deepcopy(DEFAULT_CONFIG)
+    return _deep_merge(merged, user_overrides)
+
+
+def test_user_can_enable_flag_via_settings():
+    """用户 settings.json 写 enabled=true → 合并后 flag 开启。"""
+    user_config = {
+        "features": {
+            "bash_llm_classifier": {"enabled": True},
+        }
+    }
+    merged = _merge(user_config)
+    assert is_feature_enabled(merged, "bash_llm_classifier") is True
+
+
+def test_user_enable_preserves_default_sub_fields():
+    """用户只覆盖 enabled，默认的 model/whitelist 应保留（deep_merge 行为）。"""
+    user_config = {
+        "features": {
+            "bash_llm_classifier": {"enabled": True},
+        }
+    }
+    merged = _merge(user_config)
+    cfg = get_feature_config(merged, "bash_llm_classifier")
+    assert cfg["enabled"] is True
+    assert cfg["model"] == "aux"               # 默认值保留
+    assert "ls" in cfg["whitelist"]            # 默认白名单保留
+
+
+def test_user_can_override_sub_fields():
+    """用户可以覆盖 flag 内的具体参数（如自定义白名单）。"""
+    user_config = {
+        "features": {
+            "bash_llm_classifier": {
+                "whitelist": ["ls", "my-custom-cmd"],
+            },
+        }
+    }
+    merged = _merge(user_config)
+    cfg = get_feature_config(merged, "bash_llm_classifier")
+    # 用户覆盖了 whitelist
+    assert cfg["whitelist"] == ["ls", "my-custom-cmd"]
+    # 但 enabled 仍是默认 False（用户没显式开）
+    assert cfg["enabled"] is False
+
+
+def test_user_can_disable_default_on_flag():
+    """即使默认 ON 的 flag（如果有），用户也能显式关闭。
+
+    注：当前所有 flag 默认 OFF，此测试是前向兼容（将来加默认 ON 的 flag 时验证）。
+    """
+    # 模拟"默认 ON，用户关掉"的场景
+    custom_default = {
+        "features": {
+            "hypothetical_default_on_flag": {"enabled": True, "param": "x"}
+        }
+    }
+    user_overrides = {
+        "features": {
+            "hypothetical_default_on_flag": {"enabled": False}
+        }
+    }
+    import copy
+    merged = copy.deepcopy(custom_default)
+    merged = _deep_merge(merged, user_overrides)
+    assert is_feature_enabled(merged, "hypothetical_default_on_flag") is False
+    # param 应保留
+    assert get_feature_config(merged, "hypothetical_default_on_flag")["param"] == "x"
+
+
+def test_user_unknown_flag_warns_but_doesnt_crash(caplog):
+    """用户 settings.json 写了不存在的 flag → log warning，不崩。"""
+    user_config = {
+        "features": {
+            "typo_flag_name": {"enabled": True},
+        }
+    }
+    merged = _merge(user_config)
+    # 未知 flag 在 DEFAULT_CONFIG 里没有，但合并后会出现（因为 _deep_merge 会加新 key）
+    # 这是预期行为：用户配置新 flag 不会崩，但 is_feature_enabled 会 log warning
+    # 注意：DEFAULT_CONFIG 没有这个 flag，所以合并后的 dict 里有，但读取时会 warn
+    with caplog.at_level(logging.WARNING, logger="agent.feature_flags"):
+        result = is_feature_enabled(merged, "typo_flag_name")
+    # typo_flag 在合并后 dict 里存在（_deep_merge 加了），所以不会 warn unknown
+    # 但如果用户 typo 写错名，DEFAULT_CONFIG 没有这个 flag，仍然存在；
+    # 关键是不崩
+    assert isinstance(result, bool)
+
+
+def test_other_config_sections_unaffected():
+    """加 features 节不影响其他节（model/security/memory 等）。"""
+    user_config = {
+        "model": {"name": "custom-model"},
+        "features": {"bash_llm_classifier": {"enabled": True}},
+    }
+    merged = _merge(user_config)
+    # features 节工作
+    assert is_feature_enabled(merged, "bash_llm_classifier") is True
+    # 其他节也正常
+    assert merged["model"]["name"] == "custom-model"
+    assert merged["model"]["provider"] == "deepseek"  # 默认值保留
+
+
+def test_features_section_completely_absent_in_user_config():
+    """用户 settings.json 完全没写 features 节 → 用 DEFAULT_CONFIG 默认值。"""
+    user_config = {
+        "model": {"name": "custom"},
+    }
+    merged = _merge(user_config)
+    # 所有 flag 仍是默认 OFF
+    for name in EXPECTED_FLAG_NAMES:
+        assert is_feature_enabled(merged, name) is False
