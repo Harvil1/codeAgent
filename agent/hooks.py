@@ -1,10 +1,13 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
-18 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7）：
+21 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7 + P3.3-P3.4 新增 3）：
   核心 6 种：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
            + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2）
   新增 5 种（P2-13）：SESSION_START / SESSION_END
            + PRE_COMPACT / POST_COMPACT + CONFIG_CHANGE
+  round3 新增 7 种：POST_TOOL_USE_FAILURE / SUBAGENT_START / SUBAGENT_STOP
+           + TASK_CREATED / TASK_COMPLETED + PERMISSION_REQUEST + PERMISSION_DENIED
+  P3.3-P3.4 新增 3 种：STOP_FAILURE + WORKTREE_CREATE + WORKTREE_REMOVE
 2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
 失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
 """
@@ -39,6 +42,11 @@ class HookEvent(Enum):
     TASK_COMPLETED = "task_completed"
     PERMISSION_REQUEST = "permission_request"
     PERMISSION_DENIED = "permission_denied"
+    # P3.3 NEW: STOP 失败变体（主循环异常退出时触发）
+    STOP_FAILURE = "stop_failure"
+    # P3.4 NEW: worktree 生命周期事件（隔离工作区创建/清理通知）
+    WORKTREE_CREATE = "worktree_create"
+    WORKTREE_REMOVE = "worktree_remove"
 
 
 # 程序式 hook 的签名
@@ -64,6 +72,11 @@ class HookScriptConfig:
     - mcp_tool: 调 MCP 工具 mcp_server.mcp_tool
     - prompt:   单轮 aux_llm 评估
     - agent:    多轮子代理（delegate）评估
+
+    P3.5 新增字段：
+    - if_condition: 声明式条件过滤（permission rule 语法），
+      仅适用 PRE_TOOL_USE / POST_TOOL_USE / POST_TOOL_USE_FAILURE / PERMISSION_REQUEST。
+      不匹配时跳过该 hook（省资源）。格式："ToolName(arg_pattern)"，如 "terminal(git *)"。
     """
     handler_type: str = "command"   # command | http | mcp_tool | prompt | agent
     command: Optional[list] = None  # list[str]，command 类型用（老配置仍是必需）
@@ -74,6 +87,8 @@ class HookScriptConfig:
     agent_name: Optional[str] = None  # agent 类型用（自定义子代理名，可选）
     timeout: float = 10.0
     env: Optional[dict] = None
+    # P3.5 NEW: 条件过滤（permission rule 语法，None/空 = 无条件匹配）
+    if_condition: Optional[str] = None
 
 
 @dataclass
@@ -85,6 +100,10 @@ class Hook:
     fn: Optional[Callable] = None
     script: Optional[HookScriptConfig] = None
     fail_closed: bool = False
+    # P3.6 NEW: once=True 的 hook 跑一次后被消费（从 registry 移除/跳过）
+    once: bool = False
+    # P3.8 NEW: 声明式 command hook 是否套 sandbox（仅 Unix 生效，Windows fail-open）
+    use_sandbox: bool = False
 
 
 def _now_iso() -> str:
@@ -97,6 +116,8 @@ class HookRegistry:
     def __init__(self):
         self._hooks: dict = {e: [] for e in HookEvent}
         self._stop_fire_count: int = 0
+        # P3.6 NEW: once=True 的 hook 已被消费的 id 集合（按 Hook 对象 id）
+        self._consumed: set = set()
 
     # ---- 注册 ----
     def register_user_prompt_submit(self, fn, *, name=None):
@@ -194,6 +215,7 @@ class HookRegistry:
         else:
             self._hooks[event] = []
         self._stop_fire_count = 0
+        self._consumed.clear()  # P3.6: 同步清消费记录
 
     # ---- 执行：USER_PROMPT_SUBMIT ----
     def run_user_prompt_submit(self, prompt: str, *, session_id: str) -> str:
@@ -658,3 +680,84 @@ class HookRegistry:
                     )
             except Exception as e:
                 logger.warning("PERMISSION_DENIED hook %s 异常: %s", hook.name, e)
+
+    # ---- P3.3 NEW: STOP_FAILURE 事件 ----
+
+    def register_stop_failure(self, fn, *, name=None):
+        """注册 STOP_FAILURE hook（通知型，返回值忽略）。
+
+        触发时机：agent 主循环 LLM 调用失败/异常退出时（与正常 STOP 区分）。
+        payload: {session_id, error, error_type, timestamp}。
+        """
+        self._hooks[HookEvent.STOP_FAILURE].append(
+            Hook(name=name or "anonymous", event=HookEvent.STOP_FAILURE,
+                 kind="programmatic", fn=fn))
+
+    def run_stop_failure(self, payload: dict) -> None:
+        """通知型：所有 STOP_FAILURE hook 都被调。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.STOP_FAILURE]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "stop_failure",
+                        error=payload.get("error"),
+                        error_type=payload.get("error_type"),
+                    )
+            except Exception as e:
+                logger.warning("STOP_FAILURE hook %s 异常: %s", hook.name, e)
+
+    # ---- P3.4 NEW: WORKTREE_CREATE / WORKTREE_REMOVE 事件 ----
+
+    def register_worktree_create(self, fn, *, name=None):
+        """注册 WORKTREE_CREATE hook（通知型）。
+
+        触发时机：tools/worktree.py:create_isolated_workspace 创建 worktree 成功后。
+        payload: {session_id, path, branch, workspace_type}。
+        """
+        self._hooks[HookEvent.WORKTREE_CREATE].append(
+            Hook(name=name or "anonymous", event=HookEvent.WORKTREE_CREATE,
+                 kind="programmatic", fn=fn))
+
+    def run_worktree_create(self, payload: dict) -> None:
+        """通知型：worktree 创建后通知所有 hook（审计、清理注册等）。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.WORKTREE_CREATE]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "worktree_create",
+                        path=payload.get("path"),
+                        branch=payload.get("branch"),
+                    )
+            except Exception as e:
+                logger.warning("WORKTREE_CREATE hook %s 异常: %s", hook.name, e)
+
+    def register_worktree_remove(self, fn, *, name=None):
+        """注册 WORKTREE_REMOVE hook（通知型）。
+
+        触发时机：tools/worktree.py 的 cleanup 函数执行后。
+        payload: {session_id, path, branch}。
+        """
+        self._hooks[HookEvent.WORKTREE_REMOVE].append(
+            Hook(name=name or "anonymous", event=HookEvent.WORKTREE_REMOVE,
+                 kind="programmatic", fn=fn))
+
+    def run_worktree_remove(self, payload: dict) -> None:
+        """通知型：worktree 清理后通知所有 hook。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.WORKTREE_REMOVE]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "worktree_remove",
+                        path=payload.get("path"),
+                    )
+            except Exception as e:
+                logger.warning("WORKTREE_REMOVE hook %s 异常: %s", hook.name, e)

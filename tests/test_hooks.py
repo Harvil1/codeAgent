@@ -9,7 +9,7 @@ from agent.hooks import (
 # ---------------------------------------------------------------------------
 
 def test_hook_event_has_four_values():
-    """枚举值集合（P2-13 后扩到 11 个，round3 再加 7 个，共 18 个）。"""
+    """枚举值集合（P2-13 后扩到 11 个，round3 再加 7 个，P3.3-P3.4 再加 3 个，共 21 个）。"""
     assert {e.value for e in HookEvent} == {
         "user_prompt_submit", "pre_tool_use", "post_tool_use", "stop",
         "pre_llm_call", "post_llm_call",
@@ -21,6 +21,8 @@ def test_hook_event_has_four_values():
         "post_tool_use_failure", "subagent_start", "subagent_stop",
         "task_created", "task_completed",
         "permission_request", "permission_denied",
+        # P3.3-P3.4 新增
+        "stop_failure", "worktree_create", "worktree_remove",
     }
 
 

@@ -1747,6 +1747,10 @@ class AIAgent:
                 "[LLM 调用失败，本轮已中断] 重试或检查模型连接。"
                 "详见日志（LLM API 调用失败）。"
             )
+            # P3.3: 触发 STOP_FAILURE hook（与正常 STOP 区分，通知审计/告警 hook）
+            self._trigger_stop_failure_hook(
+                error="LLM 调用失败", error_type="LLMError",
+            )
         else:
             fallback = "[已达最大迭代次数，强制停止]"
 
@@ -1757,6 +1761,21 @@ class AIAgent:
         # 异步写入外部记忆 provider（即使被打断也保留部分上下文）
         self._sync_memory(user_message, fallback)
         return fallback
+
+    def _trigger_stop_failure_hook(self, *, error: str, error_type: str) -> None:
+        """P3.3: 触发 STOP_FAILURE hook（fail-open，异常不影响主流程）。"""
+        if not self.hooks_registry:
+            return
+        if not self.config.get("hooks", {}).get("enabled", True):
+            return
+        try:
+            self.hooks_registry.run_stop_failure({
+                "session_id": self.session_id or "",
+                "error": error,
+                "error_type": error_type,
+            })
+        except Exception as e:
+            logger.warning("STOP_FAILURE hook 编排异常: %s", e)
 
     async def chat(self, message: str) -> str:
         """简单接口：发一条消息，返回响应。
