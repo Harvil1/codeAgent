@@ -213,3 +213,98 @@ async def test_memory_retrieval_llm_actually_awaited():
     assert result == ["general#123", "debug#456"], (
         "记忆检索应返回真实 LLM 响应，不是空 list"
     )
+
+
+# ============================================================================
+# Task P1.2: L5 reactive_compact 响应式回压 feature flag 测试
+# 验证：
+#   - flag OFF：context_length_exceeded 错误不触发响应式回压（返回 None）
+#   - flag ON：context_length_exceeded 错误触发响应式回压（返回 _REACTIVE_RETRY）
+#   - flag ON 但已触发过：不二次触发（once-per-session）
+# ============================================================================
+
+def _make_prompt_too_long_llm_client():
+    """构造一个 LLM client，chat_completions 永远抛 context_length_exceeded。"""
+    client = SimpleNamespace()
+    err = Exception(
+        "Error code: 400 - {'error': {'message': 'This model's maximum context length is 128000 tokens. "
+        "However, your messages resulted in 150000 tokens.', 'type': 'invalid_request_error', "
+        "'code': 'context_length_exceeded'}}"
+    )
+    client.chat_completions = AsyncMock(side_effect=err)
+    client.chat_completions_stream = AsyncMock(side_effect=err)
+    client.model = "mock-model"
+    return client
+
+
+async def test_reactive_compact_flag_off_skips_retry(tmp_path):
+    """flag OFF：context_length_exceeded 不触发响应式回压。
+
+    默认 DEFAULT_CONFIG["features"]["reactive_compact"]["enabled"] = False，
+    所以 AIAgent 默认配置下该路径应被跳过。
+    """
+    agent, _ = _make_minimal_agent(tmp_path)
+    # 显式确认默认 flag 关（DEFAULT_CONFIG 已设 False，双保险）
+    agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": False}
+    # 换成抛 context_length_exceeded 的 client
+    agent.llm_client = _make_prompt_too_long_llm_client()
+    agent._reacted = False
+
+    response = await agent._call_llm_with_escalation(
+        messages=[{"role": "user", "content": "hi"}],
+        tool_schemas=[],
+        system_prompt="你是助手",
+    )
+    # flag 关 → 不走响应式回压 → 返回 None（错误已塞回 history）
+    assert response is None, (
+        "reactive_compact flag OFF 时不应返回 _REACTIVE_RETRY，应返回 None"
+    )
+    # _reacted 不应被改（没触发回压）
+    assert agent._reacted is False, (
+        "flag OFF 时 _reacted 应保持 False（回压未触发）"
+    )
+
+
+async def test_reactive_compact_flag_on_triggers_retry(tmp_path):
+    """flag ON：context_length_exceeded 触发响应式回压（返回 _REACTIVE_RETRY）。"""
+    agent, _ = _make_minimal_agent(tmp_path)
+    agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": True}
+    agent.llm_client = _make_prompt_too_long_llm_client()
+    agent._reacted = False
+
+    # 构造足够长的 messages（reactive_compact 会截到最近 5 条）
+    msgs = [{"role": "system", "content": "你是助手"}]
+    msgs += [{"role": "user", "content": f"turn {i}"} for i in range(20)]
+    msgs += [{"role": "assistant", "content": f"a{i}"} for i in range(20)]
+
+    response = await agent._call_llm_with_escalation(
+        messages=msgs,
+        tool_schemas=[],
+        system_prompt="你是助手",
+    )
+    assert response is agent._REACTIVE_RETRY, (
+        "reactive_compact flag ON + context_length_exceeded 应返回 _REACTIVE_RETRY"
+    )
+    assert agent._reacted is True, "回压触发后 _reacted 应置 True"
+    # conversation_history 应被压缩（远少于起始 41 条）
+    assert len(agent.conversation_history) < 20, (
+        f"压缩后 history 应远少于 20 条，实际 {len(agent.conversation_history)}"
+    )
+
+
+async def test_reactive_compact_once_per_session(tmp_path):
+    """flag ON 但本会话已触发过：不二次触发（返回 None）。"""
+    agent, _ = _make_minimal_agent(tmp_path)
+    agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": True}
+    agent.llm_client = _make_prompt_too_long_llm_client()
+    # 模拟已触发过一次
+    agent._reacted = True
+
+    response = await agent._call_llm_with_escalation(
+        messages=[{"role": "user", "content": "hi"}],
+        tool_schemas=[],
+        system_prompt="你是助手",
+    )
+    assert response is None, (
+        "本会话已触发过回压（_reacted=True）应返回 None，不二次触发"
+    )

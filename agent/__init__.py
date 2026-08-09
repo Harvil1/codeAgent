@@ -1225,13 +1225,20 @@ class AIAgent:
 
         except Exception as e:
             # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
+            # Task P1.2：加 feature flag 开关（默认 OFF，避免无意启用）
             err_str = str(e).lower()
             is_prompt_too_long = (
                 "prompt_too_long" in err_str
                 or "context_length" in err_str
                 or "maximum context" in err_str
             )
-            if is_prompt_too_long and not getattr(self, "_reacted", False):
+            from agent.feature_flags import is_feature_enabled
+            reactive_enabled = is_feature_enabled(
+                self.config, "reactive_compact",
+            )
+            if (reactive_enabled
+                    and is_prompt_too_long
+                    and not getattr(self, "_reacted", False)):
                 from agent.context_pipeline import reactive_compact
                 messages, _ = reactive_compact(
                     messages,
