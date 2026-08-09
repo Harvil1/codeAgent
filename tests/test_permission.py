@@ -310,26 +310,26 @@ def test_truncate_at_threshold():
 # terminal 工具集成
 # ---------------------------------------------------------------------------
 
-def test_terminal_rejects_dangerous_command():
+async def test_terminal_rejects_dangerous_command():
     """terminal 工具拒绝黑名单命令。"""
-    result = registry.dispatch("terminal", {"command": "rm -rf /"})
+    result = await registry.dispatch("terminal", {"command": "rm -rf /"})
     data = json.loads(result)
     assert data["error_type"] == "permission_denied"
     assert "rm -rf" in data["command"]
 
 
-def test_terminal_allows_safe_command():
+async def test_terminal_allows_safe_command():
     """安全命令正常执行。"""
-    result = registry.dispatch("terminal", {"command": "echo perm_test_ok"})
+    result = await registry.dispatch("terminal", {"command": "echo perm_test_ok"})
     data = json.loads(result)
     assert "perm_test_ok" in data.get("stdout", "")
     assert data["exit_code"] == 0
 
 
-def test_terminal_truncates_long_output():
+async def test_terminal_truncates_long_output():
     """长输出被截断。"""
     # 打印 60000 个字符（超过 50000 阈值）
-    result = registry.dispatch(
+    result = await registry.dispatch(
         "terminal",
         {"command": "python -c \"print('x' * 60000)\""},
     )
@@ -342,17 +342,17 @@ def test_terminal_truncates_long_output():
 # read_file / write_file 集成
 # ---------------------------------------------------------------------------
 
-def test_read_file_denies_protected():
-    result = registry.dispatch("read_file", {"path": "~/.ssh/id_rsa"})
+async def test_read_file_denies_protected():
+    result = await registry.dispatch("read_file", {"path": "~/.ssh/id_rsa"})
     data = json.loads(result)
     assert data["error_type"] == "permission_denied"
 
 
-def test_write_file_denies_outside_whitelist(tmp_path):
+async def test_write_file_denies_outside_whitelist(tmp_path):
     """写到 cwd 和 ~/.OmniMate 外的路径被拒。"""
     # tmp_path 不在默认白名单（cwd 和 ~/.OmniMate）
     target = tmp_path / "evil.txt"
-    result = registry.dispatch(
+    result = await registry.dispatch(
         "write_file",
         {"path": str(target), "content": "x"},
     )
@@ -363,11 +363,11 @@ def test_write_file_denies_outside_whitelist(tmp_path):
         pytest.skip("tmp_path 在 cwd 下，跳过白名单测试")
 
 
-def test_write_file_allows_in_agent_home(tmp_path, monkeypatch):
+async def test_write_file_allows_in_agent_home(tmp_path, monkeypatch):
     """写到 ~/.OmniMate 允许。"""
     monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path))
     target = tmp_path / "test.txt"
-    result = registry.dispatch(
+    result = await registry.dispatch(
         "write_file",
         {"path": str(target), "content": "hello"},
     )
@@ -435,12 +435,12 @@ def test_destructive_with_callback_rejected_by_user():
     assert result.gate == "approval"
 
 
-def test_terminal_destructive_blocked_without_callback():
+async def test_terminal_destructive_blocked_without_callback():
     """terminal 工具默认无 callback，rm 命令被拒（destructive gate）。"""
     old = get_default_checker()
     try:
         set_default_checker(PermissionChecker())  # 无 callback
-        result = registry.dispatch("terminal", {"command": "rm somefile.txt"})
+        result = await registry.dispatch("terminal", {"command": "rm somefile.txt"})
         data = json.loads(result)
         assert data["error_type"] == "permission_denied"
         assert data["gate"] == "destructive"
@@ -448,9 +448,9 @@ def test_terminal_destructive_blocked_without_callback():
         set_default_checker(old)
 
 
-def test_terminal_safe_command_not_blocked():
+async def test_terminal_safe_command_not_blocked():
     """安全命令（echo）不受破坏性审批影响。"""
-    result = registry.dispatch("terminal", {"command": "echo not_destructive"})
+    result = await registry.dispatch("terminal", {"command": "echo not_destructive"})
     data = json.loads(result)
     assert "not_destructive" in data.get("stdout", "")
 
