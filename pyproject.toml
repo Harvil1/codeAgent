@@ -6,11 +6,13 @@ requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.116.0",
     "anyio>=4.14.1",
+    "httpx>=0.28.1",
     "openai>=1.0.0,<2",
     "python-dotenv==1.0.1",
     "pyyaml==6.0.2",
     "requests>=2.34.2",
     "rich==13.9.4",
+    "websockets>=17.0.1",
 ]
 
 [project.scripts]

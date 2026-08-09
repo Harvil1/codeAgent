@@ -267,7 +267,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_hours": 24,         # 最多持续重试 24 小时
         },
 
-        # ── 批次 3 (6): MCP HTTP transport ──
+        # ── 批次 3 (6): MCP HTTP/SSE transport ──
         "mcp_http_transport": {
             "enabled": False,
             "default_timeout_sec": 30,

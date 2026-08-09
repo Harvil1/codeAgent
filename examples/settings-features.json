@@ -34,7 +34,7 @@
     },
 
     "mcp_http_transport": {
-      "_comment": "MCP HTTP transport（连远程 server）",
+      "_comment": "MCP HTTP/SSE transport（连远程 server，含 streamable-http + 专用 SSE）",
       "enabled": false,
       "default_timeout_sec": 30
     },

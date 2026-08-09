@@ -1,36 +1,55 @@
-"""MCP（Model Context Protocol）客户端：stdio + HTTP/SSE transport。
+"""MCP（Model Context Protocol）客户端：stdio + HTTP/SSE/WebSocket transport。
 
 MCP 是外部服务统一接入协议。不需要为每个外部服务（Jira、Notion、数据库）
 重写工具代码，只需实现 MCP 标准接口（tools/list + tools/call）。
 
-08 升级：从单一 stdio → 两种 transport：
+Phase 5 升级：从单一 stdio → 四种 transport：
 - stdio：启动本地子进程（原有）
-- HTTP/SSE：远程 server，支持 OAuth 刷新
+- http：JSON POST + JSON 响应（httpx），支持 OAuth 刷新
+- sse：Server-Sent Events 流式响应（httpx SSE，专用 transport）
+- websocket：长连接双向 JSON-RPC（websockets 库）
 
 配置文件 ~/.OmniMate/.mcp.json：
     {
       "mcpServers": {
         "filesystem": {
+          "transport": "stdio",
           "command": "npx",
           "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
         },
         "github-http": {
+          "transport": "http",
           "url": "https://api.github-mcp.com/v1",
           "headers": {"X-Custom": "v"}
         },
         "notion-oauth": {
+          "transport": "http",
           "url": "https://mcp.notion.com/v1",
           "oauth": {
             "token_url": "...", "client_id": "...",
             "client_secret": "...", "refresh_token": "..."
           }
+        },
+        "remote-sse": {
+          "transport": "sse",
+          "url": "https://mcp.example.com/sse"
+        },
+        "remote-ws": {
+          "transport": "websocket",
+          "url": "wss://mcp.example.com/ws"
         }
       }
     }
 
 工具暴露：mcp__<server>__<tool> 前缀。
+
+Feature flags：
+    mcp_http_transport: 开启 http/sse transport（默认 OFF）
+    mcp_websocket_transport: 开启 websocket transport（默认 OFF）
+    不开时对应 transport 配置自动跳过（check_fn 隐藏）。
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -224,11 +243,11 @@ class StdioTransport(MCPTransport):
 
 
 # ---------------------------------------------------------------------------
-# HTTP/SSE transport（08 新增）
+# HTTP transport（Phase 5：requests → httpx）
 # ---------------------------------------------------------------------------
 
 class HTTPTransport(MCPTransport):
-    """HTTP/SSE 传输（08）。
+    """HTTP 传输（Phase 5 升级：基于 httpx）。
 
     支持：
     - JSON POST + JSON 响应（普通）
@@ -251,19 +270,19 @@ class HTTPTransport(MCPTransport):
         self._oauth = oauth_config
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
-        self._session = None  # requests.Session
+        self._client = None  # httpx.Client
         self._connected = False
         self._request_id = 0
         self._lock = threading.Lock()
 
     def connect(self) -> None:
-        # 1. 创建 session
+        # 1. 创建 httpx.Client
         try:
-            import requests  # noqa: F401
+            import httpx  # noqa: F401
         except ImportError as e:
-            raise RuntimeError(f"缺少 HTTP 依赖（requests）: {e}")
-        import requests
-        self._session = requests.Session()
+            raise RuntimeError(f"缺少 HTTP 依赖（httpx）: {e}")
+        import httpx
+        self._client = httpx.Client(timeout=60.0)
 
         # 2. OAuth 初始化（如配置）
         if self._oauth:
@@ -272,24 +291,24 @@ class HTTPTransport(MCPTransport):
         # 3. HTTP 预检（避免 URL 配错卡 60s）
         ok, reason = self._preflight()
         if not ok:
-            self._session.close()
-            self._session = None
+            self._client.close()
+            self._client = None
             raise RuntimeError(f"MCP HTTP 预检失败 ({self.url}): {reason}")
         logger.info("MCP HTTP 预检通过: %s", reason)
 
         # 4. MCP initialize 握手
         try:
             self._do_initialize_handshake()
-        except Exception as e:
-            self._session.close()
-            self._session = None
+        except Exception:
+            self._client.close()
+            self._client = None
             raise
         self._connected = True
 
     def _preflight(self) -> Tuple[bool, str]:
         """探测端点是否是合法 MCP server。返回 (ok, reason)。"""
-        if self._session is None:
-            return False, "session 未建立"
+        if self._client is None:
+            return False, "client 未建立"
         probe_headers = {
             **self._headers,
             "Accept": "application/json, text/event-stream",
@@ -300,9 +319,9 @@ class HTTPTransport(MCPTransport):
 
         # 先 HEAD（轻量）
         try:
-            r = self._session.head(
+            r = self._client.head(
                 self.url, headers=probe_headers,
-                timeout=self.PREFLIGHT_TIMEOUT_S, allow_redirects=True,
+                timeout=self.PREFLIGHT_TIMEOUT_S, follow_redirects=True,
             )
             ct = r.headers.get("Content-Type", "")
             if "json" in ct.lower() or "event-stream" in ct.lower():
@@ -312,7 +331,7 @@ class HTTPTransport(MCPTransport):
 
         # 再 GET
         try:
-            r = self._session.get(
+            r = self._client.get(
                 self.url, headers=probe_headers,
                 timeout=self.PREFLIGHT_TIMEOUT_S,
             )
@@ -330,14 +349,18 @@ class HTTPTransport(MCPTransport):
             return False, f"预检异常: {type(e).__name__}: {e}"
 
     def _refresh_access_token(self) -> None:
-        """用 refresh_token 换新 access_token。"""
+        """用 refresh_token 换新 access_token（OAuth refresh 流程）。
+
+        参考 claude-code-main HTTPTransport：POST grant_type=refresh_token 到
+        token_url，拿 access_token + expires_in。过期前 60s 主动刷新。
+        """
         if not self._oauth:
             return
-        import requests
         import time
+        import httpx
         cfg = self._oauth
         try:
-            r = requests.post(
+            r = httpx.post(
                 cfg["token_url"],
                 json={
                     "grant_type": "refresh_token",
@@ -345,7 +368,7 @@ class HTTPTransport(MCPTransport):
                     "client_id": cfg["client_id"],
                     "client_secret": cfg.get("client_secret", ""),
                 },
-                timeout=10,
+                timeout=10.0,
             )
             if r.status_code != 200:
                 raise RuntimeError(
@@ -370,8 +393,8 @@ class HTTPTransport(MCPTransport):
         self._refresh_access_token()
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
-        if self._session is None:
-            raise RuntimeError("MCP HTTP session 未建立")
+        if self._client is None:
+            raise RuntimeError("MCP HTTP client 未建立")
         self._ensure_token()
 
         headers = dict(self._headers)
@@ -387,8 +410,8 @@ class HTTPTransport(MCPTransport):
                 "method": method, "params": params,
             }
 
-            r = self._session.post(
-                self.url, json=payload, headers=headers, timeout=60,
+            r = self._client.post(
+                self.url, json=payload, headers=headers, timeout=60.0,
             )
             # 401 → 刷新 token 重试一次
             if r.status_code == 401 and self._oauth:
@@ -396,8 +419,8 @@ class HTTPTransport(MCPTransport):
                 self._access_token = None
                 self._refresh_access_token()
                 headers["Authorization"] = f"Bearer {self._access_token}"
-                r = self._session.post(
-                    self.url, json=payload, headers=headers, timeout=60,
+                r = self._client.post(
+                    self.url, json=payload, headers=headers, timeout=60.0,
                 )
 
             if r.status_code != 200:
@@ -430,29 +453,421 @@ class HTTPTransport(MCPTransport):
         return result
 
     def send_notification(self, method: str, params: dict) -> None:
-        if self._session is None:
+        if self._client is None:
             return
         headers = dict(self._headers)
         headers["Content-Type"] = "application/json"
         if self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
         try:
-            self._session.post(
+            self._client.post(
                 self.url,
                 json={"jsonrpc": "2.0", "method": method, "params": params},
-                headers=headers, timeout=10,
+                headers=headers, timeout=10.0,
             )
         except Exception:
             pass
 
     def close(self) -> None:
         self._connected = False
-        if self._session:
+        if self._client:
             try:
-                self._session.close()
+                self._client.close()
             except Exception:
                 pass
-            self._session = None
+            self._client = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+
+# ---------------------------------------------------------------------------
+# SSE transport（Phase 5 新增：专用 SSE 流式 transport）
+# ---------------------------------------------------------------------------
+
+class SSETransport(MCPTransport):
+    """SSE（Server-Sent Events）专用 transport（Phase 5）。
+
+    区别于 HTTPTransport 的 streamable-http（POST 后收 SSE 响应）：
+    SSETransport 建立长连接 GET 请求持续读 SSE 事件流，
+    请求通过独立 POST 发送。
+
+    适用场景：server 需要保持长连接推送（如远程 MCP server 的 SSE 端点）。
+
+    OAuth 流程复用 HTTPTransport 的实现（共用 token 管理）。
+    """
+
+    PREFLIGHT_TIMEOUT_S = 3
+
+    def __init__(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        oauth_config: Optional[dict] = None,
+        post_url: Optional[str] = None,
+    ):
+        self.url = url
+        self._post_url = post_url or url  # POST 目标（默认同 URL）
+        self._headers = headers or {}
+        self._oauth = oauth_config
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0
+        self._client = None  # httpx.Client
+        self._connected = False
+        self._request_id = 0
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        try:
+            import httpx  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(f"缺少 HTTP 依赖（httpx）: {e}")
+        import httpx
+        self._client = httpx.Client(timeout=60.0)
+
+        if self._oauth:
+            self._refresh_access_token()
+
+        # 预检（复用 HTTP 风格）
+        ok, reason = self._preflight()
+        if not ok:
+            self._client.close()
+            self._client = None
+            raise RuntimeError(f"MCP SSE 预检失败 ({self.url}): {reason}")
+        logger.info("MCP SSE 预检通过: %s", reason)
+
+        try:
+            self._do_initialize_handshake()
+        except Exception:
+            self._client.close()
+            self._client = None
+            raise
+        self._connected = True
+
+    def _preflight(self) -> Tuple[bool, str]:
+        """预检：端点需返回 event-stream 或 json content-type。"""
+        if self._client is None:
+            return False, "client 未建立"
+        probe_headers = {
+            **self._headers,
+            "Accept": "text/event-stream, application/json",
+            "MCP-Protocol-Version": "2024-11-05",
+        }
+        if self._access_token:
+            probe_headers["Authorization"] = f"Bearer {self._access_token}"
+        try:
+            r = self._client.get(
+                self.url, headers=probe_headers,
+                timeout=self.PREFLIGHT_TIMEOUT_S,
+            )
+            ct = r.headers.get("Content-Type", "")
+            if "event-stream" in ct.lower() or "json" in ct.lower():
+                return True, f"GET ok (ct={ct})"
+            if r.status_code == 405:
+                return True, "405 (端点存活)"
+            if r.status_code == 401:
+                return False, "401 Unauthorized"
+            return False, f"未知响应 (status={r.status_code}, ct={ct})"
+        except Exception as e:
+            return False, f"预检异常: {type(e).__name__}: {e}"
+
+    def _refresh_access_token(self) -> None:
+        """OAuth refresh（与 HTTPTransport 一致）。"""
+        if not self._oauth:
+            return
+        import time
+        import httpx
+        cfg = self._oauth
+        try:
+            r = httpx.post(
+                cfg["token_url"],
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": cfg["refresh_token"],
+                    "client_id": cfg["client_id"],
+                    "client_secret": cfg.get("client_secret", ""),
+                },
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(
+                    f"OAuth refresh 失败: {r.status_code} {r.text[:200]}"
+                )
+            data = r.json()
+            self._access_token = data["access_token"]
+            expires_in = data.get("expires_in", 3600)
+            self._token_expires_at = time.time() + expires_in
+            logger.info("MCP SSE OAuth token 刷新成功，%ss 后过期", expires_in)
+        except Exception as e:
+            logger.error("OAuth refresh 失败: %s", e)
+            raise
+
+    def _ensure_token(self) -> None:
+        if not self._oauth:
+            return
+        import time
+        if self._access_token and time.time() < self._token_expires_at - 60:
+            return
+        self._refresh_access_token()
+
+    def send_request(self, method: str, params: dict) -> Optional[dict]:
+        if self._client is None:
+            raise RuntimeError("MCP SSE client 未建立")
+        self._ensure_token()
+
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "text/event-stream, application/json"
+        if self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+
+        with self._lock:
+            self._request_id += 1
+            req_id = self._request_id
+            payload = {
+                "jsonrpc": "2.0", "id": req_id,
+                "method": method, "params": params,
+            }
+
+            # SSE transport：POST 请求发到 post_url，响应可能是 SSE 流或 JSON
+            r = self._client.post(
+                self._post_url, json=payload, headers=headers, timeout=60.0,
+            )
+            if r.status_code == 401 and self._oauth:
+                logger.info("MCP SSE 401，刷新 token 后重试一次")
+                self._access_token = None
+                self._refresh_access_token()
+                headers["Authorization"] = f"Bearer {self._access_token}"
+                r = self._client.post(
+                    self._post_url, json=payload, headers=headers, timeout=60.0,
+                )
+
+            if r.status_code != 200:
+                raise RuntimeError(
+                    f"MCP SSE {r.status_code}: {r.text[:200]}"
+                )
+
+            ct = r.headers.get("Content-Type", "")
+            if "event-stream" in ct.lower():
+                return self._parse_sse_response(r.text)
+            return r.json().get("result")
+
+    def _parse_sse_response(self, text: str) -> Optional[dict]:
+        """从 SSE 流里提取最后一个 JSON-RPC result。"""
+        result = None
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                try:
+                    data = json.loads(line[5:].strip())
+                    if "result" in data:
+                        result = data["result"]
+                    elif "error" in data:
+                        err = data["error"]
+                        raise RuntimeError(
+                            f"MCP 错误 {err.get('code')}: {err.get('message')}"
+                        )
+                except json.JSONDecodeError:
+                    continue
+        return result
+
+    def send_notification(self, method: str, params: dict) -> None:
+        if self._client is None:
+            return
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/json"
+        if self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+        try:
+            self._client.post(
+                self._post_url,
+                json={"jsonrpc": "2.0", "method": method, "params": params},
+                headers=headers, timeout=10.0,
+            )
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._connected = False
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+
+# ---------------------------------------------------------------------------
+# WebSocket transport（Phase 5 新增：websockets 库）
+# ---------------------------------------------------------------------------
+
+class WebSocketTransport(MCPTransport):
+    """WebSocket transport（Phase 5）。
+
+    用 websockets 库建立长连接，JSON-RPC 消息双向交换。
+    websockets 库原生 async，这里用 asyncio.run 桥接到同步接口
+    （对齐 Plan 2A 桥接模式）。
+
+    适用场景：需要低延迟双向通信的 MCP server（如实时协作工具）。
+    """
+
+    def __init__(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        oauth_config: Optional[dict] = None,
+    ):
+        # websockets 库用 ws:// 或 wss:// 协议
+        self.url = url
+        self._headers = headers or {}
+        self._oauth = oauth_config
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0
+        self._ws = None  # websockets 连接对象
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connected = False
+        self._request_id = 0
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        try:
+            import websockets  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(f"缺少 WebSocket 依赖（websockets）: {e}")
+
+        # OAuth 初始化
+        if self._oauth:
+            self._refresh_access_token()
+
+        # 新建 event loop（独立于主线程的 asyncio 循环）
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        try:
+            self._loop.run_until_complete(self._ws_connect())
+            self._do_initialize_handshake()
+        except Exception:
+            self._loop.run_until_complete(self._ws_close())
+            self._loop.close()
+            self._loop = None
+            raise
+        self._connected = True
+
+    async def _ws_connect(self) -> None:
+        """建立 WebSocket 连接。"""
+        import websockets
+        # 构造请求头（websockets 库用 additional_headers）
+        extra_headers = []
+        for k, v in self._headers.items():
+            extra_headers.append((k, v))
+        if self._access_token:
+            extra_headers.append(("Authorization", f"Bearer {self._access_token}"))
+
+        self._ws = await websockets.connect(
+            self.url, additional_headers=extra_headers,
+        )
+
+    def _refresh_access_token(self) -> None:
+        """OAuth refresh（与 HTTPTransport 一致）。"""
+        if not self._oauth:
+            return
+        import time
+        import httpx
+        cfg = self._oauth
+        try:
+            r = httpx.post(
+                cfg["token_url"],
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": cfg["refresh_token"],
+                    "client_id": cfg["client_id"],
+                    "client_secret": cfg.get("client_secret", ""),
+                },
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(
+                    f"OAuth refresh 失败: {r.status_code} {r.text[:200]}"
+                )
+            data = r.json()
+            self._access_token = data["access_token"]
+            expires_in = data.get("expires_in", 3600)
+            self._token_expires_at = time.time() + expires_in
+            logger.info("MCP WebSocket OAuth token 刷新成功，%ss 后过期", expires_in)
+        except Exception as e:
+            logger.error("OAuth refresh 失败: %s", e)
+            raise
+
+    def _ensure_token(self) -> None:
+        if not self._oauth:
+            return
+        import time
+        if self._access_token and time.time() < self._token_expires_at - 60:
+            return
+        self._refresh_access_token()
+
+    def send_request(self, method: str, params: dict) -> Optional[dict]:
+        if self._ws is None or self._loop is None:
+            raise RuntimeError("MCP WebSocket 未建立")
+        self._ensure_token()
+
+        with self._lock:
+            self._request_id += 1
+            req_id = self._request_id
+            msg = {
+                "jsonrpc": "2.0", "id": req_id,
+                "method": method, "params": params,
+            }
+            return self._loop.run_until_complete(self._ws_send_and_recv(msg, req_id))
+
+    async def _ws_send_and_recv(self, msg: dict, expected_id: int) -> Optional[dict]:
+        """发送请求并等待对应 id 的响应。"""
+        await self._ws.send(json.dumps(msg))
+        while True:
+            raw = await self._ws.recv()
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if data.get("id") == expected_id:
+                if "error" in data:
+                    err = data["error"]
+                    raise RuntimeError(
+                        f"MCP 错误 {err.get('code')}: {err.get('message')}"
+                    )
+                return data.get("result")
+
+    def send_notification(self, method: str, params: dict) -> None:
+        if self._ws is None or self._loop is None:
+            return
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        try:
+            self._loop.run_until_complete(self._ws.send(json.dumps(msg)))
+        except Exception:
+            pass
+
+    async def _ws_close(self) -> None:
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+    def close(self) -> None:
+        self._connected = False
+        if self._loop is not None:
+            try:
+                self._loop.run_until_complete(self._ws_close())
+                self._loop.close()
+            except Exception:
+                pass
+            self._loop = None
 
     @property
     def is_connected(self) -> bool:
@@ -464,10 +879,18 @@ class HTTPTransport(MCPTransport):
 # ---------------------------------------------------------------------------
 
 class MCPClient:
-    """单个 MCP server 的客户端连接（08：自动选择 transport）。
+    """单个 MCP server 的客户端连接（Phase 5：支持 4 种 transport）。
 
-    - command/args/env 配置 → StdioTransport
-    - url/headers/oauth 配置 → HTTPTransport
+    transport 选择规则（按优先级）：
+    1. 显式 transport 字段（"stdio" / "http" / "sse" / "websocket"）
+    2. 有 url → 按 URL scheme 推断（ws/wss → websocket，否则 http）
+    3. 有 command → stdio
+
+    Feature flag 门控（Phase 5 集成）：
+    - websocket 需 mcp_websocket_transport 开启
+    - sse（显式）需 mcp_http_transport 开启
+    - http 向后兼容（不强制 flag，保留旧行为）
+    未开启时构造抛 ValueError（让上层 connect_all 跳过+log）。
     """
 
     def __init__(
@@ -480,25 +903,87 @@ class MCPClient:
         url: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         oauth: Optional[dict] = None,
+        transport: Optional[str] = None,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
+        config: Optional[dict] = None,
     ):
         self.name = name
         self.include = include
         self.exclude = exclude
         self._connected = False
 
-        # 自动选择 transport
-        if url:
-            self._transport: MCPTransport = HTTPTransport(
+        # Feature flag 检查（Phase 5 集成）
+        from agent.feature_flags import is_feature_enabled
+        cfg = config or {}
+        http_enabled = is_feature_enabled(cfg, "mcp_http_transport")
+        ws_enabled = is_feature_enabled(cfg, "mcp_websocket_transport")
+
+        # 推断 transport 类型
+        transport_type = self._resolve_transport_type(
+            transport, url, command,
+        )
+
+        # 按类型构造 + flag 门控
+        if transport_type == "websocket":
+            if not ws_enabled:
+                raise ValueError(
+                    f"MCP server {name}: websocket transport 需要 "
+                    f"开启 mcp_websocket_transport feature flag"
+                )
+            self._transport: MCPTransport = WebSocketTransport(
                 url=url, headers=headers, oauth_config=oauth,
             )
-        elif command:
+        elif transport_type == "sse":
+            # 显式 SSE 需要 flag（专用 transport）
+            if not http_enabled:
+                raise ValueError(
+                    f"MCP server {name}: sse transport 需要 "
+                    f"开启 mcp_http_transport feature flag"
+                )
+            self._transport = SSETransport(
+                url=url, headers=headers, oauth_config=oauth,
+            )
+        elif transport_type == "http":
+            # http 向后兼容：不强制 flag（旧行为保护）
+            self._transport = HTTPTransport(
+                url=url, headers=headers, oauth_config=oauth,
+            )
+        elif transport_type == "stdio":
             self._transport = StdioTransport(command, args, env)
         else:
             raise ValueError(
-                f"MCP server {name} 必须配 command (stdio) 或 url (http)"
+                f"MCP server {name}: 无法确定 transport 类型"
             )
+
+    @staticmethod
+    def _resolve_transport_type(
+        transport: Optional[str],
+        url: Optional[str],
+        command: Optional[str],
+    ) -> str:
+        """推断 transport 类型。
+
+        优先级：显式 transport > URL scheme > command 存在性。
+        """
+        if transport:
+            t = transport.lower().strip()
+            if t in ("stdio", "http", "sse", "websocket"):
+                return t
+            raise ValueError(f"未知 transport 类型: {transport}")
+
+        # 无显式 transport → 按 URL scheme 推断
+        if url:
+            lower = url.lower()
+            if lower.startswith(("ws://", "wss://")):
+                return "websocket"
+            return "http"  # 默认 HTTP（含 streamable-http）
+
+        # 无 URL → command 必须存在
+        if command:
+            return "stdio"
+
+        raise ValueError("必须配 transport / url / command 之一")
 
     def connect(self) -> None:
         self._transport.connect()
@@ -564,13 +1049,22 @@ class MCPManager:
         self._clients: Dict[str, MCPClient] = {}
         self._lock = threading.Lock()
 
-    def connect_all(self, config: Optional[Dict[str, dict]] = None) -> None:
+    def connect_all(
+        self,
+        config: Optional[Dict[str, dict]] = None,
+        *,
+        app_config: Optional[dict] = None,
+    ) -> None:
         """连接所有配置的 server。
 
         配置字段（按 transport）：
-        - stdio: command, args, env
-        - HTTP:  url, headers, oauth
+        - stdio: transport="stdio", command, args, env
+        - http:  transport="http", url, headers, oauth
+        - sse:   transport="sse", url, headers, oauth
+        - websocket: transport="websocket", url, headers, oauth
         - 通用:  include, exclude（工具过滤）
+
+        app_config：应用配置字典（用于 feature flag 检查）。
         """
         if config is None:
             config = load_mcp_config()
@@ -585,8 +1079,10 @@ class MCPManager:
                     url=cfg.get("url"),
                     headers=cfg.get("headers"),
                     oauth=cfg.get("oauth"),
+                    transport=cfg.get("transport"),
                     include=cfg.get("include"),
                     exclude=cfg.get("exclude"),
+                    config=app_config,
                 )
                 client.connect()
                 with self._lock:
