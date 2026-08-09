@@ -14,6 +14,10 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+# 模块级导入 AsyncOpenAI，便于测试用 patch("agent.llm_client.AsyncOpenAI") 替换。
+# （局部 import 无法被 unittest.mock.patch 定位到模块属性）
+from openai import AsyncOpenAI
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,29 +125,28 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 
 class OpenAICompatClient(LLMClient):
-    """OpenAI 兼容格式的 LLM client。"""
+    """OpenAI 兼容格式的 LLM client（async）。"""
 
     def __init__(self, base_url: str, api_key: str, model: str):
-        from openai import OpenAI
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
 
-    def chat_completions(self, messages, *, tools=None, **kwargs):
-        """直接转发到 OpenAI SDK。返回原生的 OpenAI 响应对象。"""
+    async def chat_completions(self, messages, *, tools=None, **kwargs):
+        """async 直接转发到 AsyncOpenAI SDK。返回原生的 OpenAI 响应对象。"""
         # 防御：上层（memory_manager / reflection / retriever）习惯在 kwargs 里
         # 传 model=xxx，但 self.model 已经是 client 的属性，重复传会让 OpenAI SDK
         # 报 "got multiple values for keyword argument 'model'"。这里 pop 掉。
         kwargs.pop("model", None)
-        return self.client.chat.completions.create(
+        return await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=tools if tools else None,
             **kwargs,
         )
 
-    def chat_completions_stream(self, messages, *, tools=None, **kwargs):
-        """OpenAI SDK 原生流式：stream=True。
+    async def chat_completions_stream(self, messages, *, tools=None, **kwargs):
+        """async 流式：stream=True，async for chunk。
 
         每个 chunk 是规范化后的 dict（见 LLMClient.chat_completions_stream 文档）。
         tool_calls 的 delta 保留 SDK 原对象（含 index/id/function 字段），
@@ -151,7 +154,7 @@ class OpenAICompatClient(LLMClient):
         """
         # 同 chat_completions，防御 kwargs 里的 model 重复
         kwargs.pop("model", None)
-        stream = self.client.chat.completions.create(
+        stream = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=tools if tools else None,
@@ -159,7 +162,7 @@ class OpenAICompatClient(LLMClient):
             stream_options={"include_usage": True},
             **kwargs,
         )
-        for chunk in stream:
+        async for chunk in stream:
             usage_dict = _extract_openai_usage(getattr(chunk, "usage", None))
             if not chunk.choices:
                 # 最后一个 chunk 可能只有 usage
