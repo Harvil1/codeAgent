@@ -7,6 +7,7 @@
 SKIPPED 项需要真实 API key 才能验证。
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -61,7 +62,7 @@ def check_tool_definitions():
 def check_terminal_tool():
     """terminal 工具能执行命令。"""
     from tools.registry import registry
-    result = registry.dispatch("terminal", {"command": "echo verify_ok"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "echo verify_ok"}))
     data = json.loads(result)
     if "verify_ok" in data.get("stdout", ""):
         return _ok("echo 输出正确")
@@ -73,7 +74,7 @@ def check_read_file_tool(tmp):
     from tools.registry import registry
     f = tmp / "sample.txt"
     f.write_text("line1\nline2\n", encoding="utf-8")
-    result = registry.dispatch("read_file", {"path": str(f)})
+    result = asyncio.run(registry.dispatch("read_file", {"path": str(f)}))
     data = json.loads(result)
     if "line1" in data.get("content", ""):
         return _ok("读取到内容")
@@ -100,12 +101,12 @@ def check_memory_tool_write(tmp):
     from agent.memory_store import MemoryStore
     store = MemoryStore(omnimate_home=tmp)
 
-    result = registry.dispatch(
+    result = asyncio.run(registry.dispatch(
         "memory",
         {"action": "save", "name": "验证测试", "description": "验证测试",
          "type": "other", "body": "验证测试"},
         memory_store=store,
-    )
+    ))
     data = json.loads(result)
     if data.get("success"):
         entries = store.list_all()
@@ -173,7 +174,7 @@ def check_skills_list(tmp):
     """skills_list 工具。"""
     from tools.registry import registry
     skills = _setup_skill(tmp)
-    result = registry.dispatch("skills_list", {}, omnimate_home=tmp)
+    result = asyncio.run(registry.dispatch("skills_list", {}, omnimate_home=tmp))
     data = json.loads(result)
     names = [s["name"] for s in data["skills"]]
     if "hello" in names:
@@ -185,7 +186,7 @@ def check_skill_view(tmp):
     """skill_view 工具。"""
     from tools.registry import registry
     _setup_skill(tmp)
-    result = registry.dispatch("skill_view", {"name": "hello"}, omnimate_home=tmp)
+    result = asyncio.run(registry.dispatch("skill_view", {"name": "hello"}, omnimate_home=tmp))
     data = json.loads(result)
     if "Hello" in data.get("content", ""):
         return _ok("查看了 hello 技能")
@@ -195,11 +196,11 @@ def check_skill_view(tmp):
 def check_skill_manage_create(tmp):
     """skill_manage 能创建新技能。"""
     from tools.registry import registry
-    registry.dispatch(
+    asyncio.run(registry.dispatch(
         "skill_manage",
         {"action": "create", "name": "new-skill", "content": "---\nname: x\n---\nbody"},
         omnimate_home=tmp,
-    )
+    ))
     if (tmp / "skills" / "new-skill" / "SKILL.md").exists():
         return _ok("创建了 new-skill")
     return _fail("创建失败")
@@ -240,11 +241,11 @@ def check_session_search(tmp):
     sid = store.create_session()
     store.append_message(sid, "user", "Python 测试内容")
 
-    result = registry.dispatch(
+    result = asyncio.run(registry.dispatch(
         "session_search",
         {"query": "Python"},
         session_store=store,
-    )
+    ))
     data = json.loads(result)
     if data.get("total", 0) > 0:
         return _ok(f"找到 {data['total']} 条")
@@ -315,11 +316,11 @@ def check_delegate_sync(tmp):
     from unittest.mock import patch
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="子代理完成"):
-        result = registry.dispatch(
+        result = asyncio.run(registry.dispatch(
             "subagent",
             {"goal": "测试任务"},
             base_url=None, api_key="fake", model="test",
-        )
+        ))
     data = json.loads(result)
     if data.get("success") and data.get("result") == "子代理完成":
         return _ok("同步委托 OK")
@@ -331,11 +332,11 @@ def check_delegate_batch(tmp):
     from unittest.mock import patch
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="ok"):
-        result = registry.dispatch(
+        result = asyncio.run(registry.dispatch(
             "subagent",
             {"tasks": [{"goal": "a"}, {"goal": "b"}, {"goal": "c"}]},
             base_url=None, api_key="fake", model="test",
-        )
+        ))
     data = json.loads(result)
     if data["mode"] == "batch" and len(data["results"]) == 3:
         return _ok("3 个任务并行完成")
@@ -371,7 +372,7 @@ def check_context_compress():
     # 降低阈值确保 snip 触发
     ctx_cfg["snip_message_threshold"] = 50
     state = CompressionSessionState()
-    new_msgs, compressed = compress_if_needed(
+    new_msgs, compressed = asyncio.run(compress_if_needed(
         msgs,
         llm_client=client,
         model="deepseek-chat",
@@ -379,7 +380,7 @@ def check_context_compress():
         session_state=state,
         agent_home=None,
         session_id="verify",
-    )
+    ))
     if compressed and len(new_msgs) < len(msgs):
         return _ok(f"{len(msgs)} → {len(new_msgs)} 条")
     return _fail("未压缩")

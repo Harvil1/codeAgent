@@ -54,7 +54,7 @@ def _make_async_side_effect(sync_fn):
 # ---------------------------------------------------------------------------
 
 def check_terminal_blocks_rm_rf():
-    result = registry.dispatch("terminal", {"command": "rm -rf /"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "rm -rf /"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok(f"闸门: {data.get('gate', '?')}")
@@ -62,7 +62,7 @@ def check_terminal_blocks_rm_rf():
 
 
 def check_terminal_blocks_sudo():
-    result = registry.dispatch("terminal", {"command": "sudo apt install evil"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "sudo apt install evil"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -70,7 +70,7 @@ def check_terminal_blocks_sudo():
 
 
 def check_terminal_blocks_fork_bomb():
-    result = registry.dispatch("terminal", {"command": ":(){ :|:& };:"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": ":(){ :|:& };:"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -78,7 +78,7 @@ def check_terminal_blocks_fork_bomb():
 
 
 def check_terminal_blocks_format():
-    result = registry.dispatch("terminal", {"command": "format D:"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "format D:"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -86,7 +86,7 @@ def check_terminal_blocks_format():
 
 
 def check_terminal_blocks_force_push():
-    result = registry.dispatch("terminal", {"command": "git push origin master --force"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "git push origin master --force"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -94,7 +94,7 @@ def check_terminal_blocks_force_push():
 
 
 def check_terminal_allows_safe_command():
-    result = registry.dispatch("terminal", {"command": "echo safe_test_ok"})
+    result = asyncio.run(registry.dispatch("terminal", {"command": "echo safe_test_ok"}))
     data = json.loads(result)
     if "safe_test_ok" in data.get("stdout", ""):
         return _ok()
@@ -102,7 +102,7 @@ def check_terminal_allows_safe_command():
 
 
 def check_read_file_blocks_ssh_key():
-    result = registry.dispatch("read_file", {"path": "~/.ssh/id_rsa"})
+    result = asyncio.run(registry.dispatch("read_file", {"path": "~/.ssh/id_rsa"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -110,7 +110,7 @@ def check_read_file_blocks_ssh_key():
 
 
 def check_read_file_blocks_etc_passwd():
-    result = registry.dispatch("read_file", {"path": "/etc/passwd"})
+    result = asyncio.run(registry.dispatch("read_file", {"path": "/etc/passwd"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok()
@@ -119,7 +119,7 @@ def check_read_file_blocks_etc_passwd():
 
 def check_write_file_blocks_outside_cwd(tmp):
     target = tmp / "outside.txt"
-    result = registry.dispatch("write_file", {"path": str(target), "content": "x"})
+    result = asyncio.run(registry.dispatch("write_file", {"path": str(target), "content": "x"}))
     data = json.loads(result)
     if data.get("error_type") == "permission_denied":
         return _ok("白名单拒绝")
@@ -132,7 +132,7 @@ def check_write_file_blocks_outside_cwd(tmp):
 def check_write_file_allows_agent_home(tmp, monkeypatch_env):
     monkeypatch_env("OMNIMATE_HOME", str(tmp))
     target = tmp / "ok.txt"
-    result = registry.dispatch("write_file", {"path": str(target), "content": "hi"})
+    result = asyncio.run(registry.dispatch("write_file", {"path": str(target), "content": "hi"}))
     data = json.loads(result)
     if data.get("error_type"):
         return _fail(f"agent_home 内被拒: {data}")
@@ -143,10 +143,10 @@ def check_write_file_allows_agent_home(tmp, monkeypatch_env):
 
 def check_terminal_output_truncation():
     """超 50000 字符的输出被截断。"""
-    result = registry.dispatch(
+    result = asyncio.run(registry.dispatch(
         "terminal",
         {"command": "python -c \"print('y' * 60000)\""},
-    )
+    ))
     data = json.loads(result)
     if data.get("stdout_truncated") is True and "已截断" in data.get("stdout", ""):
         return _ok(f"{len(data['stdout'])} 字符")
@@ -253,7 +253,7 @@ def check_load_skill_returns_body(tmp):
         encoding="utf-8",
     )
 
-    result = registry.dispatch("load_skill", {"name": "demo"}, omnimate_home=tmp)
+    result = asyncio.run(registry.dispatch("load_skill", {"name": "demo"}, omnimate_home=tmp))
     data = json.loads(result)
     if data.get("body") and "执行这些步骤" in data["body"] and "---" not in data["body"]:
         return _ok("返回正文（去 frontmatter）")
@@ -338,17 +338,17 @@ def check_mcp_config_load(tmp):
 # ---------------------------------------------------------------------------
 
 def check_task_create_and_list(tmp):
-    result = registry.dispatch(
+    result = asyncio.run(registry.dispatch(
         "task_create",
         {"subject": "验证任务", "description": "test"},
         omnimate_home=tmp,
-    )
+    ))
     data = json.loads(result)
     if not data.get("success"):
         return _fail(f"create 失败: {data}")
     task_id = data["task"]["id"]
 
-    list_result = registry.dispatch("task_list", {}, omnimate_home=tmp)
+    list_result = asyncio.run(registry.dispatch("task_list", {}, omnimate_home=tmp))
     list_data = json.loads(list_result)
     if list_data.get("count") == 1:
         return _ok(f"创建 {task_id[:16]}...")
