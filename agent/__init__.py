@@ -20,6 +20,7 @@
 - 预算耗尽后给一次 grace call 让模型说最后一句话
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ from typing import Optional
 from agent.budget import IterationBudget
 from agent.context_pipeline import CompressionSessionState
 from agent.prompt_builder import build_system_prompt
+from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
@@ -1359,7 +1361,12 @@ class AIAgent:
         assistant 消息（含 tool_calls + thinking 字段）会先追加到 history。
         返回 True 表示继续主循环，False 表示 idle 已请求需退出。
 
-        Task D3：改为 async（串行 await，不引入并发；并发分组在 Phase F）。
+        Task F2：safe/unsafe 分组 + asyncio.gather。
+        - safe 工具（isConcurrencySafe=True，read_file/list_dir 等只读）并发跑
+        - unsafe 工具（write_file/terminal/memory_save 等有副作用）串行 await
+        - 结果按原 tool_call 顺序回填 history（_merge_results_in_order），
+          保证 tool_call.id 与 tool_result 严格配对，不破坏消息历史严格交替
+        - 单个 safe 失败不阻塞其他（return_exceptions=True → 转 JSON error）
         """
         # 追加 assistant 消息（DeepSeek 工具调用回传要求 thinking 字段）
         assistant_entry = {
@@ -1390,27 +1397,97 @@ class AIAgent:
             tool_calls=assistant_entry.get("tool_calls"),
         )
 
-        for tc in assistant_msg.tool_calls:
+        # ---- Task F2: safe/unsafe 分组 ----
+        tool_calls = list(assistant_msg.tool_calls)
+        safe_calls = []
+        unsafe_calls = []
+        for tc in tool_calls:
+            entry = registry.get(tc.function.name)
+            is_safe = bool(entry.isConcurrencySafe) if entry else False
+            if is_safe:
+                safe_calls.append(tc)
+            else:
+                unsafe_calls.append(tc)
+
+        # ---- safe 组：先按顺序跑 pre-callback（_record_recent / on_tool_call），
+        # 再 asyncio.gather 并发 handle_function_call（return_exceptions=True）。
+        # 失败的 result 转 JSON error，单个失败不阻塞其他。
+        safe_results_raw = await self._run_safe_group_concurrently(
+            safe_calls, handle_function_call,
+        )
+
+        # ---- unsafe 组：串行 await，保留 plan_approval / 失败统计等完整逻辑 ----
+        unsafe_results = []
+        for tc in unsafe_calls:
+            tool_content = await self._run_unsafe_tool_call(tc, handle_function_call)
+            unsafe_results.append(tool_content)
+
+        # ---- 按原 tool_call 顺序回填 history ----
+        # safe 组结果同样需要做 plan_approval 检查和失败统计（极少触发，但
+        # read_file 返回 error 仍应计入 streak；exit_plan_mode 是 unsafe，
+        # 不会在 safe 组出现）。
+        safe_processed = []
+        for tc, raw in zip(safe_calls, safe_results_raw):
+            tool_name = tc.function.name
+            if isinstance(raw, Exception):
+                content = json.dumps({
+                    "error": f"concurrent dispatch failed: {raw}",
+                    "error_type": "concurrent_dispatch_error",
+                }, ensure_ascii=False)
+            else:
+                content = raw
+            # plan_approval 检查（safe 组理论上不会触发，但保持对称以防 registry
+            # 分类变化——比如未来某只读工具也可能产 plan_approval_required）
+            content = self._maybe_handle_plan_approval(tc, content)
+            # 失败统计
+            self._update_failure_streak(content)
+            safe_processed.append((tc, content))
+
+        unsafe_processed = [(tc, c) for tc, c in zip(unsafe_calls, unsafe_results)]
+
+        # 按原 tool_call 顺序合并并回填 history
+        self._merge_results_in_order(
+            tool_calls, safe_processed, unsafe_processed,
+        )
+
+        # P4b-T2: idle 标志检查
+        if self._idle_requested:
+            logger.info("idle 已请求，退出 run_conversation")
+            return False
+        return True
+
+    async def _run_safe_group_concurrently(self, safe_calls, handle_function_call):
+        """safe 组并发执行 handle_function_call。
+
+        pre-callback（_record_recent / on_tool_call）按原顺序同步跑一遍
+        （它们是廉价的记录/通知副作用，不进并发），再用 asyncio.gather 并发。
+        return_exceptions=True 保证单个失败不阻塞其他。
+        """
+        # 按顺序跑 pre-callback（保持 _record_recent 的语义：先记录再执行）
+        for tc in safe_calls:
             tool_name = tc.function.name
             try:
                 tool_args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
                 tool_args = {}
-
-            # 压缩后重注入：记录最近读过的文件 / 加载的技能
             if tool_name == "read_file" and tool_args.get("path"):
                 self._record_recent("read", str(tool_args["path"]))
             elif tool_name == "load_skill" and tool_args.get("name"):
                 self._record_recent("skill", str(tool_args["name"]))
-
             if self.on_tool_call:
                 try:
                     self.on_tool_call(tool_name, tool_args)
                 except Exception:
                     pass
 
-            result = await handle_function_call(
-                tool_name, tool_args,
+        # 并发跑 handle_function_call
+        async def _one(tc):
+            try:
+                tool_args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                tool_args = {}
+            return await handle_function_call(
+                tc.function.name, tool_args,
                 session_id=self.session_id,
                 memory_store=self.memory_store,
                 session_store=self.session_store,
@@ -1425,81 +1502,145 @@ class AIAgent:
                 agent_ref=self,
             )
 
-            # PlanMode: 捕获 exit_plan_mode 审批请求
-            plan_handled = False
+        if not safe_calls:
+            return []
+        return await asyncio.gather(*[_one(tc) for tc in safe_calls],
+                                    return_exceptions=True)
+
+    async def _run_unsafe_tool_call(self, tc, handle_function_call):
+        """unsafe 组单个工具调用（串行）。
+
+        保留原完整逻辑：pre-callback + handle_function_call + plan_approval
+        + 失败统计。返回最终要回填 history 的 tool_content（已含 plan_approval
+        覆盖后的内容）。
+        """
+        tool_name = tc.function.name
+        try:
+            tool_args = json.loads(tc.function.arguments)
+        except json.JSONDecodeError:
+            tool_args = {}
+
+        # 压缩后重注入：记录最近读过的文件 / 加载的技能
+        if tool_name == "read_file" and tool_args.get("path"):
+            self._record_recent("read", str(tool_args["path"]))
+        elif tool_name == "load_skill" and tool_args.get("name"):
+            self._record_recent("skill", str(tool_args["name"]))
+
+        if self.on_tool_call:
             try:
-                result_data = json.loads(result) if isinstance(result, str) else {}
-            except (json.JSONDecodeError, ValueError):
-                result_data = {}
+                self.on_tool_call(tool_name, tool_args)
+            except Exception:
+                pass
 
-            if result_data.get("error_type") == "plan_approval_required":
-                plan_text = result_data.get("plan", "")
-                try:
-                    if self.plan_approval_callback is not None:
-                        approved, feedback = self.plan_approval_callback(plan_text)
-                    else:
-                        approved, feedback = True, ""
-                except Exception as cb_exc:
-                    logger.warning("plan_approval_callback 异常: %s", cb_exc)
-                    approved = False
-                    feedback = f"审批回调异常: {cb_exc}"
+        result = await handle_function_call(
+            tool_name, tool_args,
+            session_id=self.session_id,
+            memory_store=self.memory_store,
+            session_store=self.session_store,
+            omnimate_home=self.omnimate_home,
+            tool_call_id=tc.id,
+            config=self.config,
+            hooks_registry=self.hooks_registry,
+            bg_manager=self.bg_manager,
+            team_bus=self.team_bus,
+            team_coordinator=self.team_coordinator,
+            team_name=self.team_name,
+            agent_ref=self,
+        )
 
-                if approved:
-                    self.plan_mode = False
-                    tool_content = json.dumps({
-                        "plan_approved": True,
-                        "message": "用户已批准计划。现在可以开始执行：用 task_create 列出步骤，每步完成调 task_complete，依赖关系用 blocked_by。",
-                    }, ensure_ascii=False)
-                else:
-                    tool_content = json.dumps({
-                        "plan_rejected": True,
-                        "feedback": feedback or "用户未提供拒绝原因",
-                        "message": "用户拒绝了计划。请根据 feedback 修订后重新调 exit_plan_mode。",
-                    }, ensure_ascii=False)
+        # plan_approval 处理（exit_plan_mode 等；unsafe 组独有路径）
+        tool_content = self._maybe_handle_plan_approval(tc, result)
+        # 失败统计
+        self._update_failure_streak(tool_content)
+        return tool_content
 
-                self.conversation_history.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tool_name,
-                    "content": tool_content,
-                })
-                self._persist_session_message(
-                    "tool", tool_content, tool_call_id=tc.id, name=tool_name,
-                )
-                plan_handled = True
+    def _maybe_handle_plan_approval(self, tc, result):
+        """如果 tool 结果是 plan_approval_required，跑审批回调并返回最终 content。
 
-            if not plan_handled:
-                self.conversation_history.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tool_name,
-                    "content": result,
-                })
-                self._persist_session_message(
-                    "tool", result, tool_call_id=tc.id, name=tool_name,
-                )
+        不是审批请求则原样返回。保留原 plan_approval 语义（默认 approved=True
+        当 callback 为 None；plan_handled 后写 plan_approved/rejected 内容）。
+        """
+        try:
+            result_data = json.loads(result) if isinstance(result, str) else {}
+        except (json.JSONDecodeError, ValueError):
+            result_data = {}
 
-                # 失败重试检测
-                try:
-                    rd = json.loads(result) if isinstance(result, str) else {}
-                    is_error = bool(rd.get("error")) or rd.get("exit_code", 0) != 0
-                except (json.JSONDecodeError, TypeError):
-                    is_error = False
-                if is_error:
-                    self._tool_failure_streak += 1
-                    err_snippet = (
-                        rd.get("error", "") or str(rd.get("stderr", ""))[:200]
-                        if isinstance(rd, dict) else ""
-                    )
-                    self._last_tool_error = str(err_snippet)[:200]
-                else:
-                    self._tool_failure_streak = 0
+        if result_data.get("error_type") != "plan_approval_required":
+            return result
 
-        # P4b-T2: idle 标志检查
-        if self._idle_requested:
-            logger.info("idle 已请求，退出 run_conversation")
-            return False
-        return True
+        plan_text = result_data.get("plan", "")
+        try:
+            if self.plan_approval_callback is not None:
+                approved, feedback = self.plan_approval_callback(plan_text)
+            else:
+                approved, feedback = True, ""
+        except Exception as cb_exc:
+            logger.warning("plan_approval_callback 异常: %s", cb_exc)
+            approved = False
+            feedback = f"审批回调异常: {cb_exc}"
+
+        if approved:
+            self.plan_mode = False
+            return json.dumps({
+                "plan_approved": True,
+                "message": "用户已批准计划。现在可以开始执行：用 task_create 列出步骤，每步完成调 task_complete，依赖关系用 blocked_by。",
+            }, ensure_ascii=False)
+        else:
+            return json.dumps({
+                "plan_rejected": True,
+                "feedback": feedback or "用户未提供拒绝原因",
+                "message": "用户拒绝了计划。请根据 feedback 修订后重新调 exit_plan_mode。",
+            }, ensure_ascii=False)
+
+    def _update_failure_streak(self, tool_content):
+        """根据单个 tool 结果更新 _tool_failure_streak / _last_tool_error。
+
+        保留原语义：error 字段或 exit_code != 0 视为失败，streak +1；
+        成功则清零。
+        """
+        try:
+            rd = json.loads(tool_content) if isinstance(tool_content, str) else {}
+            is_error = bool(rd.get("error")) or rd.get("exit_code", 0) != 0
+        except (json.JSONDecodeError, TypeError):
+            is_error = False
+        if is_error:
+            self._tool_failure_streak += 1
+            err_snippet = (
+                rd.get("error", "") or str(rd.get("stderr", ""))[:200]
+                if isinstance(rd, dict) else ""
+            )
+            self._last_tool_error = str(err_snippet)[:200]
+        else:
+            self._tool_failure_streak = 0
+
+    def _merge_results_in_order(self, all_calls, safe_processed, unsafe_processed):
+        """按原 tool_call 顺序合并 safe/unsafe 结果并回填 history + 持久化。
+
+        safe_processed / unsafe_processed: List[(tool_call, content)]。
+        保证 tool_call.id 与 tool_result 严格配对（不破坏消息历史严格交替）。
+        """
+        safe_map = {tc.id: content for tc, content in safe_processed}
+        unsafe_map = {tc.id: content for tc, content in unsafe_processed}
+        for tc in all_calls:
+            if tc.id in safe_map:
+                content = safe_map[tc.id]
+            elif tc.id in unsafe_map:
+                content = unsafe_map[tc.id]
+            else:
+                # 不应发生：缺结果兜底（避免空 tool_result 破坏 LLM API 配对）
+                content = json.dumps({
+                    "error": "missing result for tool_call_id={}".format(tc.id),
+                    "error_type": "missing_tool_result",
+                }, ensure_ascii=False)
+            self.conversation_history.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": tc.function.name,
+                "content": content,
+            })
+            self._persist_session_message(
+                "tool", content, tool_call_id=tc.id, name=tc.function.name,
+            )
 
     def _finalize_response(self, assistant_msg, user_message: str) -> str:
         """处理无 tool_calls 的最终响应：保存历史 + STOP hook + reflection。
