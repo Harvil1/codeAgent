@@ -16,12 +16,15 @@
 
 import ast
 import importlib
+import inspect
 import json
 import logging
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+
+import anyio
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +97,12 @@ class ToolEntry:
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
-        "schema_overrides_fn",
+        "schema_overrides_fn", "isConcurrencySafe",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 schema_overrides_fn=None):
+                 schema_overrides_fn=None, isConcurrencySafe=False):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -113,6 +116,11 @@ class ToolEntry:
         # 用于让 LLM 看到实时状态（剩余并发槽位、当前模式等）。
         # None 时 schema 不变（向后兼容）。
         self.schema_overrides_fn = schema_overrides_fn
+        # 工具是否可安全并发执行（Task F1/F2 用）。
+        # True：只读/无副作用工具（read_file/list_dir/grep 等），可 asyncio.gather 并发
+        # False：有副作用工具（write_file/terminal/memory_save 等），必须串行
+        # 默认 False（安全默认 > 事后补救）——未显式标注的工具一律串行
+        self.isConcurrencySafe = isConcurrencySafe
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +193,7 @@ class ToolRegistry:
         emoji: str = "",
         override: bool = False,
         schema_overrides_fn: Callable = None,
+        isConcurrencySafe: bool = False,
     ):
         """注册一个工具。通常在模块 import 时调用。
 
@@ -195,10 +204,15 @@ class ToolRegistry:
             handler: 实际执行函数，签名 (args: dict, **kw) -> str
             check_fn: 可用性检查函数，返回 bool。None 表示总是可用
             requires_env: 依赖的环境变量列表（用于文档/UI 显示）
+            is_async: handler 是否是 async function（影响 dispatch 的处理路径）
             override: 是否允许覆盖同名工具（插件场景）
             schema_overrides_fn: 运行时 schema 覆盖函数
                 签名 (schema: dict, runtime_ctx: dict) -> dict | None
                 返回新 schema 或 None（不改）。失败会被 try/except，回退原 schema。
+            isConcurrencySafe: 工具是否可安全并发执行（Task F1/F2 用）。
+                True = 只读/无副作用（read_file/list_dir/grep），可 asyncio.gather 并发；
+                False = 有副作用（write_file/terminal/memory_save），必须串行。
+                默认 False（安全默认 > 事后补救）。
         """
         with self._lock:
             existing = self._tools.get(name)
@@ -218,11 +232,20 @@ class ToolRegistry:
                 description=description or schema.get("description", ""),
                 emoji=emoji,
                 schema_overrides_fn=schema_overrides_fn,
+                isConcurrencySafe=isConcurrencySafe,
             )
             self._generation += 1
 
-    def dispatch(self, name: str, args: dict, **kwargs) -> str:
-        """分发工具调用，返回 JSON 字符串结果。"""
+    async def dispatch(self, name: str, args: dict, **kwargs) -> str:
+        """async 分发工具调用，返回 JSON 字符串结果。
+
+        改造说明（Task C1）：
+        - async handler（如 MCP / delegate 等）：直接 await（不走 to_thread）
+        - sync handler（39 个内置工具）：用 anyio.to_thread.run_sync 包装，
+          丢线程池跑，不阻塞事件循环。handler 内部代码零改动。
+
+        handler 返回值仍走 _normalize_result（JSON 字符串契约不变）。
+        """
         with self._lock:
             entry = self._tools.get(name)
 
@@ -232,8 +255,17 @@ class ToolRegistry:
                 "error_type": "unknown_tool",
             }, ensure_ascii=False)
 
+        handler = entry.handler
         try:
-            result = entry.handler(args, **kwargs)
+            if inspect.iscoroutinefunction(handler):
+                # 真 async handler：直接 await
+                result = await handler(args, **kwargs)
+            else:
+                # 同步 handler：丢线程池跑（cancellable=False 对齐 anyio 默认，
+                # 避免 to_thread 中途被 cancel 导致 handler 资源泄露）
+                result = await anyio.to_thread.run_sync(
+                    lambda: handler(args, **kwargs)
+                )
             return self._normalize_result(name, result)
         except Exception as e:
             logger.exception("工具 %s 执行失败", name)
@@ -255,6 +287,15 @@ class ToolRegistry:
             "error_type": "tool_result_contract",
             "tool": name,
         }, ensure_ascii=False)
+
+    def get(self, name: str) -> Optional[ToolEntry]:
+        """按名取 ToolEntry；不存在返回 None。
+
+        供 Task C1 测试 + Task F1/F2 查 isConcurrencySafe 字段用。
+        加锁读取，返回的是 ToolEntry 引用（__slots__ 不可变字段安全）。
+        """
+        with self._lock:
+            return self._tools.get(name)
 
     def get_definitions(
         self,
