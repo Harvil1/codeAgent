@@ -122,4 +122,5 @@ registry.register(
     handler=_handle_tool_search,
     check_fn=_check_mcp_connected,
     emoji="🔎",
+    isConcurrencySafe=True,  # 只读：查 registry 目录（无写），可并发
 )

@@ -215,4 +215,5 @@ registry.register(
     schema=SKILL_MANAGE_SCHEMA,
     handler=_handle_skill_manage,
     emoji="📚",
+    isConcurrencySafe=False,  # 副作用：创建/更新/归档/删除技能文件，必须串行
 )

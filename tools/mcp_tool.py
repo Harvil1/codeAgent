@@ -67,6 +67,9 @@ def register_mcp_tools(manager: MCPManager = None) -> int:
                 handler=make_handler(manager, full_name),
                 check_fn=make_check(manager, server_name),
                 emoji="🔌",
+                # MCP 工具保守标 False：不知道具体副作用（可能是写文件/发请求），
+                # 安全默认 > 事后补救，让它们走串行路径
+                isConcurrencySafe=False,
             )
             count += 1
         except Exception as e:

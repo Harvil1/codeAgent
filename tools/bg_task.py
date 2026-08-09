@@ -285,24 +285,29 @@ registry.register(
     name="bg_start", toolset="bg",
     schema=BG_START_SCHEMA, handler=_handle_bg_start, emoji="🚀",
     check_fn=_check_bg_enabled,
+    isConcurrencySafe=False,  # 副作用：启动子进程，必须串行
 )
 registry.register(
     name="bg_status", toolset="bg",
     schema=BG_STATUS_SCHEMA, handler=_handle_bg_status, emoji="📊",
     check_fn=_check_bg_enabled,
+    isConcurrencySafe=True,  # 只读：查任务状态，无副作用，可并发
 )
 registry.register(
     name="bg_result", toolset="bg",
     schema=BG_RESULT_SCHEMA, handler=_handle_bg_result, emoji="📄",
     check_fn=_check_bg_enabled,
+    isConcurrencySafe=True,  # 只读：取任务输出，无副作用，可并发
 )
 registry.register(
     name="bg_list", toolset="bg",
     schema=BG_LIST_SCHEMA, handler=_handle_bg_list, emoji="📋",
     check_fn=_check_bg_enabled,
+    isConcurrencySafe=True,  # 只读：列任务，无副作用，可并发
 )
 registry.register(
     name="bg_stop", toolset="bg",
     schema=BG_STOP_SCHEMA, handler=_handle_bg_stop, emoji="🛑",
     check_fn=_check_bg_enabled,
+    isConcurrencySafe=False,  # 副作用：杀子进程，必须串行
 )

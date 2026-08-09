@@ -124,6 +124,7 @@ registry.register(
     schema=SKILLS_LIST_SCHEMA,
     handler=_handle_skills_list,
     emoji="📋",
+    isConcurrencySafe=True,  # 只读：列技能目录，无副作用，可并发
 )
 
 registry.register(
@@ -132,6 +133,7 @@ registry.register(
     schema=SKILL_VIEW_SCHEMA,
     handler=_handle_skill_view,
     emoji="👁️",
+    isConcurrencySafe=True,  # 只读：读技能正文（bump view 计数是小副作用，对并发不致命），可并发
 )
 
 
@@ -225,4 +227,5 @@ registry.register(
     schema=LOAD_SKILL_SCHEMA,
     handler=_handle_load_skill,
     emoji="📖",
+    isConcurrencySafe=False,  # 副作用：可能改 agent._skill_tool_scope（实例级状态），保守标 False
 )

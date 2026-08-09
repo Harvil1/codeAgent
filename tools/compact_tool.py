@@ -129,4 +129,5 @@ registry.register(
     schema=COMPACT_SCHEMA,
     handler=_handle_compact,
     emoji="🗜️",
+    isConcurrencySafe=False,  # 副作用：触发 LLM 压缩上下文（改消息历史），必须串行
 )

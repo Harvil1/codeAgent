@@ -385,6 +385,7 @@ registry.register(
     schema=READ_FILE_SCHEMA,
     handler=_handle_read_file,
     emoji="📄",
+    isConcurrencySafe=True,  # 只读：读文件内容，无副作用，可并发
 )
 
 registry.register(
@@ -393,6 +394,7 @@ registry.register(
     schema=WRITE_FILE_SCHEMA,
     handler=_handle_write_file,
     emoji="✏️",
+    isConcurrencySafe=False,  # 写入：改文件系统，必须串行
 )
 
 registry.register(
@@ -401,6 +403,7 @@ registry.register(
     schema=SEARCH_FILES_SCHEMA,
     handler=_handle_search_files,
     emoji="🔍",
+    isConcurrencySafe=True,  # 只读：grep 文件内容，无副作用，可并发
 )
 
 
@@ -528,4 +531,5 @@ registry.register(
     schema=STR_REPLACE_SCHEMA,
     handler=_handle_str_replace,
     emoji="🔄",
+    isConcurrencySafe=False,  # 写入：改文件内容，必须串行
 )

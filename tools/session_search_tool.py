@@ -76,4 +76,5 @@ registry.register(
     schema=SESSION_SEARCH_SCHEMA,
     handler=_handle_session_search,
     emoji="🔍",
+    isConcurrencySafe=True,  # 只读：搜历史对话（FTS 查询），无副作用，可并发
 )

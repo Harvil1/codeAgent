@@ -107,4 +107,5 @@ registry.register(
     handler=_handle_web_search,
     check_fn=_check_tavily_configured,
     emoji="🔍",
+    isConcurrencySafe=False,  # 外部调用：调 Tavily API（消耗配额 + 耗时），串行更稳
 )

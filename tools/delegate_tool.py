@@ -768,6 +768,7 @@ registry.register(
     handler=_handle_delegate_task,
     schema_overrides_fn=_delegate_schema_overrides,
     emoji="🤝",
+    isConcurrencySafe=False,  # 副作用：spawn 子 agent（重资源 + 改子任务状态），必须串行
 )
 # 兼容 alias：历史会话/记忆里的 delegate_task 调用仍可 dispatch 命中
 # toolset="_compat"：dispatch 按名字命中（不依赖 toolset），但 resolve_toolset("core")
@@ -780,4 +781,5 @@ registry.register(
     schema_overrides_fn=_delegate_schema_overrides,
     emoji="🤝",
     override=True,
+    isConcurrencySafe=False,  # alias of subagent，同样有副作用，必须串行
 )

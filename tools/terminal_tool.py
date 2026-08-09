@@ -313,4 +313,5 @@ registry.register(
     handler=_handle_terminal,
     check_fn=check_terminal_requirements,
     emoji="💻",
+    isConcurrencySafe=False,  # 副作用：执行 shell 命令（最强副作用），必须串行
 )

@@ -148,4 +148,5 @@ registry.register(
     schema=WEB_FETCH_SCHEMA,
     handler=_handle_web_fetch,
     emoji="🌐",
+    isConcurrencySafe=False,  # 外部调用：抓 URL（消耗带宽 + 耗时 + 可能触发外部副作用），串行更稳
 )

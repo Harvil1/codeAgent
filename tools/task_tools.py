@@ -619,40 +619,50 @@ def _handle_task_link(args: dict, **kwargs) -> str:
 registry.register(
     name="task_create", toolset="core",
     schema=TASK_CREATE_SCHEMA, handler=_handle_task_create, emoji="📝",
+    isConcurrencySafe=False,  # 副作用：写任务文件，必须串行
 )
 registry.register(
     name="task_update", toolset="core",
     schema=TASK_UPDATE_SCHEMA, handler=_handle_task_update, emoji="✏️",
+    isConcurrencySafe=False,  # 副作用：改任务字段，必须串行
 )
 registry.register(
     name="task_complete", toolset="core",
     schema=TASK_COMPLETE_SCHEMA, handler=_handle_task_complete, emoji="✅",
+    isConcurrencySafe=False,  # 副作用：状态机推进 + 写 artifacts，必须串行
 )
 registry.register(
     name="task_list", toolset="core",
     schema=TASK_LIST_SCHEMA, handler=_handle_task_list, emoji="📋",
+    isConcurrencySafe=True,  # 只读：列任务，无副作用，可并发
 )
 registry.register(
     name="task_heartbeat", toolset="core",
     schema=TASK_HEARTBEAT_SCHEMA, handler=_handle_task_heartbeat, emoji="💓",
+    isConcurrencySafe=False,  # 副作用：更新 last_active_at，必须串行
 )
 registry.register(
     name="task_comment", toolset="core",
     schema=TASK_COMMENT_SCHEMA, handler=_handle_task_comment, emoji="💬",
+    isConcurrencySafe=False,  # 副作用：追加评论，必须串行
 )
 registry.register(
     name="task_artifacts", toolset="core",
     schema=TASK_ARTIFACTS_SCHEMA, handler=_handle_task_artifacts, emoji="📎",
+    isConcurrencySafe=False,  # 副作用：加/改 artifacts 列表，必须串行
 )
 registry.register(
     name="task_block", toolset="core",
     schema=TASK_BLOCK_SCHEMA, handler=_handle_task_block, emoji="⏸",
+    isConcurrencySafe=False,  # 副作用：改 blocked_by DAG，必须串行
 )
 registry.register(
     name="task_unblock", toolset="core",
     schema=TASK_UNBLOCK_SCHEMA, handler=_handle_task_unblock, emoji="▶",
+    isConcurrencySafe=False,  # 副作用：改 blocked_by DAG，必须串行
 )
 registry.register(
     name="task_link", toolset="core",
     schema=TASK_LINK_SCHEMA, handler=_handle_task_link, emoji="🔗",
+    isConcurrencySafe=False,  # 副作用：改任务依赖关系，必须串行
 )

@@ -159,4 +159,5 @@ registry.register(
     schema=ASK_USER_SCHEMA,
     handler=_handle_ask_user,
     emoji="❓",
+    isConcurrencySafe=False,  # 交互式：阻塞等用户输入，并发会导致提示交错，必须串行
 )

@@ -254,24 +254,30 @@ def _err(msg: str, error_type: str) -> str:
 registry.register(
     name="team_send", toolset="team",
     schema=TEAM_SEND_SCHEMA, handler=_handle_team_send, emoji="📤",
+    isConcurrencySafe=False,  # 副作用：发消息到 bus（改其他 agent 收件箱），必须串行
 )
 registry.register(
     name="team_inbox", toolset="team",
     schema=TEAM_INBOX_SCHEMA, handler=_handle_team_inbox, emoji="📥",
+    isConcurrencySafe=False,  # 副作用：读后清空（消费式），必须串行
 )
 registry.register(
     name="team_members", toolset="team",
     schema=TEAM_MEMBERS_SCHEMA, handler=_handle_team_members, emoji="👥",
+    isConcurrencySafe=True,  # 只读：列成员状态，无副作用，可并发
 )
 registry.register(
     name="team_spawn", toolset="team",
     schema=TEAM_SPAWN_SCHEMA, handler=_handle_team_spawn, emoji="🚀",
+    isConcurrencySafe=False,  # 副作用：启动子 agent 进程，必须串行
 )
 registry.register(
     name="team_shutdown", toolset="team",
     schema=TEAM_SHUTDOWN_SCHEMA, handler=_handle_team_shutdown, emoji="🛑",
+    isConcurrencySafe=False,  # 副作用：关子 agent 进程，必须串行
 )
 registry.register(
     name="idle", toolset="team",
     schema=IDLE_SCHEMA, handler=_handle_idle, emoji="💤",
+    isConcurrencySafe=False,  # 副作用：改 worker 状态机到 IDLE，必须串行
 )

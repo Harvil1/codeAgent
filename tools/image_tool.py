@@ -294,6 +294,7 @@ registry.register(
     schema=IMAGE_ANALYZE_SCHEMA,
     handler=_handle_image_analyze,
     emoji="🖼️",
+    isConcurrencySafe=False,  # 外部调用：调 vision API（消耗配额 + 耗时），串行更稳
 )
 
 registry.register(
@@ -302,4 +303,5 @@ registry.register(
     schema=IMAGE_OCR_SCHEMA,
     handler=_handle_image_ocr,
     emoji="📝",
+    isConcurrencySafe=False,  # 外部调用：调 OCR API（消耗配额 + 耗时），串行更稳
 )

@@ -179,4 +179,5 @@ registry.register(
     schema=MEMORY_SCHEMA,
     handler=_handle_memory,
     emoji="🧠",
+    isConcurrencySafe=False,  # 混合 action：save/update/delete 有写副作用，load/list 虽只读但不能拆，整体串行
 )

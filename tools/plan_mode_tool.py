@@ -62,4 +62,5 @@ registry.register(
     },
     handler=handle_exit_plan_mode,
     emoji="📋",
+    isConcurrencySafe=False,  # 状态变更：触发审批流程（切换 plan/execute 模式），必须串行
 )
