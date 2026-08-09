@@ -5,6 +5,7 @@ description = "自学习 AI Agent（基于 Harvil Agent 复刻指南）"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.116.0",
+    "anyio>=4.14.1",
     "openai>=1.0.0,<2",
     "python-dotenv==1.0.1",
     "pyyaml==6.0.2",
@@ -28,6 +29,7 @@ include = ["agent*", "tools*", "plugins*", "scripts*", "skills*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
 
 [tool.ruff]
 preview = true
