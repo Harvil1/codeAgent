@@ -147,10 +147,14 @@ def run_reflection(
         kwargs = {}
         if model:
             kwargs["model"] = model
-        response = llm_client.chat_completions(
+        # Task D4 follow-up: llm_client.chat_completions 已改 async。
+        # run_reflection 经 apply_reflection 在 _bg() daemon thread 里跑（无事件循环），
+        # 用 asyncio.run 驱动；与 agent/user_profile.py:build_and_save_profile 同模式。
+        import asyncio
+        response = asyncio.run(llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
             **kwargs,
-        )
+        ))
         content = response.choices[0].message.content or ""
     except Exception as e:
         logger.warning("反思 LLM 调用失败（fail-open）: %s", e)
