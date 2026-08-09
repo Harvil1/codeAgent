@@ -1918,9 +1918,12 @@ def test_summarize_rewind(tmp_path, monkeypatch):
     ]
 
     # mock 摘要（_summarize_rewind 内部从 context_compressor 局部导入）
+    # _summarize_conversation 在 Plan 2A 改为 async，必须用 AsyncMock 才能反映真实签名
+    from unittest.mock import AsyncMock
+    mock_summarize = AsyncMock(return_value="摘要内容")
     monkeypatch.setattr(
         "agent.context_compressor._summarize_conversation",
-        lambda msgs, client: "摘要内容",
+        mock_summarize,
     )
 
     import cli

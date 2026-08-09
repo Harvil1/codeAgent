@@ -1528,7 +1528,10 @@ def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
 
     try:
         from agent.context_compressor import _summarize_conversation
-        summary = _summarize_conversation(after, rt.agent.llm_client)
+        # _summarize_conversation 在 Plan 2A 改为 async（LLMClient.chat_completions
+        # 已 async）。_summarize_rewind 是 sync 函数（被 sync _handle_rewind_command
+        # 调用），用 asyncio.run 桥接（同 reflection.py:150 的处理方式）。
+        summary = asyncio.run(_summarize_conversation(after, rt.agent.llm_client))
     except Exception as e:
         console.print(f"[red]摘要失败: {e}[/red]")
         return
