@@ -4,16 +4,59 @@
 由 ``agent.context_pipeline.compress_if_needed``（4 层管线）取代。
 
 本模块保留下列被 pipeline 复用的工具函数：
-    - ``_summarize_conversation``：调用 LLM 总结对话
+    - ``_summarize_conversation``：调用 LLM 总结对话（9 段式 + PTL 重试 + 熔断器）
     - ``_rule_based_summary``：无 LLM 时的降级规则提取
     - ``_fix_tool_call_pairs``：修复压缩边界破坏的 tool_call 配对
     - ``estimate_message_tokens``：粗略估算 token 数
+    - ``_strip_analysis_draft``：剥离 LLM <analysis> 草稿区
+    - ``reset_compact_circuit_breaker``：会话开始时重置熔断器
 """
 
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 改造点 ②：9 段式结构化 prompt 常量
+# ---------------------------------------------------------------------------
+
+SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要。
+
+**必须按以下 9 段输出，每段不能省略**：
+
+1. **Primary Request and Intent**：用户的核心请求和意图
+2. **Key Technical Concepts**：涉及的关键技术概念、库名、API
+3. **Files and Code Sections**：涉及的文件路径（**逐字保留**）+ 关键代码段
+4. **Errors and fixes**：遇到的错误（**逐字保留错误消息**）+ 修复方法
+5. **Problem Solving**：问题解决过程、调试思路
+6. **All user messages**：所有用户消息原文（**逐字保留**，不能改写）
+7. **Pending Tasks**：待办任务、未完成的工作
+8. **Current Work**：当前正在做什么
+9. **Optional Next Step**：可选的下一步
+
+**铁律**：
+- 文件路径、命令、错误消息、用户原话必须**逐字保留**（不能省略/改写）
+- 用 markdown 格式
+- 每段不超过 200 字（除了 user messages 段保留原文）
+
+对话内容：
+{dialog}
+"""
+
+
+# ---------------------------------------------------------------------------
+# 改造点 ②：熔断器模块级状态
+# ---------------------------------------------------------------------------
+
+_consecutive_failures = 0
+MAX_CONSECUTIVE_FAILURES = 3
+_compact_circuit_open = False
+
+# PTL（prompt_too_long）重试上限
+MAX_PTL_RETRIES = 3
 
 
 async def _summarize_conversation(
@@ -22,15 +65,95 @@ async def _summarize_conversation(
     *,
     model: str = None,
     summary_model: str = None,
+    session_memory: str = None,
 ) -> str:
-    """调用 LLM 总结对话历史（async：LLMClient.chat_completions 已改 async）。
+    """调用 LLM 用 9 段式 prompt 总结对话历史（async：对齐 batch2 async 改造）。
 
-    使用轻量模型（如果客户端可用），否则返回占位总结。
+    改造点 ②：
+    - **9 段式结构化 prompt**：强制保留文件路径/错误消息/用户原话
+    - **PTL 重试**：prompt_too_long 时丢 20% 旧消息重试（最多 MAX_PTL_RETRIES 次）
+    - **熔断器**：连续 MAX_CONSECUTIVE_FAILURES 次失败后不再调 LLM
+    - **session_memory 替代**：有预提取 memory 时直接用，不调 LLM
 
-    Task D4 fix: 改 async + await chat_completions。之前 sync 调 async 方法
-    返回 coroutine，被 except 捕获 TypeError 后降级成规则总结（silent degradation）。
+    Args:
+        messages: 对话历史
+        llm_client: LLM 客户端（None 时走规则总结）
+        model: 主模型名
+        summary_model: 摘要专用模型（优先于 model）
+        session_memory: 预提取的 session memory（有则替代 LLM 摘要）
     """
-    # 格式化对话
+    global _consecutive_failures, _compact_circuit_open
+
+    # 1. 熔断器检查（连续失败达上限 → 直接走规则总结，不调 LLM）
+    if _compact_circuit_open:
+        logger.warning(
+            "摘要熔断器开启（连续 %d 次失败），跳过 LLM 摘要",
+            _consecutive_failures,
+        )
+        return _rule_based_summary(messages)
+
+    # 2. session memory 优先（有预提取就直接用，省一次 LLM 调用）
+    if session_memory and session_memory.strip():
+        logger.info("用 session memory 替代 LLM 摘要")
+        return session_memory
+
+    # 3. 无客户端时走规则总结
+    if llm_client is None:
+        return _rule_based_summary(messages)
+
+    # 4. 格式化对话 + 9 段式 prompt
+    working_messages = list(messages)  # 不污染入参（PTL 重试会修改）
+    dialog = _format_dialog_for_summary(working_messages)
+    prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+
+    # 5. PTL 重试（最多 MAX_PTL_RETRIES 次，每次丢 20% 旧消息）
+    for retry in range(MAX_PTL_RETRIES + 1):
+        try:
+            response = await llm_client.chat_completions(
+                [{"role": "user", "content": prompt}],
+            )
+            summary = response.choices[0].message.content or ""
+            # 成功：重置熔断器
+            _consecutive_failures = 0
+            _compact_circuit_open = False
+            # 剥离 <analysis> 草稿（LLM 内部推理，不存入最终摘要）
+            return _strip_analysis_draft(summary)
+        except Exception as e:
+            err_str = str(e).lower()
+            is_ptl = "prompt_too_long" in err_str or "context_length" in err_str
+            if is_ptl and retry < MAX_PTL_RETRIES:
+                # PTL：丢 20% 旧消息重试
+                drop_count = max(1, len(working_messages) // 5)
+                working_messages = working_messages[drop_count:]
+                dialog = _format_dialog_for_summary(working_messages)
+                prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+                logger.warning(
+                    "PTL 重试 %d/%d：丢弃 %d 条旧消息",
+                    retry + 1, MAX_PTL_RETRIES, drop_count,
+                )
+                continue
+            # 其他错误或 PTL 重试耗尽 → 走规则总结 + 累加熔断器
+            _consecutive_failures += 1
+            if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                _compact_circuit_open = True
+                logger.error(
+                    "摘要熔断器开启（连续 %d 次失败）",
+                    _consecutive_failures,
+                )
+            logger.warning("LLM 摘要失败（降级规则总结）: %s", e)
+            return _rule_based_summary(working_messages)
+
+    return _rule_based_summary(working_messages)
+
+
+def _format_dialog_for_summary(messages: list) -> str:
+    """格式化消息列表为摘要 prompt 用的对话文本。
+
+    从原 _summarize_conversation 的内联格式化逻辑抽取：
+    - tool 消息：content 截断到 200 字符
+    - assistant(tool_calls)：显示工具名列表
+    - 其他：原样显示 role + content
+    """
     formatted = []
     for msg in messages:
         role = msg.get("role", "user")
@@ -49,38 +172,26 @@ async def _summarize_conversation(
                 formatted.append(f"[助手补充] {content[:200]}")
         else:
             formatted.append(f"[{role}] {content}")
+    return "\n\n".join(formatted)
 
-    dialog = "\n\n".join(formatted)
 
-    prompt = (
-        "请把以下对话总结成关键信息。\n\n"
-        "**必须逐字保留(不能省略/改写)**:\n"
-        "- 文件路径(如 D:/project/xxx.py、~/.OmniMate/workspace/xxx)\n"
-        "- 命令(如 uv add、pip install、taskkill、netstat、browser-use)\n"
-        "- 用户明确的要求/约束(如\"不要加注释\"\"用 uv 不用 pip\")\n"
-        "- 关键决策(如\"选方案 A 因为 B\"\"Chrome 需要 taskkill 后重启\")\n"
-        "- 错误关键词(如\"PYTHONHOME 冲突\"\"9222 端口未监听\"\"API key 错误\")\n"
-        "- 端口号、IP 地址、版本号(如 9222、3.12、0.13.6)\n\n"
-        "另外保留:\n"
-        "1. 用户的核心需求\n"
-        "2. 已完成的工作\n"
-        "3. 待办的事项\n\n"
-        "用简洁的要点格式,不要超过 800 字。\n\n"
-        f"对话内容:\n{dialog}"
-    )
+def _strip_analysis_draft(summary: str) -> str:
+    """剥离 <analysis> 草稿区（LLM 内部推理用，不存入最终摘要）。
 
-    if llm_client is None:
-        # 无客户端时返回占位总结（避免完全丢失上下文）
-        return _rule_based_summary(messages)
+    某些模型（如 Claude）可能在回复前加 <analysis>thinking...</analysis>
+    做内部推理。这部分不是最终摘要内容，需要剥离。
+    """
+    return re.sub(r'<analysis>.*?</analysis>\s*', '', summary, flags=re.DOTALL)
 
-    try:
-        response = await llm_client.chat_completions(
-            [{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.warning("LLM 压缩总结失败，使用规则提取: %s", e)
-        return _rule_based_summary(messages)
+
+def reset_compact_circuit_breaker() -> None:
+    """会话开始时重置熔断器状态（避免跨会话污染）。
+
+    在 AIAgent.__init__ 调用，保证新会话不从上一会话继承失败计数。
+    """
+    global _consecutive_failures, _compact_circuit_open
+    _consecutive_failures = 0
+    _compact_circuit_open = False
 
 
 def _rule_based_summary(messages: list) -> str:

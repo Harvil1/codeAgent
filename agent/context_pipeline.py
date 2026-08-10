@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 
 from agent.context_compressor import (
     _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
+    reset_compact_circuit_breaker,
 )
 from agent.transcript import snapshot_if_needed
 
@@ -627,10 +628,15 @@ async def llm_compact(
     token_threshold: int = 100000,
     msg_threshold: int = 100,
     precomputed_tokens: Optional[int] = None,
+    session_memory: Optional[str] = None,
 ) -> Tuple[list, bool]:
     """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话（async：_summarize_conversation 已改 async）。
 
     precomputed_tokens: 调用方预算的 token 数(避免重复遍历)。None 时内部算。
+
+    session_memory: 预提取的 session memory（改造点 ② 软目标）。
+    有值时传给 _summarize_conversation 替代 LLM 摘要。
+    SessionStore.get_memory_extract 尚未实现，目前永远 None（Phase 2 再接入）。
 
     Task D4 fix: 改 async + await _summarize_conversation。
     """
@@ -647,7 +653,10 @@ async def llm_compact(
     to_summarize = conv[:-keep_recent]
     keep = conv[-keep_recent:]
 
-    summary = await _summarize_conversation(to_summarize, llm_client, model=model)
+    summary = await _summarize_conversation(
+        to_summarize, llm_client, model=model,
+        session_memory=session_memory,
+    )
     if not summary:
         return messages, False
 

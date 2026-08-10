@@ -29,6 +29,7 @@ from typing import Optional
 
 from agent.budget import IterationBudget
 from agent.context_pipeline import CompressionSessionState, strip_internal_fields, reset_offload_decisions
+from agent.context_compressor import reset_compact_circuit_breaker
 from agent.prompt_builder import build_system_prompt
 from tools.registry import registry
 
@@ -198,6 +199,8 @@ class AIAgent:
         self._compress_session_state = CompressionSessionState()
         # 改造点 ①：新会话清空落盘决策（避免跨会话泄漏，保护 prompt cache）
         reset_offload_decisions()
+        # 改造点 ②：新会话重置摘要熔断器（避免跨会话污染失败计数）
+        reset_compact_circuit_breaker()
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
