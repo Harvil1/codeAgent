@@ -28,7 +28,7 @@ import time
 from typing import Optional
 
 from agent.budget import IterationBudget
-from agent.context_pipeline import CompressionSessionState, strip_internal_fields
+from agent.context_pipeline import CompressionSessionState, strip_internal_fields, reset_offload_decisions
 from agent.prompt_builder import build_system_prompt
 from tools.registry import registry
 
@@ -196,6 +196,8 @@ class AIAgent:
 
         # 上下文压缩会话状态（每实例一份，跨轮次追踪 L4 cooldown/计数）
         self._compress_session_state = CompressionSessionState()
+        # 改造点 ①：新会话清空落盘决策（避免跨会话泄漏，保护 prompt cache）
+        reset_offload_decisions()
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router

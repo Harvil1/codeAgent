@@ -14,7 +14,15 @@ import time
 
 import pytest
 
-from agent.context_pipeline import time_based_clear_old_tool_results
+from agent.context_pipeline import time_based_clear_old_tool_results, reset_offload_decisions
+
+
+@pytest.fixture(autouse=True)
+def _reset_offload_decisions_per_test():
+    """每个测试前后清空 _offload_decisions（防测试间 tool_call_id 冲突）。"""
+    reset_offload_decisions()
+    yield
+    reset_offload_decisions()
 
 
 # ---------- 辅助构造 ----------

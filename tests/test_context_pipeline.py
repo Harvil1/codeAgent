@@ -2,8 +2,22 @@
 """分层压缩管线测试。"""
 from unittest.mock import MagicMock
 
-from agent.context_pipeline import snip_compact, _split_system, micro_compact, llm_compact, CompressionSessionState, reactive_compact, compress_if_needed
+import pytest
+
+from agent.context_pipeline import (
+    snip_compact, _split_system, micro_compact, llm_compact,
+    CompressionSessionState, reactive_compact, compress_if_needed,
+    reset_offload_decisions,
+)
 from agent.context_compressor import _fix_tool_call_pairs
+
+
+@pytest.fixture(autouse=True)
+def _reset_offload_decisions_per_test():
+    """每个测试前后清空 _offload_decisions（防测试间 tool_call_id 冲突）。"""
+    reset_offload_decisions()
+    yield
+    reset_offload_decisions()
 
 
 def _check_immediate_pairing(messages):

@@ -71,8 +71,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 上下文压缩管线（Phase 1）
     "context": {
         # L3 offload
-        "output_offload_threshold": 10000,
+        # 改造点 ①：精细化落盘阈值（per-tool 50K + per-message 200K + 决策冻结）
+        "output_offload_threshold": 50000,
         "output_offload_preview": 2000,
+        "message_offload_threshold": 200000,        # per-message 聚合阈值
+        "offload_decision_freeze": True,            # 跨轮次决策冻结（保护 prompt cache）
         # L1 snip
         # 对齐 Claude Code：压缩由 L4 token 主导，消息数阈值放宽避免频繁裁中间
         "snip_message_threshold": 200,

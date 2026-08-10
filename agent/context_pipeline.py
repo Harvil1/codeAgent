@@ -312,17 +312,19 @@ def offload_large_tool_results(
     messages: list,
     *,
     agent_home,
-    threshold: int = 30000,
+    threshold: int = 50000,
     preview_chars: int = 2000,
+    message_threshold: int = 200000,
+    freeze: bool = True,
 ) -> Tuple[list, bool]:
-    """L2.5：主动扫描所有 role=tool 消息，超阈值的落盘（P1-2）。
+    """L2.5：主动扫描所有 role=tool 消息，超阈值落盘（改造点 ① 精细化）。
 
-    背景：terminal/file_ops 等工具自己调 maybe_offload（被动），
-    但 read_file/search_files/execute_code/bg_result 等没接。
-    如果一条 tool 消息 content 超 30K 字符就直接进 messages，爆 context。
-
-    本函数在 compress_if_needed 编排里跑，统一兜底：扫所有 tool 消息，
-    超阈值且不是占位的，主动调 maybe_offload 落盘。
+    三层触发逻辑：
+      1. **per-tool 阈值**（threshold，默认 50K）：单条 tool result 超阈值 → 落盘
+      2. **per-message 聚合阈值**（message_threshold，默认 200K）：一段连续 tool result
+         （不跨 user/assistant 边界）总和超阈值 → 按大小降序逐个落盘直到总和 < 阈值
+      3. **跨轮次决策冻结**（freeze=True）：已落盘的 tool_call_id 直接从 _offload_decisions
+         重放预览内容，不重新评估（保护 prompt cache，保证 byte-identical）
 
     返回 (新消息, 是否有变化)。消息结构除 content 外不变（保 tool_call_id/name 配对）。
     """
@@ -334,18 +336,35 @@ def offload_large_tool_results(
         if m.get("role") != "tool":
             out.append(m)
             continue
+
+        tc_id = m.get("tool_call_id") or ""
+
+        # ── 决策冻结：已落盘的直接重放（byte-identical，保护 prompt cache）──
+        if freeze and tc_id and tc_id in _offload_decisions:
+            decision = _offload_decisions[tc_id]
+            # 直接用记录的预览内容替换（不重新评估）
+            if m.get("content") != decision["preview"]:
+                new_m = dict(m)
+                new_m["content"] = decision["preview"]
+                out.append(new_m)
+                # 冻结重放不算 changed（没新落盘，只是保持一致）
+            else:
+                out.append(m)
+            continue
+
         content = m.get("content", "")
         if not isinstance(content, str) or len(content) <= threshold:
             out.append(m)
             continue
         if _already_offloaded(m):
-            out.append(m)  # 已是占位，不二次落盘
+            out.append(m)  # 已是占位（来自其他路径），不二次落盘
             continue
 
-        tool_call_id = m.get("tool_call_id") or f"orphan_{id(m)}"
+        # per-tool 阈值触发
+        effective_tc_id = tc_id or f"orphan_{id(m)}"
         new_content = maybe_offload(
             content,
-            tool_call_id=tool_call_id,
+            tool_call_id=effective_tc_id,
             agent_home=agent_home,
             threshold=threshold,
             preview_chars=preview_chars,
@@ -355,12 +374,143 @@ def offload_large_tool_results(
             new_m["content"] = new_content
             out.append(new_m)
             changed = True
+            if freeze and tc_id:
+                _record_decision(tc_id, new_content)
         else:
             out.append(m)
 
+    # ── per-message 聚合检查 ──
+    if message_threshold > 0:
+        agg_changed = _enforce_per_message_budget(
+            out, message_threshold, agent_home, preview_chars, freeze,
+        )
+        if agg_changed:
+            changed = True
+
     if changed:
-        logger.info("L2.5 offload_large_tool_results: 至少 1 条 tool 消息已落盘")
+        logger.info("L2.5 offload_large_tool_results: 至少 1 条 tool 消息已落盘（精细化）")
     return out, changed
+
+
+# ---------------------------------------------------------------------------
+# 改造点 ①：决策冻结 + per-message 聚合
+# ---------------------------------------------------------------------------
+
+_offload_decisions: dict = {}  # tool_call_id -> {"preview": str, "file_path": str|None}
+_OFFLOAD_DECISIONS_LIMIT = 1000  # LRU 上限，防长会话内存膨胀
+
+
+def _record_decision(tc_id: str, preview: str, file_path: str = None) -> None:
+    """记录落盘决策到 _offload_decisions，超 _OFFLOAD_DECISIONS_LIMIT 时 LRU 淘汰。
+
+    dict 在 Py3.7+ 保序（插入顺序），简化版 LRU：超限时删最早的（next(iter)）。
+    """
+    if len(_offload_decisions) >= _OFFLOAD_DECISIONS_LIMIT:
+        # 淘汰最早的一个（dict 在 Py3.7+ 保序）
+        oldest = next(iter(_offload_decisions))
+        del _offload_decisions[oldest]
+    _offload_decisions[tc_id] = {"preview": preview, "file_path": file_path}
+
+
+def reset_offload_decisions() -> None:
+    """会话开始时清空决策（避免跨会话泄漏）。
+
+    在 AIAgent.__init__ 调用，保证新会话不复用上一会话的落盘决策。
+    """
+    _offload_decisions.clear()
+
+
+def _enforce_per_message_budget(
+    messages: list,
+    limit: int,
+    agent_home,
+    preview_chars: int,
+    freeze: bool,
+) -> bool:
+    """per-message 聚合检查：一段连续 tool result 总和 > limit 时选最大的几个落盘。
+
+    分组规则（对齐 spec）：按 **user** 消息边界分组——一段连续的 tool result
+    （中间可以有 assistant(tool_calls)，但不能跨 user 消息）算一组。
+    这反映了"一次用户输入触发的所有工具调用"是一个逻辑单元。
+
+    超限的组：按 size 降序，逐个落盘直到总和 < limit。
+
+    注意：已在 _offload_decisions 里（决策冻结命中）的不重复处理；
+    已是占位（_already_offloaded）的跳过。
+    """
+    from agent.output_offload import maybe_offload
+
+    changed = False
+
+    # 1. 按 user 消息边界分组：收集所有 tool result 索引，
+    #    遇到新 user 消息就开新段
+    segments = []  # list of list of indices
+    current_seg = []
+    for i, m in enumerate(messages):
+        if m.get("role") == "tool":
+            current_seg.append(i)
+        elif m.get("role") == "user":
+            # user 消息是分组边界——user 之后的 tool result 属于新段
+            if current_seg:
+                segments.append(current_seg)
+                current_seg = []
+        # assistant / system 消息不打断段（tool result 中间可以有 assistant(tool_calls)）
+    if current_seg:
+        segments.append(current_seg)
+
+    # 2. 对每段算总和，超 limit 的按 size 降序逐个落盘
+    for seg in segments:
+        # 过滤掉已是占位或决策冻结命中的（它们 content 已经很小）
+        candidates = []
+        seg_total = 0
+        for idx in seg:
+            m = messages[idx]
+            content = m.get("content", "")
+            seg_total += len(content) if isinstance(content, str) else 0
+            tc_id = m.get("tool_call_id") or ""
+            # 决策冻结命中的或已是占位的不候选
+            if freeze and tc_id and tc_id in _offload_decisions:
+                continue
+            if _already_offloaded(m):
+                continue
+            if not isinstance(content, str):
+                continue
+            candidates.append((idx, len(content)))
+
+        if seg_total <= limit:
+            continue
+        if not candidates:
+            continue
+
+        # 按 size 降序，逐个落盘直到总和 < limit
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        for idx, size in candidates:
+            if seg_total <= limit:
+                break
+            m = messages[idx]
+            content = m.get("content", "")
+            tc_id = m.get("tool_call_id") or f"agg_{idx}"
+            new_content = maybe_offload(
+                content,
+                tool_call_id=tc_id,
+                agent_home=agent_home,
+                threshold=0,  # 强制落盘（聚合触发）
+                preview_chars=preview_chars,
+            )
+            if new_content != content:
+                new_m = dict(m)
+                new_m["content"] = new_content
+                messages[idx] = new_m
+                seg_total -= size - len(new_content)
+                changed = True
+                if freeze and tc_id:
+                    _record_decision(tc_id, new_content)
+                logger.info(
+                    "per-message 聚合 offload: tool 消息 idx=%d %d→%d",
+                    idx, size, len(new_content),
+                )
+
+    return changed
 
 
 def apply_context_collapse(
@@ -639,9 +789,29 @@ async def compress_if_needed(
 
     # L2 micro（对齐 Claude Code microCompact：按单条大小折叠 + 落盘留指针 + 保最近3条）
     # 替代原 L2.5 单条 offload——micro_compact 内部按大小触发 + 落盘 + 可读回
-    offload_threshold = config.get("output_offload_threshold", 10000)
+    # 改造点 ①：threshold 默认从 10K 提到 50K（精细化，避免小结果也落盘）
+    offload_threshold = config.get("output_offload_threshold", 50000)
     offload_preview = config.get("output_offload_preview", 2000)
+    offload_freeze = config.get("offload_decision_freeze", True)
     from agent.output_offload import maybe_offload
+
+    # ── 改造点 ①：决策冻结预处理 ──
+    # 已落盘的 tool_call_id 直接从 _offload_decisions 重放预览内容（byte-identical）
+    # 放在 L2 之前——冻结重放让 L2 看到的 content 已经是预览（不会重复落盘）
+    c_freeze = False
+    if offload_freeze and _offload_decisions:
+        for i, m in enumerate(messages):
+            if m.get("role") != "tool":
+                continue
+            tc_id = m.get("tool_call_id") or ""
+            if not tc_id or tc_id not in _offload_decisions:
+                continue
+            decision = _offload_decisions[tc_id]
+            if m.get("content") != decision["preview"]:
+                messages[i] = dict(m)
+                messages[i]["content"] = decision["preview"]
+                c_freeze = True
+
     messages, c2 = micro_compact(
         messages,
         threshold=offload_threshold,
@@ -649,10 +819,25 @@ async def compress_if_needed(
         keep_recent=config.get("micro_keep_recent_results", 3),
         agent_home=agent_home,
     )
+    # 记录 micro_compact 产生的新落盘决策
+    if offload_freeze and c2:
+        for m in messages:
+            if m.get("role") != "tool":
+                continue
+            tc_id = m.get("tool_call_id") or ""
+            if not tc_id or tc_id in _offload_decisions:
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str) and _already_offloaded(m):
+                _record_decision(tc_id, content)
 
     # L2.6 总量预算：全部 tool 结果合计仍超预算 → 最大的再落盘
+    # 改造点 ①：预算从 message_offload_threshold 读（对齐新 config 字段名）
     c26 = False
-    TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
+    TOTAL_TOOL_BUDGET = config.get(
+        "message_offload_threshold",
+        config.get("tool_result_total_budget", 200_000),
+    )
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if tool_indices:
         tool_total = sum(
@@ -685,6 +870,10 @@ async def compress_if_needed(
                     messages[i]["content"] = new_content
                     tool_total -= len(content) - len(new_content)
                     c26 = True
+                    # 改造点 ①：记录决策（跨轮次 byte-identical 重放）
+                    if offload_freeze:
+                        tc_id = messages[i].get("tool_call_id") or f"budget_{i}"
+                        _record_decision(tc_id, new_content)
                     logger.info(
                         "L2.6 总量预算 offload: tool 消息 %d %d→%d",
                         i, len(content), len(new_content),
@@ -779,7 +968,7 @@ async def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c0 or c1 or c2 or c26 or c35 or c4
+    changed = c0 or c1 or c_freeze or c2 or c26 or c35 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)
