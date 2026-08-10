@@ -743,7 +743,8 @@ async def compress_if_needed(
 ) -> Tuple[list, bool]:
     """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
 
-    顺序：L1 snip → L2 micro → L2.6 总量预算 → **L3.5 contextCollapse** → L4 llm。
+    顺序：L1 snip → L2 micro（per-tool）→ L2.5 per-message 聚合 → L2.6 总量预算
+    → **L3.5 contextCollapse** → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
 
     L3.5（Task P1.1，spec §7.1）：``features.context_collapse.enabled=True`` 时，
@@ -831,13 +832,31 @@ async def compress_if_needed(
             if isinstance(content, str) and _already_offloaded(m):
                 _record_decision(tc_id, content)
 
-    # L2.6 总量预算：全部 tool 结果合计仍超预算 → 最大的再落盘
-    # 改造点 ①：预算从 message_offload_threshold 读（对齐新 config 字段名）
+    # ── L2.5per_msg：per-message 聚合预算（改造点 ① 接入生产路径）──
+    # 按 user 消息边界分组，一段连续 tool result 总和 > message_offload_threshold
+    # 时按大小降序逐个落盘。这比 L2.6 全局预算更精细——L2.6 只看全局总和，
+    # 不区分哪个 user turn 的工具结果。per-message 先按段处理，L2.6 做最后兜底。
+    # 顺序：L2 micro（per-tool）→ L2.5per_msg（per-message 聚合）→ L2.6（全局预算）
+    c_per_msg = False
+    msg_threshold = config.get("message_offload_threshold", 200_000)
+    if msg_threshold > 0:
+        c_per_msg = _enforce_per_message_budget(
+            messages,
+            limit=msg_threshold,
+            agent_home=agent_home,
+            preview_chars=offload_preview,
+            freeze=offload_freeze,
+        )
+        if c_per_msg:
+            logger.info("L2.5 per-message 聚合 offload: 按 user 边界分组落盘")
+
+    # L2.6 总量预算：全部 tool 结果合计仍超预算 → 最大的再落盘（全局兜底）
+    # 改造点 ① Round 1 fix：解耦 L2.6 budget 与 message_offload_threshold
+    #   L2.6 读 tool_result_total_budget（默认 200K），不再 aliasing message_offload_threshold
+    #   ——两者语义不同：message_offload_threshold 是 per-segment 阈值，
+    #   tool_result_total_budget 是全局 tool 结果总量上限
     c26 = False
-    TOTAL_TOOL_BUDGET = config.get(
-        "message_offload_threshold",
-        config.get("tool_result_total_budget", 200_000),
-    )
+    TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if tool_indices:
         tool_total = sum(
@@ -968,7 +987,7 @@ async def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c0 or c1 or c_freeze or c2 or c26 or c35 or c4
+    changed = c0 or c1 or c_freeze or c2 or c_per_msg or c26 or c35 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)

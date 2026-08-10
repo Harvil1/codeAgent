@@ -14,7 +14,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THRESHOLD = 30000
+DEFAULT_THRESHOLD = 50000
 DEFAULT_PREVIEW_CHARS = 2000
 
 
@@ -80,17 +80,22 @@ def maybe_offload(
 
 
 def _resolve_unique_path(offload_dir: Path, tool_call_id: str) -> Path:
-    """生成不冲突的落盘路径。tool_call_id 文件已存在时追加 _N。"""
+    """生成不冲突的落盘路径。tool_call_id 文件已存在时追加 _N。
+
+    上限 1000 次尝试（防病理情况 O(n²) 循环）——超出时 raise OSError。
+    正常场景下决策冻结机制保证同 tool_call_id 不重复 offload，这个分支几乎到不了。
+    """
     offload_dir.mkdir(parents=True, exist_ok=True)
     base = offload_dir / f"{tool_call_id}.txt"
     if not base.exists():
         return base
-    counter = 1
-    while True:
+    for counter in range(1, 1001):
         candidate = offload_dir / f"{tool_call_id}_{counter}.txt"
         if not candidate.exists():
             return candidate
-        counter += 1
+    raise OSError(
+        f"offload 路径冲突：{tool_call_id} 已有 1000+ 同名文件"
+    )
 
 
 def finalize_tool_output(

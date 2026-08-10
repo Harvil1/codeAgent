@@ -333,10 +333,14 @@ async def test_e2e_offload_refined_full_chain(tmp_path):
     # ── 第 1 轮 ──
     messages_turn1 = agent._assemble_turn_messages(system_prompt="sys", injected={})
 
-    # compress_if_needed（走 L2 micro + L2.6 预算 offload → 落盘 + 记决策）
+    # compress_if_needed（走 L2 micro + L2.5 per-message 聚合 + L2.6 预算 offload → 落盘 + 记决策）
     ctx_cfg = _offload_cfg(
         output_offload_threshold=50000,     # 60K > 50K → L2 micro 会落盘
-        message_offload_threshold=200000,   # 5 × 60K = 300K > 200K → L2.6 也会触发
+        message_offload_threshold=200000,   # per-message 200K（L2.5 聚合阈值）
+        # 注意：L2.6 全局预算用 tool_result_total_budget（_offload_cfg 设为 10**9 禁用），
+        # 所以 L2.6 实际不触发——micro_keep_recent=3 保护最近 3 条后，
+        # 前 2 条（120K）已超 per-message 200K? 不——2 条 60K = 120K < 200K，
+        # 所以 per-message 也不触发。L2 micro（per-tool 60K > 50K）才是主触发层。
         micro_keep_recent_results=3,        # 保护最近 3 条，前 2 条会落盘
     )
     state = CompressionSessionState()
@@ -439,3 +443,172 @@ def test_aiagent_init_resets_offload_decisions(tmp_path):
     assert len(_offload_decisions) == 0, (
         "新会话开始后 _offload_decisions 应清空（防跨会话泄漏）"
     )
+
+
+# ---------------------------------------------------------------------------
+# E2E: _enforce_per_message_budget 在 compress_if_needed 生产路径中真正执行
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_e2e_per_message_budget_runs_in_production(tmp_path):
+    """端到端验证 Important 1：_enforce_per_message_budget 通过 compress_if_needed 真正执行。
+
+    场景：10 个 25K tool result（总 250K > 200K per-message 阈值），
+    每个单独 < per-tool 阈值（50K），所以 L2 micro_compact 不会落盘。
+    只有 L2.5 per-message 聚合才会落盘。
+
+    生产调用链：compress_if_needed → micro_compact（不触发）→
+        _enforce_per_message_budget（触发！按 user 边界聚合落盘）
+    """
+    from agent import AIAgent
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        omnimate_home=tmp_path,
+        enabled_toolsets=[],
+    )
+
+    # 10 个 25K tool result（总 250K > 200K per-message 阈值）
+    # 每个单独 25K < 50K per-tool 阈值 → L2 micro 不会触发
+    history = [{"role": "user", "content": "hello"}]
+    for i in range(10):
+        history.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_pm_{i}",
+                            "function": {"name": "t", "arguments": "{}"}}],
+        })
+        history.append({
+            "role": "tool", "tool_call_id": f"call_pm_{i}", "name": "t",
+            "content": "P" * 25000,  # 25K each, 总 250K > 200K
+        })
+    agent.conversation_history = history
+
+    messages = agent._assemble_turn_messages(system_prompt="sys", injected={})
+
+    ctx_cfg = _offload_cfg(
+        output_offload_threshold=50000,     # 25K < 50K → L2 micro 不触发
+        message_offload_threshold=200000,   # 250K > 200K → L2.5 per-message 触发
+        micro_keep_recent_results=0,        # 不保护任何条（让 per-message 跑）
+        tool_result_total_budget=10 ** 9,   # 禁 L2.6（只测 per-message）
+    )
+    state = CompressionSessionState()
+    messages_after, changed = await compress_if_needed(
+        messages,
+        llm_client=_FakeLLM(),
+        model="test",
+        config=ctx_cfg,
+        session_state=state,
+        agent_home=Path(tmp_path),
+        session_id="e2e_per_msg",
+    )
+    assert changed is True, "per-message 聚合应触发落盘"
+
+    # 验证确实有 tool result 被落盘（content 变成 JSON 占位）
+    tool_msgs = [m for m in messages_after if m.get("role") == "tool"]
+    offloaded = []
+    for m in tool_msgs:
+        try:
+            parsed = json.loads(m["content"])
+            if parsed.get("truncated"):
+                offloaded.append(m)
+        except (ValueError, TypeError):
+            pass
+
+    # 250K - 200K = 50K 需要落盘。每条 25K，至少落 2 条（50K）才能压到 <= 200K
+    # 但落盘后 content 变成 ~400 字节预览，实际减约 24600 字符/条
+    # 250000 - 24600*N <= 200000 → N >= 2.03 → 至少 3 条（保险起见 >= 2）
+    assert len(offloaded) >= 2, (
+        f"per-message 聚合应至少落盘 2 条，实际 {len(offloaded)}"
+    )
+
+    # 验证决策被记录（决策冻结）
+    for m in offloaded:
+        assert m["tool_call_id"] in _offload_decisions, (
+            f"{m['tool_call_id']} 应在 _offload_decisions 中"
+        )
+
+
+# ---------------------------------------------------------------------------
+# E2E: per-message 不跨 user 边界（在 compress_if_needed 生产路径中验证）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_e2e_per_message_respects_user_boundary_in_production(tmp_path):
+    """端到端验证 per-message 不跨 user 边界——在 compress_if_needed 生产路径中。
+
+    场景：两段 user，每段 5 个 30K tool result（每段总 150K < 200K 阈值）。
+    两段加起来 300K > 200K，但 per-message 按 user 边界独立判断，每段不超限 → 不落盘。
+    L2.6 全局预算也禁用（tool_result_total_budget=10**9）。
+    """
+    from agent import AIAgent
+
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        omnimate_home=tmp_path,
+        enabled_toolsets=[],
+    )
+
+    history = []
+    # 段 1：user + 5 个 30K tool result（150K < 200K）
+    history.append({"role": "user", "content": "u1"})
+    for i in range(5):
+        history.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_s1_{i}",
+                            "function": {"name": "t", "arguments": "{}"}}],
+        })
+        history.append({
+            "role": "tool", "tool_call_id": f"call_s1_{i}", "name": "t",
+            "content": "A" * 30000,
+        })
+    # 段 2：user + 5 个 30K tool result（150K < 200K）
+    history.append({"role": "user", "content": "u2"})
+    for i in range(5):
+        history.append({
+            "role": "assistant",
+            "tool_calls": [{"id": f"call_s2_{i}",
+                            "function": {"name": "t", "arguments": "{}"}}],
+        })
+        history.append({
+            "role": "tool", "tool_call_id": f"call_s2_{i}", "name": "t",
+            "content": "B" * 30000,
+        })
+    agent.conversation_history = history
+
+    messages = agent._assemble_turn_messages(system_prompt="sys", injected={})
+
+    ctx_cfg = _offload_cfg(
+        output_offload_threshold=10 ** 9,    # 禁 L2 per-tool
+        message_offload_threshold=200000,    # per-segment 200K（每段 150K 不超）
+        micro_keep_recent_results=0,
+        tool_result_total_budget=10 ** 9,    # 禁 L2.6 全局预算
+    )
+    state = CompressionSessionState()
+    messages_after, changed = await compress_if_needed(
+        messages,
+        llm_client=_FakeLLM(),
+        model="test",
+        config=ctx_cfg,
+        session_state=state,
+        agent_home=Path(tmp_path),
+        session_id="e2e_boundary",
+    )
+    # 每段独立 150K < 200K，L2.6 也禁了 → 不应触发落盘
+    # 但 changed 可能为 True（其他层如 freeze 预处理可能触发），
+    # 所以只检查没有 tool result 被落盘
+    tool_msgs = [m for m in messages_after if m.get("role") == "tool"]
+    offloaded = []
+    for m in tool_msgs:
+        try:
+            parsed = json.loads(m["content"])
+            if parsed.get("truncated"):
+                offloaded.append(m)
+        except (ValueError, TypeError):
+            pass
+    assert len(offloaded) == 0, (
+        f"per-message 不应跨 user 边界——每段 150K < 200K 不应触发落盘，"
+        f"但找到 {len(offloaded)} 条被落盘"
+    )
+

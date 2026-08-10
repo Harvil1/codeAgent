@@ -536,7 +536,7 @@ async def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
                     "function": {"name": "t", "arguments": "{}"},
                 }],
             })
-            big = "x" * 50000
+            big = "x" * 60000  # 60K > 50K（DEFAULT_THRESHOLD）→ maybe_offload 落盘
             offloaded = maybe_offload(
                 big, tool_call_id=f"call_{i}", agent_home=tmp_path,
             )
