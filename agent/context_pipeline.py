@@ -678,6 +678,13 @@ async def llm_compact(
         sum(len(str(m.get("content", ""))) for m in to_summarize),
         len(summary),
     )
+    # 改造点 ③：通知 cache_monitor 下次 cache 下降是预期的（compact 压缩了 messages）
+    # 放在 return 前，确保只在实际发生压缩时通知
+    try:
+        from agent.cache_monitor import notify_compaction
+        notify_compaction()
+    except Exception as e:
+        logger.debug("notify_compaction fail-open: %s", e)
     return new_messages, True
 
 

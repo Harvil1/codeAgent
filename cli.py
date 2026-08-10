@@ -1398,6 +1398,26 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         _handle_rewind_command(rt, args)
         return True
 
+    if name == "/cache-stats":
+        try:
+            from agent.cache_monitor import get_stats
+            stats = get_stats()
+            console.print(f"[cyan]本次会话 cache 累计 break 次数：[/cyan]{stats['total_breaks']}")
+            if stats['last_break']:
+                lb = stats['last_break']
+                console.print(
+                    f"[cyan]最近 break：[/cyan]cache read {lb['from']} → {lb['to']}"
+                    f"（降 {lb['drop']} tokens）"
+                )
+                console.print(f"[cyan]根因：[/cyan]{lb['root_cause']}")
+            if stats['last_cache_read'] is not None:
+                console.print(
+                    f"[cyan]最近一次 cache read：[/cyan]{stats['last_cache_read']} tokens"
+                )
+        except Exception as e:
+            console.print(f"[red]读取 cache 统计失败：[/red]{e}")
+        return True
+
     return False
 
 

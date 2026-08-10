@@ -201,6 +201,12 @@ class AIAgent:
         reset_offload_decisions()
         # 改造点 ②：新会话重置摘要熔断器（避免跨会话污染失败计数）
         reset_compact_circuit_breaker()
+        # 改造点 ③：新会话重置 cache 监控状态（避免跨会话污染 baseline）
+        try:
+            from agent.cache_monitor import reset_cache_monitor
+            reset_cache_monitor()
+        except Exception as e:
+            logger.debug("reset_cache_monitor 失败（fail-open）: %s", e)
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
@@ -410,6 +416,31 @@ class AIAgent:
             )
         except Exception as e:
             logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
+
+    @staticmethod
+    def _extract_cache_read(usage) -> int:
+        """从 usage 提取 cache read tokens（兼容 dict/对象 + DeepSeek/Anthropic 字段名）。
+
+        DeepSeek 用 prompt_cache_hit_tokens，Anthropic 用 cache_read_input_tokens。
+        流式路径的 SimpleNamespace.usage 两个字段都塞（见 _call_llm_streaming 末尾），
+        所以这里 or 短路兜底任一非零即可。
+        """
+        if not usage:
+            return 0
+        try:
+            if isinstance(usage, dict):
+                return (
+                    usage.get("prompt_cache_hit_tokens", 0)
+                    or usage.get("cache_read_input_tokens", 0)
+                    or 0
+                )
+            return (
+                getattr(usage, "prompt_cache_hit_tokens", 0)
+                or getattr(usage, "cache_read_input_tokens", 0)
+                or 0
+            )
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------
     # 04 NEW: 流式调用 LLM
@@ -1207,40 +1238,70 @@ class AIAgent:
             None                  - LLM 错误（已写入 history），主循环应 break
 
         Task D4: 改 async（_call_llm_streaming + call_with_retry 均已 async）。
+        改造点 ③：pre/post 调用 cache_monitor hook（fail-open，绝不影响主流程）。
         """
+        # === 改造点 ③ pre-call：cache_monitor 快照 prompt 维度（fail-open）===
+        cache_state = None
+        try:
+            from agent.cache_monitor import record_prompt_state
+            cache_state = record_prompt_state(
+                system_prompt=system_prompt or "",
+                tools=tool_schemas or [],
+                model=self.model or "",
+            )
+        except Exception as e:
+            logger.debug("cache_monitor pre-call fail-open: %s", e)
+
         try:
             if self._stream_callback is not None:
-                return await self._call_llm_streaming(
+                response = await self._call_llm_streaming(
                     messages=messages,
                     tools=tool_schemas if tool_schemas else None,
                 )
-            from agent.llm_retry import call_with_retry, detect_length_finish
-            response = await call_with_retry(
-                self.llm_client,
-                messages,
-                tools=tool_schemas if tool_schemas else None,
-                fallback_llm_client=self.fallback_llm_client,
-                config=self.config,
-            )
-            # P0-3: 非流式路径也支持 max_tokens 升级
-            if (detect_length_finish(response)
-                    and self._max_tokens_escalator is not None
-                    and not self._max_tokens_escalator.has_escalated):
-                new_max = self._max_tokens_escalator.escalate()
-                logger.info("max_tokens 截断（非流式），升级到 %d 重试", new_max)
+            else:
+                from agent.llm_retry import call_with_retry, detect_length_finish
+                response = await call_with_retry(
+                    self.llm_client,
+                    messages,
+                    tools=tool_schemas if tool_schemas else None,
+                    fallback_llm_client=self.fallback_llm_client,
+                    config=self.config,
+                )
+                # P0-3: 非流式路径也支持 max_tokens 升级
+                if (detect_length_finish(response)
+                        and self._max_tokens_escalator is not None
+                        and not self._max_tokens_escalator.has_escalated):
+                    new_max = self._max_tokens_escalator.escalate()
+                    logger.info("max_tokens 截断（非流式），升级到 %d 重试", new_max)
+                    try:
+                        response = await call_with_retry(
+                            self.llm_client,
+                            messages,
+                            tools=tool_schemas if tool_schemas else None,
+                            fallback_llm_client=self.fallback_llm_client,
+                            max_tokens=new_max,
+                            config=self.config,
+                        )
+                    except Exception as esc_err:
+                        logger.warning(
+                            "max_tokens 升级重试失败（沿用截断响应）: %s", esc_err,
+                        )
+
+            # === 改造点 ③ post-call：check_cache_break（fail-open）===
+            if cache_state is not None:
                 try:
-                    response = await call_with_retry(
-                        self.llm_client,
-                        messages,
-                        tools=tool_schemas if tool_schemas else None,
-                        fallback_llm_client=self.fallback_llm_client,
-                        max_tokens=new_max,
-                        config=self.config,
+                    from agent.cache_monitor import check_cache_break
+                    cache_read = self._extract_cache_read(
+                        getattr(response, "usage", None)
                     )
-                except Exception as esc_err:
-                    logger.warning(
-                        "max_tokens 升级重试失败（沿用截断响应）: %s", esc_err,
+                    check_cache_break(
+                        current_state=cache_state,
+                        cache_read_tokens=cache_read,
+                        query_source="main",
                     )
+                except Exception as e:
+                    logger.debug("cache_monitor post-call fail-open: %s", e)
+
             return response
 
         except Exception as e:
