@@ -42,22 +42,25 @@ def _is_tool_result(msg: dict) -> bool:
     return msg.get("role") == "tool"
 
 
-def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
+def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[list, bool]:
     """改造点 ④：基于时间的微压缩——距最后一条 assistant > gap_minutes 时清旧 tool result。
 
     对齐 claude-code-main microCompact:evaluateTimeBasedTrigger。
     在 compress_if_needed 编排里最早跑（无 token 检查），L1 snip 之前。
 
+    返回 (messages, changed)：changed=True 表示本次确实清了内容，
+    让 compress_if_needed 的 changed flag 能正确反映 time-based MC 的贡献。
+
     行为：
-      1. enabled=False → 直接返回原 messages
+      1. enabled=False → 直接返回 (messages, False)
       2. 找最后一条 role=="assistant" 的消息 index
       3. 读该消息的 _timestamp；没有就 fail-open 返回
       4. elapsed = (now - last_ts) / 60；< gap_minutes 就返回
       5. 超时：把 last_assistant_idx 之前的所有 tool result 清除内容，
          保留最后 keep_recent 个（不清）
 
-    fail-open：异常不影响主流程，返回原 messages。
-    幂等：已清除的 tool result content 等于 CLEARED_MARK，再清也不变。
+    fail-open：异常不影响主流程，返回 (messages, False)。
+    幂等：已清除的 tool result content 等于 CLEARED_MARK，再清也不变（changed=False）。
     """
     CLEARED_MARK = "[Old tool result content cleared]"
     try:
@@ -66,7 +69,7 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
         ctx_cfg = config if isinstance(config, dict) else {}
         enabled = ctx_cfg.get("time_based_mc_enabled", True)
         if not enabled:
-            return messages
+            return messages, False
 
         gap_minutes = ctx_cfg.get("time_based_mc_gap_minutes", 60)
         keep_recent = ctx_cfg.get("time_based_mc_keep_recent", 5)
@@ -78,15 +81,15 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
                 last_assistant_idx = i
                 break
         if last_assistant_idx < 0:
-            return messages
+            return messages, False
 
         last_ts = messages[last_assistant_idx].get("_timestamp")
         if not last_ts:
-            return messages
+            return messages, False
 
         elapsed_min = (time.time() - last_ts) / 60
         if elapsed_min < gap_minutes:
-            return messages
+            return messages, False
 
         # 超时：找 last_assistant_idx 之前的所有 tool result
         tool_indices = [
@@ -94,13 +97,14 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
             if messages[i].get("role") == "tool"
         ]
         if len(tool_indices) <= keep_recent:
-            return messages
+            return messages, False
 
         # 保留最后 keep_recent 个，前面的清内容
         to_clear = tool_indices[:-keep_recent] if keep_recent > 0 else tool_indices
         cleared_count = 0
         for i in to_clear:
-            if messages[i].get("content"):
+            # 幂等：content 已经是 CLEARED_MARK 的不再计 cleared_count
+            if messages[i].get("content") and messages[i].get("content") != CLEARED_MARK:
                 messages[i]["content"] = CLEARED_MARK
                 cleared_count += 1
 
@@ -109,10 +113,11 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
                 "time-based MC：清除了 %d 条旧工具结果（距上次 assistant %d 分钟）",
                 cleared_count, int(elapsed_min),
             )
-        return messages
+            return messages, True
+        return messages, False
     except Exception as e:
         logger.warning("time-based MC 异常（fail-open）: %s", e)
-        return messages
+        return messages, False
 
 
 def strip_internal_fields(messages: list) -> list:
@@ -619,7 +624,10 @@ async def compress_if_needed(
     # ── 改造点 ④：time-based MC（最早跑，无 token 检查）──
     # 距最后一条 assistant > 60min 时，把旧 tool result 内容替换为清除标记
     # 对齐 claude-code-main microCompact:evaluateTimeBasedTrigger
-    messages = time_based_clear_old_tool_results(messages, config)
+    # 返回 (messages, c0)：c0=True 时表示 time-based MC 清了内容，
+    # 必须参与最终 changed flag（否则 compress=False 会导致 conversation_history
+    # 不同步，下一轮又把原始 content 塞回去——time-based MC 效果只活一轮）
+    messages, c0 = time_based_clear_old_tool_results(messages, config)
 
     # L1 snip（对齐 Claude Code：减少频繁裁中间，由 L4 token 主导）
     messages, c1 = snip_compact(
@@ -771,7 +779,7 @@ async def compress_if_needed(
     else:
         logger.info("L4 skipped: below threshold (est_tokens=%d, conv_msgs=%d)", est_tokens, conv_len)
 
-    changed = c1 or c2 or c26 or c35 or c4
+    changed = c0 or c1 or c2 or c26 or c35 or c4
     if changed:
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)

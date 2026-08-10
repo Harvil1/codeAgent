@@ -783,6 +783,14 @@ class AIAgent:
                 messages, system_prompt,
             )
 
+            # strip 内部字段（_timestamp 等）——必须在 compress 之后、发 LLM 之前。
+            # 改造点 ④ Critical fix：之前 strip 在 _assemble_turn_messages 末尾（compress 之前），
+            # 导致 time_based_clear_old_tool_results 拿不到 _timestamp，整个功能在生产里是死代码。
+            # 现在挪到这里：compress_if_needed 能读到 _timestamp（time-based MC 真生效），
+            # 同时发给 LLM 的 messages 仍不含 _timestamp（保护 prompt cache）。
+            # 双重 strip 幂等：strip_internal_fields 创建新 dict，已 stripped 的再 strip 无副作用。
+            messages = strip_internal_fields(messages)
+
             # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
             tool_schemas = await self._prepare_toolset_and_injections(messages)
 
@@ -1003,9 +1011,8 @@ class AIAgent:
         # 上下文管理提示（接近上限时建议主动 /compact /new）
         self._maybe_inject_context_tip(messages)
 
-        # strip 内部字段（_timestamp 等），不污染发给 LLM 的 prompt（保护 prompt cache）
-        messages = strip_internal_fields(messages)
-
+        # 注意：不在这里 strip _timestamp——time-based MC 需要读 _timestamp
+        # strip 移到主循环 _run_context_compression 之后、发 LLM 之前
         return messages
 
     def _maybe_inject_context_tip(self, messages: list) -> None:
