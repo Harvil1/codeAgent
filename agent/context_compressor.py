@@ -107,10 +107,20 @@ async def _summarize_conversation(
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
 
     # 5. PTL 重试（最多 MAX_PTL_RETRIES 次，每次丢 20% 旧消息）
+    # 改造点 ② review fix：按 spec 伪代码传 system message（你是技术对话摘要助手）
+    # + model 参数（summary_model 优先于 model）。OpenAICompatClient.chat_completions
+    # 会 pop 掉 model kwarg 用 self.model（客户端构造时绑定），但 aux_llm_router /
+    # 未来其他 client 实现可能用外部传入的 model，保持 spec 一致性。
+    summary_system_prompt = "你是技术对话摘要助手。"
+    effective_model = model or summary_model
     for retry in range(MAX_PTL_RETRIES + 1):
         try:
             response = await llm_client.chat_completions(
-                [{"role": "user", "content": prompt}],
+                [
+                    {"role": "system", "content": summary_system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                model=effective_model,
             )
             summary = response.choices[0].message.content or ""
             # 成功：重置熔断器

@@ -83,4 +83,46 @@ Task 1/2 reviewer 发现的问题：单元测试覆盖了函数但没覆盖生�
 
 ## Commits
 
-（待 commit）
+- `e1890aff` feat(context): 改造点 ② 9 段式 LLM 摘要 + PTL 重试 + 熔断器
+
+---
+
+## Review Fix Round 1
+
+Reviewer 判定 "Approved with 2 Important + 3 Minor"。本次只修 Important 1+2+Minor 5
+（三者同源，一起修）。Minor 3/4 不修（设计问题 / 可辩护 trade-off）。
+
+### 修了什么
+
+| # | 问题 | Fix |
+|---|---|---|
+| Important 1 | `_summarize_conversation` 没传 `model` / `summary_model` 给 `chat_completions` | 加 `model=effective_model`，`effective_model = model or summary_model` |
+| Important 2 | 没加 system prompt "你是技术对话摘要助手。" | messages 列表前置 `{"role": "system", "content": summary_system_prompt}` |
+| Minor 5 | `summary_model` 参数是 dead code | Important 1 修后自动消除（虽然 `OpenAICompatClient` 会 pop 掉 model kwarg，但保持 spec 一致性 + 未来 aux_llm 路径可用） |
+
+### 不修的项（ledger）
+
+- **Minor 3**: 熔断器在 session_memory 检查前（spec 顺序，设计问题，不在本轮修）
+- **Minor 4**: PTL 重试耗尽后计熔断（spec 未明确，可辩护的 trade-off，不在本轮修）
+
+### 传 model 参数的方式
+
+参考 `agent/memory_retriever.py:57-59` 和 `agent/memory_manager.py:122-124` 的 pattern
+—— 直接当 kwarg 传：`chat_completions(messages, model=effective_model)`。
+
+注：`OpenAICompatClient.chat_completions`（`agent/llm_client.py:140`）会 `kwargs.pop("model", None)`
+后用 `self.model`（客户端构造时绑定），所以对当前生产 client 实际无效，但：
+1. spec 伪代码明确要求传 `model=model or summary_model`，保持一致性
+2. aux_llm_router（`agent/aux_llm.py`）会原样转发 `**kwargs`，未来切换到 aux_llm 路径就生效
+3. 对 `AnthropicClient` 等其他实现也是 forward-compatible
+
+### 新增测试（2 个）
+
+- `test_system_prompt_sent_to_llm`：验证第一条 message 是 system + 内容 == "你是技术对话摘要助手。"
+- `test_model_param_forwarded_to_llm`：3 个 case 验证 model/summary_model 转发 + 优先级（model 优先于 summary_model）
+
+### Verification
+
+- `uv run pytest tests/test_summarize_9section.py -v` → 12/12 passed（原 10 + 新 2）
+- `uv run pytest tests/ --tb=no -q` → 1664 passed, 1 skipped（比 e1890aff 多 2 个新测试）
+- `uv run python scripts/verify.py` → 22/22 PASS

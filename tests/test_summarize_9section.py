@@ -372,3 +372,62 @@ async def test_e2e_circuit_breaker_via_compress_if_needed(tmp_path):
     assert call_count_after == call_count_before, (
         f"端到端熔断器：第 4 次不应调 LLM，call_count 从 {call_count_before} → {call_count_after}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review Fix Round 1：system prompt + model 参数验证
+# ---------------------------------------------------------------------------
+
+async def test_system_prompt_sent_to_llm():
+    """Review Fix Important 2：验证 system prompt "你是技术对话摘要助手。" 真发出。"""
+    client = _make_llm(return_content="# 摘要")
+    msgs = _mk_msgs(3)
+
+    await _summarize_conversation(msgs, llm_client=client)
+
+    call_args = client.chat_completions.call_args
+    sent_messages = call_args[0][0] if call_args[0] else call_args[1].get("messages", [])
+    # 第一条应是 system message
+    assert len(sent_messages) >= 2, (
+        f"应有 system + user 两条 message，实际 {len(sent_messages)} 条"
+    )
+    assert sent_messages[0]["role"] == "system", (
+        f"第一条 message 应是 system，实际 role={sent_messages[0].get('role')}"
+    )
+    assert sent_messages[0]["content"] == "你是技术对话摘要助手。", (
+        f"system prompt 内容不对，实际: {sent_messages[0]['content']!r}"
+    )
+    # 第二条应是 user message（9 段式 prompt）
+    assert sent_messages[1]["role"] == "user"
+
+
+async def test_model_param_forwarded_to_llm():
+    """Review Fix Important 1 + Minor 5：验证 model 真传给 chat_completions。"""
+    client = _make_llm(return_content="# 摘要")
+    msgs = _mk_msgs(3)
+
+    # Case 1：只传 model
+    await _summarize_conversation(msgs, llm_client=client, model="main-model-x")
+    kwargs1 = client.chat_completions.call_args[1]
+    assert kwargs1.get("model") == "main-model-x", (
+        f"model 参数应转发，实际 kwargs: {kwargs1}"
+    )
+
+    # Case 2：同时传 model + summary_model，应优先 model（spec: model or summary_model）
+    await _summarize_conversation(
+        msgs, llm_client=client,
+        model="main-model-x", summary_model="summary-model-y",
+    )
+    kwargs2 = client.chat_completions.call_args[1]
+    assert kwargs2.get("model") == "main-model-x", (
+        f"model + summary_model 都传时应优先 model，实际: {kwargs2.get('model')!r}"
+    )
+
+    # Case 3：只传 summary_model（model=None），应用 summary_model
+    await _summarize_conversation(
+        msgs, llm_client=client, summary_model="summary-model-y",
+    )
+    kwargs3 = client.chat_completions.call_args[1]
+    assert kwargs3.get("model") == "summary-model-y", (
+        f"model=None 时应回退到 summary_model，实际: {kwargs3.get('model')!r}"
+    )
