@@ -267,6 +267,10 @@ uv sync                                 # 同步已声明依赖
 | /rewind 4 模式 | `cli.py:_handle_rewind_command`（全恢复/只对话/只代码/从此压缩）|
 | OS 沙箱（bwrap/Seatbelt） | `agent/sandbox_runner.py` + `tools/terminal_tool.py`（_handle_terminal sandbox 注入） |
 | reflection reference 型 | `agent/reflection.py:REFLECTION_PROMPT_TEMPLATE`（4 类：user/feedback/project/reference）|
+| time-based MC（60min 清旧 tool result） | `agent/context_pipeline.py:time_based_clear_old_tool_results`（在 `compress_if_needed` 最早跑，无 token 检查；`_timestamp` 在 `_assemble_turn_messages` 加，主循环 strip 后发给 LLM）|
+| 落盘精细化（per-tool 50K + per-message 200K + 决策冻结） | `agent/context_pipeline.py:offload_large_tool_results` + `_enforce_per_message_budget` + `_offload_decisions`（LRU 1000）+ `reset_offload_decisions`（AIAgent.__init__ 调）|
+| 9 段式 LLM 摘要（+ PTL 重试 + 熔断器 + session_memory） | `agent/context_compressor.py:SUMMARIZE_PROMPT_9SECTION` + `_summarize_conversation`（9 段 + PTL 重试 3 次 + 熔断 3 次失败）+ `reset_compact_circuit_breaker`（AIAgent.__init__ 调）|
+| prompt cache 检测（12 维度 + break 根因） | `agent/cache_monitor.py:record_prompt_state` / `check_cache_break` / `notify_compaction`（llm_compact + reactive_compact 末尾调）/ `reset_cache_monitor`（AIAgent.__init__ 调）；hook 在 `_call_llm_with_escalation` 流式+非流式汇合点；`/cache-stats` 命令看统计 |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -289,7 +293,7 @@ uv sync                                 # 同步已声明依赖
 
 ## 测试策略
 
-- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,llm_retry,worktree,mcp,task_system,agent_defs,web_search,hooks}.py`
+- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,llm_retry,worktree,mcp,task_system,agent_defs,web_search,hooks,time_based_mc,offload_refined,summarize_9section,cache_monitor}.py`
 - **集成**：`tests/test_integration.py` 用 mock OpenAI client 跑完整对话流程（含工具调用、记忆注入、中断）
 - **验证脚本**：`scripts/verify.py` 跑 11-scaffold.md 的 22 项检查清单，适合改完代码后快速回归（不含 P0-P3 新功能测试）
 - **新增功能必加测试**：每个新模块（permission/mcp/task_store/agent_defs/web_search 等）都有独立测试文件，改完跑 `uv run pytest tests/` 确认无回归
