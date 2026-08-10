@@ -68,13 +68,15 @@ def _base_config(
     gap_minutes: int = 60,
     keep_recent: int = 5,
 ) -> dict:
-    """构造带 time_based_mc 配置的 config 字典。"""
+    """构造带 time_based_mc 配置的 context 子字典（flat keys）。
+
+    compress_if_needed 传入的 config 已经是 self.config.get("context", {})，
+    所以 time_based_* 是 flat key（跟 snip_keep_first / output_offload_threshold 一致）。
+    """
     return {
-        "context": {
-            "time_based_mc_enabled": enabled,
-            "time_based_mc_gap_minutes": gap_minutes,
-            "time_based_mc_keep_recent": keep_recent,
-        }
+        "time_based_mc_enabled": enabled,
+        "time_based_mc_gap_minutes": gap_minutes,
+        "time_based_mc_keep_recent": keep_recent,
     }
 
 
@@ -101,8 +103,8 @@ def test_within_60min_no_clear():
 
 # ---------- 测试 2：60min 外清 ----------
 
-def test_over_60min_clear():
-    """距上次 assistant 70 分钟 → 旧 tool result 被替换成清除标记。"""
+def test_over_60min_keeps_all_when_below_keep_recent():
+    """距上次 assistant 70 分钟但 tool 数 < keep_recent → 全保留（不清）。"""
     now = time.time()
     messages = [
         *_mk_tool_chain(3, ts=now - 80 * 60),       # 3 条 tool，80 分钟前
@@ -171,6 +173,26 @@ def test_keep_recent_5_fewer_tools():
 
     for i in range(4):
         assert result[i]["content"] == f'{{"result": "data_{i}"}}'
+
+
+def test_keep_recent_zero_clears_all():
+    """keep_recent=0 + 超时 → 全部 tool result 都清（不保留任何）。
+
+    边缘场景：tool_indices[:-0] 会得到全列表，验证实现用 ``if keep_recent > 0``
+    分支守住了这个边缘（不依赖 Python 切片 [:-0] 的反直觉行为）。
+    """
+    now = time.time()
+    messages = [
+        *_mk_tool_chain(6, ts=now - 100 * 60),     # 6 条 tool，100 分钟前
+        _mk_assistant_final(ts=now - 70 * 60),     # 最后 assistant，70 分钟前
+    ]
+    config = _base_config(keep_recent=0)
+    result = time_based_clear_old_tool_results(messages, config)
+
+    # keep_recent=0 → 全部清
+    for i in range(6):
+        assert result[i]["content"] == CLEARED_MARK, \
+            f"tool result {i} 应被清除（keep_recent=0）"
 
 
 # ---------- 测试 4：没有 _timestamp 字段 → fail-open ----------
@@ -287,3 +309,110 @@ def test_fail_open_on_exception():
     # config 没有 "context" 键 → .get("context", {}) 应 fail-open
     result = time_based_clear_old_tool_results(messages, {})
     assert result is messages or result == messages
+
+
+# ---------- 集成测试：通过 compress_if_needed 编排触发 ----------
+
+import pytest
+from unittest.mock import MagicMock
+
+from agent.context_pipeline import compress_if_needed, CompressionSessionState
+
+
+class _FakeLLM:
+    """模拟 LLM client（async chat_completions），仅供 compress_if_needed 接口对齐。"""
+    async def chat_completions(self, msgs):
+        m = MagicMock()
+        m.choices = [MagicMock(message=MagicMock(content="summary"))]
+        return m
+
+
+def _orch_cfg(
+    enabled: bool = True,
+    gap_minutes: int = 60,
+    keep_recent: int = 5,
+) -> dict:
+    """compress_if_needed 用的 context 子字典（flat keys）。
+
+    包含 snip/offload/L4 需要的 flat key，让其他层不干扰本测试。
+    """
+    return {
+        "snip_message_threshold": 10 ** 9,     # 禁 L1 snip
+        "snip_keep_first": 3,
+        "snip_keep_last": 47,
+        "output_offload_threshold": 10 ** 9,   # 禁 L2 offload
+        "output_offload_preview": 2000,
+        "micro_keep_recent_results": 3,
+        "llm_compact_token_threshold": 10 ** 9,  # 禁 L4
+        "llm_compact_cooldown_turns": 5,
+        "max_compress_attempts": 3,
+        "llm_compact_keep_recent": 10,
+        "transcript_enabled": False,
+        "transcript_retention": 20,
+        "tool_result_total_budget": 10 ** 9,
+        # time-based MC（改造点 ④）
+        "time_based_mc_enabled": enabled,
+        "time_based_mc_gap_minutes": gap_minutes,
+        "time_based_mc_keep_recent": keep_recent,
+    }
+
+
+@pytest.mark.asyncio
+async def test_compress_if_needed_skips_when_disabled(tmp_path):
+    """compress_if_needed 编排：time_based_mc_enabled=False → tool result 不被清。
+
+    回归保障：Critical 1（config 嵌套 bug）修复后，enabled=False 配置（flat key）
+    能真正被编排器读到、让 time-based MC 跳过。若 bug 复现（函数去读嵌套 context 键），
+    enabled 会被 fallback 到默认 True，tool result 会被清掉，断言失败。
+    """
+    now = time.time()
+    messages = [
+        {"role": "system", "content": "sys"},
+        *_mk_tool_chain(8, ts=now - 100 * 60),     # 8 条 tool，100 分钟前
+        _mk_assistant_final(ts=now - 70 * 60),     # 超时
+    ]
+    cfg = _orch_cfg(enabled=False, keep_recent=5)
+    state = CompressionSessionState()
+    out, _ = await compress_if_needed(
+        messages,
+        llm_client=_FakeLLM(),
+        model="test",
+        config=cfg,
+        session_state=state,
+        agent_home=str(tmp_path),
+        session_id="s1",
+    )
+    # enabled=False → tool result 内容不被清
+    tool_contents = [m.get("content") for m in out if m.get("role") == "tool"]
+    assert all(c != CLEARED_MARK for c in tool_contents), \
+        "enabled=False 时不应有 tool result 被清"
+
+
+@pytest.mark.asyncio
+async def test_compress_if_needed_clears_when_enabled_and_overdue(tmp_path):
+    """compress_if_needed 编排：enabled=True + 超时 + tool 数 > keep_recent → 清。
+
+    正向验证：flat key 配置能让 time-based MC 真正触发，证明 config shape 修复有效。
+    """
+    now = time.time()
+    messages = [
+        {"role": "system", "content": "sys"},
+        *_mk_tool_chain(8, ts=now - 100 * 60),     # 8 条 tool，100 分钟前
+        _mk_assistant_final(ts=now - 70 * 60),     # 超时
+    ]
+    cfg = _orch_cfg(enabled=True, keep_recent=5)
+    state = CompressionSessionState()
+    out, _ = await compress_if_needed(
+        messages,
+        llm_client=_FakeLLM(),
+        model="test",
+        config=cfg,
+        session_state=state,
+        agent_home=str(tmp_path),
+        session_id="s2",
+    )
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    cleared = [m for m in tool_msgs if m.get("content") == CLEARED_MARK]
+    kept = [m for m in tool_msgs if m.get("content") != CLEARED_MARK]
+    assert len(cleared) == 3, f"期望 3 条被清（8 - 5），实际 {len(cleared)}"
+    assert len(kept) == 5, f"期望 5 条保留，实际 {len(kept)}"

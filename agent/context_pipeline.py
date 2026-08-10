@@ -61,7 +61,9 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
     """
     CLEARED_MARK = "[Old tool result content cleared]"
     try:
-        ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
+        # config 是 context 子字典（由 compress_if_needed 从 self.config.get("context", {}) 传入），
+        # flat key 读法跟 snip_compact / offload_large_tool_results 一致
+        ctx_cfg = config if isinstance(config, dict) else {}
         enabled = ctx_cfg.get("time_based_mc_enabled", True)
         if not enabled:
             return messages
