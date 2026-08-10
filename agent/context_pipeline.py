@@ -743,6 +743,13 @@ def reactive_compact(
 
     session_state.reacted = True
     logger.warning("reactive_compact triggered: kept last %d", len(keep))
+    # 通知 cache_monitor：下次 cache 下降是预期压缩（对齐 llm_compact 的 pattern）
+    # fail-open：异常只 debug log，不影响压缩结果
+    try:
+        from agent.cache_monitor import notify_compaction
+        notify_compaction()
+    except Exception as e:
+        logger.debug("notify_compaction fail-open: %s", e)
     return new_messages, True
 
 

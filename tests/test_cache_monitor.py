@@ -606,6 +606,70 @@ async def test_e2e_compact_then_no_break(tmp_path):
 
 
 # ============================================================================
+# reactive_compact 触发 notify_compaction（紧急通道：prompt_too_long 时）
+# ============================================================================
+
+def test_reactive_compact_calls_notify_compaction():
+    """reactive_compact 触发后，notify_compaction 应被调用。"""
+    from agent import cache_monitor
+    from agent.context_pipeline import reactive_compact, CompressionSessionState
+
+    cache_monitor.reset_cache_monitor()
+    assert cache_monitor._pending_compaction is False
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "old1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "old2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "old3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "recent"},
+    ]
+    session_state = CompressionSessionState()
+    new_msgs, changed = reactive_compact(
+        messages, session_state=session_state, keep_recent=3,
+    )
+    assert changed is True
+    assert cache_monitor._pending_compaction is True, (
+        "reactive_compact 未触发 notify_compaction"
+    )
+
+
+def test_reactive_compact_then_no_break():
+    """reactive_compact 触发 notify_compaction 后，cache 大降不算 break。"""
+    from agent import cache_monitor
+    from agent.context_pipeline import reactive_compact, CompressionSessionState
+
+    cache_monitor.reset_cache_monitor()
+
+    # 先种 baseline
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(
+        current_state=s1, cache_read_tokens=10000,
+    )
+
+    # 触发 reactive_compact
+    messages = [
+        {"role": "system", "content": "sys"},
+    ] + [{"role": "user", "content": f"msg{i}"} for i in range(20)]
+    session_state = CompressionSessionState()
+    reactive_compact(messages, session_state=session_state, keep_recent=3)
+
+    # reactive 后 cache 大降，应该不算 break
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=100,  # 大降
+    )
+    assert result is None
+
+
+# ============================================================================
 # reset_cache_monitor 在 __init__ 调用测试
 # ============================================================================
 
