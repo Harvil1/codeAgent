@@ -81,6 +81,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "snip_keep_last": 47,
         # L2 micro（对齐 Claude Code microCompact：按单条大小折叠，保护最近 3 条）
         "micro_keep_recent_results": 3,
+        # 改造点 ④：time-based MC（60min 清旧工具结果）
+        # 距最后一条 assistant 消息 > gap_minutes 时，把旧 tool result 替换为清除标记，
+        # 保留最近 keep_recent 个（对齐 claude-code-main microCompact:evaluateTimeBasedTrigger）
+        "time_based_mc_enabled": True,
+        "time_based_mc_gap_minutes": 60,
+        "time_based_mc_keep_recent": 5,
         # L4 llm
         # 100K tokens ≈ 300K 字符。DeepSeek/OpenAI context 上限 64K-128K。
         # 消息数阈值只是兜底（token 接近窗口才 LLM 压缩，1M 模型放宽到 2000）

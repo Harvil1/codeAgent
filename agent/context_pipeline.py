@@ -7,6 +7,7 @@ Task P1.1（spec §7.1）补 L3.5 contextCollapse：按 token 占用比折叠早
 """
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -39,6 +40,94 @@ def _has_tool_calls(msg: dict) -> bool:
 def _is_tool_result(msg: dict) -> bool:
     """是否为 tool 结果消息（role=='tool'）。"""
     return msg.get("role") == "tool"
+
+
+def time_based_clear_old_tool_results(messages: list, config: dict) -> list:
+    """改造点 ④：基于时间的微压缩——距最后一条 assistant > gap_minutes 时清旧 tool result。
+
+    对齐 claude-code-main microCompact:evaluateTimeBasedTrigger。
+    在 compress_if_needed 编排里最早跑（无 token 检查），L1 snip 之前。
+
+    行为：
+      1. enabled=False → 直接返回原 messages
+      2. 找最后一条 role=="assistant" 的消息 index
+      3. 读该消息的 _timestamp；没有就 fail-open 返回
+      4. elapsed = (now - last_ts) / 60；< gap_minutes 就返回
+      5. 超时：把 last_assistant_idx 之前的所有 tool result 清除内容，
+         保留最后 keep_recent 个（不清）
+
+    fail-open：异常不影响主流程，返回原 messages。
+    幂等：已清除的 tool result content 等于 CLEARED_MARK，再清也不变。
+    """
+    CLEARED_MARK = "[Old tool result content cleared]"
+    try:
+        ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
+        enabled = ctx_cfg.get("time_based_mc_enabled", True)
+        if not enabled:
+            return messages
+
+        gap_minutes = ctx_cfg.get("time_based_mc_gap_minutes", 60)
+        keep_recent = ctx_cfg.get("time_based_mc_keep_recent", 5)
+
+        # 找最后一条 assistant 消息
+        last_assistant_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "assistant":
+                last_assistant_idx = i
+                break
+        if last_assistant_idx < 0:
+            return messages
+
+        last_ts = messages[last_assistant_idx].get("_timestamp")
+        if not last_ts:
+            return messages
+
+        elapsed_min = (time.time() - last_ts) / 60
+        if elapsed_min < gap_minutes:
+            return messages
+
+        # 超时：找 last_assistant_idx 之前的所有 tool result
+        tool_indices = [
+            i for i in range(last_assistant_idx)
+            if messages[i].get("role") == "tool"
+        ]
+        if len(tool_indices) <= keep_recent:
+            return messages
+
+        # 保留最后 keep_recent 个，前面的清内容
+        to_clear = tool_indices[:-keep_recent] if keep_recent > 0 else tool_indices
+        cleared_count = 0
+        for i in to_clear:
+            if messages[i].get("content"):
+                messages[i]["content"] = CLEARED_MARK
+                cleared_count += 1
+
+        if cleared_count:
+            logger.info(
+                "time-based MC：清除了 %d 条旧工具结果（距上次 assistant %d 分钟）",
+                cleared_count, int(elapsed_min),
+            )
+        return messages
+    except Exception as e:
+        logger.warning("time-based MC 异常（fail-open）: %s", e)
+        return messages
+
+
+def strip_internal_fields(messages: list) -> list:
+    """strip 消息列表里的内部字段（如 _timestamp），不污染发给 LLM 的 prompt。
+
+    prompt cache 神圣不可侵犯：_timestamp 等内部字段绝不能进 LLM messages。
+    在 _assemble_turn_messages 组装发给 LLM 的 messages 时调用。
+    """
+    INTERNAL_KEYS = ("_timestamp",)
+    out = []
+    for m in messages:
+        if any(k in m for k in INTERNAL_KEYS):
+            new_m = {k: v for k, v in m.items() if k not in INTERNAL_KEYS}
+            out.append(new_m)
+        else:
+            out.append(m)
+    return out
 
 
 def snip_compact(
@@ -524,6 +613,11 @@ async def compress_if_needed(
                 return messages, False
         except Exception as e:
             logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
+
+    # ── 改造点 ④：time-based MC（最早跑，无 token 检查）──
+    # 距最后一条 assistant > 60min 时，把旧 tool result 内容替换为清除标记
+    # 对齐 claude-code-main microCompact:evaluateTimeBasedTrigger
+    messages = time_based_clear_old_tool_results(messages, config)
 
     # L1 snip（对齐 Claude Code：减少频繁裁中间，由 L4 token 主导）
     messages, c1 = snip_compact(

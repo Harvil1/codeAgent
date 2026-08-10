@@ -24,10 +24,11 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 from agent.budget import IterationBudget
-from agent.context_pipeline import CompressionSessionState
+from agent.context_pipeline import CompressionSessionState, strip_internal_fields
 from agent.prompt_builder import build_system_prompt
 from tools.registry import registry
 
@@ -1002,6 +1003,9 @@ class AIAgent:
         # 上下文管理提示（接近上限时建议主动 /compact /new）
         self._maybe_inject_context_tip(messages)
 
+        # strip 内部字段（_timestamp 等），不污染发给 LLM 的 prompt（保护 prompt cache）
+        messages = strip_internal_fields(messages)
+
         return messages
 
     def _maybe_inject_context_tip(self, messages: list) -> None:
@@ -1261,6 +1265,7 @@ class AIAgent:
             self.conversation_history.append({
                 "role": "assistant",
                 "content": f"[API 错误: {e}]",
+                "_timestamp": time.time(),
             })
             return None
 
@@ -1401,6 +1406,7 @@ class AIAgent:
             assistant_entry["reasoning_content"] = rc
         if sig:
             assistant_entry["thinking_signature"] = sig
+        assistant_entry["_timestamp"] = time.time()
         self.conversation_history.append(assistant_entry)
         # 对齐 Claude Code：assistant(tool_calls) 消息持久化，恢复时可重放
         self._persist_session_message(
@@ -1648,6 +1654,7 @@ class AIAgent:
                 "tool_call_id": tc.id,
                 "name": tc.function.name,
                 "content": content,
+                "_timestamp": time.time(),
             })
             self._persist_session_message(
                 "tool", content, tool_call_id=tc.id, name=tc.function.name,
@@ -1693,6 +1700,7 @@ class AIAgent:
         self.conversation_history.append({
             "role": "assistant",
             "content": final_content,
+            "_timestamp": time.time(),
         })
 
         if self.on_response:
@@ -1757,6 +1765,7 @@ class AIAgent:
         self.conversation_history.append({
             "role": "assistant",
             "content": fallback,
+            "_timestamp": time.time(),
         })
         # 异步写入外部记忆 provider（即使被打断也保留部分上下文）
         self._sync_memory(user_message, fallback)
