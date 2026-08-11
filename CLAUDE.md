@@ -279,6 +279,7 @@ uv sync                                 # 同步已声明依赖
 | reactive_compact 多次触发 + 冷却窗口 | `agent/context_pipeline.py:reactive_compact`（session_state.reactive_last_at + reactive_count；冷却 60s + 上限 5 次/会话；`reacted` 改 @property 向后兼容）；config `reactive_compact_cooldown_seconds` + `reactive_compact_max_per_session` |
 | PTL tokenGap 精确算法 | `agent/context_compressor.py:_compute_ptl_drop_count` + `_get_model_max_tokens`（三格式正则 DeepSeek/Anthropic/OpenAI + 三层 fallback 到 20% 旧算法）|
 | post-compact 主动恢复（最近文件 + invoked skills） | `agent/post_compact_recovery.py:build_post_compact_brief`（compact 末尾注入；走 safe_path 白名单 + fail-open）；追踪在 `_dispatch_tool_calls`（safe + unsafe 两路都调 `_record_recent`）；config `post_compact_recovery_enabled/max_files/max_skills` |
+| 子代理 sidechain transcript 持久化（CCAR5-I） | `agent/subagent_persistence.py`（generate_agent_id / write_metadata / append_message / load_transcript / list_resumable / mark_completed / cleanup_old / cleanup_stale_subagents）；接入 `tools/delegate_tool.py:_run_child`（on_response 回调 + try/finally 标记 status）；cli.py 启动时清理 stale running + 过期 retention；config 开关 `delegation.subagent_persistence_enabled`（默认 True）+ `subagent_persistence_retention_days`（默认 7） |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -298,10 +299,11 @@ uv sync                                 # 同步已声明依赖
 - **mcp_server_filter 仅 schema 层** —— 自定义子代理 `mcpServers` 字段只过滤 LLM 可见 schema，registry 仍注册全部 MCP 工具（手动 dispatch 仍命中，对齐 Claude Code 语义）。
 - **context:fork 同步等待** —— 技能子代理跑完才回主循环（对齐官方 `background:false`）；子代理用 minimal 工具集，spawn_depth+1 防递归。
 - **Hooks 通知型事件 fail-open** —— round3 加的 7 个事件都是通知型，hook 异常只 log 不影响主流程。
+- **子代理 transcript 落盘 fail-open** —— Task I 加的 sidechain transcript 持久化（`~/.OmniMate/.agent-sessions/`）所有操作 try/except，写盘失败不影响主流程；默认开（`delegation.subagent_persistence_enabled`），7 天 retention 清理；Phase 2 才做 `subagent_resume` 工具。
 
 ## 测试策略
 
-- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,llm_retry,worktree,mcp,task_system,agent_defs,web_search,hooks,time_based_mc,offload_refined,summarize_9section,cache_monitor,post_compact_recovery,partial_compact,reactive_compact}.py`
+- **按模块组织**：`tests/test_{basic,memory,skills,curator,sessions,context,delegation,config,integration,permission,llm_retry,worktree,mcp,task_system,agent_defs,web_search,hooks,time_based_mc,offload_refined,summarize_9section,cache_monitor,post_compact_recovery,partial_compact,reactive_compact,subagent_persistence}.py`
 - **集成**：`tests/test_integration.py` 用 mock OpenAI client 跑完整对话流程（含工具调用、记忆注入、中断）
 - **验证脚本**：`scripts/verify.py` 跑 11-scaffold.md 的 22 项检查清单，适合改完代码后快速回归（不含 P0-P3 新功能测试）
 - **新增功能必加测试**：每个新模块（permission/mcp/task_store/agent_defs/web_search 等）都有独立测试文件，改完跑 `uv run pytest tests/` 确认无回归

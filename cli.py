@@ -422,6 +422,27 @@ class RuntimeContext:
         except Exception as e:
             logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
 
+        # === Task I: 清理 stale 子代理记录 + 过期 retention 清理 ===
+        # 启动时把 status=running 但进程已退出的（上次崩溃残留）标记为 interrupted，
+        # 并清理超过 retention_days 的已完成记录。
+        _delegation_cfg = self.config.get("delegation", {})
+        if _delegation_cfg.get("subagent_persistence_enabled", True):
+            try:
+                from agent.subagent_persistence import (
+                    cleanup_stale_subagents, cleanup_old,
+                )
+                stale_n = cleanup_stale_subagents()
+                retention_days = _delegation_cfg.get(
+                    "subagent_persistence_retention_days", 7,
+                )
+                old_n = cleanup_old(days=retention_days)
+                if stale_n or old_n:
+                    logger.info(
+                        "子代理持久化清理：stale=%d, expired=%d", stale_n, old_n,
+                    )
+            except Exception as e:
+                logger.debug("子代理持久化清理失败（不阻塞）: %s", e)
+
         # === Hooks: SESSION_START（会话已建立，声明式 hooks 已加载） ===
         self._fire_session_start()
 

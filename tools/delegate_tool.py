@@ -408,9 +408,35 @@ def _run_child(
     子代理不继承父代理的对话历史。
 
     batch1-T4: 子 agent 注册到父 agent._children，支持中断传播。
+    Task I: sidechain transcript 持久化（fail-open，不影响主流程）。
     """
     # 延迟导入避免循环
     from agent import AIAgent
+
+    # === Task I: sidechain transcript 持久化初始化（fail-open）===
+    _persistence_enabled = (kwargs.get("config") or {}).get(
+        "delegation", {},
+    ).get("subagent_persistence_enabled", True)
+    _child_agent_id = None
+    if _persistence_enabled:
+        try:
+            from agent.subagent_persistence import (
+                generate_agent_id, write_metadata as _sp_write_meta,
+            )
+            _child_agent_id = generate_agent_id(
+                parent_session_id=kwargs.get("session_id", ""),
+            )
+            _sp_write_meta(_child_agent_id, {
+                "agent_type": kwargs.get("subagent_type", "general-purpose"),
+                "parent_session_id": kwargs.get("session_id", ""),
+                "description": f"{goal[:100]}",
+                "status": "running",
+                "created_at": __import__("time").time(),
+            })
+            logger.debug("Task I: 子代理 transcript 持久化启用: %s", _child_agent_id)
+        except Exception as e:
+            logger.debug("Task I: transcript 持久化初始化失败（fail-open）: %s", e)
+            _child_agent_id = None
 
     # 从 kwargs 或 config 获取 LLM 配置
     base_url = kwargs.get("base_url")
@@ -667,6 +693,24 @@ def _run_child(
                         system_prompt = _build_child_system_prompt(
                             goal, context, role, override=custom_def.system_prompt)
 
+        # === Task I: on_response 回调把每轮 message 追加到 transcript ===
+        def _on_response_cb(final_content: str):
+            """子代理每轮响应的回调（写入 sidechain transcript）。
+
+            fail-open：写盘失败不影响子代理正常返回。
+            """
+            if not _child_agent_id:
+                return
+            try:
+                from agent.subagent_persistence import append_message
+                append_message(_child_agent_id, {
+                    "role": "assistant",
+                    "content": final_content,
+                    "_ts": __import__("time").time(),
+                })
+            except Exception:
+                pass  # fail-open
+
         child = AIAgent(
             base_url=base_url,
             api_key=api_key or None,
@@ -682,6 +726,7 @@ def _run_child(
             config=child_config,
             memory_store=child_memory_store,
             initial_messages=child_initial_messages,
+            on_response=_on_response_cb,  # Task I: transcript 持久化 hook
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）
@@ -748,8 +793,24 @@ def _run_child(
         # round3 D2 NEW: 子代理成功标志（finally 里据此触发 SUBAGENT_STOP）
         _fork_success = True
 
+        # === Task I: 标记子代理完成 ===
+        if _child_agent_id:
+            try:
+                from agent.subagent_persistence import mark_completed
+                mark_completed(_child_agent_id, "completed")
+            except Exception:
+                pass  # fail-open
+
         return result
     finally:
+        # === Task I: 异常时标记 failed（_fork_success=False 表示没到 return）===
+        if _child_agent_id and not _fork_success:
+            try:
+                from agent.subagent_persistence import mark_completed
+                mark_completed(_child_agent_id, "failed")
+            except Exception:
+                pass  # fail-open
+
         # batch1-T4: 从父 agent._children 移除
         if parent_agent is not None and child is not None:
             try:
