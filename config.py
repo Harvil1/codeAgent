@@ -221,6 +221,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Task G: worktree 智能清理
         # True=总是清理（旧行为，无论有无改动）；False=智能清理（有改动保留）
         "worktree_always_cleanup": False,
+        # Task H: fork 子代理路径（cache-identical 省 token）
+        # True 时 subagent(fork=True) 继承父 system prompt + 父对话前缀
+        "fork_subagent_enabled": True,
+        # 继承父最近 N 个 assistant turn（cache 命中范围 vs context 污染权衡）
+        "fork_max_parent_turns": 3,
     },
 
     # 安全

@@ -77,6 +77,7 @@ class AIAgent:
         ask_user_bridge=None,    # ask_user CLI 桥接（渲染问题+读选择）
         checkpoint_manager=None, # === Checkpoint NEW: 文件快照/回滚（对齐 Claude Code）===
         permission_mode: str = "default",  # === B2 NEW: default | bypassPermissions ===
+        initial_messages: list = None,  # === Task H NEW: fork 子代理初始 messages ===
     ):
         """
         参数：
@@ -90,6 +91,8 @@ class AIAgent:
             memory_store: 记忆存储（MEMORY.md + USER.md）
             on_tool_call: 工具调用回调（CLI 用它打印进度）
             on_response: 最终响应回调
+            initial_messages: fork 子代理初始 conversation_history（Task H），
+                None 时从空开始（默认）；非 None 时用传入的 messages 初始化
         """
         # 创建 LLM client（根据 model_format 选 OpenAI 兼容或 Anthropic 原生）
         from agent.llm_client import create_llm_client
@@ -156,7 +159,8 @@ class AIAgent:
         self._context_prompt: Optional[str] = ""
 
         # 对话历史（不包含 system prompt，system 单独传）
-        self.conversation_history: list = []
+        # Task H NEW: initial_messages 支持（fork 子代理继承父前缀）
+        self.conversation_history: list = list(initial_messages) if initial_messages else []
 
         # 上下文压缩配置
         self.compression_enabled = True

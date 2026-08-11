@@ -150,6 +150,16 @@ DELEGATE_TASK_SCHEMA = {
                 "description": "是否在隔离工作区执行（默认 False）。True 时创建独立 worktree/临时目录，避免文件冲突。",
                 "default": False,
             },
+            "fork": {
+                "type": "boolean",
+                "description": (
+                    "（高级）fork 模式：继承父 system prompt 字节 + 父对话前缀（最近 N 个 assistant turn），"
+                    "构造 cache-identical 前缀，prompt cache 命中省 token 50%+。"
+                    "仅适合 read-only 探索/分析类任务（子代理看不到父 tool_result 真实内容，只有占位符）。"
+                    "destructive 操作（写文件/删文件/持久化任务）请用 fork=False。默认 False。"
+                ),
+                "default": False,
+            },
         },
     },
 }
@@ -608,6 +618,55 @@ def _run_child(
                 child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
             child_config["mcp_server_filter"] = custom_def.mcp_servers
 
+        # === Task H: fork 子代理路径（cache-identical 省 token）===
+        # fork=True 时：子代理继承父 system prompt 字节 + 父对话前缀（最近 N 个 assistant turn），
+        # 构造 cache-identical 前缀，prompt cache 命中省 token 50%+。
+        # fail-open：fork 构造失败 fallback 到非 fork 路径（仅 log warning）
+        fork_mode = kwargs.get("fork", False)
+        child_initial_messages = None
+        if fork_mode:
+            # 读 config 开关（默认 True）
+            _cfg = kwargs.get("config") or {}
+            _delegation_cfg = _cfg.get("delegation") if isinstance(_cfg, dict) else {}
+            _fork_enabled = (_delegation_cfg or {}).get("fork_subagent_enabled", True)
+            _max_turns = int((_delegation_cfg or {}).get("fork_max_parent_turns", 3))
+
+            if _fork_enabled and parent_agent is not None:
+                try:
+                    from agent.fork_messages import (
+                        build_forked_messages,
+                        build_forked_system_prompt,
+                    )
+                    parent_messages = parent_agent.conversation_history or []
+                    parent_sysprompt = parent_agent._get_system_prompt() or ""
+                    # 覆盖 system_prompt 为 fork 版（父字节 + fork marker）
+                    system_prompt = build_forked_system_prompt(
+                        parent_sysprompt, child_role=role,
+                    )
+                    # 构造初始 messages（父前缀 + directive）
+                    child_initial_messages = build_forked_messages(
+                        parent_messages=parent_messages,
+                        parent_system_prompt=parent_sysprompt,
+                        child_directive=f"{goal}\n上下文: {context}" if context else goal,
+                        max_parent_turns=_max_turns,
+                    )
+                    logger.info(
+                        "Task H: fork 子代理启用，继承 %d 条 messages",
+                        len(child_initial_messages),
+                    )
+                except Exception as e:
+                    # fail-open：fork 构造失败，回退到非 fork 路径
+                    logger.warning(
+                        "Task H: fork 构造失败，fallback 到非 fork 路径: %s", e,
+                    )
+                    child_initial_messages = None
+                    # system_prompt 保留前面 _build_child_system_prompt 的结果
+                    # 但如果上面 build_forked_system_prompt 已覆盖又出错，需要重建
+                    system_prompt = _build_child_system_prompt(goal, context, role)
+                    if custom_def and custom_def.system_prompt:
+                        system_prompt = _build_child_system_prompt(
+                            goal, context, role, override=custom_def.system_prompt)
+
         child = AIAgent(
             base_url=base_url,
             api_key=api_key or None,
@@ -622,6 +681,7 @@ def _run_child(
             effort_level=(custom_def.effort if custom_def else None) or getattr(parent_agent, "effort_level", None),
             config=child_config,
             memory_store=child_memory_store,
+            initial_messages=child_initial_messages,
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）
