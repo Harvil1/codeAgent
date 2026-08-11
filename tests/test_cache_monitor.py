@@ -1004,8 +1004,8 @@ def test_diff_file_lru_cap(tmp_path, monkeypatch):
 
     diff_dir = tmp_path / ".cache-breaks"
     diff_files = list(diff_dir.glob("cache-break-*.diff"))
-    # 不超过 100
-    assert len(diff_files) <= 100, f"diff 文件应 <= 100，实际 {len(diff_files)}"
+    # 精确等于 100（105 次写入后 LRU 应到精确上限）
+    assert len(diff_files) == 100, f"diff 文件应 == 100，实际 {len(diff_files)}"
 
 
 # ============================================================================
@@ -1313,3 +1313,145 @@ def test_reset_clears_last_baseline_at():
 
     cache_monitor.reset_cache_monitor()
     assert cache_monitor._last_baseline_at is None
+
+
+# ============================================================================
+# Review Fix Round 1 测试
+# ============================================================================
+
+def test_system_delta_shows_real_char_count():
+    """Important 1: system delta 应显示真实字符差（不是 +0）。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A" * 100, tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A" * 150, tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    # delta 应是 +50（不是 +0）
+    assert "+50 chars" in result, f"期望 '+50 chars'，实际：{result}"
+
+
+def test_system_delta_shows_negative_char_count():
+    """Important 1: system 缩短时 delta 显示负数。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A" * 200, tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A" * 80, tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "-120 chars" in result, f"期望 '-120 chars'，实际：{result}"
+
+
+def test_system_len_multi_block():
+    """Important 1: system_prompt 为 list（multi-block）时 system_len 正确计算。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt=[{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
+        tools=[], model="m",
+    )
+    assert s1.system_len == 10  # "hello"(5) + "world"(5)
+    assert s1.system_boundary == "multi-block"
+
+
+async def test_e2e_tool_choice_betas_passed_from_config(tmp_path):
+    """Important 2: _call_llm_with_escalation 应从 config 读 tool_choice/betas 传入 record_prompt_state。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    agent, _ = _make_minimal_agent(tmp_path)
+    # config 里放 tool_choice 和 betas
+    agent.config = {
+        "model": {
+            "max_tokens": 4096,
+            "temperature": 0.5,
+            "tool_choice": "auto",
+            "betas": {"anthropic_beta": "prompt-caching-2024-07-31"},
+        }
+    }
+
+    captured_kwargs = {}
+    original_record = cache_monitor.record_prompt_state
+
+    def capture_record(**kwargs):
+        captured_kwargs.update(kwargs)
+        return original_record(**kwargs)
+
+    with patch.object(cache_monitor, "record_prompt_state", side_effect=capture_record):
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            system_prompt="你是助手",
+        )
+
+    assert "tool_choice" in captured_kwargs, "tool_choice 未传入 record_prompt_state"
+    assert captured_kwargs["tool_choice"] == "auto"
+    assert "betas" in captured_kwargs, "betas 未传入 record_prompt_state"
+    assert captured_kwargs["betas"] == {"anthropic_beta": "prompt-caching-2024-07-31"}
+
+
+def test_tool_choice_none_does_not_trigger_break():
+    """Important 2: tool_choice=None（常见情况）不应导致维度差异——恒定 baseline。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    # 两次都不传 tool_choice（默认 None）
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    assert s1.tool_choice is None
+    assert s2.tool_choice is None
+    assert s1.tool_choice == s2.tool_choice  # 恒定
+
+
+def test_diff_filename_unique_same_second(tmp_path, monkeypatch):
+    """Important 3: 同秒内写多个 diff 文件，文件名不覆盖。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    # 快速连续触发 5 次 break（都在同一秒）
+    for i in range(5):
+        s_prev = cache_monitor.record_prompt_state(
+            system_prompt=f"sys_{i}", tools=[], model="m",
+        )
+        cache_monitor.check_cache_break(
+            current_state=s_prev, cache_read_tokens=10000,
+        )
+        s_break = cache_monitor.record_prompt_state(
+            system_prompt=f"sys_{i}_changed", tools=[], model="m",
+        )
+        cache_monitor.check_cache_break(
+            current_state=s_break, cache_read_tokens=100,
+        )
+
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    # 应有 5 个（不覆盖）
+    assert len(diff_files) == 5, f"同秒 5 次 break 应有 5 个 diff，实际 {len(diff_files)}"
+    # 文件名唯一（无重复）
+    names = [f.name for f in diff_files]
+    assert len(set(names)) == 5, f"文件名应唯一，实际：{names}"

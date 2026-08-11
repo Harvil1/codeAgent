@@ -1274,6 +1274,8 @@ class AIAgent:
                 max_tokens=_mt,
                 temperature=_temp,
                 stream_mode=self._stream_callback is not None,
+                tool_choice=_cfg.get("model", {}).get("tool_choice"),
+                betas=_cfg.get("model", {}).get("betas"),
                 user_content_prefix=_ucp,
                 messages_count=len(messages),
             )

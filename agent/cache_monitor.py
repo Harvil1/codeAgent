@@ -58,6 +58,7 @@ class PromptState:
     user_content_prefix: int = 0  # user 首条消息前 N 字符的 hash
     messages_count: int = 0
     system_boundary: str = ""  # "single" / "multi-block"
+    system_len: int = 0  # system prompt 长度（只存长度不存原文，用于 delta 显示）
     # per-tool hash（工具列表每个工具单独 hash，精准定位哪个工具变了）
     tool_hashes: List[ToolHashEntry] = field(default_factory=list)
 
@@ -69,6 +70,7 @@ _pending_compaction: bool = False  # compact 后预期 cache 下降
 _break_history: List[dict] = []  # break 事件累计（给 /cache-stats 展示）
 _BREAK_HISTORY_LIMIT: int = 100  # 防长会话内存膨胀
 _last_baseline_at: Optional[float] = None  # 上次 baseline 设置时间（TTL 分析用）
+_diff_counter: int = 0  # diff 文件名递增计数器（防同秒覆盖）
 
 
 def _hash_content(content: Any) -> int:
@@ -131,6 +133,15 @@ def record_prompt_state(
         # user_content_prefix: 前 500 字 hash
         ucp_str = (user_content_prefix or "")[:500]
 
+        # system_len：只存长度（不存原文），用于 delta 显示
+        if isinstance(system_prompt, list):
+            _sys_len = sum(
+                len(b.get("text", "")) if isinstance(b, dict) else len(str(b))
+                for b in system_prompt
+            )
+        else:
+            _sys_len = len(system_prompt or "")
+
         state = PromptState(
             system_hash=_hash_content(system_prompt),
             tools_hash=_hash_content([(t.name, t.schema_hash) for t in tool_hashes]),
@@ -144,6 +155,7 @@ def record_prompt_state(
             user_content_prefix=_hash_content(ucp_str),
             messages_count=kwargs.get("messages_count", 0),
             system_boundary="multi-block" if isinstance(system_prompt, list) else "single",
+            system_len=_sys_len,
             tool_hashes=tool_hashes,
         )
         return state
@@ -216,8 +228,9 @@ def check_cache_break(
         if len(_break_history) > _BREAK_HISTORY_LIMIT:
             del _break_history[0:len(_break_history) - _BREAK_HISTORY_LIMIT]
 
-        # LRU 清理 diff 文件
-        _enforce_diff_lru_limit()
+        # LRU 清理 diff 文件（只在真写了 diff 时才清理，避免无谓 IO）
+        if diff_path:
+            _enforce_diff_lru_limit()
 
         # 更新 baseline
         prev_read = _last_cache_read
@@ -243,9 +256,7 @@ def _diagnose_break(current: PromptState, prev: PromptState, token_drop: int) ->
 
     # 12 维度对比
     if current.system_hash != prev.system_hash:
-        prev_len = len(_state_system_text(prev))
-        cur_len = len(_state_system_text(current))
-        delta = cur_len - prev_len
+        delta = current.system_len - prev.system_len
         reasons.append(
             f"system prompt 变了 ({'+' if delta >= 0 else ''}{delta} chars)"
         )
@@ -317,15 +328,6 @@ def _diff_tool_hashes(current: List[ToolHashEntry], prev: List[ToolHashEntry]) -
     return " ".join(parts) if parts else "schema 全等但 tools_hash 变了"
 
 
-def _state_system_text(state: PromptState) -> str:
-    """从 PromptState 提取 system 文本（用于 diff 显示，长度比较）。
-
-    注意：PromptState 不保存原始 system_prompt（避免内存占用），
-    这里返回空字符串做占位（diff 内容靠 _write_break_diff 里另外算）。
-    """
-    return ""  # PromptState 只存 hash 不存原文；diff 文件不展示原文
-
-
 def _write_break_diff(
     prev: PromptState, cur: PromptState, reasons: List[str],
 ) -> Optional[str]:
@@ -333,6 +335,7 @@ def _write_break_diff(
 
     只在 system 或 tools 变了才写 diff（其他维度变化对 debug 帮助小）。
     """
+    global _diff_counter
     try:
         if not reasons:
             return None
@@ -344,8 +347,9 @@ def _write_break_diff(
         diff_dir = get_omnimate_home() / ".cache-breaks"
         diff_dir.mkdir(parents=True, exist_ok=True)
 
+        _diff_counter += 1
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        diff_path = diff_dir / f"cache-break-{ts}.diff"
+        diff_path = diff_dir / f"cache-break-{ts}-{_diff_counter:04d}.diff"
 
         # 简化版 diff（per-tool + system hash 对比）
         lines = [
@@ -411,6 +415,11 @@ def _enforce_diff_lru_limit() -> None:
         logger.debug("enforce_diff_lru_limit fail-open: %s", e)
 
 
+# 模块级 diff 上限（可被 AIAgent.__init__ 覆盖）
+# 放在 _read_diff_limit 之前（定义先于使用）
+_diff_limit: int = 100
+
+
 def _read_diff_limit() -> int:
     """从 config 读 max_cache_break_diff_files（默认 100）。"""
     try:
@@ -421,10 +430,6 @@ def _read_diff_limit() -> int:
         return _diff_limit
     except Exception:
         return 100
-
-
-# 模块级 diff 上限（可被 AIAgent.__init__ 覆盖）
-_diff_limit: int = 100
 
 
 def set_diff_limit(limit: int) -> None:
