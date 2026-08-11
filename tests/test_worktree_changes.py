@@ -128,17 +128,20 @@ def test_has_changes_non_git_with_new_file():
 # ---------------------------------------------------------------------------
 
 def test_cleanup_smart_no_changes_cleans(tmp_path):
-    """无改动 → cleanup_worktree_smart 清理（True）。"""
+    """无改动 → cleanup_worktree_smart 清理（True）。
+
+    注意：cleanup_worktree_smart 只清理目录不删分支（方案 B），
+    分支删除用闭包 cleanup（有精确 branch 上下文）。
+    """
     repo = _init_git_repo(tmp_path)
     wt_path, cleanup = _create_git_worktree(repo, "smart-nochange")
-    # 不需要 cleanup 原始（smart 接管）
     try:
         result = cleanup_worktree_smart(wt_path)
         assert result is True
         assert not wt_path.exists()
-    except Exception:
-        cleanup()
-        raise
+    finally:
+        # 用闭包清理分支（worktree 目录已被 smart cleanup 删，闭包兜底）
+        cleanup(force=True)
 
 
 def test_cleanup_smart_with_changes_preserves(tmp_path):
@@ -151,8 +154,8 @@ def test_cleanup_smart_with_changes_preserves(tmp_path):
         assert result is False
         assert wt_path.exists()
     finally:
-        # 手动清理（测试结束）
-        cleanup_worktree_smart(wt_path, force=True)
+        # 用闭包清理（删 worktree 目录 + 分支）
+        cleanup(force=True)
 
 
 def test_cleanup_smart_force_cleans_even_with_changes(tmp_path):
@@ -165,7 +168,7 @@ def test_cleanup_smart_force_cleans_even_with_changes(tmp_path):
         assert result is True
         assert not wt_path.exists()
     except Exception:
-        cleanup_worktree_smart(wt_path, force=True)
+        cleanup(force=True)
         raise
 
 
@@ -184,8 +187,8 @@ def test_create_workspace_smart_cleanup_preserves_with_changes(tmp_path):
     # 有改动 → 保留 → cleanup 返回 False
     assert result is False or result is None
     assert path.exists()
-    # 手动清理
-    cleanup_worktree_smart(path, force=True)
+    # 用闭包强制清理（删目录 + 分支）
+    cleanup(force=True)
 
 
 def test_create_workspace_smart_cleanup_no_changes(tmp_path):

@@ -39,18 +39,6 @@ logger = logging.getLogger(__name__)
 # 变更检测（Task G）
 # ---------------------------------------------------------------------------
 
-def _get_snapshot(path: Path) -> set:
-    """对临时目录取文件快照（用 listdir 获取相对路径集合）。
-
-    用于非 git 目录的变更检测（对比创建时 vs 清理时的文件集合）。
-    fail-open：异常返回空集合（后续 has_worktree_changes 会保守处理）。
-    """
-    try:
-        return {str(f.relative_to(path)) for f in path.rglob("*") if f.is_file()}
-    except Exception:
-        return set()
-
-
 def has_worktree_changes(worktree_path: Path) -> bool:
     """检测 worktree 是否有改动。
 
@@ -90,8 +78,9 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
     """智能清理：有改动保留（返回 False），无改动或 force=True 则清理（True）。
 
     用于独立调用场景（路径已知但无闭包上下文）。
-    git worktree 走 git worktree remove + branch -D；
-    非 git 目录走 shutil.rmtree。
+    **只做 has_changes 检测 + 目录清理，不删分支**。
+    分支删除由 `_create_git_worktree` 的 cleanup 闭包负责（它有精确的 branch 上下文，
+    不会误删其他并发 worktree 的分支）。
 
     返回：True=已清理 / False=保留
     """
@@ -104,6 +93,7 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
         return False
 
     # 尝试 git worktree 清理（如果是 git 仓库的一部分）
+    # 注意：不在这里删分支——分支删除由 _create_git_worktree 的闭包负责
     repo_root = get_repo_root(wt)
     if repo_root is not None:
         try:
@@ -113,30 +103,6 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
                 capture_output=True,
                 timeout=10,
             )
-            # 删除分支（如果能推断出）
-            try:
-                branch_result = subprocess.run(
-                    ["git", "branch", "--list", "--format=%(refname:short)",
-                     f"--contains={wt}"],
-                    cwd=str(repo_root),
-                    capture_output=True, text=True, timeout=5,
-                )
-                # 直接尝试删除 omnimate/ 开头的分支
-                branches_result = subprocess.run(
-                    ["git", "branch", "--list", "omnimate/*"],
-                    cwd=str(repo_root),
-                    capture_output=True, text=True, timeout=5,
-                )
-                for line in (branches_result.stdout or "").splitlines():
-                    b = line.strip().lstrip("* ").strip()
-                    if b and "omnimate/" in b:
-                        subprocess.run(
-                            ["git", "branch", "-D", b],
-                            cwd=str(repo_root),
-                            capture_output=True, timeout=5,
-                        )
-            except Exception:
-                pass
         except Exception as e:
             logger.debug("git worktree remove 失败: %s", e)
 
