@@ -68,7 +68,7 @@ def test_temp_workspace_via_helper():
         test_file.write_text("hi", encoding="utf-8")
         assert test_file.exists()
     finally:
-        cleanup()
+        cleanup(force=True)  # Task G: 智能清理下需 force=True 才能清理有改动的目录
     assert not path.exists()
 
 

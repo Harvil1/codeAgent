@@ -36,6 +36,116 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 变更检测（Task G）
+# ---------------------------------------------------------------------------
+
+def _get_snapshot(path: Path) -> set:
+    """对临时目录取文件快照（用 listdir 获取相对路径集合）。
+
+    用于非 git 目录的变更检测（对比创建时 vs 清理时的文件集合）。
+    fail-open：异常返回空集合（后续 has_worktree_changes 会保守处理）。
+    """
+    try:
+        return {str(f.relative_to(path)) for f in path.rglob("*") if f.is_file()}
+    except Exception:
+        return set()
+
+
+def has_worktree_changes(worktree_path: Path) -> bool:
+    """检测 worktree 是否有改动。
+
+    git 目录：用 git status --porcelain（返回非空 = 有改动）
+    非 git 目录：fallback 到 listdir 文件数 > 0（temp workspace 创建时是空的）
+
+    fail-open 原则：异常返回 True（保守，避免误删用户改动）。
+    """
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return False  # 不存在 = 无东西可清理
+
+    # 尝试 git status
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(wt),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+        # returncode != 0 可能不是 git 仓库 → fallback
+    except Exception as e:
+        logger.debug("git status 不可用，fallback 到 listdir 检测: %s", e)
+
+    # 非 git 目录 fallback：有文件就认为有改动
+    # （temp workspace 创建时是空的，子代理写入后会有文件）
+    try:
+        return any(wt.iterdir())
+    except Exception:
+        return True  # fail-open
+
+
+def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
+    """智能清理：有改动保留（返回 False），无改动或 force=True 则清理（True）。
+
+    用于独立调用场景（路径已知但无闭包上下文）。
+    git worktree 走 git worktree remove + branch -D；
+    非 git 目录走 shutil.rmtree。
+
+    返回：True=已清理 / False=保留
+    """
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return True  # 已不存在
+
+    if not force and has_worktree_changes(wt):
+        logger.info("worktree %s 有改动，保留（cleanup_worktree_smart）", wt)
+        return False
+
+    # 尝试 git worktree 清理（如果是 git 仓库的一部分）
+    repo_root = get_repo_root(wt)
+    if repo_root is not None:
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(wt)],
+                cwd=str(repo_root),
+                capture_output=True,
+                timeout=10,
+            )
+            # 删除分支（如果能推断出）
+            try:
+                branch_result = subprocess.run(
+                    ["git", "branch", "--list", "--format=%(refname:short)",
+                     f"--contains={wt}"],
+                    cwd=str(repo_root),
+                    capture_output=True, text=True, timeout=5,
+                )
+                # 直接尝试删除 omnimate/ 开头的分支
+                branches_result = subprocess.run(
+                    ["git", "branch", "--list", "omnimate/*"],
+                    cwd=str(repo_root),
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in (branches_result.stdout or "").splitlines():
+                    b = line.strip().lstrip("* ").strip()
+                    if b and "omnimate/" in b:
+                        subprocess.run(
+                            ["git", "branch", "-D", b],
+                            cwd=str(repo_root),
+                            capture_output=True, timeout=5,
+                        )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("git worktree remove 失败: %s", e)
+
+    # 兜底删除目录
+    shutil.rmtree(wt, ignore_errors=True)
+    return not wt.exists()
+
+
+# ---------------------------------------------------------------------------
 # 事件流（worktree lifecycle 审计日志）
 # ---------------------------------------------------------------------------
 
@@ -203,7 +313,14 @@ def _create_git_worktree(base: Path, name: str, *,
         "workspace_type": "git",
     })
 
-    def cleanup(keep: bool = False):
+    def cleanup(keep: bool = False, force: bool = False):
+        """清理 worktree。
+
+        keep=True：保留（用户查看），不做任何清理。
+        force=True：强制清理（即使有改动）。
+        默认（keep=False, force=False）：智能清理，有改动则保留。
+        返回：True=已清理 / False=保留（有改动或 keep=True）
+        """
         if keep:
             logger.info("保留 worktree: %s", worktree_dir)
             # 事件：remove.keep
@@ -211,7 +328,16 @@ def _create_git_worktree(base: Path, name: str, *,
                 "branch": branch,
                 "worktree_dir": str(worktree_dir),
             })
-            return
+            return False
+        # 智能检测：无 force 时先查改动
+        if not force and has_worktree_changes(worktree_dir):
+            logger.info("worktree %s 有改动，保留（智能清理）", worktree_dir)
+            _log_worktree_event(repo_root, "remove.keep", {
+                "branch": branch,
+                "worktree_dir": str(worktree_dir),
+                "reason": "has_changes",
+            })
+            return False
         # 事件：remove.before
         _log_worktree_event(repo_root, "remove.before", {
             "branch": branch,
@@ -246,6 +372,7 @@ def _create_git_worktree(base: Path, name: str, *,
             "path": str(worktree_dir),
             "branch": branch,
         })
+        return True
 
     return worktree_dir, cleanup
 
@@ -270,15 +397,27 @@ def _create_temp_workspace(name: str, *,
         "workspace_type": "temp",
     })
 
-    def cleanup(keep: bool = False):
+    def cleanup(keep: bool = False, force: bool = False):
+        """清理 temp workspace。
+
+        keep=True：保留（用户查看），不做任何清理。
+        force=True：强制清理（即使有改动）。
+        默认（keep=False, force=False）：智能清理，有改动则保留。
+        返回：True=已清理 / False=保留
+        """
         if keep:
-            return
+            return False
+        # 智能检测：无 force 时先查改动
+        if not force and has_worktree_changes(tmp):
+            logger.info("temp workspace %s 有改动，保留（智能清理）", tmp)
+            return False
         shutil.rmtree(tmp, ignore_errors=True)
         # P3.4: 触发 WORKTREE_REMOVE hook（fail-open）
         _fire_worktree_hook(hook_registry, "remove", {
             "session_id": session_id,
             "path": str(tmp),
         })
+        return True
 
     return tmp, cleanup
 

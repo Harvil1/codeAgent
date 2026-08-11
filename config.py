@@ -218,6 +218,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "async_tool_whitelist_enabled": True,
         # 用户扩展禁用列表（在 ASYNC_AGENT_DISALLOWED_TOOLS 基础上追加）
         "async_disallowed_tools": [],
+        # Task G: worktree 智能清理
+        # True=总是清理（旧行为，无论有无改动）；False=智能清理（有改动保留）
+        "worktree_always_cleanup": False,
     },
 
     # 安全

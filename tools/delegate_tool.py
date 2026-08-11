@@ -705,7 +705,22 @@ def _run_child(
             except Exception:
                 pass
         if workspace_cleanup:
-            workspace_cleanup()
+            # Task G: 智能清理 worktree（有改动保留，无改动清理）
+            # config.delegation.worktree_always_cleanup=True → 旧行为（总是清理）
+            _cfg = kwargs.get("config") or {}
+            _delegation_cfg = _cfg.get("delegation") if isinstance(_cfg, dict) else {}
+            _always_cleanup = (_delegation_cfg or {}).get("worktree_always_cleanup", False)
+            try:
+                if _always_cleanup:
+                    workspace_cleanup(force=True)
+                else:
+                    cleaned = workspace_cleanup()
+                    if cleaned is False and workspace_path is not None:
+                        logger.warning(
+                            "worktree 保留（子代理有改动）: %s", workspace_path,
+                        )
+            except Exception as e:
+                logger.warning("worktree 智能清理异常（fail-open）: %s", e)
 
         # round3 D2 NEW: SUBAGENT_STOP（无论成功失败都触发，fail-open）
         if _parent_hooks is not None:
