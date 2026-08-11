@@ -23,6 +23,8 @@ from agent.context_compressor import (
     reset_compact_circuit_breaker,
     MAX_CONSECUTIVE_FAILURES,
     MAX_PTL_RETRIES,
+    _compute_ptl_drop_count,
+    _get_model_max_tokens,
 )
 from agent.context_pipeline import compress_if_needed, CompressionSessionState
 
@@ -431,3 +433,176 @@ async def test_model_param_forwarded_to_llm():
     assert kwargs3.get("model") == "summary-model-y", (
         f"model=None 时应回退到 summary_model，实际: {kwargs3.get('model')!r}"
     )
+
+
+# ===========================================================================
+# Task E：PTL tokenGap 精确算法测试
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# _get_model_max_tokens 查表测试
+# ---------------------------------------------------------------------------
+
+def test_get_model_max_tokens_lookup():
+    """_get_model_max_tokens 查表正确。"""
+    assert _get_model_max_tokens("deepseek-chat") == 65536
+    assert _get_model_max_tokens("deepseek-v4") == 65536
+    assert _get_model_max_tokens("claude-3-5-sonnet") == 200000
+    assert _get_model_max_tokens("claude-3-5-haiku") == 200000
+    assert _get_model_max_tokens("some-model[1m]") == 1_000_000
+    assert _get_model_max_tokens("model-1m") == 1_000_000
+    assert _get_model_max_tokens("unknown-model") == 64000
+    assert _get_model_max_tokens("") == 64000
+    assert _get_model_max_tokens(None) == 64000
+
+
+# ---------------------------------------------------------------------------
+# _compute_ptl_drop_count 精确算法测试
+# ---------------------------------------------------------------------------
+
+def test_compute_drop_count_deepseek_format():
+    """DeepSeek 格式 'input 75000 > 65536' → 提取上限 + 实际，算精确 drop。"""
+    # 100 条消息，每条约 750 token
+    msgs = [{"role": "user", "content": "x" * 2250}] * 100  # 2250 chars / 3 = 750 tokens
+    error_msg = "prompt_too_long: input 75000 > 65536"
+
+    drop = _compute_ptl_drop_count(msgs, error_msg, model_max_tokens=65536)
+    # budget = 65536 * 0.85 = 55705; overflow = 75000 - 55705 = 19295
+    # avg_per_msg = 75000 / 100 = 750; drop = 19295/750 * 1.1 + 1 ≈ 29
+    assert drop >= 20, f"DeepSeek 格式应丢 ≥20 条，实际 {drop}"
+    assert drop < 100, "不应丢光"
+
+
+def test_compute_drop_count_anthropic_format():
+    """Anthropic 格式 'prompt is too long: 75000 > 64000'。"""
+    msgs = [{"role": "user", "content": "x" * 2250}] * 100
+    error_msg = "prompt is too long: 75000 > 64000"
+
+    drop = _compute_ptl_drop_count(msgs, error_msg, model_max_tokens=64000)
+    assert drop >= 15, f"Anthropic 格式应丢 ≥15 条，实际 {drop}"
+
+
+def test_compute_drop_count_openai_format():
+    """OpenAI 格式 'maximum context length is 65536... requested 75000'。"""
+    msgs = [{"role": "user", "content": "x" * 2250}] * 100
+    error_msg = (
+        "This model's maximum context length is 65536 tokens. "
+        "However, your messages resulted in 75000 tokens."
+    )
+
+    drop = _compute_ptl_drop_count(msgs, error_msg, model_max_tokens=65536)
+    assert drop >= 15, f"OpenAI 格式应丢 ≥15 条，实际 {drop}"
+
+
+def test_compute_drop_count_fallback_unparseable_error():
+    """错误消息无法解析 → fallback 到旧 20% 算法。"""
+    msgs = [{"role": "user", "content": "msg"}] * 100
+    # 无数字的错误消息
+    error_msg = "some weird error without token numbers"
+
+    drop = _compute_ptl_drop_count(msgs, error_msg)
+    assert drop == 20, f"无法解析时应 fallback 到 20%（100//5=20），实际 {drop}"
+
+
+def test_compute_drop_count_fallback_empty_error():
+    """空错误消息 → fallback 到旧 20% 算法。"""
+    msgs = [{"role": "user", "content": "msg"}] * 50
+    drop = _compute_ptl_drop_count(msgs, "")
+    assert drop == 10, f"空 error 时应 fallback（50//5=10），实际 {drop}"
+
+
+def test_compute_drop_count_fallback_non_ptl_error():
+    """非 PTL 错误（如 timeout）→ fallback 到旧 20%。"""
+    msgs = [{"role": "user", "content": "msg"}] * 50
+    error_msg = "Connection timeout"
+    drop = _compute_ptl_drop_count(msgs, error_msg)
+    assert drop == 10, f"非 PTL 错误应 fallback（50//5=10），实际 {drop}"
+
+
+def test_compute_drop_count_protect_min_2():
+    """消息少时不能丢光——至少留 2 条。"""
+    msgs = [{"role": "user", "content": "x" * 99999}] * 3  # 3 条巨大消息
+    error_msg = "prompt_too_long: input 99999 > 1000"
+
+    drop = _compute_ptl_drop_count(msgs, error_msg, model_max_tokens=1000)
+    assert drop <= 1, f"3 条消息时最多丢 1 条（留 2 条），实际 {drop}"
+
+
+def test_compute_drop_count_vs_old_20pct():
+    """精确算法 vs 旧算法：100 条 PTL 时精确算法应比旧算法丢更多（overflow 更大）。
+
+    旧算法：100 // 5 = 20 条
+    精确算法：算 overflow 后 drop_count 会更大
+    """
+    msgs = [{"role": "user", "content": "x" * 2250}] * 100  # 750 tokens/msg
+    error_msg = "prompt_too_long: input 90000 > 65536"
+
+    drop = _compute_ptl_drop_count(msgs, error_msg, model_max_tokens=65536)
+    old_drop = 100 // 5  # = 20
+    # overflow = 90000 - 55705 = 34295; drop = 34295/900 * 1.1 + 1 ≈ 43
+    # 精确算法应比旧算法丢更多（因为 overflow 更大，旧算法固定 20% 不够）
+    assert drop > old_drop, (
+        f"精确算法（{drop}）应比旧 20%（{old_drop}）丢更多（overflow 大时）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 端到端测试：_summarize_conversation 用精确算法重试
+# ---------------------------------------------------------------------------
+
+async def test_e2e_ptl_retry_uses_precise_drop_count():
+    """Task E 端到端：mock LLM 第一次抛 PTL（带 token 数），第二次成功，
+    验证丢精确数（而非旧 20%）。
+    """
+    # 构造 100 条消息（每条约 750 token）
+    msgs = []
+    for i in range(100):
+        msgs.append({"role": "user", "content": f"x" * 2250})
+        msgs.append({"role": "assistant", "content": f"y" * 2250})
+
+    # PTL 错误（DeepSeek 格式，带 token 数）
+    ptl_error = Exception(
+        "prompt_too_long: input 200000 > 65536"
+    )
+    success_resp = MagicMock()
+    success_resp.choices = [MagicMock(message=MagicMock(content="摘要"))]
+
+    client = MagicMock()
+    client.chat_completions = AsyncMock(
+        side_effect=[ptl_error, success_resp]
+    )
+
+    result = await _summarize_conversation(msgs, llm_client=client, model="deepseek-chat")
+
+    assert client.chat_completions.call_count == 2
+    assert result == "摘要"
+    # 验证第二次调用的消息比第一次少（丢了一些消息）
+    first_call = client.chat_completions.call_args_list[0][0][0]
+    second_call = client.chat_completions.call_args_list[1][0][0]
+    first_prompt = first_call[-1]["content"] if first_call else ""
+    second_prompt = second_call[-1]["content"] if second_call else ""
+    assert len(second_prompt) < len(first_prompt), (
+        "PTL 重试后 prompt 应更短（丢了消息）"
+    )
+
+
+async def test_e2e_ptl_retry_fallback_on_unparseable_error():
+    """Task E 端到端：PTL 错误消息无法解析 → 走 fallback 20%。
+    验证不报错，正常重试。
+    """
+    msgs = _mk_msgs(20)  # 40 条
+
+    # PTL 错误但无 token 数（无法解析精确算法）
+    ptl_error = Exception("prompt_too_long: input too long")
+    success_resp = MagicMock()
+    success_resp.choices = [MagicMock(message=MagicMock(content="fallback 摘要"))]
+
+    client = MagicMock()
+    client.chat_completions = AsyncMock(
+        side_effect=[ptl_error, success_resp]
+    )
+
+    result = await _summarize_conversation(msgs, llm_client=client)
+
+    assert client.chat_completions.call_count == 2
+    assert result == "fallback 摘要"

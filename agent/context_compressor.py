@@ -125,7 +125,8 @@ async def _summarize_conversation(
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
 
-    # 5. PTL 重试（最多 MAX_PTL_RETRIES 次，每次丢 20% 旧消息）
+    # 5. PTL 重试（最多 MAX_PTL_RETRIES 次）
+    # Task E：用 tokenGap 精确算法替旧 20% 粗丢
     # 改造点 ② review fix：按 spec 伪代码传 system message（你是技术对话摘要助手）
     # + model 参数（summary_model 优先于 model）。OpenAICompatClient.chat_completions
     # 会 pop 掉 model kwarg 用 self.model（客户端构造时绑定），但 aux_llm_router /
@@ -151,14 +152,19 @@ async def _summarize_conversation(
             err_str = str(e).lower()
             is_ptl = "prompt_too_long" in err_str or "context_length" in err_str
             if is_ptl and retry < MAX_PTL_RETRIES:
-                # PTL：丢 20% 旧消息重试
-                drop_count = max(1, len(working_messages) // 5)
+                # Task E：精确算法替旧 20% 粗丢
+                # _compute_ptl_drop_count 内部会 fallback 到 20% 当错误消息无法解析
+                drop_count = _compute_ptl_drop_count(
+                    working_messages, str(e),
+                    model_max_tokens=_get_model_max_tokens(effective_model or ""),
+                )
+                old_drop = max(1, len(working_messages) // 5)
                 working_messages = working_messages[drop_count:]
                 dialog = _format_dialog_for_summary(working_messages)
                 prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
                 logger.warning(
-                    "PTL 重试 %d/%d：丢弃 %d 条旧消息",
-                    retry + 1, MAX_PTL_RETRIES, drop_count,
+                    "PTL 重试 %d/%d：tokenGap 精确算法丢 %d 条（旧 20%% 会丢 %d 条）",
+                    retry + 1, MAX_PTL_RETRIES, drop_count, old_drop,
                 )
                 continue
             # 其他错误或 PTL 重试耗尽 → 走规则总结 + 累加熔断器
@@ -354,3 +360,125 @@ def estimate_message_tokens(messages: list) -> int:
             else:
                 total_chars += len(str(args))
     return total_chars // 3
+
+
+# ---------------------------------------------------------------------------
+# Task E：PTL tokenGap 精确算法
+# ---------------------------------------------------------------------------
+
+
+def _get_model_max_tokens(model_name: str) -> int:
+    """根据模型名查 max_tokens（简化版查表）。
+
+    覆盖常见 provider：
+      - ``[1m]`` / ``1m`` 后缀 → 1M（Claude 扩展上下文）
+      - ``v4`` / ``deepseek`` → 65536（DeepSeek）
+      - ``claude-3-5`` / ``sonnet`` / ``haiku`` → 200000（Anthropic）
+      - 默认 → 64000（OpenAI 常见值）
+    """
+    if not model_name:
+        return 64000
+    name = model_name.lower()
+    if "[1m]" in name or "1m" in name:
+        return 1_000_000
+    if "v4" in name or "deepseek" in name:
+        return 65536
+    if "claude-3-5" in name or "sonnet" in name or "haiku" in name:
+        return 200000
+    return 64000
+
+
+def _compute_ptl_drop_count(
+    messages: list,
+    error_msg: str,
+    model_max_tokens: int = 64000,
+    safety_margin: float = 0.85,
+) -> int:
+    """根据 PTL 错误和当前 messages 大小，计算精确该丢多少条。
+
+    tokenGap 算法（借鉴 claude-code-main）：
+      1. 从错误消息提取 token 上限和实际 token 数（如果可解析）
+      2. 算预算（``model_max_tokens * safety_margin``）
+      3. 算超了多少
+      4. 把超的量换算成要丢的消息条数（按平均大小，多丢 10% 保险）
+
+    **fallback**：错误消息无法解析时走旧 20% 算法（``max(1, len // 5)``），
+    保证不比现状差。
+
+    **保护**：至少留 2 条（``min(drop, len-2)``），不能丢光。
+    """
+    # fallback：错误消息无法解析（空 / 不含 token 数）走旧 20% 算法
+    if not error_msg:
+        return max(1, len(messages) // 5)
+
+    err_lower = error_msg.lower()
+
+    # 检测是否是 PTL 类错误（如果不是，走 fallback）
+    is_ptl = (
+        "prompt_too_long" in err_lower
+        or "context_length" in err_lower
+        or "too long" in err_lower
+        or "maximum context" in err_lower
+    )
+    if not is_ptl:
+        return max(1, len(messages) // 5)
+
+    # 尝试提取 token 数——三种 provider 格式：
+    # DeepSeek: "prompt_too_long: input 75000 > 65536"
+    # Anthropic: "prompt is too long: 75000 > 64000"
+    # OpenAI: "maximum context length is 65536 tokens, however you requested 75000"
+    #
+    # 策略：
+    #   actual = "(\d+) >"  或  "requested (\d+)"
+    #   limit  = "> (\d+)"  或  "max... is (\d+)" 或 "max...[:=]\s*(\d+)"
+    actual_tokens = None
+    limit_tokens = None
+
+    # actual: "75000 >" 格式（DeepSeek / Anthropic）
+    m = re.search(r"(\d{3,7})\s*>", error_msg)
+    if m:
+        actual_tokens = int(m.group(1))
+
+    # actual: "requested 75000" 格式（OpenAI）
+    if actual_tokens is None:
+        m = re.search(r"requested\s+(\d{3,7})", err_lower)
+        if m:
+            actual_tokens = int(m.group(1))
+
+    # limit: "> 65536" 格式（DeepSeek / Anthropic）
+    m = re.search(r">\s*(\d{3,7})", error_msg)
+    if m:
+        limit_tokens = int(m.group(1))
+
+    # limit: "is 65536 tokens" 或 "max... 65536" 格式（OpenAI）
+    if limit_tokens is None:
+        m = re.search(r"(?:is|max[a-z_]*)\s*[:=]?\s*(\d{3,7})", err_lower)
+        if m:
+            limit_tokens = int(m.group(1))
+
+    # 无法提取 → fallback 到 20%
+    if actual_tokens is None and limit_tokens is None:
+        return max(1, len(messages) // 5)
+
+    # 用提取到的值覆盖默认
+    if limit_tokens:
+        model_max_tokens = limit_tokens
+    if actual_tokens is None:
+        actual_tokens = estimate_message_tokens(messages)
+
+    # 算预算（留 15% 给输出 + prompt overhead）
+    budget = int(model_max_tokens * safety_margin)
+    overflow = max(0, actual_tokens - budget)
+
+    if overflow == 0:
+        return 1  # 兜底丢 1 条（PTL 报错但算出来没超——可能是 margin 太严）
+
+    # 算每条消息平均大小
+    msg_count = max(1, len(messages))
+    avg_tokens_per_msg = actual_tokens / msg_count
+
+    # 算要丢多少条（多丢 10% 保险，避免连续 PTL）
+    drop_count = int(overflow / avg_tokens_per_msg * 1.1) + 1
+
+    # 保护：至少留 2 条
+    return min(drop_count, max(1, len(messages) - 2))
