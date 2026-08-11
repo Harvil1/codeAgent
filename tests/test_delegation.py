@@ -430,3 +430,176 @@ def test_run_child_general_purpose_unchanged(monkeypatch):
     assert captured["permission_mode"] == "default"
     assert captured["config"] is None
     assert result == "general result"
+
+
+# ---------------------------------------------------------------------------
+# CCAR5 Important 1 回归：非 custom_def 路径下 disabled_tools 透传
+# ---------------------------------------------------------------------------
+
+def _make_fake_child(captured: dict):
+    """构造 FakeChild，捕获 AIAgent 构造参数（复用模式）。"""
+    class FakeChild:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.llm_client = type("FakeClient", (), {})()
+            self.model = kwargs.get("model")
+            self._children = []
+            self.conversation_history = []
+            self.spawn_depth = kwargs.get("spawn_depth", 0)
+            self.effort_level = kwargs.get("effort_level")
+            self._stream_callback = None
+            self.aux_llm_router = None
+            self.hooks_registry = None
+
+        async def chat(self, msg):
+            return "ok"
+    return FakeChild
+
+
+def _patch_run_child_env(monkeypatch):
+    """打上 _run_child 跑通所需的最小 mock（config/ProgressReporter/hallucination）。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake")
+    return patch("config.load_config", return_value={
+        "model": {"name": "test", "api_key": "fake_key", "base_url": "http://x"},
+    })
+
+
+def test_run_child_passes_injected_disabled_tools_without_custom_def(monkeypatch):
+    """CCAR5 Important 1：非 custom_def 路径下，kwargs["config"]["disabled_tools"]
+    必须透传到 AIAgent 的 config.disabled_tools。
+
+    场景：_delegate_async（Task F）在 kwargs["config"]["disabled_tools"] 注入黑名单，
+    但 stype=general-purpose（无 custom_def），修复前 child_config 永远是 None，
+    注入的黑名单完全丢失。
+    """
+    captured = {}
+    FakeChild = _make_fake_child(captured)
+
+    with _patch_run_child_env(monkeypatch):
+        with patch("agent.AIAgent", FakeChild):
+            with patch("agent.progress.ProgressReporter") as fake_prog:
+                fake_prog.return_value.__enter__ = lambda s: None
+                fake_prog.return_value.__exit__ = lambda s, *a: None
+                with patch(
+                    "agent.team.hallucination_check.verify_claims",
+                    return_value=None,
+                ):
+                    with patch(
+                        "agent.team.hallucination_check.append_warning",
+                        lambda r, v: r,
+                    ):
+                        _run_child(
+                            "goal", "ctx", "leaf",
+                            config={"disabled_tools": ["bg_start", "team_spawn"]},
+                        )
+
+    # 修复前：config 为 None；修复后：config 含 disabled_tools
+    assert captured["config"] is not None, (
+        "非 custom_def 路径下 child_config 不应为 None（CCAR5 Important 1）"
+    )
+    disabled = captured["config"].get("disabled_tools") or []
+    assert "bg_start" in disabled, "Task F 注入的 bg_start 应透传到 AIAgent"
+    assert "team_spawn" in disabled, "Task F 注入的 team_spawn 应透传到 AIAgent"
+
+
+def test_run_child_merges_custom_def_and_injected_disabled_tools(monkeypatch):
+    """CCAR5 Important 1：custom_def.disallowed_tools 和 kwargs 注入的 disabled_tools
+    取并集（保序去重），不互相覆盖。
+    """
+    from agent.agent_defs import AgentDefinition
+    custom_def = AgentDefinition(
+        name="merger",
+        description="合并测试",
+        disallowed_tools=["subagent", "idle"],
+    )
+    monkeypatch.setattr("agent.agent_defs.get_agent_def", lambda n: custom_def)
+
+    captured = {}
+    FakeChild = _make_fake_child(captured)
+
+    with _patch_run_child_env(monkeypatch):
+        with patch("agent.AIAgent", FakeChild):
+            with patch("agent.progress.ProgressReporter") as fake_prog:
+                fake_prog.return_value.__enter__ = lambda s: None
+                fake_prog.return_value.__exit__ = lambda s, *a: None
+                with patch(
+                    "agent.team.hallucination_check.verify_claims",
+                    return_value=None,
+                ):
+                    with patch(
+                        "agent.team.hallucination_check.append_warning",
+                        lambda r, v: r,
+                    ):
+                        _run_child(
+                            "goal", "ctx", "leaf",
+                            subagent_type="merger",
+                            config={"disabled_tools": ["bg_start", "subagent"]},
+                        )
+
+    # 并集：custom_def（subagent/idle）+ injected（bg_start/subagent）= subagent/idle/bg_start
+    disabled = captured["config"].get("disabled_tools") or []
+    assert "subagent" in disabled, "custom_def 的 subagent 应保留"
+    assert "idle" in disabled, "custom_def 的 idle 应保留"
+    assert "bg_start" in disabled, "Task F 注入的 bg_start 应并入"
+    # 去重：subagent 在两边都有，只应出现一次
+    assert disabled.count("subagent") == 1, "并集去重：subagent 不应重复"
+
+
+def test_run_child_no_disabled_tools_yields_none_child_config(monkeypatch):
+    """CCAR5 Important 1 回归保护：无任何 disabled_tools 时，child_config 仍为 None
+    （不破坏 test_run_child_general_purpose_unchanged 的契约）。
+    """
+    captured = {}
+    FakeChild = _make_fake_child(captured)
+
+    with _patch_run_child_env(monkeypatch):
+        with patch("agent.AIAgent", FakeChild):
+            with patch("agent.progress.ProgressReporter") as fake_prog:
+                fake_prog.return_value.__enter__ = lambda s: None
+                fake_prog.return_value.__exit__ = lambda s, *a: None
+                with patch(
+                    "agent.team.hallucination_check.verify_claims",
+                    return_value=None,
+                ):
+                    with patch(
+                        "agent.team.hallucination_check.append_warning",
+                        lambda r, v: r,
+                    ):
+                        _run_child("goal", "ctx", "leaf")
+
+    # 无任何 disabled 时 config 仍为 None（不构造空 dict）
+    assert captured["config"] is None
+
+
+def test_run_child_preserves_other_config_keys_with_disabled(monkeypatch):
+    """CCAR5 Important 1：构造 child_config 时其他 config 键不丢失。"""
+    captured = {}
+    FakeChild = _make_fake_child(captured)
+
+    with _patch_run_child_env(monkeypatch):
+        with patch("agent.AIAgent", FakeChild):
+            with patch("agent.progress.ProgressReporter") as fake_prog:
+                fake_prog.return_value.__enter__ = lambda s: None
+                fake_prog.return_value.__exit__ = lambda s, *a: None
+                with patch(
+                    "agent.team.hallucination_check.verify_claims",
+                    return_value=None,
+                ):
+                    with patch(
+                        "agent.team.hallucination_check.append_warning",
+                        lambda r, v: r,
+                    ):
+                        _run_child(
+                            "goal", "ctx", "leaf",
+                            config={
+                                "disabled_tools": ["bg_start"],
+                                "delegation": {"max_concurrent_children": 3},
+                                "other_key": "preserved",
+                            },
+                        )
+
+    cfg = captured["config"]
+    assert cfg is not None
+    assert cfg.get("disabled_tools") == ["bg_start"], "disabled_tools 应注入"
+    assert cfg.get("other_key") == "preserved", "其他键应保留"
+    assert cfg.get("delegation", {}).get("max_concurrent_children") == 3

@@ -1,14 +1,17 @@
 """子代理 sidechain transcript 持久化（借鉴 claude-code-main）。
 
-存储结构：
-  ~/.OmniMate/.agent-sessions/
-  ├── <agent_id>.jsonl          # 对话历史流式追加（每行一条 JSON）
-  └── <agent_id>.meta.json      # 元数据（agent_id / agent_type / status / created_at / ...）
+存储：
+- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 子代理最终响应（on_response 触发，目前一条/会话）
+- ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据（agent_id / agent_type / parent_session / status / created_at / updated_at）
 
 agent_id 格式：sub-{parent_session_id 前 8 位}-{YYYYMMDD-HHMMSS}-{random8}
-  例：sub-abc12345-20260811-143022-x4k9po2m
+  例：sub-parent-s-20260811-143022-605d9a3a
 
-status 状态机：running → completed | failed | interrupted
+status：running / completed / failed / interrupted
+
+⚠️ 当前 transcript 只落盘子代理的最终 assistant 响应（on_response 回调），
+   不是完整对话流（user/tool/中间 assistant）。
+   Phase 2 计划：在主循环每轮追加，支持 subagent_resume 工具跨会话恢复。
 
 设计约定（CLAUDE.md）：
 - **fail-open 硬要求**：所有持久化操作 try/except，绝不让主流程崩

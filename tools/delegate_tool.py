@@ -629,12 +629,29 @@ def _run_child(
 
         # disabled_tools 透传：AIAgent.__init__ 无此参数，走 config 透传
         # （get_tool_definitions 运行时从 self.config 读 disabled_tools，见 D2）
+        #
+        # CCAR5 Important 1 修复：合并两个来源的 disabled_tools（取并集保序去重）：
+        #   ① custom_def.disallowed_tools（custom_def 路径，上面赋给 `disabled`）
+        #   ② Task F 在 _delegate_async 注入的 kwargs["config"]["disabled_tools"]
+        #      （async 黑名单兜底）—— 非 custom_def 路径下曾丢失，这里补上
+        _injected_disabled = (
+            (kwargs.get("config") or {}).get("disabled_tools")
+            if isinstance(kwargs.get("config"), dict)
+            else None
+        )
+        _all_disabled = []
+        for _src in (disabled, _injected_disabled):
+            if _src:
+                for _tool in _src:
+                    if _tool not in _all_disabled:
+                        _all_disabled.append(_tool)
+
         child_config = None
-        if disabled:
+        if _all_disabled:
             # 继承父 config（如有）再加 disabled_tools
             parent_cfg = kwargs.get("config")
             child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
-            child_config["disabled_tools"] = disabled
+            child_config["disabled_tools"] = _all_disabled
 
         # === Task C1: mcp_servers 字段 — child 只暴露列出的 MCP server ===
         # 必须在 child_config 构造之后、AIAgent 构造之前
