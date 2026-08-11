@@ -105,6 +105,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",
         "transcript_retention": 20,
+        # CCAR4 Task A：cache break diff 文件 LRU 上限（默认 100，超过删最旧）
+        "max_cache_break_diff_files": 100,
     },
 
     # Hooks 系统（Phase 2a）

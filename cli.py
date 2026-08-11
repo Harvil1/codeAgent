@@ -1410,6 +1410,12 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                     f"（降 {lb['drop']} tokens）"
                 )
                 console.print(f"[cyan]根因：[/cyan]{lb['root_cause']}")
+                # CCAR4 Task A：展示 diff 文件路径
+                if lb.get('diff_path'):
+                    console.print(
+                        f"[cyan]diff 文件：[/cyan]{lb['diff_path']}"
+                        f"（read_file 看详细变化）"
+                    )
             if stats['last_cache_read'] is not None:
                 console.print(
                     f"[cyan]最近一次 cache read：[/cyan]{stats['last_cache_read']} tokens"

@@ -207,6 +207,17 @@ class AIAgent:
             reset_cache_monitor()
         except Exception as e:
             logger.debug("reset_cache_monitor 失败（fail-open）: %s", e)
+        # CCAR4 Task A：从 config 读 diff 文件 LRU 上限，传给 cache_monitor
+        try:
+            from agent.cache_monitor import set_diff_limit
+            _diff_limit = (
+                (config or {}).get("context", {}).get(
+                    "max_cache_break_diff_files", 100,
+                )
+            )
+            set_diff_limit(_diff_limit)
+        except Exception as e:
+            logger.debug("set_diff_limit 失败（fail-open）: %s", e)
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
@@ -1237,14 +1248,34 @@ class AIAgent:
         Task D4: 改 async（_call_llm_streaming + call_with_retry 均已 async）。
         改造点 ③：pre/post 调用 cache_monitor hook（fail-open，绝不影响主流程）。
         """
-        # === 改造点 ③ pre-call：cache_monitor 快照 prompt 维度（fail-open）===
+        # === 改造点 ③ pre-call：cache_monitor 快照 12 维 prompt 状态（fail-open）===
+        # CCAR4 Task A：扩展到 12 维度 + per-tool hash（对齐 claude-code-main）
         cache_state = None
         try:
             from agent.cache_monitor import record_prompt_state
+            # 从 config 提取 LLM 调用参数（对齐 _call_llm_streaming 的 max_tokens 提取逻辑）
+            _cfg = self.config or {}
+            _mt = (
+                _cfg.get("model", {}).get("max_tokens")
+                or _cfg.get("llm", {}).get("max_tokens")
+            ) or 0
+            _temp = _cfg.get("model", {}).get("temperature")
+            # user 首条消息前缀（捕捉 user 消息变化）
+            _ucp = ""
+            if messages:
+                for m in messages:
+                    if m.get("role") == "user":
+                        _ucp = str(m.get("content", ""))[:500]
+                        break
             cache_state = record_prompt_state(
                 system_prompt=system_prompt or "",
                 tools=tool_schemas or [],
                 model=self.model or "",
+                max_tokens=_mt,
+                temperature=_temp,
+                stream_mode=self._stream_callback is not None,
+                user_content_prefix=_ucp,
+                messages_count=len(messages),
             )
         except Exception as e:
             logger.debug("cache_monitor pre-call fail-open: %s", e)

@@ -694,3 +694,622 @@ def test_reset_called_in_init(tmp_path):
     assert cache_monitor._break_history == []
     assert cache_monitor._last_state is None
     assert cache_monitor._last_cache_read is None
+
+
+# ============================================================================
+# CCAR4 Task A: 12 维度扩展 + per-tool hash + diff 文件 + TTL 分析
+# ============================================================================
+
+def _make_tool(name, schema=None):
+    """构造 OpenAI 格式工具 schema。"""
+    return {"type": "function", "function": {
+        "name": name,
+        "description": f"tool {name}",
+        "input_schema": schema or {"type": "object", "properties": {}},
+    }}
+
+
+def test_record_prompt_state_captures_12_dimensions():
+    """record_prompt_state 接收 12 维参数都能捕获。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    state = cache_monitor.record_prompt_state(
+        system_prompt="hello",
+        tools=[_make_tool("foo")],
+        model="deepseek-chat",
+        max_tokens=8192,
+        temperature=0.5,
+        stream_mode=True,
+        tool_choice="auto",
+        user_content_prefix="用户首条消息",
+        betas={"anthropic_beta": ["tools-2024"]},
+        messages_count=10,
+        cache_strategy="aggressive",
+    )
+    # 12 维度都应有值
+    assert state.system_hash != 0
+    assert state.tools_hash != 0
+    assert state.model == "deepseek-chat"
+    assert state.max_tokens == 8192
+    assert state.temperature == 0.5
+    assert state.stream_mode is True
+    assert state.tool_choice == "auto"
+    assert state.user_content_prefix != 0
+    assert state.messages_count == 10
+    assert state.cache_strategy == "aggressive"
+    assert state.betas_hash != 0
+    # system_prompt 是 str → single 边界
+    assert state.system_boundary == "single"
+    # per-tool hash 应有 1 条
+    assert len(state.tool_hashes) == 1
+    assert state.tool_hashes[0].name == "foo"
+    assert state.tool_hashes[0].schema_hash != 0
+
+
+def test_record_prompt_state_system_boundary_multi_block():
+    """system_prompt 是 list 时 system_boundary == 'multi-block'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    state = cache_monitor.record_prompt_state(
+        system_prompt=[{"type": "text", "text": "block1"}],
+        tools=[],
+        model="m",
+    )
+    assert state.system_boundary == "multi-block"
+
+
+def test_check_cache_break_reports_all_12_dimensions():
+    """两个 state 在 12 维度上都不同 → 根因报告含 12 个原因。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[_make_tool("t1")], model="m1",
+        max_tokens=1000, temperature=0.1, stream_mode=False,
+        tool_choice="none", user_content_prefix="u1",
+        betas={"k": [1]}, messages_count=5,
+        cache_strategy="aggressive",
+    )
+    cache_monitor.check_cache_break(
+        current_state=s1, cache_read_tokens=10000,
+    )
+
+    # s2 用 list 形式 system_prompt 触发 system_boundary 变化
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt=[{"type": "text", "text": "B"}],
+        tools=[_make_tool("t2")], model="m2",
+        max_tokens=2000, temperature=0.9, stream_mode=True,
+        tool_choice="auto", user_content_prefix="u2",
+        betas={"k": [2]}, messages_count=10,
+        cache_strategy="conservative",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    # 12 个维度都有报告
+    assert "system prompt" in result
+    assert "工具" in result
+    assert "model" in result
+    assert "max_tokens" in result
+    assert "temperature" in result
+    assert "stream" in result
+    assert "tool_choice" in result
+    assert "user content" in result
+    assert "messages count" in result
+    assert "system 边界" in result
+    assert "betas" in result
+    assert "cache_strategy" in result
+
+
+# ============================================================================
+# per-tool hash 增删改测试
+# ============================================================================
+
+def test_per_tool_hash_added():
+    """tools 从 [a, b, c] → [a, b, c, d]：根因含 '+1 (d)'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("a"), _make_tool("b"), _make_tool("c")],
+        model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("a"), _make_tool("b"), _make_tool("c"), _make_tool("d")],
+        model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "+1" in result
+    assert "d" in result
+
+
+def test_per_tool_hash_removed():
+    """tools 从 [a, b, c] → [a, c]：根因含 '-1 (b)'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("a"), _make_tool("b"), _make_tool("c")],
+        model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("a"), _make_tool("c")],
+        model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "-1" in result
+    assert "b" in result
+
+
+def test_per_tool_hash_changed():
+    """tools 从 [a, b, c] → [a, b'(改 schema), c]：根因含 '~1 (b)'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("a"), _make_tool("b"), _make_tool("c")],
+        model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    # b 改 schema
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[
+            _make_tool("a"),
+            _make_tool("b", schema={"type": "object", "properties": {"new_field": {"type": "string"}}}),
+            _make_tool("c"),
+        ],
+        model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "~1" in result
+    assert "b" in result
+
+
+# ============================================================================
+# diff 文件落盘测试
+# ============================================================================
+
+def test_diff_file_written_on_system_change(tmp_path, monkeypatch):
+    """system prompt 变化触发 break 时，diff 文件写到 .cache-breaks/。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    # mock omnimate home 到 tmp_path
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="original system prompt",
+        tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="changed system prompt",
+        tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+
+    # diff 文件应存在
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    assert len(diff_files) == 1, f"应有 1 个 diff 文件，实际 {len(diff_files)}"
+    content = diff_files[0].read_text(encoding="utf-8")
+    assert "## system prompt" in content
+    # PromptState 只存 hash 不存原文，验证 hash 对比信息
+    assert "OLD hash:" in content
+    assert "NEW hash:" in content
+
+
+def test_diff_file_written_on_tools_change(tmp_path, monkeypatch):
+    """tools 变化触发 break 时，diff 文件含 tools schema 段。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("foo")], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A",
+        tools=[_make_tool("bar")], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    assert len(diff_files) >= 1
+    content = diff_files[0].read_text(encoding="utf-8")
+    assert "## tools schema" in content
+
+
+def test_diff_file_not_written_on_non_schema_break(tmp_path, monkeypatch):
+    """非 system/tools 变化（如 model 变）不写 diff 文件。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m1",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m2",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    # 不应写 diff 文件（model 变不写 diff）
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    assert len(diff_files) == 0
+
+
+def test_diff_file_lru_cap(tmp_path, monkeypatch):
+    """diff 文件超过 max_cache_break_diff_files (100) 时删旧。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    # 写 105 个 diff 文件
+    for i in range(105):
+        s_prev = cache_monitor.record_prompt_state(
+            system_prompt=f"sys_{i}", tools=[], model="m",
+        )
+        cache_monitor.check_cache_break(
+            current_state=s_prev, cache_read_tokens=10000,
+        )
+        s_break = cache_monitor.record_prompt_state(
+            system_prompt=f"sys_{i}_changed", tools=[], model="m",
+        )
+        cache_monitor.check_cache_break(
+            current_state=s_break, cache_read_tokens=100,
+        )
+
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    # 不超过 100
+    assert len(diff_files) <= 100, f"diff 文件应 <= 100，实际 {len(diff_files)}"
+
+
+# ============================================================================
+# TTL 时长分析测试
+# ============================================================================
+
+def test_ttl_analysis_no_field_change_short_elapsed():
+    """无字段变化 + elapsed < 5min → 'server-side 或未知'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "server-side" in result or "未知" in result
+
+
+def test_ttl_analysis_no_field_change_5min():
+    """无字段变化 + 5min < elapsed < 1h → '>5min TTL 过期'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    # mock baseline 时间为 10 分钟前
+    import time as _time
+    cache_monitor._last_baseline_at = _time.time() - 600  # 10 分钟前
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "5min" in result or "TTL" in result
+
+
+def test_ttl_analysis_no_field_change_1h():
+    """无字段变化 + elapsed > 1h → '>1h TTL 过期'。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    # mock baseline 时间为 2 小时前
+    import time as _time
+    cache_monitor._last_baseline_at = _time.time() - 7200
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "1h" in result or "TTL" in result
+
+
+# ============================================================================
+# 端到端测试：_call_llm_with_escalation 传 12 维参数
+# ============================================================================
+
+async def test_e2e_12_dimensions_captured_in_record(tmp_path):
+    """通过 _call_llm_with_escalation 触发 record_prompt_state，验证新参数被捕获。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    agent, _ = _make_minimal_agent(tmp_path)
+    # 设置 config 让 max_tokens 可提取
+    agent.config = {"model": {"max_tokens": 4096, "temperature": 0.3}}
+
+    captured_kwargs = {}
+    original_record = cache_monitor.record_prompt_state
+
+    def capture_record(**kwargs):
+        captured_kwargs.update(kwargs)
+        return original_record(**kwargs)
+
+    with patch.object(cache_monitor, "record_prompt_state", side_effect=capture_record):
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[{"type": "function", "function": {
+                "name": "test_tool", "description": "d",
+                "input_schema": {"type": "object"},
+            }}],
+            system_prompt="你是助手",
+        )
+
+    # 新参数应被传入
+    assert "max_tokens" in captured_kwargs, "max_tokens 未传入 record_prompt_state"
+    assert captured_kwargs["max_tokens"] == 4096
+    assert "stream_mode" in captured_kwargs, "stream_mode 未传入"
+    assert "messages_count" in captured_kwargs, "messages_count 未传入"
+    assert captured_kwargs["messages_count"] == 1
+    assert "user_content_prefix" in captured_kwargs, "user_content_prefix 未传入"
+
+
+async def test_e2e_diff_file_written_on_system_change(tmp_path):
+    """端到端：两次调用 system 变化，cache 大降 → diff 文件真落盘。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    # mock omnimate home
+    import constants
+    original_get_home = constants.get_omnimate_home
+    constants.get_omnimate_home = lambda: tmp_path
+    try:
+        agent, _ = _make_minimal_agent(tmp_path)
+
+        # 第一次调用建立 baseline（cache_read=10000）
+        agent.llm_client.chat_completions = AsyncMock(
+            return_value=_make_mock_response(cache_read=10000)
+        )
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            system_prompt="system A",
+        )
+
+        # 第二次调用 system 变 + cache 大降
+        agent.llm_client.chat_completions = AsyncMock(
+            return_value=_make_mock_response(cache_read=1000)
+        )
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            system_prompt="system B totally different",
+        )
+    finally:
+        constants.get_omnimate_home = original_get_home
+
+    # diff 文件应存在
+    diff_dir = tmp_path / ".cache-breaks"
+    diff_files = list(diff_dir.glob("cache-break-*.diff"))
+    assert len(diff_files) >= 1, "端到端：diff 文件未落盘"
+    content = diff_files[0].read_text(encoding="utf-8")
+    assert "## system prompt" in content
+
+
+async def test_e2e_break_history_includes_diff_path(tmp_path):
+    """端到端：break 后 _break_history 条目含 diff_path。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    import constants
+    original_get_home = constants.get_omnimate_home
+    constants.get_omnimate_home = lambda: tmp_path
+    try:
+        agent, _ = _make_minimal_agent(tmp_path)
+
+        agent.llm_client.chat_completions = AsyncMock(
+            return_value=_make_mock_response(cache_read=10000)
+        )
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            system_prompt="system A",
+        )
+
+        agent.llm_client.chat_completions = AsyncMock(
+            return_value=_make_mock_response(cache_read=1000)
+        )
+        await agent._call_llm_with_escalation(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            system_prompt="system B different",
+        )
+    finally:
+        constants.get_omnimate_home = original_get_home
+
+    stats = cache_monitor.get_stats()
+    assert stats["last_break"] is not None
+    assert "diff_path" in stats["last_break"]
+    assert stats["last_break"]["diff_path"] is not None
+
+
+# ============================================================================
+# fail-open 测试（新维度）
+# ============================================================================
+
+def test_fail_open_diagnose_break_exception():
+    """_diagnose_break 抛异常时 check_cache_break 不崩。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="B", tools=[], model="m",
+    )
+    # mock _diagnose_break 抛异常
+    with patch.object(cache_monitor, "_diagnose_break",
+                      side_effect=RuntimeError("diagnose bomb")):
+        result = cache_monitor.check_cache_break(
+            current_state=s2, cache_read_tokens=1000,
+        )
+    # fail-open：不抛，返回 None 或字符串
+    assert result is None or isinstance(result, str)
+
+
+def test_fail_open_write_break_diff_exception(tmp_path, monkeypatch):
+    """_write_break_diff 抛异常时不影响 check_cache_break。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+    import constants
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: tmp_path)
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="B", tools=[], model="m",
+    )
+    # mock _write_break_diff 抛异常
+    original_write = cache_monitor._write_break_diff
+    def boom(*a, **kw):
+        raise RuntimeError("write bomb")
+    with patch.object(cache_monitor, "_write_break_diff", side_effect=boom):
+        result = cache_monitor.check_cache_break(
+            current_state=s2, cache_read_tokens=1000,
+        )
+    # 不崩，仍然报根因
+    assert result is not None
+
+
+# ============================================================================
+# 现有 5 维度回归（新维度加进来后老测试仍过）
+# ============================================================================
+
+def test_backward_compat_record_without_new_params():
+    """不传新参数调用 record_prompt_state 仍正常（向后兼容）。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    state = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    # 老字段都有
+    assert state.system_hash != 0
+    assert state.model == "m"
+    # 新字段有默认值
+    assert state.max_tokens == 0
+    assert state.temperature is None
+    assert state.stream_mode is False
+    assert state.tool_hashes == []
+
+
+def test_backward_compat_check_cache_break_system_change():
+    """老模式（只传 system/tools/model）break 检测仍工作。"""
+    from agent import cache_monitor
+    cache_monitor.reset_cache_monitor()
+
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+
+    s2 = cache_monitor.record_prompt_state(
+        system_prompt="B", tools=[], model="m",
+    )
+    result = cache_monitor.check_cache_break(
+        current_state=s2, cache_read_tokens=1000,
+    )
+    assert result is not None
+    assert "system prompt" in result
+
+
+# ============================================================================
+# reset_cache_monitor 清 _last_baseline_at
+# ============================================================================
+
+def test_reset_clears_last_baseline_at():
+    """reset_cache_monitor 清 _last_baseline_at。"""
+    from agent import cache_monitor
+    import time as _time
+    cache_monitor.reset_cache_monitor()
+
+    # 搞点状态
+    s1 = cache_monitor.record_prompt_state(
+        system_prompt="A", tools=[], model="m",
+    )
+    cache_monitor.check_cache_break(current_state=s1, cache_read_tokens=10000)
+    assert cache_monitor._last_baseline_at is not None
+
+    cache_monitor.reset_cache_monitor()
+    assert cache_monitor._last_baseline_at is None
