@@ -509,3 +509,115 @@ async def test_load_skill_triggers_recent_tracking(tmp_path):
     assert "brainstorming" in agent._recent_skills, (
         f"load_skill 应触发 _recent_skills 追踪: {agent._recent_skills}"
     )
+
+
+# ============================================================================
+# 9. 多轮测试：ephemeral 设计权衡（让设计 explicit）
+# ============================================================================
+
+async def test_recovery_content_visible_in_first_round_after_compact(tmp_path):
+    """compact 后第 1 轮调 LLM，验证 LLM 收到的 messages 含 recovery brief 内容。
+
+    构造：conversation_history 有历史 → run_conversation 触发 compress →
+    压缩后 _run_context_compression 把 brief append 到 messages 末尾 →
+    第 1 轮 LLM 能看到文件路径/内容。
+    """
+    f1 = tmp_path / "session.py"
+    f1.write_text("SESSION_SECRET = 'compact_marker_42'", encoding="utf-8")
+
+    agent = _make_minimal_agent(omnimate_home=tmp_path)
+    agent._recent_read_files = [str(f1)]
+    agent._recent_skills = []
+
+    captured_messages_list = []
+
+    def fake_compress(messages, **kwargs):
+        return messages, True
+
+    async def fake_call_with_retry(client, messages, **kwargs):
+        captured_messages_list.append(list(messages))
+        return _make_final_response("done")
+
+    with patch("agent.context_pipeline.compress_if_needed", side_effect=fake_compress), \
+         patch("agent.llm_retry.call_with_retry", side_effect=fake_call_with_retry):
+        await agent.run_conversation("继续")
+
+    assert captured_messages_list, "LLM 应被调用"
+    first_round_msgs = captured_messages_list[0]
+
+    # 第 1 轮的 messages 应含 recovery brief（在 <post_compress_brief> 里）
+    brief_msg = next(
+        (m for m in first_round_msgs
+         if "<post_compress_brief>" in (m.get("content") or "")),
+        None,
+    )
+    assert brief_msg is not None, "第 1 轮 LLM 调用应收到 post_compress_brief"
+    assert "compact_marker_42" in brief_msg["content"], (
+        f"第 1 轮 brief 应含最近文件内容: {brief_msg['content'][:300]}"
+    )
+
+
+async def test_recovery_content_lost_in_second_round_due_to_ephemeral_design(tmp_path):
+    """compact 后第 2 轮组装的 messages 不含 recovery brief（ephemeral 设计）。
+
+    这是 Task B 的已知设计权衡，让 reviewer 提出的 50/50 决策 explicit：
+
+    **设计**：post_compress_brief 是 ephemeral（临时消息），_run_context_compression
+    先把摘要后的 messages 同步到 conversation_history（line 1130），**之后**再 append
+    brief 到局部变量 messages（line 1174）。brief 从不进 conversation_history。
+
+    **后果**：第 1 轮 LLM 能看到 brief（在局部 messages 里），但第 2 轮通过
+    _assemble_turn_messages 重建 messages 时，brief 没了（因为 history 不含它）。
+
+    **为什么不修**：如果把 brief 写入 history，下次 compact 会把 brief 也压缩掉，
+    导致摘要不要的内容污染；而且 brief 本质是"刚醒来的提醒"，不该长期驻留。
+    Claude Code 用 file attachments（结构化字段），OmniMate 用临时消息，都是 ephemeral。
+
+    本测试锁定这个设计行为：如果未来有人改成把 brief 写入 history，此测试会 FAIL
+    提醒他重新评估设计权衡（而不是无意中改变行为）。
+    """
+    f1 = tmp_path / "lost.py"
+    f1.write_text("UNIQUE_EPHEMERAL_MARKER", encoding="utf-8")
+
+    agent = _make_minimal_agent(omnimate_home=tmp_path)
+    agent._recent_read_files = [str(f1)]
+    agent._recent_skills = []
+
+    call_count = [0]
+    captured_messages_list = []
+
+    def fake_compress(messages, **kwargs):
+        return messages, True
+
+    async def fake_call_with_retry(client, messages, **kwargs):
+        call_count[0] += 1
+        captured_messages_list.append(list(messages))
+        # 第 1 轮返回带 tool_calls，让主循环跑第 2 轮
+        if call_count[0] == 1:
+            return _make_final_response("done")
+        return _make_final_response("done2")
+
+    with patch("agent.context_pipeline.compress_if_needed", side_effect=fake_compress), \
+         patch("agent.llm_retry.call_with_retry", side_effect=fake_call_with_retry):
+        # 调一次 run_conversation 触发 compact
+        await agent.run_conversation("继续")
+
+    # 手动模拟第 2 轮 _assemble_turn_messages（compact 已发生过，history 已重建）
+    # 此时再组装一轮，应看不到 brief 内容
+    second_round_msgs = agent._assemble_turn_messages(
+        "system", {"bg_notifications": [], "cron_messages": [], "team_messages_text": ""},
+    )
+
+    second_round_brief = next(
+        (m for m in second_round_msgs
+         if "<post_compress_brief>" in (m.get("content") or "")),
+        None,
+    )
+    # 设计权衡：第 2 轮组装的 messages 不应含 brief（ephemeral 不进 history）
+    if second_round_brief is not None:
+        assert "UNIQUE_EPHEMERAL_MARKER" not in second_round_brief["content"], (
+            "ephemeral 设计：第 2 轮组装的 messages 不应含第 1 轮的 recovery brief 内容。"
+            "如果此测试 FAIL，说明 brief 被写入 conversation_history 了——"
+            "请重新评估设计权衡（brief 污染下次 compact 摘要的风险）。"
+        )
+    # 如果 second_round_brief 是 None（没有 brief 消息），也符合 ephemeral 设计

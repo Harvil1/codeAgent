@@ -1855,7 +1855,12 @@ async def test_recent_read_file_and_skill_recorded(tmp_path):
 
 
 def test_build_reinject_context(tmp_path):
-    """压缩后重注入包含技能正文 + 最近读过的文件内容。"""
+    """压缩后重注入包含技能正文 + 最近读过的文件内容。
+
+    Task B Round 1 fix：原内联 _build_reinject_context 已删除（dead code），
+    改用 agent.post_compact_recovery.build_post_compact_brief（行为等价）。
+    """
+    from agent.post_compact_recovery import build_post_compact_brief
     src = tmp_path / "data.txt"
     src.write_text("关键内容 ABC", encoding="utf-8")
 
@@ -1865,23 +1870,31 @@ def test_build_reinject_context(tmp_path):
     agent._recent_skills = ["brainstorming"]
     agent._recent_read_files = [str(src)]
 
-    out = agent._build_reinject_context()
-    assert "[技能 brainstorming 正文]" in out, f"应含技能正文，实际: {out[:200]}"
+    out = build_post_compact_brief(agent)
+    assert "brainstorming" in out.lower(), f"应含技能正文，实际: {out[:200]}"
     assert "关键内容 ABC" in out, f"应含文件内容，实际: {out[:200]}"
-    assert "[最近读过的文件" in out
+    assert "最近读过的文件" in out
 
 
 def test_reinject_context_budget(tmp_path):
-    """重注入受总预算限制（reinject_char_limit）。"""
+    """重注入受每文件 preview 上限限制（RECENT_FILE_PREVIEW_CHARS=1000）。
+
+    Task B Round 1 fix：原内联 _build_reinject_context 已删除（dead code），
+    改用 build_post_compact_brief（per-file 1K preview，不是旧 4K）。
+    """
+    from agent.post_compact_recovery import build_post_compact_brief, RECENT_FILE_PREVIEW_CHARS
     big = tmp_path / "big.txt"
-    big.write_text("A" * 10000, encoding="utf-8")  # 超过每文件 4000 上限
+    big.write_text("A" * 10000, encoding="utf-8")  # 超过每文件 1K preview 上限
 
     agent = AIAgent(api_key="fake", model="test", enabled_toolsets=[],
-                    omnimate_home=tmp_path, config={"context": {"reinject_char_limit": 2000}})
+                    omnimate_home=tmp_path, config={"context": {}})
     agent._recent_read_files = [str(big)]
 
-    out = agent._build_reinject_context()
-    assert len(out) <= 2000 + 200, f"应受预算限制，实际长度 {len(out)}"
+    out = build_post_compact_brief(agent)
+    # preview 截到 1K + 标签开销
+    assert out.count("A") <= RECENT_FILE_PREVIEW_CHARS + 200, (
+        f"应受 per-file preview 1K 限制，实际 A 数: {out.count('A')}"
+    )
 
 
 def test_context_management_tip_injected(tmp_path):

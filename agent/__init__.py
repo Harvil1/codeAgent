@@ -1427,38 +1427,6 @@ class AIAgent:
             logger.debug("加载技能正文失败 %s: %s", name, e)
             return ""
 
-    def _build_reinject_context(self) -> str:
-        """压缩后重注入最近技能正文 + 最近读过的文件。
-
-        上限：总 reinject_char_limit（默认 25000 字符）；每技能 5000、每文件 4000。
-        技能优先（官方确认的核心），其次是最近读过的文件（对症：减少反复手动读）。
-        """
-        budget = self.config.get("context", {}).get(
-            "reinject_char_limit", 25000,
-        )
-        from pathlib import Path  # 本模块顶部未导入，局部导入避免 NameError 被 except 吞
-        parts, used = [], 0
-        for skill in reversed(self._recent_skills[-5:]):
-            body = self._load_skill_body(skill)
-            if not body:
-                continue
-            snippet = body[:5000]
-            if used + len(snippet) > budget:
-                break
-            parts.append(f"[技能 {skill} 正文]\n{snippet}")
-            used += len(snippet)
-        for path in reversed(self._recent_read_files[-5:]):
-            try:
-                content = Path(path).read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            snippet = content[:4000]
-            if used + len(snippet) > budget:
-                break
-            parts.append(f"[最近读过的文件 {path}]\n{snippet}")
-            used += len(snippet)
-        return "\n\n".join(parts)
-
     def _persist_session_message(self, role, content, *, tool_calls=None,
                                  tool_call_id=None, name=None) -> None:
         """把消息持久化到会话库（对齐 Claude Code：工具轮次完整入库）。
