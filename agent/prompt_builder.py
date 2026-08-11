@@ -214,8 +214,12 @@ def build_system_prompt_layers(
 
     # 项目记忆：递归扫 cwd → root 收集 OMNIMATE.md
     # 对齐 Claude Code 的 "recursive CLAUDE.md lookup" 语义
+    # Round 1 fix: Path.cwd() 也是进程级（等价 os.getcwd），并发子代理会踩。
+    # 改走 get_workspace_cwd()（线程局部 ContextVar）。
     try:
-        project_mds = _scan_project_memory_files(Path.cwd())
+        from agent.workspace_context import get_workspace_cwd
+        scan_root = Path(get_workspace_cwd())
+        project_mds = _scan_project_memory_files(scan_root)
         for pmd in project_mds:
             try:
                 content = pmd.read_text(encoding="utf-8")
@@ -223,7 +227,7 @@ def build_system_prompt_layers(
                 if content.strip():
                     # 显示相对路径，便于调试（绝对路径太长）
                     try:
-                        rel = pmd.relative_to(Path.cwd())
+                        rel = pmd.relative_to(scan_root)
                     except ValueError:
                         rel = pmd
                     context_parts.append(f"## 项目记忆: {rel}\n{content}")

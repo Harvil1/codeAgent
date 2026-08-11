@@ -353,8 +353,14 @@ def is_write_protected_path(path) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def default_allowed_roots() -> List[Path]:
-    """默认允许写入的根目录：cwd + ~/.OmniMate。"""
-    roots = [Path.cwd().resolve()]
+    """默认允许写入的根目录：cwd + ~/.OmniMate。
+
+    Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩到别人的 cwd。
+    改走 get_workspace_cwd()（线程局部 ContextVar），子代理在自己 worktree 内
+    写文件时白名单会包含 worktree 路径，不会被 safe_path 拒绝。
+    """
+    from agent.workspace_context import get_workspace_cwd
+    roots = [Path(get_workspace_cwd()).resolve()]
     try:
         from constants import get_omnimate_home
         roots.append(get_omnimate_home().resolve())

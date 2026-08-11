@@ -42,7 +42,10 @@ def _user_agents_dir() -> Path:
 
 
 def _project_agents_dir() -> Path:
-    return Path.cwd() / ".omnimate" / "agents"
+    # Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩。
+    # 改走 get_workspace_cwd()（线程局部 ContextVar）。
+    from agent.workspace_context import get_workspace_cwd
+    return Path(get_workspace_cwd()) / ".omnimate" / "agents"
 
 
 def _builtin_agents_dir() -> Path:

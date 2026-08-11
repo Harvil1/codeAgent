@@ -621,12 +621,15 @@ def _run_child(
             result = asyncio.run(child.chat(f"请执行任务: {goal}"))
 
         # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
+        # Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩。
+        # 优先用 kwargs cwd，否则走线程局部的 get_workspace_cwd()。
         try:
             from agent.team.hallucination_check import verify_claims, append_warning
+            from agent.workspace_context import get_workspace_cwd
             verification = verify_claims(
                 result,
                 task_store=kwargs.get("task_store"),
-                fs_cwd=kwargs.get("cwd") or Path.cwd(),
+                fs_cwd=kwargs.get("cwd") or Path(get_workspace_cwd()),
             )
             result = append_warning(result, verification)
         except Exception as e:

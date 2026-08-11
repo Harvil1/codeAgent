@@ -221,10 +221,14 @@ def test_run_child_sets_workspace_context_for_tools(tmp_path, monkeypatch):
 def test_terminal_tool_reads_workspace_cwd(tmp_path):
     """验证 terminal_tool 读 cwd 走 get_workspace_cwd（而非 os.getcwd）。
 
-    在 workspace_cwd_context 内调 terminal_tool 的 cwd 解析逻辑，
-    应该拿到 workspace path。
+    Round 1 fix: 之前只断言 error_type != permission_denied，根本没验证 cwd 值——
+    即便 terminal_tool 完全不读 ContextVar 测试也能过（伪绿）。
+
+    强化：直接断言 subprocess.run 的 cwd 参数 == workspace path。
+    如果 cwd 没传对（fallback 到 os.getcwd），mock 会拿到主进程 cwd，断言失败。
     """
     from tools.terminal_tool import _handle_terminal
+    from unittest.mock import MagicMock
 
     workspace = str(tmp_path)
 
@@ -240,18 +244,151 @@ def test_terminal_tool_reads_workspace_cwd(tmp_path):
             })()
 
             # mock subprocess.run 不实际执行
-            import subprocess
-            mock_result = type("R", (), {
-                "stdout": workspace,  # 返回 cwd 让测试验证
-                "stderr": "",
-                "returncode": 0,
-            })()
-            with patch("subprocess.run", return_value=mock_result):
+            mock_result = MagicMock(
+                stdout=workspace, stderr="", returncode=0,
+            )
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
                 # 不传 cwd，让 terminal_tool 走 get_workspace_cwd
                 result = _handle_terminal({"command": "pwd", "timeout": 5})
+
+                # 核心：subprocess.run 被调用时 cwd 参数必须是 workspace
+                # 兼容 call_args / call_args_list 两种取值路径
+                assert mock_run.called, "subprocess.run 应被调用"
+                # 找到第一个（也是唯一一个）调用的 cwd 参数
+                call = mock_run.call_args_list[0]
+                cwd_passed = call.kwargs.get("cwd") or call.args[3] if len(call.args) > 3 else None
+                # 更稳的取法：按 keyword 取
+                cwd_from_kwargs = call.kwargs.get("cwd")
+                if cwd_from_kwargs is None:
+                    # fallback：terminal_tool 内部 subprocess.run 的 cwd 是 keyword
+                    pytest.fail(
+                        f"subprocess.run 没收到 cwd 参数。call: {call}"
+                    )
+                assert cwd_from_kwargs == workspace, (
+                    f"terminal_tool 应传 cwd={workspace}（workspace ContextVar）给 subprocess.run，"
+                    f"实际传了 cwd={cwd_from_kwargs}（说明 fallback 到了 os.getcwd）"
+                )
 
     # 验证 terminal_tool 没报错（权限/参数正常）
     import json
     data = json.loads(result)
     # 命令执行成功（可能输出截断或包装，但不应是 permission_denied）
     assert data.get("error_type") != "permission_denied"
+
+
+# ---------------------------------------------------------------------------
+# 5. permission.py:357 端到端验证（最关键的 review finding）
+# ---------------------------------------------------------------------------
+# default_allowed_roots() 之前用 Path.cwd()——进程级，并发子代理会拿到别人的 cwd。
+# 子代理在自己 worktree 内 write_file 时，白名单必须含 worktree 路径，否则被拒。
+# 修复后：default_allowed_roots 走 get_workspace_cwd()（线程局部）。
+
+
+def test_default_allowed_roots_uses_workspace_cwd(tmp_path):
+    """default_allowed_roots 在 workspace_cwd_context 内返回 worktree 路径。
+
+    模拟子代理场景：主进程 cwd 是 /project/HermesAgent，但子代理 worktree 在
+    tmp_path。修复后 default_allowed_roots 应该把 tmp_path（不是主进程 cwd）
+    放进白名单。
+
+    这是 permission.py:357 修复的核心验证：
+    - 改前：roots = [Path.cwd()] = [主进程 cwd] → worktree 内写文件被拒
+    - 改后：roots = [get_workspace_cwd()] = [worktree] → 写文件放行
+    """
+    from agent.permission import default_allowed_roots
+    from pathlib import Path
+
+    worktree = tmp_path / "worktree_child"
+    worktree.mkdir()
+    worktree_str = str(worktree)
+
+    # 先记录主进程视角的 roots（作为对照）
+    main_roots = default_allowed_roots()
+    main_cwd_resolved = Path(worktree_str).resolve().parent  # tmp_path 的 resolve
+
+    # 进子代理 workspace
+    with workspace_cwd_context(worktree_str):
+        roots = default_allowed_roots()
+        roots_resolved = [Path(r).resolve() for r in roots]
+        worktree_resolved = Path(worktree_str).resolve()
+        # 核心：worktree 必须在白名单里
+        found = False
+        for r in roots_resolved:
+            try:
+                if worktree_resolved == r or worktree_resolved.relative_to(r):
+                    found = True
+                    break
+            except ValueError:
+                continue
+        assert found, (
+            f"default_allowed_roots 在 workspace 上下文内应含 worktree={worktree_resolved}，"
+            f"实际 roots={roots_resolved}（说明 fallback 到了主进程 cwd）"
+        )
+
+
+def test_safe_path_write_in_worktree_not_denied(tmp_path):
+    """端到端：子代理在 worktree 内 write_file 不被 safe_path 拒（最关键的回归守门）。
+
+    场景：并发子代理各自有 worktree，其中一个想往自己 worktree 内写文件。
+    - 改前（Path.cwd()）：safe_path(write=True) 拿到的白名单是主进程 cwd，
+      worktree 路径不在里面 → 子代理写文件被拒 → 子代理无法正常工作
+    - 改后（get_workspace_cwd()）：白名单含 worktree → 放行
+
+    如果将来有人把 default_allowed_roots 改回 Path.cwd()，这个测试会立即失败。
+    """
+    from agent.permission import safe_path
+    from pathlib import Path
+
+    worktree = tmp_path / "worktree_child"
+    worktree.mkdir()
+    target_file = worktree / "output.txt"
+
+    with workspace_cwd_context(str(worktree)):
+        # safe_path 默认调用 default_allowed_roots()（write=True 且不传 allowed_roots）
+        result = safe_path(str(target_file), write=True)
+        assert result.allowed, (
+            f"子代理在 worktree 内写文件应被放行，但被拒: {result.reason}（gate={result.gate}）。"
+            f"说明 default_allowed_roots 没用 get_workspace_cwd()（permission.py:357 回归）。"
+        )
+
+
+def test_concurrent_subagents_each_can_write_own_worktree(tmp_path):
+    """并发场景：3 个子代理各自在自己 worktree 内写文件，互不影响，全部放行。
+
+    模拟真实 ThreadPoolExecutor 场景：每个线程 set 自己的 worktree，然后写文件。
+    如果 default_allowed_roots 用 Path.cwd()（进程级），所有线程拿到同一个 cwd，
+    非主进程 cwd 的 worktree 写入会被拒。
+    """
+    from agent.permission import safe_path
+    from pathlib import Path
+    import threading
+
+    worktrees = []
+    for i in range(3):
+        wt = tmp_path / f"wt_{i}"
+        wt.mkdir()
+        worktrees.append(wt)
+
+    results = {}  # idx -> (allowed, reason)
+    barrier = threading.Barrier(3)
+
+    def worker(idx):
+        wt = worktrees[idx]
+        target = wt / "out.txt"
+        with workspace_cwd_context(str(wt)):
+            barrier.wait()  # 3 线程都 set 完再同时验
+            time.sleep(0.05)
+            r = safe_path(str(target), write=True)
+            results[idx] = (r.allowed, r.reason)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(worker, i) for i in range(3)]
+        for f in futures:
+            f.result()
+
+    # 每个子代理都应该能在自己 worktree 写文件
+    for i in range(3):
+        allowed, reason = results[i]
+        assert allowed, (
+            f"子代理 {i} 应能在 worktree {worktrees[i]} 写文件，但被拒: {reason}"
+        )
