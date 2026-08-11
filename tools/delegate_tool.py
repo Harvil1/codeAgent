@@ -123,7 +123,11 @@ DELEGATE_TASK_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "是否后台运行（默认 false）",
+                "description": (
+                    "是否后台运行（默认 false）。"
+                    "**后台模式受工具白名单管控：禁 bg_start/team_spawn/team_shutdown/"
+                    "task_complete/subagent/idle 等有全局副作用的工具**"
+                ),
                 "default": False,
             },
             "role": {
@@ -241,8 +245,49 @@ def _delegate_async(
     role: str,
     **kwargs,
 ) -> str:
-    """异步委托：立即返回，后台执行。"""
+    """异步委托：立即返回，后台执行。
+
+    Task F: async 模式强制工具白名单（对齐 claude-code-main ASYNC_AGENT_ALLOWED_TOOLS）。
+    后台子代理在 daemon 线程跑，用户无法实时审批 destructive 操作，
+    因此过滤 enabled_toolsets（白名单交集）+ 注入 disabled_tools（黑名单兜底）。
+    config.delegation.async_tool_whitelist_enabled=False 可关（不推荐）。
+    """
     delegation_id = f"del_{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
+
+    # === Task F: async 工具白名单 ===
+    # fail-open：白名单逻辑异常时不崩，退回原行为
+    try:
+        from toolsets import (
+            ASYNC_AGENT_ALLOWED_TOOLSETS,
+            ASYNC_AGENT_DISALLOWED_TOOLS,
+        )
+        _cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
+        _delegation_cfg = (_cfg.get("delegation") or {}) if isinstance(_cfg, dict) else {}
+        _whitelist_enabled = _delegation_cfg.get("async_tool_whitelist_enabled", True)
+
+        if _whitelist_enabled:
+            # ① toolsets 取交集（用户传的跟白名单）
+            _user_ts = kwargs.get("enabled_toolsets")
+            if _user_ts:
+                _filtered = [ts for ts in _user_ts if ts in ASYNC_AGENT_ALLOWED_TOOLSETS]
+                kwargs["enabled_toolsets"] = _filtered
+            else:
+                # 用户没传 → 给一个安全默认（不是全部）
+                kwargs["enabled_toolsets"] = list(ASYNC_AGENT_ALLOWED_TOOLSETS)
+
+            # ② disabled_tools 注入 config（内置黑名单 + 用户扩展）
+            _user_extra = _delegation_cfg.get("async_disallowed_tools", [])
+            _disabled = list(ASYNC_AGENT_DISALLOWED_TOOLS) + list(_user_extra)
+            # 不覆盖 custom_def 已设的 disabled_tools（取并集）
+            _parent_cfg = kwargs.get("config")
+            _child_cfg = dict(_parent_cfg) if isinstance(_parent_cfg, dict) else {}
+            _existing_disabled = _child_cfg.get("disabled_tools") or []
+            _child_cfg["disabled_tools"] = list(dict.fromkeys(
+                list(_existing_disabled) + _disabled
+            ))
+            kwargs["config"] = _child_cfg
+    except Exception:
+        logger.warning("async 工具白名单应用失败（fail-open）", exc_info=True)
 
     def _background():
         try:

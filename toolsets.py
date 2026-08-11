@@ -117,6 +117,35 @@ TOOLSETS: Dict[str, dict] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Task F: async 子代理工具白名单（ASYNC_AGENT_ALLOWED_TOOLS）
+# ---------------------------------------------------------------------------
+# 借鉴 claude-code-main src/constants/tools.ts:ASYNC_AGENT_ALLOWED_TOOLS
+# 后台子代理在 daemon 线程里跑，用户感知不到 destructive 操作，
+# 因此对 enabled_toolsets 做白名单过滤 + 对具体工具名做黑名单兜底。
+
+ASYNC_AGENT_ALLOWED_TOOLSETS = frozenset({
+    "core",      # 基础工具（read/write/search/terminal/memory/skill/...）
+    "minimal",   # 子代理默认最小集
+    "explore",   # 只读探索
+    # 不含：mcp / team / bg / plan（这些有外部副作用或需交互）
+})
+
+ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
+    # 后台任务管理（嵌套后台 → 不可控孙子进程）
+    "bg_start", "bg_stop",
+    # Team 多 agent 协作（影响其他 agent 进程）
+    "team_spawn", "team_shutdown", "team_send",
+    # 任务状态机推进（async 子代理不应修改全局任务图）
+    "task_complete",
+    # 子代理嵌套（防止递归派生）
+    "subagent",
+    # cron 调度（后台子代理不应注册定时任务）
+    # idle 挂起（后台子代理不应进 IDLE 状态影响 team 协调）
+    "idle",
+})
+
+
 def resolve_toolset(toolset_name: str) -> List[str]:
     """解析工具集，返回完整的工具名列表（递归展开 includes）。"""
     if toolset_name not in TOOLSETS:

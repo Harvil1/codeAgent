@@ -213,6 +213,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "orchestrator_enabled": True,
         "subagent_auto_approve": False,
         "max_iterations": 50,
+        # Task F: async 子代理工具白名单（对齐 claude-code-main ASYNC_AGENT_ALLOWED_TOOLS）
+        # 默认开（安全默认 > 事后补救）；False 时 async 子代理能用全部工具
+        "async_tool_whitelist_enabled": True,
+        # 用户扩展禁用列表（在 ASYNC_AGENT_DISALLOWED_TOOLS 基础上追加）
+        "async_disallowed_tools": [],
     },
 
     # 安全
