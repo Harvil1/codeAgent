@@ -33,3 +33,12 @@ backend/
 /.codegraph/
 /.omnimate/
 /dist/
+
+# Python 构建产物（python -m build 生成的 sdist/wheel）
+/build/
+
+# 临时调试脚本（不进 git，需要时手动保留）
+/dump_llm_payload.py
+/dump_llm_payload_full.py
+/verify_ctxopt_live.py
+/snapshot_report.html

@@ -701,14 +701,11 @@ class AIAgent:
         - volatile：每轮可变（reminder），不入缓存
         """
         if not self._system_prompt_built:
-            # 从 config 读 language（默认 "zh"）
-            language = (self.config or {}).get("language", "zh") if self.config else "zh"
             from agent.prompt_builder import build_system_prompt_layers
             layers = build_system_prompt_layers(
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
                 enabled_toolsets=self.enabled_toolsets,
-                language=language,
             )
             # stable + context 缓存，volatile 即时取
             self._stable_prompt = layers.stable

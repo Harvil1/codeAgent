@@ -105,33 +105,6 @@ DELEGATE_GUIDANCE = (
 
 
 # ---------------------------------------------------------------------------
-# 身份声明（多语言：中文/英文）
-# ---------------------------------------------------------------------------
-
-IDENTITY_ZH = "你是 OmniMate,自学习 AI Agent 平台。"
-
-IDENTITY_EN = "You are OmniMate, a self-learning AI Agent platform."
-
-# 向后兼容别名（中文为默认）
-IDENTITY = IDENTITY_ZH
-
-
-OUTPUT_CONVENTION_ZH = (
-    "## 输出约定\n"
-    "- 使用中文回复\n"
-    "- 代码标识符（变量名、函数名、类名）使用英文\n"
-    "- 长输出分段，使用 markdown 格式"
-)
-
-OUTPUT_CONVENTION_EN = (
-    "## Output Convention\n"
-    "- Respond in English\n"
-    "- Use English for code identifiers (variable/function/class names)\n"
-    "- Break long output into sections; use Markdown formatting"
-)
-
-
-# ---------------------------------------------------------------------------
 # 三层结构（05）
 # ---------------------------------------------------------------------------
 
@@ -169,7 +142,6 @@ def build_system_prompt_layers(
     context_files: Optional[List[Path]] = None,
     extra_instructions: str = "",
     include_guidance: bool = True,
-    language: str = "zh",
     # volatile 来源（运行时传入）
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
@@ -180,17 +152,9 @@ def build_system_prompt_layers(
       - stable：跨会话不变（同版本同一台机器，几乎 100% 命中 cache）
       - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内 80%+ 命中）
       - volatile：每轮可变（todo / reminder），不期望 cache 命中
-
-    language: "zh"（默认）或 "en"。只影响身份声明和输出约定。
     """
     # ---- stable 层 ----
     stable_parts = []
-    if language == "en":
-        stable_parts.append(IDENTITY_EN)
-        stable_parts.append(OUTPUT_CONVENTION_EN)
-    else:
-        stable_parts.append(IDENTITY_ZH)
-        stable_parts.append(OUTPUT_CONVENTION_ZH)
     if include_guidance:
         stable_parts.extend([
             MEMORY_GUIDANCE, SKILLS_GUIDANCE,
@@ -305,7 +269,6 @@ def build_system_prompt(
     context_files: Optional[List[Path]] = None,
     extra_instructions: str = "",
     include_guidance: bool = True,
-    language: str = "zh",
 ) -> str:
     """组装 system prompt（向后兼容旧接口）。
 
@@ -320,7 +283,6 @@ def build_system_prompt(
         context_files=context_files,
         extra_instructions=extra_instructions,
         include_guidance=include_guidance,
-        language=language,
     )
     return layers.render_flat()
 
