@@ -66,6 +66,8 @@ async def _summarize_conversation(
     model: str = None,
     summary_model: str = None,
     session_memory: str = None,
+    from_idx: int = 0,
+    up_to_idx: int = -1,
 ) -> str:
     """调用 LLM 用 9 段式 prompt 总结对话历史（async：对齐 batch2 async 改造）。
 
@@ -75,14 +77,31 @@ async def _summarize_conversation(
     - **熔断器**：连续 MAX_CONSECUTIVE_FAILURES 次失败后不再调 LLM
     - **session_memory 替代**：有预提取 memory 时直接用，不调 LLM
 
+    Task C（partial compact）：
+    - **from_idx/up_to_idx**：只压 messages[from_idx:up_to_idx] 段（默认 0/-1 = 全量）
+    - 段消息数 < 2 时返回空串（不压）
+
     Args:
         messages: 对话历史
         llm_client: LLM 客户端（None 时走规则总结）
         model: 主模型名
         summary_model: 摘要专用模型（优先于 model）
         session_memory: 预提取的 session memory（有则替代 LLM 摘要）
+        from_idx: 从第 N 条开始压（默认 0 = 从头）
+        up_to_idx: 压到第 N 条为止（默认 -1 = 压到末尾）
     """
     global _consecutive_failures, _compact_circuit_open
+
+    # Task C：partial 提取（from_idx/up_to_idx）
+    is_partial = from_idx != 0 or up_to_idx != -1
+    effective_up_to = len(messages) if up_to_idx < 0 else up_to_idx
+    to_summarize = messages[from_idx:effective_up_to]
+    if is_partial and len(to_summarize) < 2:
+        logger.info(
+            "partial compact: 段消息数 %d < 2，跳过压缩",
+            len(to_summarize),
+        )
+        return ""
 
     # 1. 熔断器检查（连续失败达上限 → 直接走规则总结，不调 LLM）
     if _compact_circuit_open:
@@ -90,7 +109,7 @@ async def _summarize_conversation(
             "摘要熔断器开启（连续 %d 次失败），跳过 LLM 摘要",
             _consecutive_failures,
         )
-        return _rule_based_summary(messages)
+        return _rule_based_summary(to_summarize)
 
     # 2. session memory 优先（有预提取就直接用，省一次 LLM 调用）
     if session_memory and session_memory.strip():
@@ -99,10 +118,10 @@ async def _summarize_conversation(
 
     # 3. 无客户端时走规则总结
     if llm_client is None:
-        return _rule_based_summary(messages)
+        return _rule_based_summary(to_summarize)
 
-    # 4. 格式化对话 + 9 段式 prompt
-    working_messages = list(messages)  # 不污染入参（PTL 重试会修改）
+    # 4. 格式化对话 + 9 段式 prompt（用 to_summarize 而不是全量 messages）
+    working_messages = list(to_summarize)  # 不污染入参（PTL 重试会修改）
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
 

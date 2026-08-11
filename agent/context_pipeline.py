@@ -629,6 +629,8 @@ async def llm_compact(
     msg_threshold: int = 100,
     precomputed_tokens: Optional[int] = None,
     session_memory: Optional[str] = None,
+    from_idx: int = 0,
+    up_to_idx: int = -1,
 ) -> Tuple[list, bool]:
     """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话（async：_summarize_conversation 已改 async）。
 
@@ -637,6 +639,11 @@ async def llm_compact(
     session_memory: 预提取的 session memory（改造点 ② 软目标）。
     有值时传给 _summarize_conversation 替代 LLM 摘要。
     SessionStore.get_memory_extract 尚未实现，目前永远 None（Phase 2 再接入）。
+
+    Task C（partial compact）：
+    - **from_idx/up_to_idx**：只压 conv[from_idx:up_to_idx] 段，保留 head + tail 原文
+    - 默认 0/-1 = 全量（向后兼容，走原 keep_recent 逻辑）
+    - partial 模式时 keep_recent 被忽略（from/up_to 完全决定切片）
 
     Task D4 fix: 改 async + await _summarize_conversation。
     """
@@ -647,6 +654,52 @@ async def llm_compact(
         over_token = estimate_message_tokens(messages) > token_threshold
     if not over_token:  # 对齐 Claude Code：压缩由 token 驱动，不按消息数
         return messages, False
+
+    # Task C：partial 模式 vs 全量模式
+    is_partial = from_idx != 0 or up_to_idx != -1
+
+    if is_partial:
+        # partial 模式：head + summary + tail 拼装
+        effective_up_to = len(conv) if up_to_idx < 0 else up_to_idx
+        head = conv[:from_idx]
+        tail = conv[effective_up_to:] if effective_up_to < len(conv) else []
+
+        summary = await _summarize_conversation(
+            conv,  # 传完整 conv，由 _summarize_conversation 内部切片
+            llm_client, model=model,
+            session_memory=session_memory,
+            from_idx=from_idx,
+            up_to_idx=effective_up_to,
+        )
+        if not summary:
+            return messages, False
+
+        placeholder = {
+            "role": "user",
+            "content": (
+                f"[对话摘要（{from_idx}-{effective_up_to}）]\n\n"
+                f"{summary}\n\n"
+                "[以下是压缩段之后的对话，请继续]"
+            ),
+        }
+        new_conv = head + [placeholder] + tail
+        new_conv = _fix_tool_call_pairs(new_conv)
+        new_messages = _reassemble(system, new_conv)
+
+        summarized_count = effective_up_to - from_idx
+        logger.info(
+            "L4 llm_compact (partial %d-%d): %d msgs summarized, head=%d tail=%d",
+            from_idx, effective_up_to, summarized_count,
+            len(head), len(tail),
+        )
+        try:
+            from agent.cache_monitor import notify_compaction
+            notify_compaction()
+        except Exception as e:
+            logger.debug("notify_compaction fail-open: %s", e)
+        return new_messages, True
+
+    # 全量模式（原逻辑，向后兼容）
     if len(conv) <= keep_recent:
         return messages, False
 
