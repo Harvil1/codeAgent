@@ -61,16 +61,20 @@ def _sessions_dir() -> Path:
 def write_metadata(agent_id: str, meta: dict) -> None:
     """写元数据（覆盖式，会自动追加 agent_id + updated_at）。fail-open。
 
-    atomic: 先写临时文件再 rename（Windows 兼容）。
+    原子写：tempfile + os.replace（via atomic_write_text_lite），读者不会看到半截 JSON。
+    异常时 fail-open（元数据可能不更新，但 transcript 在 jsonl 仍可用）。
     """
     try:
+        from agent.atomic_io import atomic_write_text_lite
+
         path = _sessions_dir() / f"{agent_id}.meta.json"
         payload = {
             **meta,
             "agent_id": agent_id,
             "updated_at": time.time(),
         }
-        path.write_text(
+        atomic_write_text_lite(
+            path,
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -177,8 +181,9 @@ def cleanup_old(days: int = 7) -> int:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("status") in ("completed", "failed", "interrupted"):
                 if meta.get("completed_at", 0) < cutoff:
+                    agent_id = meta.get("agent_id") or meta_path.stem.removesuffix(".meta")
                     meta_path.unlink(missing_ok=True)
-                    jsonl_path = meta_path.with_suffix(".jsonl")
+                    jsonl_path = sessions_dir / f"{agent_id}.jsonl"
                     jsonl_path.unlink(missing_ok=True)
                     cleaned += 1
         except Exception:

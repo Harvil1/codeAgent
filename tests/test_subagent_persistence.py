@@ -257,13 +257,20 @@ class TestCleanupOld:
         write_metadata(aid_new, {"status": "running"})
         mark_completed(aid_new, "completed")
 
+        # 验证清理前 transcript 确实存在（保证测试有意义）
+        from agent.subagent_persistence import load_transcript
+        assert len(load_transcript(aid_old)) == 1, "清理前应有 1 条 transcript"
+
         cleaned = cleanup_old(days=7)
         assert cleaned == 1
 
-        # 验证旧文件被删
+        # 验证旧 meta 被删
         from agent.subagent_persistence import load_metadata
         assert load_metadata(aid_old) is None
         assert load_metadata(aid_new) is not None
+
+        # 验证旧 transcript (jsonl) 也被删（不只 meta）
+        assert load_transcript(aid_old) == [], "jsonl transcript 应一并删除"
 
     def test_running_not_cleaned(self, isolated_sessions_dir):
         """即使很老的 running 也不被 cleanup_old 删（只清终态）。"""
