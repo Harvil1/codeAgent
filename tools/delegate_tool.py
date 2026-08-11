@@ -435,20 +435,30 @@ def _run_child(
             )
 
     # 可选：隔离工作区（自定义 .md 定义 isolation=worktree 也开启）
+    # 注意：不再用 os.chdir（进程级全局，ThreadPoolExecutor 并发子代理会互相踩 cwd）
+    # 改用 workspace_cwd_context（contextvars.ContextVar，线程隔离），
+    # 在下方 try/finally 外层包一层 with，让子代理内的工具读 get_workspace_cwd() 拿到自己的 worktree。
     isolated = kwargs.get("isolated_workspace", False) or (
         custom_def is not None and custom_def.isolation == "worktree")
-    original_cwd = os.getcwd()
     workspace_cleanup = None
+    workspace_path = None
     if isolated:
         try:
             from tools.worktree import create_isolated_workspace
             workspace_path, workspace_cleanup = create_isolated_workspace(
                 name=f"delegate-{goal[:20].replace(' ', '-')}",
             )
-            os.chdir(workspace_path)
             logger.info("子代理在隔离工作区运行: %s", workspace_path)
         except Exception as e:
             logger.warning("创建隔离工作区失败，用当前目录: %s", e)
+
+    # workspace_cwd_guard: 手动管理 ContextVar token（不重新缩进 200 行 try/finally）
+    # 用 contextvars 替代 os.chdir：并发子代理（ThreadPoolExecutor）每线程独立 ContextVar，
+    # 不会互相踩 cwd。token 在 finally 末尾 reset（退出 try 块 = 退出子代理 context）。
+    from agent.workspace_context import _workspace_cwd
+    _workspace_cwd_token = None
+    if workspace_path is not None:
+        _workspace_cwd_token = _workspace_cwd.set(str(workspace_path))
 
     # batch1-T4: 获取父 agent 引用（用于中断传播）
     parent_agent = kwargs.get("agent_ref")
@@ -639,12 +649,14 @@ def _run_child(
                     parent_agent._children.remove(child)
             except Exception:
                 pass
-        # 恢复工作目录
-        if workspace_cleanup:
+        # 恢复 workspace cwd context（替代 os.chdir）
+        # ContextVar token reset 只影响当前线程，不会踩到其他并发子代理
+        if _workspace_cwd_token is not None:
             try:
-                os.chdir(original_cwd)
+                _workspace_cwd.reset(_workspace_cwd_token)
             except Exception:
                 pass
+        if workspace_cleanup:
             workspace_cleanup()
 
         # round3 D2 NEW: SUBAGENT_STOP（无论成功失败都触发，fail-open）

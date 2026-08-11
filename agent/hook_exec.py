@@ -134,8 +134,9 @@ def _wrap_with_sandbox(hook) -> list:
         else:
             shell_cmd = str(raw_cmd)
 
-        import os as _os
-        cwd = _os.getcwd()
+        # 并发子代理 workspace：优先读 ContextVar（线程隔离），fallback 到 os.getcwd()
+        from agent.workspace_context import get_workspace_cwd
+        cwd = get_workspace_cwd()
         writable_roots = []  # hook 命令默认只可写 cwd
         return sandbox_runner.wrap_command(
             shell_cmd, cwd=cwd, writable_roots=writable_roots,

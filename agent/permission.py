@@ -892,9 +892,9 @@ class PermissionChecker:
         # acceptEdits: cwd 内写入自动放行
         # 受保护路径已在闸门 1 拒掉（~/.ssh 等仍拒），此处只处理 cwd 内合法写入。
         if effective_mode == "acceptEdits":
-            import os
+            from agent.workspace_context import get_workspace_cwd
             try:
-                cwd_path = Path(os.getcwd()).resolve()
+                cwd_path = Path(get_workspace_cwd()).resolve()
                 resolved = Path(path).expanduser().resolve()
                 resolved.relative_to(cwd_path)
                 return PermissionResult(True, "acceptEdits: write in cwd", "auto")

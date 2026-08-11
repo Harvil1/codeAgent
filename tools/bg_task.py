@@ -153,7 +153,11 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
 
     command_str = " ".join(shlex.quote(str(c)) for c in command)
     cwd_raw = args.get("cwd")
-    cwd_for_check = cwd_raw or os.getcwd()
+    if not cwd_raw:
+        # 并发子代理 workspace：优先读 ContextVar（线程隔离），fallback 到 os.getcwd()
+        from agent.workspace_context import get_workspace_cwd
+        cwd_raw = get_workspace_cwd()
+    cwd_for_check = cwd_raw
 
     # 闸门 0b: fatal 不可逆（任何 mode 都挡）
     fatal = check_fatal_irreversible(command_str)

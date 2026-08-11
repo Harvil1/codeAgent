@@ -288,8 +288,8 @@ def build_system_prompt(
 
 
 def _current_cwd() -> str:
-    import os
-    return os.getcwd()
+    from agent.workspace_context import get_workspace_cwd
+    return get_workspace_cwd()
 
 
 def _paths_match(paths: list, cwd: str) -> bool:

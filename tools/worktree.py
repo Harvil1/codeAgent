@@ -13,8 +13,11 @@ P3.4 新增：create_isolated_workspace 接受可选的 hook_registry 参数，
 用法：
     path, cleanup = create_isolated_workspace(name="task-x")
     try:
-        os.chdir(path)
-        # 在隔离工作区执行任务
+        # 注意：不要用 os.chdir（进程级全局，并发子代理会互相踩 cwd）
+        # 用 workspace_cwd_context（contextvars.ContextVar，线程隔离）
+        from agent.workspace_context import workspace_cwd_context
+        with workspace_cwd_context(str(path)):
+            ...  # 在隔离工作区执行任务
     finally:
         cleanup()
 """

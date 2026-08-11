@@ -131,7 +131,11 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         timeout = float(args.get("timeout", 120) or 120)
     except (TypeError, ValueError):
         timeout = 120.0
-    cwd = args.get("cwd") or os.getcwd()
+    cwd = args.get("cwd")
+    if not cwd:
+        # 并发子代理 workspace：优先读 ContextVar（线程隔离），fallback 到 os.getcwd()
+        from agent.workspace_context import get_workspace_cwd
+        cwd = get_workspace_cwd()
 
     # S4 fix: cwd 必须过 safe_path（之前可在 ~/.ssh 跑 cat * 读私钥）
     from agent.permission import safe_path
