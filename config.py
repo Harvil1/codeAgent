@@ -98,9 +98,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "llm_compact_keep_recent": 30,
         "llm_compact_cooldown_turns": 5,
         "max_compress_attempts": 3,
-        # Reactive
+        # Reactive（Task D：多次触发 + 冷却窗口）
         "reactive_keep_recent": 10,
-        "reactive_once_per_session": True,
+        "reactive_compact_cooldown_seconds": 60,   # 冷却窗口（60s 内最多 1 次）
+        "reactive_compact_max_per_session": 5,     # 单会话最多触发 5 次（防失控）
+        "reactive_once_per_session": False,        # 向后兼容 flag（已废弃，默认 False）
         # Transcript
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",

@@ -492,7 +492,9 @@ async def test_llm_fixes_tool_call_pairs():
 
 def test_session_state_default():
     s = CompressionSessionState()
-    assert s.reacted is False
+    assert s.reacted is False  # 向后兼容：reactive_count > 0 → True
+    assert s.reactive_count == 0
+    assert s.reactive_last_at == 0.0
     assert s.llm_compact_count == 0
     assert s.cooldown_ok(5) is True
 
@@ -514,17 +516,18 @@ def test_reactive_truncates_to_last_5():
     state = CompressionSessionState()
     out, changed = reactive_compact(msgs, session_state=state)
     assert changed is True
-    assert state.reacted is True
+    assert state.reactive_count == 1
+    assert state.reacted is True  # 向后兼容
     # system + placeholder + 5 条
     assert len(out) == 7
     assert out[0]["role"] == "system"
     assert "紧急上下文压缩" in out[1]["content"]
 
 
-def test_reactive_once_per_session():
-    """session_state.reacted=True 时不再触发。"""
+def test_reactive_max_per_session_reached():
+    """session_state.reactive_count >= max_per_session 时不再触发。"""
     msgs = _mk_msgs(40)
-    state = CompressionSessionState(reacted=True)
+    state = CompressionSessionState(reactive_count=5)  # 达到默认上限
     out, changed = reactive_compact(msgs, session_state=state)
     assert changed is False
     assert out == msgs
@@ -538,11 +541,92 @@ def test_reactive_short_history_kept_as_is():
     state = CompressionSessionState()
     out, changed = reactive_compact(msgs, session_state=state, keep_recent=5)
     assert changed is True
+    assert state.reactive_count == 1
     assert state.reacted is True
     # system + placeholder + conv 2 条（u1 + a1）
     assert len(out) == 4
     assert out[0]["role"] == "system"
     assert "紧急上下文压缩" in out[1]["content"]
+
+
+# ============ Task D：冷却窗口 + 多次触发测试 ============
+
+def test_reactive_cooldown_blocks_within_window():
+    """冷却窗口内（< 60s）拒绝触发。"""
+    import time as _time
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState(
+        reactive_count=1,
+        reactive_last_at=_time.time() - 30,  # 30s 前触发过（< 60s 冷却）
+    )
+    out, changed = reactive_compact(msgs, session_state=state)
+    assert changed is False
+    assert out == msgs
+
+
+def test_reactive_cooldown_allows_outside_window():
+    """冷却窗口外（> 60s）允许再次触发。"""
+    import time as _time
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState(
+        reactive_count=1,
+        reactive_last_at=_time.time() - 90,  # 90s 前触发过（> 60s 冷却）
+    )
+    out, changed = reactive_compact(msgs, session_state=state)
+    assert changed is True
+    assert state.reactive_count == 2
+
+
+def test_reactive_multiple_triggers_within_session():
+    """多次 PTL 在冷却窗口外都能触发。"""
+    import time as _time
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState()
+
+    # 第 1 次触发
+    t0 = 1000.0
+    out1, c1 = reactive_compact(msgs, session_state=state, now_fn=lambda: t0)
+    assert c1 is True
+    assert state.reactive_count == 1
+
+    # 60s 内（冷却中）→ 拒绝
+    out2, c2 = reactive_compact(out1, session_state=state, now_fn=lambda: t0 + 30)
+    assert c2 is False
+
+    # 61s 后（冷却外）→ 触发
+    out3, c3 = reactive_compact(out1, session_state=state, now_fn=lambda: t0 + 61)
+    assert c3 is True
+    assert state.reactive_count == 2
+
+
+def test_reactive_custom_cooldown_and_max():
+    """自定义 cooldown_seconds 和 max_per_session 生效。"""
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState(reactive_count=3)
+    # max_per_session=3 → 达上限
+    out, changed = reactive_compact(
+        msgs, session_state=state, max_per_session=3,
+    )
+    assert changed is False
+
+    # max_per_session=10 → 允许
+    state2 = CompressionSessionState(reactive_count=3)
+    out2, changed2 = reactive_compact(
+        msgs, session_state=state2, max_per_session=10,
+    )
+    assert changed2 is True
+    assert state2.reactive_count == 4
+
+
+def test_reactive_first_trigger_no_cooldown():
+    """首次触发（reactive_count=0）不受冷却限制。"""
+    import time as _time
+    msgs = _mk_msgs(40)
+    state = CompressionSessionState()
+    # reactive_last_at=0 → 首次，elapsed 很大，不受冷却
+    out, changed = reactive_compact(msgs, session_state=state)
+    assert changed is True
+    assert state.reactive_count == 1
 
 
 # ============ compress_if_needed 编排器测试 ============

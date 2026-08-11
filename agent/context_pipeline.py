@@ -745,15 +745,25 @@ async def llm_compact(
 class CompressionSessionState:
     """单会话的压缩状态。
 
-    - reacted: 本会话是否已触发过 reactive_compact（once-per-session）
+    - reactive_last_at: 上次 reactive_compact 触发的 time.time()（0=从未触发）
+    - reactive_count: 本会话 reactive_compact 已触发次数
     - llm_compact_count: L4 触发次数
     - last_llm_compact_turn: 上次 L4 触发时的 current_turn（用于 cooldown）
     - current_turn: 当前 LLM 轮次（由 agent 主循环 increment）
+
+    向后兼容：``reacted`` 属性保留为只读代理（``reactive_count > 0``），
+    旧代码读 ``state.reacted`` 不破坏。
     """
-    reacted: bool = False
+    reactive_last_at: float = 0.0
+    reactive_count: int = 0
     llm_compact_count: int = 0
     last_llm_compact_turn: int = -10**6
     current_turn: int = 0
+
+    @property
+    def reacted(self) -> bool:
+        """向后兼容：reacted 等价于 reactive_count > 0。"""
+        return self.reactive_count > 0
 
     def record_llm_compact(self) -> None:
         self.llm_compact_count += 1
@@ -766,18 +776,45 @@ class CompressionSessionState:
         self.current_turn += 1
 
 
+# 冷却窗口 + 上限的默认值（可被 config 覆盖）
+REACTIVE_COOLDOWN_SECONDS = 60
+REACTIVE_MAX_PER_SESSION = 5
+
+
 def reactive_compact(
     messages: list,
     *,
     session_state: CompressionSessionState,
     keep_recent: int = 5,
+    cooldown_seconds: float = REACTIVE_COOLDOWN_SECONDS,
+    max_per_session: int = REACTIVE_MAX_PER_SESSION,
+    now_fn=time.time,
 ) -> Tuple[list, bool]:
     """紧急通道：API 报 prompt_too_long 时调用。
 
     只留 system + 占位 + 最后 keep_recent 条。
-    会话级 once-per-session：session_state.reacted=True 后不再触发。
+    **多次触发**（Task D 改造）：每次 PTL 都可触发，受两层保护：
+      1. **冷却窗口**：距上次触发 < ``cooldown_seconds`` 则跳过（默认 60s）
+      2. **单会话上限**：已触发 ``max_per_session`` 次则跳过（默认 5）
+
+    ``now_fn`` 参数仅为测试注入用（生产代码不传）。
     """
-    if session_state.reacted:
+    # 保护 1：冷却窗口
+    now = now_fn()
+    elapsed = now - session_state.reactive_last_at
+    if session_state.reactive_count > 0 and elapsed < cooldown_seconds:
+        logger.info(
+            "reactive_compact 冷却中（距上次 %ds < %ds），跳过",
+            int(elapsed), int(cooldown_seconds),
+        )
+        return messages, False
+
+    # 保护 2：单会话上限
+    if session_state.reactive_count >= max_per_session:
+        logger.warning(
+            "reactive_compact 达到单会话上限 %d 次，跳过",
+            session_state.reactive_count,
+        )
         return messages, False
 
     system, conv = _split_system(messages)
@@ -794,8 +831,12 @@ def reactive_compact(
     new_conv = _fix_tool_call_pairs(new_conv)
     new_messages = _reassemble(system, new_conv)
 
-    session_state.reacted = True
-    logger.warning("reactive_compact triggered: kept last %d", len(keep))
+    session_state.reactive_last_at = now
+    session_state.reactive_count += 1
+    logger.warning(
+        "reactive_compact triggered (#%d): kept last %d",
+        session_state.reactive_count, len(keep),
+    )
     # 通知 cache_monitor：下次 cache 下降是预期压缩（对齐 llm_compact 的 pattern）
     # fail-open：异常只 debug log，不影响压缩结果
     try:

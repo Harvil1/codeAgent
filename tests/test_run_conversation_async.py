@@ -220,7 +220,8 @@ async def test_memory_retrieval_llm_actually_awaited():
 # 验证：
 #   - flag OFF：context_length_exceeded 错误不触发响应式回压（返回 None）
 #   - flag ON：context_length_exceeded 错误触发响应式回压（返回 _REACTIVE_RETRY）
-#   - flag ON 但已触发过：不二次触发（once-per-session）
+#   - flag ON 但已达上限：不二次触发（max_per_session）
+#   - Task D：flag ON + 冷却窗口外：可多次触发
 # ============================================================================
 
 def _make_prompt_too_long_llm_client():
@@ -292,13 +293,17 @@ async def test_reactive_compact_flag_on_triggers_retry(tmp_path):
     )
 
 
-async def test_reactive_compact_once_per_session(tmp_path):
-    """flag ON 但本会话已触发过：不二次触发（返回 None）。"""
+async def test_reactive_compact_max_per_session_reached(tmp_path):
+    """flag ON 但本会话已达 max_per_session 上限：不二次触发（返回 None）。
+
+    Task D：reactive_compact 改多次触发，gate 从 ``_reacted`` bool
+    迁移到 ``session_state.reactive_count >= max_per_session``。
+    """
     agent, _ = _make_minimal_agent(tmp_path)
     agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": True}
     agent.llm_client = _make_prompt_too_long_llm_client()
-    # 模拟已触发过一次
-    agent._reacted = True
+    # 模拟已达到单会话上限（默认 5）
+    agent._compress_session_state.reactive_count = 5
 
     response = await agent._call_llm_with_escalation(
         messages=[{"role": "user", "content": "hi"}],
@@ -306,5 +311,29 @@ async def test_reactive_compact_once_per_session(tmp_path):
         system_prompt="你是助手",
     )
     assert response is None, (
-        "本会话已触发过回压（_reacted=True）应返回 None，不二次触发"
+        "本会话已达 reactive_compact 上限（reactive_count=5）应返回 None，不二次触发"
+    )
+
+
+async def test_reactive_compact_cooldown_blocks_within_window(tmp_path):
+    """Task D：flag ON + 冷却窗口内（< 60s）→ 拒绝触发（返回 None）。"""
+    import time as _time
+    agent, _ = _make_minimal_agent(tmp_path)
+    agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": True}
+    agent.llm_client = _make_prompt_too_long_llm_client()
+    # 模拟 30s 前触发过一次（< 60s 冷却窗口）
+    agent._compress_session_state.reactive_count = 1
+    agent._compress_session_state.reactive_last_at = _time.time() - 30
+
+    msgs = [{"role": "system", "content": "你是助手"}]
+    msgs += [{"role": "user", "content": f"turn {i}"} for i in range(20)]
+    msgs += [{"role": "assistant", "content": f"a{i}"} for i in range(20)]
+
+    response = await agent._call_llm_with_escalation(
+        messages=msgs,
+        tool_schemas=[],
+        system_prompt="你是助手",
+    )
+    assert response is None, (
+        "冷却窗口内（< 60s）不应触发 reactive_compact"
     )

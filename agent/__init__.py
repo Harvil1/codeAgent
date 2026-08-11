@@ -278,8 +278,9 @@ class AIAgent:
         self._max_tokens_escalator = MaxTokensEscalator()
 
         # === 韧性状态：reactive_compact 已触发标记 ===
-        # True 表示本会话已经做过一次紧急压缩，下次 prompt_too_long 不再重试。
-        # 显式初始化避免依赖 getattr 默认值（可读性 + 子类安全）。
+        # Task D：reactive_compact 改多次触发（冷却 60s + 上限 5 次/会话），
+        # gate 逻辑下沉到 reactive_compact 内部（session_state 字段），
+        # 这里不再维护独立的 _reacted flag。保留字段做向后兼容（测试可能读）。
         self._reacted: bool = False
 
         # === 失败重试检测 ===
@@ -1341,7 +1342,9 @@ class AIAgent:
             return response
 
         except Exception as e:
-            # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试（每会话一次）
+            # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试
+            # Task D：改多次触发（冷却 60s + 上限 5 次/会话），
+            # gate 逻辑下沉到 reactive_compact 内部（session_state.reactive_count / reactive_last_at）
             # Task P1.2：加 feature flag 开关（默认 OFF，避免无意启用）
             err_str = str(e).lower()
             is_prompt_too_long = (
@@ -1353,21 +1356,25 @@ class AIAgent:
             reactive_enabled = is_feature_enabled(
                 self.config, "reactive_compact",
             )
-            if (reactive_enabled
-                    and is_prompt_too_long
-                    and not getattr(self, "_reacted", False)):
+            if reactive_enabled and is_prompt_too_long:
                 from agent.context_pipeline import reactive_compact
-                messages, _ = reactive_compact(
+                ctx_cfg = self.config.get("context", {})
+                messages, changed = reactive_compact(
                     messages,
                     session_state=self._compress_session_state,
-                    keep_recent=self.config.get("context", {}).get(
-                        "reactive_keep_recent", 5),
+                    keep_recent=ctx_cfg.get("reactive_keep_recent", 5),
+                    cooldown_seconds=ctx_cfg.get(
+                        "reactive_compact_cooldown_seconds", 60),
+                    max_per_session=ctx_cfg.get(
+                        "reactive_compact_max_per_session", 5),
                 )
-                self._reacted = True
-                self.conversation_history = messages[1:]  # 跳过 system
-                self.invalidate_system_prompt()
-                logger.warning("reactive_compact 后重试本轮")
-                return self._REACTIVE_RETRY
+                if changed:
+                    self._reacted = True  # 向后兼容标记
+                    self.conversation_history = messages[1:]  # 跳过 system
+                    self.invalidate_system_prompt()
+                    logger.warning("reactive_compact 后重试本轮")
+                    return self._REACTIVE_RETRY
+                # changed=False：冷却中或达到上限，走正常错误路径
 
             logger.error("LLM API 调用失败（重试后）: %s", e)
             # 错误作为助手消息塞回，让模型有机会自我修正
