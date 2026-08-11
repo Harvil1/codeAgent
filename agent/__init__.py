@@ -1155,9 +1155,15 @@ class AIAgent:
         )
         brief_parts.append(f"当前模式：{mode_text}")
 
-        # 对齐 Claude Code：压缩后重注入最近加载的技能正文 + 读过的文件，
+        # CCAR4 Task B：对齐 Claude Code，压缩后重注入最近加载的技能正文 + 读过的文件，
         # 让 agent 压缩后不"失忆"（避免反复手动读文件/重新 load_skill）。
-        reinject = self._build_reinject_context()
+        # 委托到 post_compact_recovery 模块（fail-open，走 safe_path 白名单）。
+        try:
+            from agent.post_compact_recovery import build_post_compact_brief
+            reinject = build_post_compact_brief(self)
+        except Exception as e:
+            logger.debug("post_compact_recovery fail-open: %s", e)
+            reinject = ""
         if reinject:
             brief_parts.append(
                 "以下是你最近加载的技能和读过的文件（压缩后重注入，帮助恢复上下文）：\n"

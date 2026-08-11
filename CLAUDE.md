@@ -271,6 +271,7 @@ uv sync                                 # 同步已声明依赖
 | 落盘精细化（per-tool 50K + per-message 200K + 决策冻结） | `agent/context_pipeline.py:offload_large_tool_results` + `_enforce_per_message_budget` + `_offload_decisions`（LRU 1000）+ `reset_offload_decisions`（AIAgent.__init__ 调）|
 | 9 段式 LLM 摘要（+ PTL 重试 + 熔断器 + session_memory） | `agent/context_compressor.py:SUMMARIZE_PROMPT_9SECTION` + `_summarize_conversation`（9 段 + PTL 重试 3 次 + 熔断 3 次失败）+ `reset_compact_circuit_breaker`（AIAgent.__init__ 调）|
 | prompt cache 检测（12 维度 + break 根因） | `agent/cache_monitor.py:record_prompt_state` / `check_cache_break` / `notify_compaction`（llm_compact + reactive_compact 末尾调）/ `reset_cache_monitor`（AIAgent.__init__ 调）；hook 在 `_call_llm_with_escalation` 流式+非流式汇合点；`/cache-stats` 命令看统计 |
+| post-compact 主动恢复（最近文件 + invoked skills） | `agent/post_compact_recovery.py:build_post_compact_brief`（compact 末尾注入；走 safe_path 白名单 + fail-open）；追踪在 `_dispatch_tool_calls`（safe + unsafe 两路都调 `_record_recent`）；config `post_compact_recovery_enabled/max_files/max_skills` |
 
 ## 已知约束（设计如此，不是 bug）
 

@@ -107,6 +107,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transcript_retention": 20,
         # CCAR4 Task A：cache break diff 文件 LRU 上限（默认 100，超过删最旧）
         "max_cache_break_diff_files": 100,
+        # CCAR4 Task B：post-compact 主动恢复（最近文件 + invoked skills 重注入）
+        "post_compact_recovery_enabled": True,          # 开关（False 时 compact 后不重注入）
+        "post_compact_recovery_max_files": 5,            # 最近文件数上限
+        "post_compact_recovery_max_skills": 5,           # invoked skills 数上限
     },
 
     # Hooks 系统（Phase 2a）
