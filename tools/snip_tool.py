@@ -11,8 +11,10 @@
 """
 import json
 import logging
+from pathlib import Path
 
 from agent.context_pipeline import snip_compact
+from agent.transcript import snapshot_if_needed
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,29 @@ def _handle_snip(args: dict, **kwargs) -> str:
         config = getattr(agent, "config", {}) or {}
         ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
         keep_first = ctx_cfg.get("snip_keep_first", 3)
+
+        # snip 前主动落盘 transcript（force=True），让"无损"描述变真。
+        # compress_if_needed 只在 L4 llm_compact 前调 snapshot_if_needed；
+        # snip_tool 绕过 compress_if_needed 直接调 snip_compact，必须自己补这一步，
+        # 否则被裁掉的中间消息原文就真丢了。
+        agent_home_raw = getattr(agent, "omnimate_home", None)
+        session_id = getattr(agent, "session_id", None) or ""
+        transcript_enabled = ctx_cfg.get("transcript_enabled", True)
+        transcript_retention = ctx_cfg.get("transcript_retention", 20)
+        if transcript_enabled and agent_home_raw is not None:
+            try:
+                agent_home = Path(agent_home_raw)
+                snapshot_if_needed(
+                    history,
+                    agent_home=agent_home,
+                    session_id=session_id,
+                    force=True,
+                    enabled=True,
+                    retention=transcript_retention,
+                )
+            except Exception as e:
+                # fail-open：snapshot 失败不阻塞 snip（但消息不可找回，已在 log 警告）
+                logger.warning("snip 前 transcript snapshot 失败（不阻塞 snip）: %s", e)
 
         # snip_compact 签名：(messages, *, keep_first, keep_last, threshold=50)
         # 我们主动调用：threshold 传 keep_first+keep_recent+2 让它一定过阈值检查

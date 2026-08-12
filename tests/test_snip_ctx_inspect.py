@@ -26,7 +26,8 @@ from tools.ctx_inspect_tool import CTX_INSPECT_SCHEMA, _handle_ctx_inspect
 # 辅助
 # ---------------------------------------------------------------------------
 
-def _mk_agent(history_len: int = 60, config: dict = None):
+def _mk_agent(history_len: int = 60, config: dict = None, omnimate_home=None,
+              session_id: str = "test-session-001"):
     """构造 mock agent，带 conversation_history 和 config。"""
     history = []
     for i in range(history_len):
@@ -40,6 +41,8 @@ def _mk_agent(history_len: int = 60, config: dict = None):
             "llm_compact_token_threshold": 100000,
         }
     }
+    agent.omnimate_home = omnimate_home
+    agent.session_id = session_id
     return agent
 
 
@@ -131,6 +134,81 @@ class TestSnipTool:
             result_json = _handle_snip({"reason": "x"}, agent_ref=agent)
         result = json.loads(result_json)
         assert result["snipped"] is False
+
+    def test_snip_calls_snapshot_before_snip(self, tmp_path):
+        """snip 前主动调 snapshot_if_needed(force=True) 落 transcript。
+
+        验证 Important fix：让"无损"描述变真——原文确实落到 .transcripts/ 了。
+        """
+        agent = _mk_agent(history_len=60, omnimate_home=tmp_path)
+        before = len(agent.conversation_history)
+        result_json = _handle_snip(
+            {"reason": "探索阶段结束"},
+            agent_ref=agent,
+        )
+        result = json.loads(result_json)
+        assert result["snipped"] is True
+        # transcript 目录确实被创建
+        transcripts_dir = tmp_path / ".transcripts"
+        assert transcripts_dir.exists(), ".transcripts 目录应被创建"
+        # 至少一个 .jsonl transcript 文件
+        jsonl_files = list(transcripts_dir.glob("transcript_*.jsonl"))
+        assert len(jsonl_files) >= 1, "应至少有一个 transcript_*.jsonl"
+        # latest.txt 指针存在
+        latest_pointer = transcripts_dir / "latest.txt"
+        assert latest_pointer.exists(), "latest.txt 指针应存在"
+        # transcript 内容含 snip 前的全部消息（无损）
+        import json as _json
+        with open(jsonl_files[0], encoding="utf-8") as f:
+            lines = f.readlines()
+        # 最后一行是 _meta，其余是消息
+        msg_lines = [l for l in lines if "_meta" not in l]
+        assert len(msg_lines) == before, (
+            f"transcript 应含 {before} 条原文，实有 {len(msg_lines)}"
+        )
+
+    def test_snip_skips_snapshot_when_no_home(self):
+        """omnimate_home=None 时跳过 snapshot（但不崩）。"""
+        agent = _mk_agent(history_len=60, omnimate_home=None)
+        with patch("tools.snip_tool.snapshot_if_needed") as mock_snap:
+            result_json = _handle_snip(
+                {"reason": "测试"},
+                agent_ref=agent,
+            )
+            # snapshot 没被调（因为 omnimate_home=None）
+            mock_snap.assert_not_called()
+        result = json.loads(result_json)
+        assert result["snipped"] is True
+
+    def test_snip_snapshot_failure_failopen(self, tmp_path):
+        """snapshot_if_needed 抛异常时 fail-open，snip 继续执行。"""
+        agent = _mk_agent(history_len=60, omnimate_home=tmp_path)
+        with patch("tools.snip_tool.snapshot_if_needed", side_effect=OSError("disk full")):
+            result_json = _handle_snip(
+                {"reason": "测试"},
+                agent_ref=agent,
+            )
+        result = json.loads(result_json)
+        # snip 照常成功（snapshot 失败不阻塞）
+        assert result["snipped"] is True
+
+    def test_snip_snapshot_disabled_skips(self, tmp_path):
+        """transcript_enabled=False 时不调 snapshot。"""
+        config = {
+            "context": {
+                "snip_keep_first": 3,
+                "transcript_enabled": False,
+            }
+        }
+        agent = _mk_agent(history_len=60, omnimate_home=tmp_path, config=config)
+        with patch("tools.snip_tool.snapshot_if_needed") as mock_snap:
+            result_json = _handle_snip(
+                {"reason": "测试"},
+                agent_ref=agent,
+            )
+            mock_snap.assert_not_called()
+        result = json.loads(result_json)
+        assert result["snipped"] is True
 
 
 # ---------------------------------------------------------------------------
