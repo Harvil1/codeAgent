@@ -949,10 +949,11 @@ class AIAgent:
         return user_message
 
     def _drain_injected_messages(self) -> dict:
-        """收集外部异步消息（后台任务/cron/team inbox），本轮注入后清空。
+        """收集外部异步消息（后台任务/cron/team inbox/async 子代理），本轮注入后清空。
 
-        返回 dict 含三个 key（任一可能为空）：
-            bg_notifications: list, cron_messages: list, team_messages_text: str
+        返回 dict 含四个 key（任一可能为空）：
+            bg_notifications: list, cron_messages: list,
+            team_messages_text: str, delegation_results: list
         """
         bg_notifications = []
         if self.bg_manager:
@@ -980,10 +981,22 @@ class AIAgent:
             except Exception as e:
                 logger.warning("team inbox drain 异常: %s", e)
 
+        # async 子代理完成通知（CCAR5 留的漏点 fix：原代码只 push 不 drain）
+        # fail-open：queue 异常不崩主循环
+        delegation_results = []
+        try:
+            from tools.delegate_tool import get_delegation_queue
+            queue = get_delegation_queue()
+            if queue.has_pending():
+                delegation_results = queue.drain()
+        except Exception as e:
+            logger.warning("delegation_queue drain 异常: %s", e)
+
         return {
             "bg_notifications": bg_notifications,
             "cron_messages": cron_messages,
             "team_messages_text": team_messages_text,
+            "delegation_results": delegation_results,
         }
 
     async def _initial_memory_recall(self, user_message: str) -> str:
@@ -1066,6 +1079,41 @@ class AIAgent:
                 "content": f"<team_messages>\n{team_text}\n</team_messages>",
             })
             injected["team_messages_text"] = ""
+
+        # async 子代理完成通知（消费型，每条转一条 ephemeral user 消息）
+        # fail-open + result 截断（防 context 爆炸）
+        delegation_results = injected.get("delegation_results") or []
+        for r in delegation_results:
+            try:
+                success = r.get("success", False)
+                delegation_id = r.get("delegation_id", "?")
+                goal = r.get("goal", "")
+                if success:
+                    result_text = r.get("result", "")
+                    if len(result_text) > 2000:
+                        result_text = result_text[:2000] + (
+                            f"...[truncated {len(result_text)} chars]"
+                        )
+                    text = (
+                        f"[后台子代理完成] task_id={delegation_id}\n"
+                        f"任务: {goal}\n"
+                        f"结果: {result_text}"
+                    )
+                else:
+                    error_text = r.get("error", "")
+                    text = (
+                        f"[后台子代理失败] task_id={delegation_id}\n"
+                        f"任务: {goal}\n"
+                        f"错误: {error_text}"
+                    )
+                messages.append({
+                    "role": "user",
+                    "content": f"<delegation_completion>\n{text}\n</delegation_completion>",
+                })
+            except Exception as e:
+                logger.warning("delegation_results 注入异常: %s", e)
+        if delegation_results:
+            injected["delegation_results"] = []
 
         # Plan mode reminder（每轮重算）
         if self.plan_mode:
