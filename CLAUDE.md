@@ -280,6 +280,8 @@ uv sync                                 # 同步已声明依赖
 | PTL tokenGap 精确算法 | `agent/context_compressor.py:_compute_ptl_drop_count` + `_get_model_max_tokens`（三格式正则 DeepSeek/Anthropic/OpenAI + 三层 fallback 到 20% 旧算法）|
 | post-compact 主动恢复（最近文件 + invoked skills） | `agent/post_compact_recovery.py:build_post_compact_brief`（compact 末尾注入；走 safe_path 白名单 + fail-open）；追踪在 `_dispatch_tool_calls`（safe + unsafe 两路都调 `_record_recent`）；config `post_compact_recovery_enabled/max_files/max_skills` |
 | 子代理 sidechain transcript 持久化（CCAR5-I） | `agent/subagent_persistence.py`（generate_agent_id / write_metadata / append_message / load_transcript / list_resumable / mark_completed / cleanup_old / cleanup_stale_subagents）；接入 `tools/delegate_tool.py:_run_child`（on_response 回调 + try/finally 标记 status）；cli.py 启动时清理 stale running + 过期 retention；config 开关 `delegation.subagent_persistence_enabled`（默认 True）+ `subagent_persistence_retention_days`（默认 7） |
+| async 子代理默认拒审批（CCAR6-J） | `agent/permission.py:PermissionChecker`（permission_mode="autoDeny" 第 4 模式，闸门 2 短路 + 保留 fatal/safe-fs 底线）；`_delegate_async` 注入；config `async_auto_deny_permission`（默认 True）；`_run_child` 优先级链 custom_def > 注入 > default；`_common.py` mode 白名单含 autoDeny（关键：singleton checker 走 mode_override 不走 self.mode） |
+| 子代理中断完整化（CCAR6-K） | `tools/delegate_tool.py:_delegate_sync`（threading.Event 替代 timeout+abandon）+ `_delegate_async`（cancel_event + `_async_tasks` 注册表）+ `_delegate_batch`（KeyboardInterrupt 传播）；`agent/__init__.py:run_conversation(cancel_event=)` 每轮检查 + `_extract_partial_result`（[PARTIAL] 前缀保留最后 assistant 消息）；`subagent_kill` 工具（core toolset）；config `sync_cancel_timeout_seconds` + `async_kill_enabled` |
 
 ## 已知约束（设计如此，不是 bug）
 
