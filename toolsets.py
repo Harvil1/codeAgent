@@ -38,6 +38,9 @@ _CORE_TOOLS = [
     "image_analyze", "image_ocr",
     # 主动上下文压缩(借鉴 learn-claude-code s08,LLM 自己管理 context)
     "compact",
+    # Task L: LLM 主动 snip（剪早期历史）+ ctx_inspect（查上下文状态）
+    "snip",
+    "ctx_inspect",
     # 网页抓取（对齐 Claude Code WebFetch）
     "web_fetch",
     # 网络搜索（对齐 Claude Code WebSearch，Tavily 后端，check_fn 门控）

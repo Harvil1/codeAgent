@@ -18,7 +18,7 @@ discover_builtin_tools()
 # ---------------------------------------------------------------------------
 
 # Safe=True：只读 / 无副作用工具。
-# 11 个，全是查询类（读文件、查状态、列目录、搜历史）。
+# 12 个，全是查询类（读文件、查状态、列目录、搜历史、查上下文）。
 SAFE_TOOLS = {
     # 文件类（只读）
     "read_file",        # 读文件内容
@@ -38,6 +38,8 @@ SAFE_TOOLS = {
     "bg_list",          # 列后台任务
     # 团队（只读）
     "team_members",     # 列成员状态
+    # 上下文自查（只读）
+    "ctx_inspect",      # Task L: 读 messages_count / cache_stats / token 估算
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -52,6 +54,7 @@ UNSAFE_TOOLS = {
     "ask_user",         # 阻塞等用户输入（并发会导致提示交错）
     # 上下文管理（副作用）
     "compact",          # 触发 LLM 压缩（改消息历史）
+    "snip",             # Task L: 剪早期历史（改 conversation_history）
     # 子代理（副作用）
     "subagent",         # spawn 子 agent（重资源 + 改子任务状态）
     "delegate_task",    # subagent 的 _compat alias
@@ -140,11 +143,11 @@ def test_no_overlap_between_safe_and_unsafe():
 
 
 def test_safe_subset_consistent_with_plan():
-    """Sanity check：SAFE 工具数量符合预期（11 个，纯读类）。
+    """Sanity check：SAFE 工具数量符合预期（12 个，纯读类）。
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 11
+    expected_safe_count = 12
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
