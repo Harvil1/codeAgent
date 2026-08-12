@@ -853,6 +853,12 @@ def _run_child(
                     system_prompt = build_forked_system_prompt(
                         parent_sysprompt, child_role=role,
                     )
+                    # Task N Important fix: fork 覆盖 system_prompt 后再拼一次 critical_reminder
+                    # （critical_reminder 常是安全提醒，fork 路径不能丢）
+                    if custom_def and custom_def.critical_reminder:
+                        system_prompt += (
+                            f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
+                        )
                     # 构造初始 messages（父前缀 + directive）
                     child_initial_messages = build_forked_messages(
                         parent_messages=parent_messages,
@@ -876,6 +882,11 @@ def _run_child(
                     if custom_def and custom_def.system_prompt:
                         system_prompt = _build_child_system_prompt(
                             goal, context, role, override=custom_def.system_prompt)
+                    # Task N Important fix: fallback 也要补 critical_reminder
+                    if custom_def and custom_def.critical_reminder:
+                        system_prompt += (
+                            f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
+                        )
 
         # === Task I: on_response 回调把每轮 message 追加到 transcript ===
         def _on_response_cb(final_content: str):
