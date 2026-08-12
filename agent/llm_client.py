@@ -477,7 +477,9 @@ class AnthropicClient(LLMClient):
                 anthropic_tools.append({
                     "name": func["name"],
                     "description": func.get("description", ""),
-                    "input_schema": func.get("parameters") or {
+                    # OmniMate 内部 schema 用 input_schema（不是 OpenAI 的 parameters）
+                    # 两者兼容：先 parameters 后 input_schema 再 fallback 空
+                    "input_schema": func.get("parameters") or func.get("input_schema") or {
                         "type": "object",
                         "properties": {},
                     },
