@@ -94,8 +94,26 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
         omnimate_home = kwargs.get("omnimate_home")
-        final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
-        content_offloaded = final_content != raw_content
+
+        # 防递归 offload：如果正在读取的文件本身就在 offload 目录下，
+        # 跳过二次 offload（否则会无限递归落盘 + 行号嵌套叠加 1\t1\t1\t）
+        # 压力测试发现的 bug：read_file 读 .task_outputs/tool-results/xxx.txt
+        # → 又触发 offload → 落盘新文件 → 行号前缀嵌套叠加
+        _skip_offload = False
+        if omnimate_home:
+            try:
+                offload_dir = Path(omnimate_home) / ".task_outputs" / "tool-results"
+                if path.resolve().is_relative_to(offload_dir.resolve()):
+                    _skip_offload = True
+            except Exception:
+                pass
+
+        if _skip_offload:
+            final_content = raw_content
+            content_offloaded = False
+        else:
+            final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
+            content_offloaded = final_content != raw_content
 
         return json.dumps({
             "path": str(path),
