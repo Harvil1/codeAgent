@@ -689,6 +689,16 @@ def _run_child(
     _fork_success = False
     # round3 D2 NEW: 父 agent 的 hooks_registry（用于 SUBAGENT_START/STOP 审计）
     _parent_hooks = getattr(parent_agent, "hooks_registry", None) if parent_agent else None
+    # === Task N NEW: CWD_CHANGED hook — worktree 切换时触发（fail-open）===
+    if workspace_path is not None and _parent_hooks is not None:
+        try:
+            _parent_hooks.run_cwd_changed({
+                "session_id": kwargs.get("session_id", ""),
+                "old": str(Path.cwd()),  # 进程 cwd（近似）
+                "new": str(workspace_path),
+            })
+        except Exception:
+            pass  # fail-open
     try:
         # 工具集选择（对齐 Claude Code Agent subagent_type）
         # - 自定义名：custom_def 已在 worktree 分支前加载，按定义配置 toolsets/model/perm/maxTurns
@@ -733,6 +743,17 @@ def _run_child(
         if custom_def and custom_def.system_prompt:
             system_prompt = _build_child_system_prompt(
                 goal, context, role, override=custom_def.system_prompt)
+
+        # === Task N NEW: critical_reminder 拼 system_prompt 末尾 ===
+        # cache 友好（system_prompt 一次构建缓存，不在每轮注入）
+        if custom_def and custom_def.critical_reminder:
+            system_prompt += (
+                f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
+            )
+            logger.debug(
+                "Task N: critical_reminder 已拼到子代理 system_prompt (%d 字符)",
+                len(custom_def.critical_reminder),
+            )
 
         # === Task C1: memory 字段 — child 独立记忆目录 ===
         # 默认继承父 store（None 则 child 自己新建默认 store）
@@ -890,6 +911,7 @@ def _run_child(
             memory_store=child_memory_store,
             initial_messages=child_initial_messages,
             on_response=_on_response_cb,  # Task I: transcript 持久化 hook
+            omit_project_memory=bool(custom_def.omit_claude_md) if custom_def else False,
         )
 
         # batch1-T4: 注册到父 agent._children（中断传播）
@@ -934,12 +956,23 @@ def _run_child(
             # 子代理主循环每轮检查 cancel_event.is_set() → 退出并返回 partial result
             import asyncio
             _cancel_event = kwargs.get("cancel_event")
+            # === Task N NEW: initial_prompt 前置到首 user turn ===
+            # slash 风格预处理（对齐 Claude Code Agent.initialPrompt 字段）
+            _child_first_msg = f"请执行任务: {goal}"
+            if custom_def and custom_def.initial_prompt:
+                _child_first_msg = (
+                    f"{custom_def.initial_prompt}\n\n{_child_first_msg}"
+                )
+                logger.debug(
+                    "Task N: initial_prompt 前置到子代理首 user (%d 字符)",
+                    len(custom_def.initial_prompt),
+                )
             if _cancel_event is not None:
                 result = asyncio.run(
-                    child.chat(f"请执行任务: {goal}", cancel_event=_cancel_event)
+                    child.chat(_child_first_msg, cancel_event=_cancel_event)
                 )
             else:
-                result = asyncio.run(child.chat(f"请执行任务: {goal}"))
+                result = asyncio.run(child.chat(_child_first_msg))
 
         # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
         # Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩。

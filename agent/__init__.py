@@ -78,6 +78,7 @@ class AIAgent:
         checkpoint_manager=None, # === Checkpoint NEW: 文件快照/回滚（对齐 Claude Code）===
         permission_mode: str = "default",  # === B2 NEW: default | bypassPermissions ===
         initial_messages: list = None,  # === Task H NEW: fork 子代理初始 messages ===
+        omit_project_memory: bool = False,  # === Task N NEW: 子代理跳过项目 OMNIMATE.md ===
     ):
         """
         参数：
@@ -157,6 +158,8 @@ class AIAgent:
         # 05 NEW: 三层结构缓存
         self._stable_prompt: Optional[str] = system_prompt_override
         self._context_prompt: Optional[str] = ""
+        # Task N NEW: 自定义子代理可跳过项目 OMNIMATE.md 注入（omitClaudeMd）
+        self.omit_project_memory = bool(omit_project_memory)
 
         # 对话历史（不包含 system prompt，system 单独传）
         # Task H NEW: initial_messages 支持（fork 子代理继承父前缀）
@@ -722,6 +725,7 @@ class AIAgent:
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
                 enabled_toolsets=self.enabled_toolsets,
+                omit_project_memory=self.omit_project_memory,
             )
             # stable + context 缓存，volatile 即时取
             self._stable_prompt = layers.stable

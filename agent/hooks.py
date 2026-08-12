@@ -1,6 +1,6 @@
 """Hooks 系统：扩展 agent 主循环行为的注册表机制。
 
-21 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7 + P3.3-P3.4 新增 3）：
+27 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7 + P3.3-P3.4 新增 3 + Task N 新增 6）：
   核心 6 种：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
            + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2）
   新增 5 种（P2-13）：SESSION_START / SESSION_END
@@ -8,6 +8,8 @@
   round3 新增 7 种：POST_TOOL_USE_FAILURE / SUBAGENT_START / SUBAGENT_STOP
            + TASK_CREATED / TASK_COMPLETED + PERMISSION_REQUEST + PERMISSION_DENIED
   P3.3-P3.4 新增 3 种：STOP_FAILURE + WORKTREE_CREATE + WORKTREE_REMOVE
+  Task N 新增 6 种：FILE_CHANGED / CWD_CHANGED / INSTRUCTIONS_LOADED
+           + SETUP / TEAMMATE_IDLE / ELICITATION_STARTED
 2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
 失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
 """
@@ -47,6 +49,13 @@ class HookEvent(Enum):
     # P3.4 NEW: worktree 生命周期事件（隔离工作区创建/清理通知）
     WORKTREE_CREATE = "worktree_create"
     WORKTREE_REMOVE = "worktree_remove"
+    # === Task N 新增 6 种（借鉴 Claude Code）===
+    FILE_CHANGED = "file_changed"                   # 文件写后触发（IDE 集成基础）
+    CWD_CHANGED = "cwd_changed"                     # worktree 切换（workspace_context 配合）
+    INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/OMNIMATE.md 加载完
+    SETUP = "setup"                                 # 启动时一次（cli.py initialize）
+    TEAMMATE_IDLE = "teammate_idle"                 # team 成员进 idle
+    ELICITATION_STARTED = "elicitation_started"     # ask_user 弹窗前
 
 
 # 程序式 hook 的签名
@@ -825,3 +834,157 @@ class HookRegistry:
                     )
             except Exception as e:
                 logger.warning("WORKTREE_REMOVE hook %s 异常: %s", hook.name, e)
+
+    # ---- Task N NEW: 6 个新事件 ----
+
+    def register_file_changed(self, fn, *, name=None):
+        """注册 FILE_CHANGED hook（通知型）。
+
+        触发时机：write_file / str_replace 等文件写入成功后（IDE 集成基础）。
+        payload: {session_id, path, op}。op ∈ {"write", "append", "edit"}。
+        """
+        self._hooks[HookEvent.FILE_CHANGED].append(
+            Hook(name=name or "anonymous", event=HookEvent.FILE_CHANGED,
+                 kind="programmatic", fn=fn))
+
+    def run_file_changed(self, payload: dict) -> None:
+        """通知型：文件写入成功后通知所有 hook（IDE 同步、审计、热重载等）。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.FILE_CHANGED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "file_changed",
+                        path=payload.get("path"),
+                        op=payload.get("op"),
+                    )
+            except Exception as e:
+                logger.warning("FILE_CHANGED hook %s 异常: %s", hook.name, e)
+
+    def register_cwd_changed(self, fn, *, name=None):
+        """注册 CWD_CHANGED hook（通知型）。
+
+        触发时机：workspace_context 切换时（子代理 worktree 进入/退出）。
+        payload: {session_id, old, new}。
+        """
+        self._hooks[HookEvent.CWD_CHANGED].append(
+            Hook(name=name or "anonymous", event=HookEvent.CWD_CHANGED,
+                 kind="programmatic", fn=fn))
+
+    def run_cwd_changed(self, payload: dict) -> None:
+        """通知型：workspace cwd 切换后通知所有 hook。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.CWD_CHANGED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "cwd_changed",
+                        old=payload.get("old"),
+                        new=payload.get("new"),
+                    )
+            except Exception as e:
+                logger.warning("CWD_CHANGED hook %s 异常: %s", hook.name, e)
+
+    def register_instructions_loaded(self, fn, *, name=None):
+        """注册 INSTRUCTIONS_LOADED hook（通知型）。
+
+        触发时机：prompt_builder 加载完项目 CLAUDE.md/OMNIMATE.md 后。
+        payload: {session_id, source, bytes}。
+        """
+        self._hooks[HookEvent.INSTRUCTIONS_LOADED].append(
+            Hook(name=name or "anonymous", event=HookEvent.INSTRUCTIONS_LOADED,
+                 kind="programmatic", fn=fn))
+
+    def run_instructions_loaded(self, payload: dict) -> None:
+        """通知型：项目记忆加载完通知所有 hook。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.INSTRUCTIONS_LOADED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "instructions_loaded",
+                        source=payload.get("source"),
+                    )
+            except Exception as e:
+                logger.warning("INSTRUCTIONS_LOADED hook %s 异常: %s", hook.name, e)
+
+    def register_setup(self, fn, *, name=None):
+        """注册 SETUP hook（通知型）。
+
+        触发时机：cli.py RuntimeContext.initialize 末尾（启动时一次）。
+        payload: {session_id, agent_home, started_at}。
+        """
+        self._hooks[HookEvent.SETUP].append(
+            Hook(name=name or "anonymous", event=HookEvent.SETUP,
+                 kind="programmatic", fn=fn))
+
+    def run_setup(self, payload: dict) -> None:
+        """通知型：agent 启动时触发一次。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.SETUP]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "setup",
+                        agent_home=payload.get("agent_home"),
+                    )
+            except Exception as e:
+                logger.warning("SETUP hook %s 异常: %s", hook.name, e)
+
+    def register_teammate_idle(self, fn, *, name=None):
+        """注册 TEAMMATE_IDLE hook（通知型）。
+
+        触发时机：team 成员进 idle 状态（team 协作时）。
+        payload: {session_id, member}。
+        """
+        self._hooks[HookEvent.TEAMMATE_IDLE].append(
+            Hook(name=name or "anonymous", event=HookEvent.TEAMMATE_IDLE,
+                 kind="programmatic", fn=fn))
+
+    def run_teammate_idle(self, payload: dict) -> None:
+        """通知型：team 成员进 idle 时通知所有 hook。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.TEAMMATE_IDLE]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "teammate_idle",
+                        member=payload.get("member"),
+                    )
+            except Exception as e:
+                logger.warning("TEAMMATE_IDLE hook %s 异常: %s", hook.name, e)
+
+    def register_elicitation_started(self, fn, *, name=None):
+        """注册 ELICITATION_STARTED hook（通知型）。
+
+        触发时机：ask_user 工具弹窗前（UI 集成用）。
+        payload: {session_id, prompt}。
+        """
+        self._hooks[HookEvent.ELICITATION_STARTED].append(
+            Hook(name=name or "anonymous", event=HookEvent.ELICITATION_STARTED,
+                 kind="programmatic", fn=fn))
+
+    def run_elicitation_started(self, payload: dict) -> None:
+        """通知型：ask_user 弹窗前通知所有 hook。fail-open。"""
+        session_id = payload.get("session_id", "") or ""
+        for hook in self._hooks[HookEvent.ELICITATION_STARTED]:
+            try:
+                if hook.kind == "programmatic":
+                    hook.fn(payload)
+                else:
+                    self._invoke_declarative_script(
+                        hook, session_id, "elicitation_started",
+                        prompt=payload.get("prompt"),
+                    )
+            except Exception as e:
+                logger.warning("ELICITATION_STARTED hook %s 异常: %s", hook.name, e)

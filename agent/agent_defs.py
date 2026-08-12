@@ -34,6 +34,11 @@ class AgentDefinition:
     skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
     mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
     effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
+    # === Task N 新增 4 字段（借鉴 Claude Code）===
+    omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理跳过项目 OMNIMATE.md（省 token）
+    initial_prompt: str = ""                # frontmatter "initialPrompt" → 首 user turn 前置（slash 风格预处理）
+    required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺失则 agent 不显示
+    critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼 system_prompt（cache 友好）
 
 
 def _user_agents_dir() -> Path:
@@ -73,6 +78,11 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             skills=fm.get("skills") or [],
             mcp_servers=fm.get("mcpServers") or [],
             effort=fm.get("effort"),
+            # === Task N: 4 新字段 frontmatter camelCase → snake_case ===
+            omit_claude_md=bool(fm.get("omitClaudeMd", False)),
+            initial_prompt=str(fm.get("initialPrompt") or ""),
+            required_mcp_servers=fm.get("requiredMcpServers") or [],
+            critical_reminder=str(fm.get("criticalReminder") or ""),
         )
     except Exception as e:
         logger.warning("解析子代理定义失败 %s: %s", skill_md, e)
@@ -145,6 +155,11 @@ def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
                 skills=cfg.get("skills") or [],
                 mcp_servers=cfg.get("mcpServers") or [],
                 effort=cfg.get("effort"),
+                # === Task N: CLI 注入也接受 4 新字段 ===
+                omit_claude_md=bool(cfg.get("omitClaudeMd", False)),
+                initial_prompt=str(cfg.get("initialPrompt") or ""),
+                required_mcp_servers=cfg.get("requiredMcpServers") or [],
+                critical_reminder=str(cfg.get("criticalReminder") or ""),
             )
             _cli_injected[name] = ad
             count += 1

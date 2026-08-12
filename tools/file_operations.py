@@ -167,6 +167,26 @@ def _track_checkpoint(path, kwargs) -> None:
             pass
 
 
+def _trigger_file_changed(path, op: str, kwargs) -> None:
+    """Task N NEW: 文件写入成功后触发 FILE_CHANGED hook（通知型，fail-open）。
+
+    对齐 Claude Code hooks 的 file_changed 事件，用于 IDE 集成 / 热重载 / 审计。
+    无 hooks_registry（测试/子代理）时静默跳过。
+    """
+    agent_ref = kwargs.get("agent_ref")
+    hooks = getattr(agent_ref, "hooks_registry", None)
+    if hooks is None:
+        return
+    try:
+        hooks.run_file_changed({
+            "session_id": getattr(agent_ref, "session_id", "") if agent_ref else "",
+            "path": str(path),
+            "op": op,
+        })
+    except Exception:
+        pass  # fail-open
+
+
 def _handle_write_file(args: dict, **kwargs) -> str:
     path_str = args.get("path", "")
     content = args.get("content", "")
@@ -229,6 +249,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             atomic_write_text(path, content)
 
         _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
+        _trigger_file_changed(path, "append" if append else "write", kwargs)  # Task N: FILE_CHANGED hook
 
         return json.dumps({
             "path": str(path),
@@ -517,6 +538,7 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
+    _trigger_file_changed(path, "edit", kwargs)  # Task N: FILE_CHANGED hook
 
     return json.dumps({
         "path": str(path),

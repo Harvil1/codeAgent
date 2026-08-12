@@ -264,6 +264,8 @@ uv sync                                 # 同步已声明依赖
 | ToolSearch（MCP lazy schema） | `tools/tool_search_tool.py` + `tools/registry.py:get_catalog_entry` + `model_tools.py:get_tool_definitions`（拆 built-in 完整/mcp__ 精简目录） |
 | Skills context:fork | `agent/skill_fork.py:run_skill_in_fork`（slash 触发 + load_skill 提示）；scan_skill_commands 读 frontmatter context 字段 |
 | Hooks 18 种事件 | `agent/hooks.py:HookEvent`（11 核心 + round3 加 POST_TOOL_USE_FAILURE/SUBAGENT_START+STOP/TASK_CREATED+COMPLETED/PERMISSION_REQUEST+DENIED）|
+| 自定义子代理 4 扩展字段（Task N） | `agent/agent_defs.py:AgentDefinition`（omit_claude_md / initial_prompt / required_mcp_servers / critical_reminder，frontmatter camelCase）+ `tools/delegate_tool.py:_run_child`（critical_reminder 拼 system_prompt；omit_claude_md 传 AIAgent 的 omit_project_memory；initial_prompt 前置首 user）+ `agent/prompt_builder.py:build_system_prompt_layers(omit_project_memory=True)` 跳过项目 OMNIMATE.md + `agent/__init__.py:AIAgent(omit_project_memory=...)` |
+| Hooks 27 种事件（Task N） | `agent/hooks.py:HookEvent`（21 + Task N 加 FILE_CHANGED/CWD_CHANGED/INSTRUCTIONS_LOADED/SETUP/TEAMMATE_IDLE/ELICITATION_STARTED）；HookRegistry 加 6 对 register_/run_ 方法；FILE_CHANGED 真接入 `tools/file_operations.py:_trigger_file_changed`（write_file + str_replace 后），CWD_CHANGED 真接入 `tools/delegate_tool.py:_run_child` worktree 切换时；其余 4 事件加枚举留 follow-up |
 | /rewind 4 模式 | `cli.py:_handle_rewind_command`（全恢复/只对话/只代码/从此压缩）|
 | OS 沙箱（bwrap/Seatbelt） | `agent/sandbox_runner.py` + `tools/terminal_tool.py`（_handle_terminal sandbox 注入） |
 | reflection reference 型 | `agent/reflection.py:REFLECTION_PROMPT_TEMPLATE`（4 类：user/feedback/project/reference）|

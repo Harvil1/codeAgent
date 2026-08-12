@@ -145,6 +145,8 @@ def build_system_prompt_layers(
     # volatile 来源（运行时传入）
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
+    # === Task N NEW: 自定义子代理可跳过项目 OMNIMATE.md（省 token）===
+    omit_project_memory: bool = False,
 ) -> SystemPromptLayers:
     """构建三层 system prompt（05）。
 
@@ -152,6 +154,9 @@ def build_system_prompt_layers(
       - stable：跨会话不变（同版本同一台机器，几乎 100% 命中 cache）
       - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内 80%+ 命中）
       - volatile：每轮可变（todo / reminder），不期望 cache 命中
+
+    Task N: omit_project_memory=True 时跳过项目 OMNIMATE.md 注入，
+    用于 read-only / 轻量子代理（对齐 Claude Code omitClaudeMd 字段）。
     """
     # ---- stable 层 ----
     stable_parts = []
@@ -216,25 +221,27 @@ def build_system_prompt_layers(
     # 对齐 Claude Code 的 "recursive CLAUDE.md lookup" 语义
     # Round 1 fix: Path.cwd() 也是进程级（等价 os.getcwd），并发子代理会踩。
     # 改走 get_workspace_cwd()（线程局部 ContextVar）。
-    try:
-        from agent.workspace_context import get_workspace_cwd
-        scan_root = Path(get_workspace_cwd())
-        project_mds = _scan_project_memory_files(scan_root)
-        for pmd in project_mds:
-            try:
-                content = pmd.read_text(encoding="utf-8")
-                content = _expand_imports(content, pmd.parent)
-                if content.strip():
-                    # 显示相对路径，便于调试（绝对路径太长）
-                    try:
-                        rel = pmd.relative_to(scan_root)
-                    except ValueError:
-                        rel = pmd
-                    context_parts.append(f"## 项目记忆: {rel}\n{content}")
-            except Exception as e:
-                logger.warning("读取项目记忆失败 %s: %s", pmd, e)
-    except Exception as e:
-        logger.debug("项目记忆扫描失败(可忽略): %s", e)
+    # Task N: omit_project_memory=True 时跳过（自定义子代理 omitClaudeMd=true）
+    if not omit_project_memory:
+        try:
+            from agent.workspace_context import get_workspace_cwd
+            scan_root = Path(get_workspace_cwd())
+            project_mds = _scan_project_memory_files(scan_root)
+            for pmd in project_mds:
+                try:
+                    content = pmd.read_text(encoding="utf-8")
+                    content = _expand_imports(content, pmd.parent)
+                    if content.strip():
+                        # 显示相对路径，便于调试（绝对路径太长）
+                        try:
+                            rel = pmd.relative_to(scan_root)
+                        except ValueError:
+                            rel = pmd
+                        context_parts.append(f"## 项目记忆: {rel}\n{content}")
+                except Exception as e:
+                    logger.warning("读取项目记忆失败 %s: %s", pmd, e)
+        except Exception as e:
+            logger.debug("项目记忆扫描失败(可忽略): %s", e)
 
     if context_files:
         for cf in context_files:
