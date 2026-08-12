@@ -1225,16 +1225,20 @@ def _handle_subagent_kill(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
 
-def _subagent_kill_check_fn(runtime_ctx: dict) -> bool:
+def _subagent_kill_check_fn() -> bool:
     """check_fn：config.delegation.async_kill_enabled 控制可见性。
 
     True（默认）→ 工具对 LLM 可见；False → 隐藏（check_fn 返 False）
+
+    ⚠️ registry._check_fn_cached 调 fn() 不传参——必须用无参签名（跟其他 check_fn 一致）。
     """
-    cfg = runtime_ctx.get("config") if runtime_ctx else None
-    if not isinstance(cfg, dict):
-        return True  # 无 config 信息时默认可见（fail-open）
-    delegation = cfg.get("delegation") or {}
-    return bool(delegation.get("async_kill_enabled", True))
+    try:
+        from agent.settings import load_settings
+        cfg = load_settings() or {}
+        delegation = cfg.get("delegation") or {}
+        return bool(delegation.get("async_kill_enabled", True))
+    except Exception:
+        return True  # fail-open
 
 
 # 注册到 core 工具集（让 resolve("core") 能找到）
