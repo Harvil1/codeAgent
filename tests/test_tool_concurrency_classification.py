@@ -55,6 +55,7 @@ UNSAFE_TOOLS = {
     # 子代理（副作用）
     "subagent",         # spawn 子 agent（重资源 + 改子任务状态）
     "delegate_task",    # subagent 的 _compat alias
+    "subagent_kill",    # Task K: set cancel_event + 改注册表（副作用）
     # 图像（外部 API）
     "image_analyze",    # vision API 调用
     "image_ocr",        # OCR API 调用

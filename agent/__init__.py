@@ -749,10 +749,19 @@ class AIAgent:
         self._system_prompt_built = False
         # _stable_prompt 保留（理论上整次会话内 stable 永不变）
 
-    async def run_conversation(self, user_message: str) -> str:
+    async def run_conversation(
+        self, user_message: str, cancel_event=None,
+    ) -> str:
         """处理一条用户消息，返回助手最终响应。
 
         这是整个系统的核心循环。Task D4: 改 async（核心循环 async 化）。
+        Task K: 新增 cancel_event 参数（threading.Event）——被父代理 set 时，
+        本循环在下一轮迭代开头立即退出，并返回 _extract_partial_result() 保留
+        已完成的中间结果（借鉴 Claude Code extractPartialResult）。
+
+        参数：
+            user_message: 用户消息文本
+            cancel_event: 可选的 threading.Event；None 时无 cancel 检查（向后兼容）
 
         重构后主循环结构（自顶向下阅读）：
             循环前：hook → drain 外部消息 → 开场记忆检索 → 追加 user history
@@ -810,6 +819,16 @@ class AIAgent:
                 turn_exit_reason = "interrupted_by_user"
                 self._interrupt_requested = False  # 清除标志
                 break
+
+            # === Task K: cancel_event 检查（父代理触发）===
+            # 每轮开头检查（不是每条 message）——性能损耗小，且足够及时
+            # 借鉴 Claude Code AbortController：父代理 set 时本子代理优雅退出
+            # 返回 _extract_partial_result() 保留已完成的 assistant 消息
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info(
+                    "Task K: 子代理被 cancel_event 中断，返回 partial result"
+                )
+                return self._extract_partial_result()
 
             # 消耗预算（grace call 不消耗）
             if not self._budget_grace_call:
@@ -1834,6 +1853,33 @@ class AIAgent:
 
         return final_content
 
+    def _extract_partial_result(self) -> str:
+        """Task K: 被中断时提取已完成部分（借鉴 Claude Code extractPartialResult）。
+
+        返回最后一条 assistant 消息的 content（如有），加 [PARTIAL] 前缀
+        让父代理知道这是中断而非完整结果；无 assistant 消息时返回空串。
+
+        fail-open：conversation_history 异常时返回空串（不抛错），保证
+        父代理 cancel 路径不因子代理 history 状态异常而崩。
+
+        使用场景：
+            1. cancel_event 被 set → run_conversation 主循环退出时调此方法
+            2. 父代理 _delegate_sync 的 cancel 路径返回 partial result
+        """
+        try:
+            history = getattr(self, "conversation_history", None) or []
+            for msg in reversed(history):
+                if (isinstance(msg, dict)
+                        and msg.get("role") == "assistant"
+                        and msg.get("content")):
+                    content = msg["content"]
+                    if isinstance(content, str) and content.strip():
+                        return f"[PARTIAL] {content}"
+            return ""
+        except Exception as e:
+            logger.warning("_extract_partial_result 异常（fail-open）: %s", e)
+            return ""
+
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
         """循环结束（预算耗尽或中断）的兜底响应。"""
         if turn_exit_reason == "interrupted_by_user":
@@ -1874,11 +1920,15 @@ class AIAgent:
         except Exception as e:
             logger.warning("STOP_FAILURE hook 编排异常: %s", e)
 
-    async def chat(self, message: str) -> str:
+    async def chat(self, message: str, cancel_event=None) -> str:
         """简单接口：发一条消息，返回响应。
 
         Task D4: 改 async（run_conversation 已 async）。
+        Task K: 新增 cancel_event 参数，透传给 run_conversation
+        （子代理场景用，让父代理能 cancel 子代理）。
         """
+        if cancel_event is not None:
+            return await self.run_conversation(message, cancel_event=cancel_event)
         return await self.run_conversation(message)
 
     def _sync_memory(self, user_message: str, assistant_message: str) -> None:

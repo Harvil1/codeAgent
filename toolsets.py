@@ -26,6 +26,7 @@ _CORE_TOOLS = [
     "session_search",
     # 委托（09 实现）
     "subagent",  # 子代理（对齐 Claude Code Agent；delegate_task 为兼容别名）
+    "subagent_kill",  # Task K: 中断 async 子代理（set cancel_event）
     # 澄清（AskUserQuestion 复刻）
     "ask_user",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）

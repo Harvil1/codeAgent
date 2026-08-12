@@ -240,6 +240,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 用户可改成其他 mode（"default"/"bypassPermissions"/"acceptEdits"）让 async 子代理
         # 走特定权限逻辑（仅当 async_auto_deny_permission=True 时生效）
         "async_permission_mode": "autoDeny",
+        # Task K: sync 子代理超时后给多少秒让子代理响应 cancel_event 优雅退出
+        # 主线程先 set cancel_event，然后 join(timeout=sync_cancel_timeout_seconds)，
+        # 子代理在 LLM 调用前每轮检查 cancel_event，触发就退出（不继续浪费 token）
+        "sync_cancel_timeout_seconds": 2.0,
+        # Task K: async 子代理 kill 工具开关
+        # True 时 subagent_kill 工具对 LLM 可见；False 时工具 check_fn 返回 False
+        "async_kill_enabled": True,
     },
 
     # 安全

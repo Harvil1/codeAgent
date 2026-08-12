@@ -65,6 +65,14 @@ class DelegationCompletionQueue:
 _delegation_queue = DelegationCompletionQueue()
 
 
+# === Task K: async 子代理注册表（让 subagent_kill 能找到正在跑的 task）===
+# key = delegation_id（_delegate_async 生成的 del_xxx），
+# value = {"thread": Thread, "cancel_event": threading.Event}
+# 注意：进程内全局，不跨进程；多个 AIAgent 实例共享同一注册表
+# （进程内真并发的 async 子代理才能被 kill 工具定位）
+_async_tasks: Dict[str, dict] = {}
+
+
 def get_delegation_queue() -> DelegationCompletionQueue:
     """获取全局委托完成队列。"""
     return _delegation_queue
@@ -214,10 +222,24 @@ def _delegate_sync(
 ) -> str:
     """同步委托：等待子代理完成。带超时（防止无限挂起）。
 
-    用后台线程跑子代理，主线程 join(timeout)。超时后返回错误，
-    子代理留在 daemon 线程继续（结果丢弃，与 async 模式一致）。
+    Task K: 用 cancel_event 协作式中断替代 daemon=True + abandon。
+    主线程超时后 set cancel_event，子代理在 LLM 调用前每轮检查 → 优雅退出，
+    返回 _extract_partial_result() 保留已完成部分（借鉴 Claude Code extractPartialResult）。
+    子代理在 sync_cancel_timeout_seconds 内不响应时，主线程强制 abandon
+    （daemon=True 让进程退出时自然结束），避免主线程无限阻塞。
     """
     child_timeout = float(kwargs.get("child_timeout", 600))
+    # Task K: 从 config.delegation.sync_cancel_timeout_seconds 读优雅退出窗口
+    _cfg = kwargs.get("config") or {}
+    _delegation_cfg = (_cfg.get("delegation") or {}) if isinstance(_cfg, dict) else {}
+    sync_cancel_timeout = float(_delegation_cfg.get(
+        "sync_cancel_timeout_seconds", 2.0,
+    ))
+
+    # Task K: 创建 cancel_event，透传给 _run_child → child AIAgent.run_conversation
+    cancel_event = threading.Event()
+    kwargs["cancel_event"] = cancel_event
+
     box: dict = {}
 
     def _run():
@@ -231,11 +253,55 @@ def _delegate_sync(
     thread.join(timeout=child_timeout)
 
     if thread.is_alive():
+        # Task K: 主线程超时 → set cancel_event 让子代理优雅退出
+        logger.info(
+            "Task K: sync 子代理超时 %ss，set cancel_event 等优雅退出",
+            child_timeout,
+        )
+        cancel_event.set()
+        thread.join(timeout=sync_cancel_timeout)
+
+        if thread.is_alive():
+            # 子代理未在 sync_cancel_timeout_seconds 内响应 cancel
+            # → 强制 abandon（daemon=True 让进程退出时自然结束）
+            # 资源仍可能泄漏（LLM 调用未完成），但这是 fail-safe，不应阻塞主线程
+            logger.warning(
+                "Task K: 子代理在 %ss 内未响应 cancel，强制 abandon",
+                sync_cancel_timeout,
+            )
+            return json.dumps({
+                "success": False,
+                "error": (
+                    f"子代理执行超时（{child_timeout}s），"
+                    f"已 set cancel_event 并等待 {sync_cancel_timeout}s 仍未退出，"
+                    f"强制 abandon"
+                ),
+                "mode": "sync",
+            }, ensure_ascii=False)
+
+        # 子代理在 cancel_event 触发后优雅退出
+        # 此时 _run_child 应返回 partial result（由 child.run_conversation 内
+        # cancel_event 分支的 _extract_partial_result 提供）
+        if "error" in box:
+            logger.exception("Task K: 子代理 cancel 后异常退出")
+            return json.dumps({
+                "success": False,
+                "error": str(box["error"]),
+                "mode": "sync",
+                "cancelled": True,
+            }, ensure_ascii=False)
+        partial = box.get("result", "")
         return json.dumps({
-            "success": False,
-            "error": f"子代理执行超时（{child_timeout}s），已放弃等待",
+            "success": False,  # 被中断不算成功
+            "result": partial,
             "mode": "sync",
+            "cancelled": True,
+            "message": (
+                f"子代理被 cancel 中断（超时 {child_timeout}s），"
+                f"返回 partial result"
+            ),
         }, ensure_ascii=False)
+
     if "error" in box:
         logger.exception("子代理执行失败")
         return json.dumps({
@@ -271,6 +337,11 @@ def _delegate_async(
     _run_child 内 custom_def 分支会覆盖此处的注入）。
     """
     delegation_id = f"del_{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
+
+    # === Task K: async 子代理也创建 cancel_event，注册到 _async_tasks ===
+    # subagent_kill 工具可 set 此 event，让 async 子代理优雅退出
+    cancel_event = threading.Event()
+    kwargs["cancel_event"] = cancel_event
 
     # === Task F: async 工具白名单 ===
     # fail-open：白名单逻辑异常时不崩，退回原行为
@@ -355,21 +426,37 @@ def _delegate_async(
                 "error": str(e),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             })
+        finally:
+            # Task K: 退出时从注册表清掉（防止 _async_tasks 无限增长）
+            _async_tasks.pop(delegation_id, None)
 
     # 后台线程执行
-    thread = threading.Thread(target=_background, daemon=True)
+    thread = threading.Thread(target=_background, daemon=True,
+                              name=f"delegate-async-{delegation_id}")
     thread.start()
+    # Task K: 注册到 _async_tasks，让 subagent_kill 工具能定位
+    _async_tasks[delegation_id] = {
+        "thread": thread,
+        "cancel_event": cancel_event,
+    }
 
     return json.dumps({
         "success": True,
         "mode": "async",
         "delegation_id": delegation_id,
-        "message": f"子代理已启动（ID: {delegation_id}），完成后会通知你",
+        "message": (
+            f"子代理已启动（ID: {delegation_id}），完成后会通知你"
+            f"。如需中断，调用 subagent_kill(task_id=\"{delegation_id}\")"
+        ),
     }, ensure_ascii=False)
 
 
 def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
-    """批量并行委托。"""
+    """批量并行委托。
+
+    Task K: 每个任务一个 cancel_event，跟踪到 batch_cancel_events。
+    KeyboardInterrupt 时 set 所有 cancel_event（让所有子代理在 LLM 调用前退出）。
+    """
     # 从 config 读并发上限（config.delegation.max_concurrent_children），
     # 不依赖 kwargs（之前永远 fallback 3，配置不生效）
     _cfg = (kwargs.get("config") or {}) if isinstance(kwargs.get("config"), dict) else {}
@@ -382,13 +469,21 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     # 手动管理，KeyboardInterrupt 时传播中断 + 不阻塞等待。
     executor = ThreadPoolExecutor(max_workers=max_concurrent)
     futures = {}
+    # Task K: 每任务的 cancel_event（submit 时创建，传给 _run_child）
+    batch_cancel_events = []
     try:
         for i, task in enumerate(tasks):
             goal = task.get("goal", "") or task.get("prompt", "")
             context = task.get("context", "")
             role = task.get("role", "leaf")
 
-            future = executor.submit(_run_child, goal, context, role, **kwargs)
+            # Task K: 每任务独立 cancel_event（并发不互相干扰）
+            task_cancel = threading.Event()
+            batch_cancel_events.append(task_cancel)
+            task_kwargs = dict(kwargs)
+            task_kwargs["cancel_event"] = task_cancel
+
+            future = executor.submit(_run_child, goal, context, role, **task_kwargs)
             futures[future] = i
 
         for future in futures:
@@ -409,10 +504,17 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     except KeyboardInterrupt:
         # Ctrl+C：先传播中断给子代理（让它们在下轮迭代退出），
         # 取消未启动任务，shutdown(wait=False) 不阻塞，再向上抛。
+        # Task K: 新增——set 所有 batch 子代理的 cancel_event，
+        # 让正在跑的子代理在 LLM 调用前优雅退出（不只是依赖 parent.interrupt()）
         parent = kwargs.get("agent_ref")
         if parent is not None and hasattr(parent, "interrupt"):
             try:
                 parent.interrupt()
+            except Exception:
+                pass
+        for ev in batch_cancel_events:
+            try:
+                ev.set()
             except Exception:
                 pass
         for f in futures:
@@ -828,8 +930,16 @@ def _run_child(
             # 运行子代理
             # Task D4 fix: AIAgent.chat 已改 async。_run_child 在独立线程里跑
             # （_delegate_sync / _delegate_async 均起 threading.Thread），无事件循环 → asyncio.run 驱动。
+            # Task K: cancel_event 从 kwargs 透传到 child AIAgent.run_conversation，
+            # 子代理主循环每轮检查 cancel_event.is_set() → 退出并返回 partial result
             import asyncio
-            result = asyncio.run(child.chat(f"请执行任务: {goal}"))
+            _cancel_event = kwargs.get("cancel_event")
+            if _cancel_event is not None:
+                result = asyncio.run(
+                    child.chat(f"请执行任务: {goal}", cancel_event=_cancel_event)
+                )
+            else:
+                result = asyncio.run(child.chat(f"请执行任务: {goal}"))
 
         # 06 NEW: 幻觉检测（在 summary_only 压缩前做，保留警告进摘要）
         # Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩。
@@ -1017,6 +1127,116 @@ def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
     return new_schema
 
 
+# ---------------------------------------------------------------------------
+# Task K: subagent_kill 工具（中断 async 子代理）
+# ---------------------------------------------------------------------------
+
+SUBAGENT_KILL_SCHEMA = {
+    "name": "subagent_kill",
+    "description": (
+        "中断后台子代理（让子代理优雅退出 + 保留已完成部分）。"
+        "适用场景：async 子代理跑偏、用户 ESC 想停、任务已完成想提前 kill。"
+        "\n\n**注意**：\n"
+        "- 只能 kill async 子代理（subagent(background=True) 返回的 delegation_id）\n"
+        "- sync 子代理由父代理超时机制管理，不需要显式 kill\n"
+        "- kill 是协作式的：set cancel_event，子代理在下次 LLM 调用前检查退出"
+        "（不会真杀线程）\n"
+        "- kill 后子代理仍有 sync_cancel_timeout_seconds 秒响应窗口"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": (
+                    "要中断的子代理 task_id（即 subagent(background=True) "
+                    "返回的 delegation_id）"
+                ),
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+
+def _handle_subagent_kill(args: dict, **kwargs) -> str:
+    """Task K: 中断 async 子代理。
+
+    查 _async_tasks 注册表，set cancel_event 让子代理在 LLM 调用前退出。
+    子代理主循环（AIAgent.run_conversation）每轮开头检查 cancel_event，
+    触发就返回 _extract_partial_result()。
+
+    fail-open：注册表查询/线程 join 异常不影响主流程（返错误 JSON）。
+    """
+    task_id = args.get("task_id")
+    if not task_id:
+        return json.dumps({
+            "error": "task_id 不能为空",
+            "error_type": "invalid_argument",
+        }, ensure_ascii=False)
+
+    # 检查 config 开关（config.delegation.async_kill_enabled）
+    _cfg = kwargs.get("config") or {}
+    _delegation_cfg = (_cfg.get("delegation") or {}) if isinstance(_cfg, dict) else {}
+    if not _delegation_cfg.get("async_kill_enabled", True):
+        return json.dumps({
+            "error": "subagent_kill 工具已被 config.delegation.async_kill_enabled=False 禁用",
+            "error_type": "disabled",
+        }, ensure_ascii=False)
+
+    info = _async_tasks.get(task_id)
+    if info is None:
+        return json.dumps({
+            "error": f"任务 {task_id} 不存在（可能已完成或 task_id 错误）",
+            "error_type": "not_found",
+        }, ensure_ascii=False)
+
+    try:
+        cancel_event = info.get("cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+
+        # 给子代理最多 2s 优雅退出（不等 thread.join() 完整跑完，只是软通知）
+        # 注意：不在这里阻塞主流程，thread 的退出由 run_conversation 内部检查决定
+        thread = info.get("thread")
+        if thread is not None and thread.is_alive():
+            # 不等 join——kill 工具本身应快速返回
+            # 子代理在自己的线程里继续跑直到 cancel_event 检查生效
+            logger.info(
+                "Task K: subagent_kill task_id=%s，cancel_event 已 set",
+                task_id,
+            )
+
+        return json.dumps({
+            "success": True,
+            "task_id": task_id,
+            "status": "killed",
+            "message": (
+                "已通知子代理退出（cancel_event 已 set），"
+                "子代理将在下次 LLM 调用前退出并返回 partial result"
+            ),
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.exception("subagent_kill 异常（fail-open）")
+        return json.dumps({
+            "error": f"kill 操作异常: {e}",
+            "error_type": "internal_error",
+            "task_id": task_id,
+        }, ensure_ascii=False)
+
+
+def _subagent_kill_check_fn(runtime_ctx: dict) -> bool:
+    """check_fn：config.delegation.async_kill_enabled 控制可见性。
+
+    True（默认）→ 工具对 LLM 可见；False → 隐藏（check_fn 返 False）
+    """
+    cfg = runtime_ctx.get("config") if runtime_ctx else None
+    if not isinstance(cfg, dict):
+        return True  # 无 config 信息时默认可见（fail-open）
+    delegation = cfg.get("delegation") or {}
+    return bool(delegation.get("async_kill_enabled", True))
+
+
 # 注册到 core 工具集（让 resolve("core") 能找到）
 registry.register(
     name="subagent",
@@ -1039,4 +1259,14 @@ registry.register(
     emoji="🤝",
     override=True,
     isConcurrencySafe=False,  # alias of subagent，同样有副作用，必须串行
+)
+# Task K: subagent_kill 工具（中断 async 子代理）
+registry.register(
+    name="subagent_kill",
+    toolset="core",
+    schema=SUBAGENT_KILL_SCHEMA,
+    handler=_handle_subagent_kill,
+    check_fn=_subagent_kill_check_fn,
+    emoji="🛑",
+    isConcurrencySafe=False,  # 副作用：set cancel_event + 改注册表，串行
 )
