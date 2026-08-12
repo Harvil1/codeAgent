@@ -559,7 +559,7 @@ class PermissionChecker:
         approval_callback: Optional[Callable[[str], bool]] = None,
         whitelist_file=None,
         paths_whitelist_file=None,
-        mode: str = "default",  # "default" | "bypassPermissions" | "acceptEdits"
+        mode: str = "default",  # "default" | "bypassPermissions" | "acceptEdits" | "autoDeny"
         hooks_registry=None,  # round3 D2 NEW: 权限审计 hook
     ):
         """
@@ -578,6 +578,12 @@ class PermissionChecker:
                   - "acceptEdits": cwd 内 safe-fs（mkdir/touch/mv/cp/rm/del）命令和
                     cwd 内写入自动放行，其他命令走原闸门（fatal 底线 + 自我保护 +
                     受保护路径仍生效）。适合 agent 连续编辑代码场景。
+                  - "autoDeny" (Task J): 所有需用户审批的命令直接拒（fail-closed）。
+                    用于 async 子代理（background=True）：用户不在场无法审批，
+                    借鉴 Claude Code `shouldAvoidPermissionPrompts: true`。
+                    保留 fatal 底线 + 黑名单 + 受保护路径（所有硬拒仍生效）；
+                    已批准命令（白名单缓存）仍可执行；
+                    其他破坏性命令（rm 等）一律 permission_denied。
             hooks_registry: 可选的 HookRegistry，用于触发 PERMISSION_REQUEST /
                            PERMISSION_DENIED 审计事件。fail-open：hook 异常不影响权限判断。
         """
@@ -592,10 +598,13 @@ class PermissionChecker:
         self._approved_paths = set()
         if paths_whitelist_file:
             self._load_paths_whitelist()
-        # 权限模式（default / bypassPermissions / acceptEdits）
-        if mode not in ("default", "bypassPermissions", "acceptEdits"):
+        # 权限模式（default / bypassPermissions / acceptEdits / autoDeny）
+        if mode not in ("default", "bypassPermissions", "acceptEdits", "autoDeny"):
             raise ValueError(f"非法 permission_mode: {mode}")
         self.mode = mode
+        # Task J NEW: autoDeny 模式标记（async 子代理默认拒审批）
+        # 用于 check() 内短路 destructive 命令的审批逻辑（fail-closed）
+        self.auto_deny = (mode == "autoDeny")
         # round3 D2 NEW: hooks registry 引用（可选，None=不触发审计 hook）
         self._hooks_registry = hooks_registry
         # OS 沙箱模式（off | on）；运行时通过 set_sandbox_mode() 切换
@@ -751,6 +760,23 @@ class PermissionChecker:
             # 先检查持久化白名单 + 会话缓存
             if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
                 return PermissionResult(True, "已批准（白名单）", "approval")
+
+            # === Task J NEW: auto_deny 短路 ===
+            # async 子代理（background=True）不能弹审批 UI（用户不在场），
+            # 所有需 user approval 的破坏性命令直接 permission_denied（fail-closed）。
+            # 借鉴 Claude Code `shouldAvoidPermissionPrompts: true`。
+            # 注意：
+            # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
+            # - 黑名单（sudo 等）已在闸门 1 拒绝，不会走到这里
+            # - 已批准命令（白名单缓存）已在上面的 if 放行
+            # - safe-fs 在 cwd 内（acceptEdits 模式）已在上面 acceptEdits 分支放行，
+            #   auto_deny 模式不走 acceptEdits，safe-fs 路径不触发
+            if self.auto_deny:
+                return self._deny(
+                    command,
+                    f"auto-denied: async 子代理不能弹审批 UI（破坏性命令: {destructive}）",
+                    "auto_deny",
+                )
 
             if self.approval_callback is None:
                 return self._deny(

@@ -231,6 +231,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "subagent_persistence_enabled": True,
         # 已完成子代理记录保留 N 天（超期清理，节省磁盘）
         "subagent_persistence_retention_days": 7,
+        # Task J: async 子代理默认拒审批（对齐 claude-code-main shouldAvoidPermissionPrompts）
+        # True 时 async 子代理（background=True）permission_mode='autoDeny'，
+        # 所有需 user approval 的破坏性命令直接 permission_denied（fail-closed）。
+        # 安全默认 > 事后补救；False 时不注入（不推荐）
+        "async_auto_deny_permission": True,
+        # async 子代理用的 permission_mode 名称（默认 autoDeny）
+        # 用户可改成其他 mode（"default"/"bypassPermissions"/"acceptEdits"）让 async 子代理
+        # 走特定权限逻辑（仅当 async_auto_deny_permission=True 时生效）
+        "async_permission_mode": "autoDeny",
     },
 
     # 安全

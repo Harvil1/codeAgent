@@ -125,8 +125,9 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "boolean",
                 "description": (
                     "是否后台运行（默认 false）。"
-                    "**后台模式受工具白名单管控：禁 bg_start/team_spawn/team_shutdown/"
-                    "task_complete/subagent/idle 等有全局副作用的工具**"
+                    "**后台模式受限：(1) 工具白名单管控（禁 bg_start/team_spawn/"
+                    "team_shutdown/task_complete/subagent/idle 等有全局副作用的工具）；"
+                    "(2) 所有需审批的操作自动拒（用户不在场，async 子代理不能弹审批 UI）**"
                 ),
                 "default": False,
             },
@@ -261,6 +262,13 @@ def _delegate_async(
     后台子代理在 daemon 线程跑，用户无法实时审批 destructive 操作，
     因此过滤 enabled_toolsets（白名单交集）+ 注入 disabled_tools（黑名单兜底）。
     config.delegation.async_tool_whitelist_enabled=False 可关（不推荐）。
+
+    Task J: async 模式默认注入 permission_mode='autoDeny'（fail-closed）。
+    借鉴 Claude Code `shouldAvoidPermissionPrompts: true`。后台子代理不能弹审批
+    UI（用户不在场），所有需 user approval 的破坏性命令直接 permission_denied。
+    config.delegation.async_auto_deny_permission=False 可关（不推荐）。
+    custom_def.permission_mode 优先（通过 kwargs.permission_mode 透传，
+    _run_child 内 custom_def 分支会覆盖此处的注入）。
     """
     delegation_id = f"del_{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
 
@@ -298,6 +306,36 @@ def _delegate_async(
             kwargs["config"] = _child_cfg
     except Exception:
         logger.warning("async 工具白名单应用失败（fail-open）", exc_info=True)
+
+    # === Task J: async 子代理默认拒审批（permission_mode=autoDeny）===
+    # 借鉴 Claude Code `shouldAvoidPermissionPrompts: true`：后台子代理不能弹
+    # 审批 UI（用户不在场），所有需 user approval 的命令直接 fail-closed。
+    # 优先级：custom_def.permission_mode > config 显式覆盖 > 默认 autoDeny
+    # （custom_def 分支在 _run_child 内部处理，这里只注入默认/配置值；
+    #   _run_child 的 custom_def 分支会覆盖此处的 kwargs 注入）
+    # fail-open：配置异常时不崩，退回默认行为（autoDeny 安全默认）
+    try:
+        _cfg_for_perm = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
+        _delegation_cfg_for_perm = (
+            (_cfg_for_perm.get("delegation") or {}) if isinstance(_cfg_for_perm, dict) else {}
+        )
+        _auto_deny_enabled = _delegation_cfg_for_perm.get(
+            "async_auto_deny_permission", True,
+        )
+        _config_perm_mode = _delegation_cfg_for_perm.get("async_permission_mode")
+
+        if _auto_deny_enabled:
+            # 默认 autoDeny；config 显式指定其他 mode 时尊重
+            _async_perm_mode = _config_perm_mode if _config_perm_mode else "autoDeny"
+        else:
+            # 开关关闭：不注入 autoDeny，用 config 指定或 default
+            _async_perm_mode = _config_perm_mode if _config_perm_mode else "default"
+
+        # 仅在调用方未显式传 permission_mode 时注入（避免覆盖显式调用）
+        if "permission_mode" not in kwargs or kwargs.get("permission_mode") is None:
+            kwargs["permission_mode"] = _async_perm_mode
+    except Exception:
+        logger.warning("async auto_deny 注入失败（fail-open）", exc_info=True)
 
     def _background():
         try:
@@ -554,6 +592,11 @@ def _run_child(
         # - 自定义名：custom_def 已在 worktree 分支前加载，按定义配置 toolsets/model/perm/maxTurns
         # - custom：用显式 enabled_toolsets
         # - general-purpose：按角色默认
+        # Task J: permission_mode 优先级：
+        #   ① custom_def.permission_mode（最高，自定义 .md 显式指定）
+        #   ② kwargs["permission_mode"]（_delegate_async 注入的 autoDeny 或调用方显式传）
+        #   ③ "default"（兜底）
+        _injected_perm_mode = kwargs.get("permission_mode")
         if custom_def:
             # 按定义配置
             child_toolsets = custom_def.tools or (
@@ -561,26 +604,27 @@ def _run_child(
             # 自定义 .md 的 disallowedTools 覆盖父 config（非 union）
             disabled = custom_def.disallowed_tools or None
             child_model = custom_def.model or model
-            child_perm_mode = custom_def.permission_mode or "default"
+            # custom_def 显式指定优先于 kwargs 注入（async autoDeny）
+            child_perm_mode = custom_def.permission_mode or _injected_perm_mode or "default"
             child_max_iter = custom_def.max_turns or kwargs.get("child_max_iterations", 50)
         elif stype == "custom":
             child_toolsets = kwargs.get("enabled_toolsets") or (
                 ["core"] if role == "orchestrator" else ["minimal"])
             disabled = None
             child_model = model
-            child_perm_mode = "default"
+            child_perm_mode = _injected_perm_mode or "default"
             child_max_iter = kwargs.get("child_max_iterations", 50)
         elif role == "leaf":
             child_toolsets = kwargs.get("enabled_toolsets") or ["minimal"]
             disabled = None
             child_model = model
-            child_perm_mode = "default"
+            child_perm_mode = _injected_perm_mode or "default"
             child_max_iter = kwargs.get("child_max_iterations", 50)
         else:  # orchestrator
             child_toolsets = kwargs.get("enabled_toolsets") or ["core"]
             disabled = None
             child_model = model
-            child_perm_mode = "default"
+            child_perm_mode = _injected_perm_mode or "default"
             child_max_iter = kwargs.get("child_max_iterations", 50)
 
         # 自定义子代理 system_prompt 覆盖（重建 system_prompt）
