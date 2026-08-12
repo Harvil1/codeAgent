@@ -207,6 +207,9 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
 
     # 透传 subagent_type 给子代理创建（工具集选择）
     kwargs["subagent_type"] = subagent_type
+    # 透传 isolated_workspace（LLM 传的 args 字段，_run_child 从 kwargs 读）
+    # 之前漏搬导致 isolated_workspace=True 永远进不去 worktree 创建逻辑
+    kwargs["isolated_workspace"] = args.get("isolated_workspace", False)
 
     if background:
         return _delegate_async(goal, args.get("context", ""), role, **kwargs)

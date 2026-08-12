@@ -261,11 +261,13 @@ class ToolRegistry:
                 # 真 async handler：直接 await
                 result = await handler(args, **kwargs)
             else:
-                # 同步 handler：丢线程池跑（cancellable=False 对齐 anyio 默认，
-                # 避免 to_thread 中途被 cancel 导致 handler 资源泄露）
-                result = await anyio.to_thread.run_sync(
-                    lambda: handler(args, **kwargs)
-                )
+                # 同步 handler：丢线程池跑。
+                # 用 asyncio.to_thread（不用 anyio.to_thread.run_sync）：asyncio.to_thread
+                # 自动 copy 当前 context 到 worker 线程（含 workspace_cwd 等 ContextVar）。
+                # 否则 isolated_workspace 子代理的工具拿到主进程 cwd 而不是 worktree。
+                # （anyio.to_thread.run_sync 默认 abandon context，且 4.x API 变了）
+                import asyncio as _asyncio
+                result = await _asyncio.to_thread(handler, args, **kwargs)
             return self._normalize_result(name, result)
         except Exception as e:
             logger.exception("工具 %s 执行失败", name)
