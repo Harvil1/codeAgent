@@ -43,14 +43,14 @@ class TestPermissionCheckerAutoDenyMode:
     """PermissionChecker 支持 permission_mode='autoDeny'。"""
 
     def test_auto_deny_field_default_false(self):
-        """默认模式（default）下 auto_deny 字段为 False。"""
+        """默认模式（default）下 mode 字段为 'default'。"""
         c = PermissionChecker(mode="default")
-        assert c.auto_deny is False
+        assert c.mode == "default"
 
     def test_auto_deny_field_true_when_mode_is_autoDeny(self):
-        """permission_mode='autoDeny' 时 auto_deny 字段为 True。"""
+        """permission_mode='autoDeny' 时 mode 字段为 'autoDeny'。"""
         c = PermissionChecker(mode="autoDeny")
-        assert c.auto_deny is True
+        assert c.mode == "autoDeny"
 
     def test_auto_deny_rejects_destructive_command(self):
         """auto_deny 模式下 rm（破坏性命令）被拒。
@@ -194,25 +194,64 @@ class TestDelegateAsyncInjectsAutoDeny:
     def test_async_custom_def_overrides_auto_deny(self):
         """custom_def.permission_mode 优先于 async 默认 autoDeny。
 
-        custom_def 透传 permission_mode 走 _run_child 内部逻辑，
-        kwargs.permission_mode 仅作为 fallback。
+        真测优先级：mock get_agent_def 返回 permission_mode="default" 的 custom_def，
+        跑真 _run_child，验证 AIAgent 收到 permission_mode="default"
+        （custom_def 优先于 kwargs 注入的 autoDeny）。
         """
+        from agent.agent_defs import AgentDefinition
+
         captured = {}
 
-        def fake_run_child(goal, context, role, **kwargs):
-            captured["kwargs"] = kwargs
-            return "ok"
+        class FakeChild:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.llm_client = type("FakeClient", (), {})()
+                self.model = kwargs.get("model")
 
-        with patch("tools.delegate_tool._run_child", side_effect=fake_run_child):
-            _delegate_async(
-                goal="test", context="", role="leaf",
-                subagent_type="custom-agent",
-            )
-            time.sleep(0.15)
+            async def chat(self, msg):
+                return "ok"
 
-        # 即使 async 注入了 permission_mode=autoDeny，
-        # _run_child 内部 custom_def.permission_mode 优先（test custom_def 验证）
-        assert captured["kwargs"].get("permission_mode") == "autoDeny"
+        # 构造 custom_def：显式 permission_mode="default"
+        custom_def = AgentDefinition(
+            name="custom-agent",
+            description="test custom",
+            permission_mode="default",
+            tools=["minimal"],
+        )
+
+        import os
+        monkeypatch_env = os.environ.copy()
+        monkeypatch_env["DEEPSEEK_API_KEY"] = "fake"
+
+        with patch.dict(os.environ, monkeypatch_env, clear=True):
+            with patch("config.load_config", return_value={
+                "model": {"name": "test", "api_key": "fake_key", "base_url": "http://x"},
+            }):
+                with patch("agent.AIAgent", FakeChild):
+                    with patch(
+                        "agent.team.hallucination_check.verify_claims",
+                        return_value=None,
+                    ):
+                        with patch(
+                            "agent.team.hallucination_check.append_warning",
+                            lambda r, v: r,
+                        ):
+                            # get_agent_def 在 _run_child 内部 import，patch 源模块
+                            with patch(
+                                "agent.agent_defs.get_agent_def",
+                                return_value=custom_def,
+                            ):
+                                _run_child(
+                                    "goal", "ctx", "leaf",
+                                    subagent_type="custom-agent",
+                                    permission_mode="autoDeny",
+                                )
+
+        # 关键验证：custom_def.permission_mode="default" 优先于
+        # kwargs 注入的 permission_mode="autoDeny"
+        assert captured.get("permission_mode") == "default", \
+            f"custom_def.permission_mode 应优先（期望 'default'），实际: " \
+            f"{captured.get('permission_mode')}"
 
     def test_async_config_override_permission_mode(self):
         """config.delegation.async_permission_mode 覆盖默认 autoDeny。"""
@@ -388,6 +427,99 @@ class TestEndToEndAutoDenyFlag:
         checker = PermissionChecker(mode="autoDeny")
         rm_result = checker.check("rm /tmp/auto_deny_e2e_test")
         assert rm_result.allowed is False
+
+    def test_production_dispatch_auto_deny_through_terminal_tool(self, monkeypatch):
+        """端到端走真 dispatch 路径：terminal_tool + get_default_checker() 共享
+        singleton + agent_ref.permission_mode="autoDeny"。
+
+        验证 Critical 1 两个 gap 同时修复：
+        - Gap A: get_mode_override_from_kwargs 白名单含 "autoDeny"
+          （否则 mode_override=None，effective_mode 退回 singleton 的 "default"）
+        - Gap B: check() 用 effective_mode 而非 self.auto_deny
+          （singleton 的 self.mode 永远 "default"，self.auto_deny 已删）
+
+        场景：子代理（permission_mode=autoDeny）调 rm 破坏性命令。
+        期望：approval_callback 不被调用（短路）；命令返 permission_denied。
+        """
+        from tools.terminal_tool import _handle_terminal
+        from agent.permission import (
+            PermissionChecker,
+            get_default_checker,
+            set_default_checker,
+        )
+
+        # 构造共享 singleton（mode=default，模拟生产环境）
+        # approval_callback 若被调则测试失败（auto_deny 应短路，不该走到审批）
+        def _fail_if_called(cmd):
+            raise AssertionError(
+                f"approval_callback 不应被调用（auto_deny 应短路），但收到: {cmd}"
+            )
+
+        prod_checker = PermissionChecker(
+            mode="default",
+            approval_callback=_fail_if_called,
+        )
+        original_checker = get_default_checker()
+        set_default_checker(prod_checker)
+        try:
+            # 模拟子代理 agent_ref（permission_mode=autoDeny）
+            agent_ref = type("FakeAgentRef", (), {})()
+            agent_ref.permission_mode = "autoDeny"
+
+            # 跑 terminal_tool 走真 dispatch（不 mock subprocess，因为权限应先拒）
+            result_json = _handle_terminal(
+                args={
+                    "command": "rm /tmp/auto_deny_dispatch_test",
+                    "cwd": "/tmp",
+                },
+                agent_ref=agent_ref,
+            )
+            result = json.loads(result_json)
+
+            # 验证：auto_deny 短路触发，返 permission_denied
+            assert result.get("error_type") == "permission_denied", \
+                f"auto_deny 应返 permission_denied，实际: {result}"
+            assert "auto-denied" in result.get("error", ""), \
+                f"reason 应含 'auto-denied'，实际: {result.get('error')}"
+            assert result.get("gate") == "auto_deny", \
+                f"gate 应为 auto_deny，实际: {result.get('gate')}"
+        finally:
+            # 恢复全局 singleton
+            set_default_checker(original_checker)
+
+    def test_production_dispatch_auto_deny_via_mode_override_param(self):
+        """更直接：调 PermissionChecker.check() with mode_override="autoDeny"
+        在共享 default-mode singleton 上。
+
+        验证 Critical 1 Gap B：mode_override 路径正确触发 auto_deny 短路，
+        不依赖实例 self.mode。
+        """
+        from agent.permission import PermissionChecker
+
+        # 共享 singleton 风格：mode=default
+        checker = PermissionChecker(mode="default")
+        # 通过 mode_override 注入 autoDeny（生产路径：agent_ref.permission_mode）
+        result = checker.check(
+            "rm /tmp/auto_deny_via_override",
+            mode_override="autoDeny",
+        )
+        assert result.allowed is False, "mode_override=autoDeny 应触发 auto_deny 短路"
+        assert result.gate == "auto_deny", \
+            f"gate 应为 auto_deny，实际: {result.gate}"
+
+    def test_production_dispatch_auto_deny_preserves_fatal_baseline(self):
+        """Critical 1 回归：autoDeny 模式仍保留 fatal 底线（rm -rf / 走闸门 0）。"""
+        from agent.permission import PermissionChecker
+
+        checker = PermissionChecker(mode="default")
+        result = checker.check(
+            "rm -rf /",
+            mode_override="autoDeny",
+        )
+        assert result.allowed is False
+        # 走闸门 0（fatal），不走 auto_deny 短路
+        assert result.gate == "deny", \
+            f"rm -rf / 应走 fatal 闸门，实际 gate: {result.gate}"
 
 
 # ---------------------------------------------------------------------------

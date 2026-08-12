@@ -602,9 +602,6 @@ class PermissionChecker:
         if mode not in ("default", "bypassPermissions", "acceptEdits", "autoDeny"):
             raise ValueError(f"非法 permission_mode: {mode}")
         self.mode = mode
-        # Task J NEW: autoDeny 模式标记（async 子代理默认拒审批）
-        # 用于 check() 内短路 destructive 命令的审批逻辑（fail-closed）
-        self.auto_deny = (mode == "autoDeny")
         # round3 D2 NEW: hooks registry 引用（可选，None=不触发审计 hook）
         self._hooks_registry = hooks_registry
         # OS 沙箱模式（off | on）；运行时通过 set_sandbox_mode() 切换
@@ -771,7 +768,12 @@ class PermissionChecker:
             # - 已批准命令（白名单缓存）已在上面的 if 放行
             # - safe-fs 在 cwd 内（acceptEdits 模式）已在上面 acceptEdits 分支放行，
             #   auto_deny 模式不走 acceptEdits，safe-fs 路径不触发
-            if self.auto_deny:
+            #
+            # Task J review fix：必须用 effective_mode（来自 mode_override 或 self.mode），
+            # 不能用 self.auto_deny 实例字段——singleton checker（get_default_checker()
+            # 返回的共享实例）的 self.mode 永远是 "default"，子代理的 autoDeny 通过
+            # mode_override 传入，只有 effective_mode 能反映本次调用的真实模式。
+            if effective_mode == "autoDeny":
                 return self._deny(
                     command,
                     f"auto-denied: async 子代理不能弹审批 UI（破坏性命令: {destructive}）",
