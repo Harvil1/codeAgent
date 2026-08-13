@@ -74,6 +74,10 @@ class MCPTransport(ABC):
       - send_notification(method, params) -> None
       - close()
       - is_connected 属性
+
+    可选（Task 9 加）：
+      - set_notification_handler(handler)：注册 server → client notification 处理器
+        默认 no-op（向后兼容），子类按需 override（StdioTransport 真起 reader 线程）
     """
 
     @abstractmethod
@@ -91,6 +95,25 @@ class MCPTransport(ABC):
     @property
     @abstractmethod
     def is_connected(self) -> bool: ...
+
+    def set_notification_handler(
+        self,
+        handler,  # Callable[[str, dict], None]
+    ) -> None:
+        """注册 server → client notification 处理器。
+
+        handler(notification_method, params) 在收到 notifications/* 时调用。
+        默认实现：no-op（不强制子类 override，向后兼容 HTTPTransport 等）。
+
+        StdioTransport override：reader 线程读 stdout 时真 dispatch notification。
+        """
+        # 默认 no-op（不强制子类实现，向后兼容）
+        self._notification_handler = handler
+
+    @property
+    def notification_handler(self):
+        """返回当前注册的 notification handler（None 表示未注册）。"""
+        return getattr(self, "_notification_handler", None)
 
     # 共享：MCP 握手流程（子类 connect() 末尾调用）
     def _do_initialize_handshake(self) -> None:
@@ -110,7 +133,13 @@ class MCPTransport(ABC):
 # ---------------------------------------------------------------------------
 
 class StdioTransport(MCPTransport):
-    """stdio 传输：启动本地子进程通过 stdin/stdout 交换 JSON-RPC。"""
+    """stdio 传输：启动本地子进程通过 stdin/stdout 交换 JSON-RPC。
+
+    Task 9 升级：后台 daemon thread 读 stdout，
+    response 走 queue（send_request 从 queue 拿），
+    notification dispatch 到 set_notification_handler 注册的 handler。
+    对现有调用方透明（仍 sync 阻塞等响应）。
+    """
 
     def __init__(
         self,
@@ -125,6 +154,13 @@ class StdioTransport(MCPTransport):
         self._request_id = 0
         self._lock = threading.Lock()
         self._connected = False
+        # Task 9：reader 线程相关
+        import queue as queue_module
+        self._response_queue: "queue_module.Queue" = queue_module.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
+        self._notification_handler = None  # 默认 None（向后兼容）
+        # send_request 等响应的超时（秒）；可被子类/测试覆盖
+        self._response_timeout: float = 60.0
 
     def connect(self) -> None:
         full_env = {**os.environ, **self.env}
@@ -139,9 +175,11 @@ class StdioTransport(MCPTransport):
             bufsize=1,  # 行缓冲
         )
         try:
+            # 握手期间 send_request 会懒启动 reader 线程
             self._do_initialize_handshake()
         except Exception:
             # 握手失败 → 关闭进程
+            self._connected = False
             try:
                 self.process.stdin.close()
                 self.process.terminate()
@@ -151,6 +189,57 @@ class StdioTransport(MCPTransport):
             self.process = None
             raise
         self._connected = True
+
+    def _ensure_reader_started(self) -> None:
+        """懒启动 reader 线程（首次 send_request 时起）。
+
+        为什么不在 connect() 末尾起：握手期间就需要读响应，
+        所以 send_request 里懒启动更简单（一个入口覆盖所有读需求）。
+        """
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            return
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            daemon=True,
+            name="mcp-stdio-reader",
+        )
+        self._reader_thread.start()
+
+    def _reader_loop(self) -> None:
+        """daemon thread：持续读 stdout。
+
+        - response（带 id）→ _response_queue
+        - notification（有 method 无 id）→ notification_handler
+        - 非 JSON 行 → 跳过（server debug 输出）
+        - handler 抛异常 → log 不影响后续读
+        - readline 返回空（EOF）→ 退出循环
+        """
+        while self._connected and self.process and self.process.poll() is None:
+            try:
+                line = self.process.stdout.readline()
+            except Exception as e:
+                logger.warning("mcp reader readline 异常: %s", e)
+                break
+            if not line:
+                break  # EOF
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug("MCP 非 JSON 行: %s", line.strip())
+                continue
+            # 区分 response（带 id）vs notification（有 method 无 id）
+            if "id" in data:
+                # response（带 id）→ queue
+                self._response_queue.put(data)
+            elif "method" in data:
+                # notification → handler（fail-open：handler 异常不影响后续）
+                handler = self._notification_handler
+                if handler is not None:
+                    try:
+                        handler(data["method"], data.get("params", {}))
+                    except Exception as e:
+                        logger.warning("notification handler 异常: %s", e)
+            # 其他类型（无 id 无 method）忽略
 
     def _resolve_command_argv(self) -> List[str]:
         """解析 MCP 子进程的 argv（跨平台）。
@@ -177,6 +266,9 @@ class StdioTransport(MCPTransport):
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("MCP stdio server 未运行")
 
+        # Task 9：懒启动 reader 线程（首次调用时起，之后复用）
+        self._ensure_reader_started()
+
         with self._lock:
             self._request_id += 1
             req_id = self._request_id
@@ -192,22 +284,31 @@ class StdioTransport(MCPTransport):
             except (BrokenPipeError, OSError) as e:
                 raise RuntimeError(f"MCP stdio 写入失败: {e}")
 
-            while True:
-                line = self.process.stdout.readline()
-                if not line:
-                    raise RuntimeError("MCP stdio server 断开")
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.debug("MCP 非 JSON 行: %s", line.strip())
-                    continue
-                if data.get("id") == req_id:
-                    if "error" in data:
-                        err = data["error"]
-                        raise RuntimeError(
-                            f"MCP 错误 {err.get('code')}: {err.get('message')}"
-                        )
-                    return data.get("result")
+        # 从 queue 拿响应（reader 线程已把 response 投递过来）
+        # 注意：不在 _lock 内等——reader 线程可能需要 lock 写 queue
+        # （实际 queue 是 thread-safe，不需要 lock，但避免持锁阻塞）
+        import queue as queue_module
+        # 清掉可能存在的过期 response（id 不匹配的）
+        deadline = None
+        while True:
+            try:
+                data = self._response_queue.get(
+                    timeout=self._response_timeout,
+                )
+            except queue_module.Empty:
+                raise RuntimeError(
+                    f"MCP stdio request 超时（{self._response_timeout}s）"
+                )
+            # 匹配 id
+            if data.get("id") == req_id:
+                if "error" in data:
+                    err = data["error"]
+                    raise RuntimeError(
+                        f"MCP 错误 {err.get('code')}: {err.get('message')}"
+                    )
+                return data.get("result")
+            # 不是我们要的 response（可能是迟到的旧 response）→ 丢
+            logger.debug("MCP 丢弃过期 response: id=%s", data.get("id"))
 
     def send_notification(self, method: str, params: dict) -> None:
         if self.process is None:
@@ -221,6 +322,8 @@ class StdioTransport(MCPTransport):
 
     def close(self) -> None:
         self._connected = False
+        # reader 线程是 daemon，会随 _connected=False + process 退出自然结束
+        # （readline 会因为 stdout 关闭返回空）。
         if self.process is None:
             return
         try:
