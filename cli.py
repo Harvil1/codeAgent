@@ -2138,19 +2138,11 @@ def _handle_init_command(rt, args: str) -> bool:
     try:
         text = asyncio.run(_gen())
     except RuntimeError:
-        # 已在事件循环内（如 pytest-asyncio 管理时）→ 尝试拿到 loop 跑
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # loop 已在跑：用 run_until_complete 会冲突，
-                # 直接 await（仅在已有 loop 上下文可用，同步 CLI 路径不会进这）
-                import asyncio as _a
-                text = _a.get_event_loop().run_until_complete(
-                    _a.ensure_future(_gen())
-                )
-        except Exception as e:
-            logger.warning("init 生成失败（事件循环冲突）: %s", e)
-            text = ""
+        # 已在事件循环内（如 pytest-asyncio 管理时）→ 放弃生成
+        # （对齐 _start_new_goal：loop 已跑时 run_until_complete 会冲突，
+        #   同步 CLI 路径不会进这分支；测试环境走 mock 不依赖真 LLM）
+        logger.warning("init 生成跳过（已有运行中的事件循环）")
+        text = ""
     except Exception as e:
         logger.warning("init 生成失败（LLM 调用异常）: %s", e)
         text = ""

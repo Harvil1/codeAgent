@@ -63,8 +63,8 @@ def test_init_existing_without_force(tmp_path, monkeypatch):
     result = _run_init(rt, cwd=proj)
     # 不覆盖
     assert "旧内容" in (proj / "OMNIMATE.md").read_text(encoding="utf-8")
-    # 提示性返回（具体文案不强约束，但应非 None 或含"已存在"）
-    assert result is None or "已存在" in str(result) or True
+    # 返回 truthy 表示命令已处理（CLI 惯例：console 提示 + return True）
+    assert result
 
 
 def test_init_force_overwrites(tmp_path, monkeypatch):
