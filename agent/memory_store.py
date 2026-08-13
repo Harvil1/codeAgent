@@ -133,6 +133,10 @@ class MemoryStore:
         # 语义安全：记忆写入后本会话不注入（prompt cache 保护设计），
         # 下次会话构造时 build_index_text 会 ensure fresh。
         self._index_dirty = False
+        # CCAR9 Task 3：记录上次 rebuild 用的项目键，_ensure_index_fresh 据此
+        # 感知 cwd 变化（即使无新写入，切项目也触发 rebuild）。
+        # 初始化为 None，首次 _rebuild_index() 会填实际值。
+        self._index_built_key: Optional[str] = None
         # 启动时迁移老格式（每记忆一 .md → topic jsonl）
         self._migrate_legacy_if_any()
         self._rebuild_index()
@@ -278,6 +282,17 @@ class MemoryStore:
         from agent.project_scope import get_project_memory_dir
         return get_project_memory_dir(self._home)
 
+    def _current_project_key_safe(self) -> Optional[str]:
+        """当前项目键（供 _ensure_index_fresh 比较 cwd 变化）。
+
+        fail-open：project_scope 抛异常时返回 None（视为无项目区）。
+        """
+        try:
+            from agent.project_scope import get_project_memory_key
+            return get_project_memory_key()
+        except Exception:
+            return None
+
     def _locate_entry(self, topic: str, uid: str) -> Optional[tuple]:
         """在全局区和当前项目区找条目。
 
@@ -302,8 +317,17 @@ class MemoryStore:
                     return (zone, rows_proj, r, i)
         return None
 
-    def _row_to_entry(self, topic: str, row: dict) -> MemoryEntry:
-        return MemoryEntry(
+    def _row_to_entry(
+        self, topic: str, row: dict,
+        *, zone_dir: Optional[Path] = None,
+    ) -> MemoryEntry:
+        """row → MemoryEntry。
+
+        zone_dir 携带条目所在区（None=全局区），用于生成正确的链接路径。
+        CCAR9 Task 3：链接路径区分全局区（.memory/）和项目区
+        （.memory/projects/<key>/），避免项目条目链接指向错误位置。
+        """
+        entry = MemoryEntry(
             id=f"{topic}#{row.get('id', '')}",
             name=row.get("name", ""),
             description=row.get("description", ""),
@@ -319,11 +343,34 @@ class MemoryStore:
             state=row.get("state", "active") or "active",
             last_reviewed_at=row.get("last_reviewed_at", "") or "",
         )
+        # 附带 zone 元信息（不存进 MemoryEntry 字段——transient，仅 _rebuild_index 用）
+        entry._zone_dir = zone_dir  # type: ignore[attr-defined]
+        return entry
+
+    def _entry_link(self, entry: MemoryEntry) -> str:
+        """生成 MEMORY.md 里的 markdown 链接路径。
+
+        全局区：.memory/{topic}.jsonl#{uid}
+        项目区：.memory/projects/{key}/{topic}.jsonl#{uid}
+        """
+        topic = entry.topic
+        uid = entry.id.split("#")[-1]
+        zone_dir = getattr(entry, "_zone_dir", None)
+        if zone_dir is None:
+            return f".memory/{topic}.jsonl#{uid}"
+        # 项目区：从 zone_dir 提取项目键（最后一级目录名）
+        try:
+            proj_key = zone_dir.name
+            return f".memory/projects/{proj_key}/{topic}.jsonl#{uid}"
+        except Exception:
+            return f".memory/{topic}.jsonl#{uid}"
 
     def _scan_all_entries(self) -> List[MemoryEntry]:
         """扫描全局区 + 当前项目区所有 topic 文件，解析全部记忆。
 
         CCAR9 Task 2：list_all / _rebuild_index 用——合并两区。
+        CCAR9 Task 3：条目附带 _zone_dir 标记来源区，_rebuild_index 据此分节
+        并生成正确的链接路径（修 Task 2 遗留的路径错位问题）。
         当前项目区由 workspace_cwd 决定（子代理 contextvars 场景正确）。
         """
         entries = []
@@ -332,7 +379,7 @@ class MemoryStore:
             topic = path.stem
             for row in self._read_topic_rows(topic, zone_dir=None):
                 try:
-                    entries.append(self._row_to_entry(topic, row))
+                    entries.append(self._row_to_entry(topic, row, zone_dir=None))
                 except (ValueError, TypeError) as e:
                     logger.warning("memory 行解析失败 %s: %s", path, e)
         # 2. 当前项目区（如果存在）
@@ -342,7 +389,9 @@ class MemoryStore:
                 topic = path.stem
                 for row in self._read_topic_rows(topic, zone_dir=zone):
                     try:
-                        entries.append(self._row_to_entry(topic, row))
+                        entries.append(
+                            self._row_to_entry(topic, row, zone_dir=zone)
+                        )
                     except (ValueError, TypeError) as e:
                         logger.warning("memory 行解析失败 %s: %s", path, e)
         return entries
@@ -352,45 +401,96 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _rebuild_index(self) -> None:
-        """重建 MEMORY.md：按主题分组。"""
+        """重建 MEMORY.md：全局记忆 + 当前项目记忆 双区两节（CCAR9 Task 3）。
+
+        排序规则不变（type 优先级 → confidence → updated_at 倒序），但分别在
+        各自区内排序（全局节内排序，项目节内排序），再各自按 topic 分组。
+        输出结构：
+            # Memory Index
+            （头部说明）
+
+            ## 全局记忆
+            ### 主题：{topic}
+            - [name](.memory/{topic}.jsonl#{uid}) — desc
+
+            ## 当前项目记忆（{project_key}）
+            ### 主题：{topic}
+            - [name](.memory/projects/{key}/{topic}.jsonl#{uid}) — desc
+
+        空项目区（无 project 类条目）不输出"当前项目记忆"节。
+        """
         type_priority = {"feedback": 0, "user": 1, "project": 2, "reference": 3, "other": 4}
         entries = self._scan_all_entries()
         entries = [e for e in entries if e.state != "archived"]
+        # 三层排序：type 优先级（稳定排序串行）
         entries.sort(key=lambda e: str(e.updated_at), reverse=True)
         entries.sort(key=lambda e: e.confidence, reverse=True)
         entries.sort(key=lambda e: type_priority.get(e.type, 99))
 
-        # 按 topic 分组（保持 topic 内排序）
-        by_topic: Dict[str, list] = {}
-        for e in entries:
-            by_topic.setdefault(e.topic, []).append(e)
+        # 按区拆分：全局区 (_zone_dir is None) vs 项目区
+        global_entries = [e for e in entries if getattr(e, "_zone_dir", None) is None]
+        proj_entries = [e for e in entries if getattr(e, "_zone_dir", None) is not None]
 
         lines = [
             "# Memory Index",
             "",
             "自动生成，请勿手动编辑。⭐ 表示 feedback 类(用户纠正过的),永远优先显示。",
+            "全局区记忆跨项目共享；项目区记忆仅当前项目可见。",
             "",
         ]
-        for topic in sorted(by_topic.keys()):
-            lines.append(f"## 主题：{topic}")
-            for e in by_topic[topic]:
-                marker = "⭐ " if e.type == "feedback" else ""
-                uid = e.id.split("#")[-1]
-                if e.summary:
-                    lines.append(
-                        f"- {marker}[{e.name}](.memory/{topic}.jsonl#{uid}) — "
-                        f"{e.description} | 摘要：{e.summary}"
-                    )
-                else:
-                    lines.append(
-                        f"- {marker}[{e.name}](.memory/{topic}.jsonl#{uid}) — {e.description}"
-                    )
+
+        def _emit_section(
+            section_title: str, section_entries: List[MemoryEntry],
+        ) -> None:
+            """把一组条目按 topic 分组并写入 lines。"""
+            if not section_entries:
+                return
+            lines.append(section_title)
             lines.append("")
+            by_topic: Dict[str, list] = {}
+            for e in section_entries:
+                by_topic.setdefault(e.topic, []).append(e)
+            for topic in sorted(by_topic.keys()):
+                lines.append(f"### 主题：{topic}")
+                for e in by_topic[topic]:
+                    marker = "⭐ " if e.type == "feedback" else ""
+                    link = self._entry_link(e)
+                    if e.summary:
+                        lines.append(
+                            f"- {marker}[{e.name}]({link}) — "
+                            f"{e.description} | 摘要：{e.summary}"
+                        )
+                    else:
+                        lines.append(
+                            f"- {marker}[{e.name}]({link}) — {e.description}"
+                        )
+                lines.append("")
+
+        # 全局节（始终输出，即使为空——全局区至少有头部说明）
+        _emit_section("## 全局记忆", global_entries)
+
+        # 项目节（仅当项目区有条目时才输出）
+        if proj_entries:
+            from agent.project_scope import get_project_memory_key
+            proj_key = get_project_memory_key()
+            _emit_section(
+                f"## 当前项目记忆（{proj_key}）", proj_entries,
+            )
 
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
-        # 缓存 snapshot(跳过前 4 行头)
-        self._cached_snapshot = "\n".join(lines[4:]) if len(lines) > 4 else ""
+        # 缓存 snapshot（跳过头部说明行——第 0 行是标题，第 1 行空，第 2-3 行说明，
+        # 第 4 行空行后才是正文）。原实现跳过前 4 行，这里头部多了 1 行说明，
+        # 改为跳过到第一个 `## 全局记忆` 出现的位置。
+        head_end = 0
+        for i, ln in enumerate(lines):
+            if ln.startswith("## "):
+                head_end = i
+                break
+        self._cached_snapshot = "\n".join(lines[head_end:]) if head_end > 0 else ""
         self._index_dirty = False
+        # CCAR9 Task 3：记录本次 rebuild 用的项目键，_ensure_index_fresh 据此
+        # 感知 cwd 变化（即使无新写入，切项目也触发 rebuild）
+        self._index_built_key = self._current_project_key_safe()
 
     def snapshot_for_prompt(self) -> str:
         """索引注入 system prompt（截断：200 行 / 25KB，先到者，对齐 Claude Code）。"""
@@ -415,10 +515,18 @@ class MemoryStore:
         self._index_dirty = True
 
     def _ensure_index_fresh(self) -> None:
-        """读路径调用：dirty 时才 rebuild（惰性）。线程安全（拿锁）。"""
-        if self._index_dirty:
+        """读路径调用：dirty 或 cwd 切换时 rebuild（惰性）。线程安全（拿锁）。
+
+        CCAR9 Task 3：除了 dirty flag，还要比较当前项目键——存
+        self._index_built_key（rebuild 时记录），键变了也触发 rebuild。
+        场景：同实例切 cwd 到另一个项目（无新写入），snapshot 应反映新项目。
+        """
+        current_key = self._current_project_key_safe()
+        if self._index_dirty or current_key != self._index_built_key:
             with self._lock:
-                if self._index_dirty:
+                # 双检：拿锁后再查一次（避免多线程重复 rebuild）
+                current_key = self._current_project_key_safe()
+                if self._index_dirty or current_key != self._index_built_key:
                     self._rebuild_index()
 
     def build_index_text(self) -> str:
