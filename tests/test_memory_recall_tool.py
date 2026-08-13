@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,29 +17,45 @@ def test_schema_basic():
     assert "query" in MEMORY_RECALL_SCHEMA["inputSchema"]["required"]
 
 
-def test_handle_no_ctx_returns_not_configured():
-    """ctx 为 None 时返回 not_configured 错误。"""
-    result = asyncio.run(_handle_memory_recall({}, {"query": "test"}, None))
+def test_handle_no_memory_store_returns_not_configured():
+    """memory_store 缺失（dispatch_kwargs 里没传）时返回 not_configured 错误。
+
+    模拟 dispatch 真实调用：handler(args, **dispatch_kwargs)。
+    不传 memory_store= → dispatch_kwargs.get("memory_store") 为 None。
+    """
+    result = asyncio.run(
+        _handle_memory_recall({"query": "test"}, agent_ref=None)
+    )
     data = json.loads(result)
     assert data["error_type"] == "not_configured"
 
 
 def test_handle_no_aux_llm_returns_not_configured():
-    """ctx 有 memory_store 但 aux_llm_client 为 None 时返回 not_configured。"""
-    ctx = MagicMock()
-    ctx.memory_store.full_index_text.return_value = "index"
-    ctx.aux_llm_client = None
-    result = asyncio.run(_handle_memory_recall({}, {"query": "test"}, ctx))
+    """agent_ref 有但 aux_llm_router 为 None 时返回 not_configured。"""
+    memory_store = MagicMock()
+    memory_store.full_index_text.return_value = "index"
+    agent_ref = MagicMock()
+    agent_ref.aux_llm_router = None  # 未配置 aux_llm
+
+    result = asyncio.run(
+        _handle_memory_recall(
+            {"query": "test"},
+            memory_store=memory_store,
+            agent_ref=agent_ref,
+        )
+    )
     data = json.loads(result)
     assert data["error_type"] == "not_configured"
 
 
 def test_handle_returns_hits():
     """正常路径：retrieve_relevant 返回 id 列表，再查 MemoryStore 拿正文。"""
-    ctx = MagicMock()
-    ctx.memory_store.full_index_text.return_value = "idx"
-    ctx.aux_llm_client = MagicMock()
-    ctx.aux_model = "deepseek-chat"
+    memory_store = MagicMock()
+    memory_store.full_index_text.return_value = "idx"
+
+    # agent_ref 上挂 aux_llm_router（对齐 _auto_recall_memory 接线）
+    agent_ref = MagicMock()
+    agent_ref.aux_llm_router = MagicMock()
 
     # 模拟 memory
     entry = MagicMock()
@@ -47,14 +64,18 @@ def test_handle_returns_hits():
     entry.description = "用户角色"
     entry.summary = "L1 摘要"
     entry.body = "完整正文"
-    ctx.memory_store.get.return_value = entry
+    memory_store.get.return_value = entry
 
     with patch(
         "tools.memory_recall_tool.retrieve_relevant",
         new=AsyncMock(return_value=["general#abc"]),
     ):
         result = asyncio.run(
-            _handle_memory_recall({}, {"query": "用户角色", "top_k": 5}, ctx)
+            _handle_memory_recall(
+                {"query": "用户角色", "top_k": 5},
+                memory_store=memory_store,
+                agent_ref=agent_ref,
+            )
         )
     data = json.loads(result)
     assert data["count"] == 1
@@ -64,37 +85,56 @@ def test_handle_returns_hits():
 
 def test_handle_top_k_clamped():
     """top_k > 20 截到 20，< 1 截到 1。"""
-    ctx = MagicMock()
-    ctx.memory_store.full_index_text.return_value = "idx"
-    ctx.aux_llm_client = MagicMock()
-    ctx.aux_model = "m"
+    memory_store = MagicMock()
+    memory_store.full_index_text.return_value = "idx"
+    agent_ref = MagicMock()
+    agent_ref.aux_llm_router = MagicMock()
 
     with patch(
         "tools.memory_recall_tool.retrieve_relevant",
         new=AsyncMock(return_value=[]),
     ) as mock_retrieve:
-        asyncio.run(_handle_memory_recall({}, {"query": "x", "top_k": 100}, ctx))
+        asyncio.run(
+            _handle_memory_recall(
+                {"query": "x", "top_k": 100},
+                memory_store=memory_store,
+                agent_ref=agent_ref,
+            )
+        )
         # max_results 应该被截到 20
         assert mock_retrieve.call_args.kwargs["max_results"] == 20
 
-        asyncio.run(_handle_memory_recall({}, {"query": "x", "top_k": -5}, ctx))
+        asyncio.run(
+            _handle_memory_recall(
+                {"query": "x", "top_k": -5},
+                memory_store=memory_store,
+                agent_ref=agent_ref,
+            )
+        )
         assert mock_retrieve.call_args.kwargs["max_results"] == 1
 
 
 def test_handle_does_not_affect_snapshot():
     """调用 memory_recall 不影响 MemoryStore.snapshot_for_prompt（frozen）。"""
-    ctx = MagicMock()
-    ctx.memory_store.full_index_text.return_value = "idx"
-    ctx.memory_store.snapshot_for_prompt.return_value = "FROZEN"
-    ctx.aux_llm_client = MagicMock()
-    ctx.aux_model = "m"
+    memory_store = MagicMock()
+    memory_store.full_index_text.return_value = "idx"
+    memory_store.snapshot_for_prompt.return_value = "FROZEN"
+    agent_ref = MagicMock()
+    agent_ref.aux_llm_router = MagicMock()
+
     with patch(
         "tools.memory_recall_tool.retrieve_relevant",
         new=AsyncMock(return_value=[]),
     ):
-        asyncio.run(_handle_memory_recall({}, {"query": "x"}, ctx))
+        asyncio.run(
+            _handle_memory_recall(
+                {"query": "x"},
+                memory_store=memory_store,
+                agent_ref=agent_ref,
+            )
+        )
     # snapshot_for_prompt 没被调用（frozen 保持不变）
-    ctx.memory_store.snapshot_for_prompt.assert_not_called()
+    memory_store.snapshot_for_prompt.assert_not_called()
 
 
 def test_registered_in_registry():
@@ -109,18 +149,41 @@ def test_registered_in_registry():
 
 def test_handle_exception_returns_error():
     """retrieve_relevant 抛异常时返回 error JSON。"""
-    ctx = MagicMock()
-    ctx.memory_store.full_index_text.return_value = "idx"
-    ctx.aux_llm_client = MagicMock()
-    ctx.aux_model = "m"
+    memory_store = MagicMock()
+    memory_store.full_index_text.return_value = "idx"
+    agent_ref = MagicMock()
+    agent_ref.aux_llm_router = MagicMock()
 
     with patch(
         "tools.memory_recall_tool.retrieve_relevant",
         new=AsyncMock(side_effect=RuntimeError("LLM 挂了")),
     ):
         result = asyncio.run(
-            _handle_memory_recall({}, {"query": "x"}, ctx)
+            _handle_memory_recall(
+                {"query": "x"},
+                memory_store=memory_store,
+                agent_ref=agent_ref,
+            )
         )
     data = json.loads(result)
     assert "error" in data
     assert data["error_type"] == "RuntimeError"
+
+
+def test_handler_signature_matches_dispatch_contract():
+    """dispatch 调 handler(args, **kwargs)，签名必须兼容（防 silent-dead-code）。
+
+    历史教训：曾写成 (args, kwargs, ctx) 三位置参数，单元测试直调三参数
+    漏检，生产 dispatch 调用 100% TypeError（silent-dead-code）。
+    async handler 同样适用——registry.dispatch 用 inspect.iscoroutinefunction
+    判定后 await handler(args, **kwargs)。
+    """
+    sig = inspect.signature(_handle_memory_recall)
+    params = list(sig.parameters.values())
+    # 第一个参数是位置参数（args）
+    assert params[0].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert params[0].name == "args"
+    # 必须有 **kwargs 接收 dispatch 上下文
+    assert any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+    # 必须是 async（registry 据此走 await 分支）
+    assert inspect.iscoroutinefunction(_handle_memory_recall)

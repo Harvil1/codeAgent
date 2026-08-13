@@ -44,14 +44,19 @@ BRIEF_SCHEMA = {
 }
 
 
-def _handle_brief(args: dict, kwargs: dict, ctx) -> str:
-    """直接 echo args（格式化）——这是个输出格式约定工具。"""
+def _handle_brief(args: dict, **kwargs) -> str:
+    """直接 echo args（格式化）——这是个输出格式约定工具。
+
+    签名对齐 registry.dispatch 契约：dispatch(args, **dispatch_kwargs)。
+    dispatch_kwargs 是命名上下文（memory_store / agent_ref 等），不是工具参数。
+    工具参数（headline / steps / risks / audience）从 args 取。
+    """
     return json.dumps(
         {
-            "headline": kwargs["headline"],
-            "steps": kwargs.get("steps", []),
-            "risks": kwargs.get("risks", []),
-            "audience": kwargs.get("audience", "user"),
+            "headline": args["headline"],
+            "steps": args.get("steps", []),
+            "risks": args.get("risks", []),
+            "audience": args.get("audience", "user"),
         },
         ensure_ascii=False,
     )
