@@ -91,6 +91,9 @@ class HandoffBundleMeta:
     message_count: int
     handoff_state: str
     file_size: int
+    # CCAR8 Task 7 新增（向后兼容，旧 bundle 默认 None/False）
+    source_cwd: Optional[str] = None
+    auto_saved: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +227,9 @@ class HandoffStore:
         notes: Optional[str] = None,
         source_platform: str = "cli",
         allow_secrets: bool = False,
+        # CCAR8 Task 7 新增：
+        source_cwd: Optional[str] = None,
+        auto_saved: bool = False,
     ) -> str:
         """生成 bundle 写入磁盘，返回 bundle_id。"""
         # 密钥扫描（除非显式 allow_secrets）
@@ -256,6 +262,9 @@ class HandoffStore:
             "handoff_state": "pending",
             "notes": notes,
             "schema_checksum": checksum,
+            # CCAR8 Task 7 新增：
+            "source_cwd": source_cwd,
+            "auto_saved": auto_saved,
         }
 
         # 大小预检（基于序列化后字节数）
@@ -336,6 +345,9 @@ class HandoffStore:
                     message_count=len(data.get("transcript", [])),
                     handoff_state=data.get("handoff_state", "pending"),
                     file_size=path.stat().st_size,
+                    # CCAR8 Task 7：读取新字段（旧 bundle 用默认值）
+                    source_cwd=data.get("source_cwd"),
+                    auto_saved=data.get("auto_saved", False),
                 ))
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning("跳过损坏的 bundle %s: %s", path, e)
