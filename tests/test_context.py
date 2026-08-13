@@ -216,3 +216,30 @@ def test_estimate_tokens():
     msgs = [{"role": "user", "content": "a" * 30}]
     tokens = estimate_message_tokens(msgs)
     assert tokens == 10  # 30 / 3
+
+
+def test_system_prompt_includes_current_cwd(tmp_path):
+    """system prompt 必须注入当前工作目录（log.log 案例）。
+
+    恢复历史会话后 LLM 顺着旧项目路径模仿填 cwd，跑去探索别的项目。
+    修复：context 层注入当前目录 + "以当前目录为准"提示。
+    """
+    from agent.prompt_builder import build_system_prompt_layers
+    from agent.workspace_context import workspace_cwd_context
+
+    fake_cwd = r"D:\project\deer-flow-main"
+    with workspace_cwd_context(fake_cwd):
+        layers = build_system_prompt_layers(include_guidance=False)
+    assert "当前工作目录" in layers.context
+    assert fake_cwd in layers.context
+    # "以当前目录为准"提示（防历史会话路径误导）
+    assert "以当前目录为准" in layers.context
+
+
+def test_system_prompt_cwd_defaults_to_process_cwd():
+    """未设 workspace context 时 fallback 到 os.getcwd()。"""
+    import os
+    from agent.prompt_builder import build_system_prompt_layers
+
+    layers = build_system_prompt_layers(include_guidance=False)
+    assert os.getcwd() in layers.context

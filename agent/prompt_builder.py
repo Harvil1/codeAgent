@@ -170,6 +170,19 @@ def build_system_prompt_layers(
 
     # ---- context 层 ----
     context_parts = []
+    # 当前工作目录（log.log 案例：恢复历史会话后 LLM 顺着旧项目的路径
+    # 模仿填 cwd，跑去探索别的项目。明确注入当前目录 + "以当前为准"）
+    try:
+        from agent.workspace_context import get_workspace_cwd
+        context_parts.append(
+            "## 当前工作目录\n"
+            f"{get_workspace_cwd()}\n\n"
+            "用户在此目录启动了会话。用户说\"这个项目\"时指当前工作目录；"
+            "恢复的历史会话如果提到其他项目路径，以当前目录为准"
+            "（除非用户明确要求切到别的目录）。"
+        )
+    except Exception as e:
+        logger.debug("当前工作目录注入失败(可忽略): %s", e)
     if skills_dir is None:
         try:
             from constants import all_skills_dirs as _asd
