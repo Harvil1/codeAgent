@@ -256,3 +256,78 @@ def test_stdio_transport_handler_exception_does_not_crash_reader(tmp_path: Path)
     # 不应抛
     transport._reader_loop()
     # 验证：reader 走完了（没卡死也没抛）
+
+
+# ---------------------------------------------------------------------------
+# 端到端：MCP notification → ChannelInbox.push → unconsumed（final fix）
+# ---------------------------------------------------------------------------
+
+def test_stdio_transport_to_channel_inbox_end_to_end(tmp_path: Path):
+    """端到端：StdioTransport 收 notification → handler → ChannelInbox.push → unconsumed。
+
+    这是 final review Critical bug 的回归测试：之前 handler 没注册导致
+    notification 被丢弃、/inbox 永远空。
+    """
+    from agent.mcp_client import StdioTransport
+
+    inbox = ChannelInbox(tmp_path)
+    transport = StdioTransport("echo")
+    # 模拟 cli._create_agent 接线：把 inbox.push 包成 handler
+    # 注意闭包变量捕获（server_name 用默认参数绑定）
+    def _make_handler(sname, inb):
+        def _handler(method, params):
+            inb.push(sname, {"method": method, **(params or {})})
+        return _handler
+    transport.set_notification_handler(_make_handler("feishu", inbox))
+
+    # 模拟 reader 线程读 stdout
+    transport._connected = True
+    transport.process = MagicMock()
+    transport.process.poll.return_value = None
+    transport.process.stdout.readline.side_effect = [
+        json.dumps({
+            "method": "notifications/message",
+            "params": {"level": "info", "text": "build done"},
+        }),
+        "",
+    ]
+    transport._reader_loop()
+
+    # 验证：inbox 里有一条消息
+    msgs = inbox.unconsumed()
+    assert len(msgs) == 1
+    assert msgs[0]["server"] == "feishu"
+    payload = msgs[0]["payload"]
+    assert payload["method"] == "notifications/message"
+    assert payload["text"] == "build done"
+    assert payload["level"] == "info"
+
+
+def test_multiple_servers_route_to_shared_inbox(tmp_path: Path):
+    """多 server 接同一个 inbox：handler 闭包捕获 server_name 正确。"""
+    from agent.mcp_client import StdioTransport
+
+    inbox = ChannelInbox(tmp_path)
+
+    def _make_handler(sname, inb):
+        def _handler(method, params):
+            inb.push(sname, {"method": method, **(params or {})})
+        return _handler
+
+    # 两个 transport，分别绑不同 server_name
+    for srv_name in ["feishu", "slack"]:
+        t = StdioTransport("echo")
+        t.set_notification_handler(_make_handler(srv_name, inbox))
+        t._connected = True
+        t.process = MagicMock()
+        t.process.poll.return_value = None
+        t.process.stdout.readline.side_effect = [
+            json.dumps({"method": "notifications/x", "params": {"from": srv_name}}),
+            "",
+        ]
+        t._reader_loop()
+
+    msgs = inbox.unconsumed()
+    assert len(msgs) == 2
+    servers = sorted(m["server"] for m in msgs)
+    assert servers == ["feishu", "slack"]

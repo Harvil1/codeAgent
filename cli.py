@@ -244,17 +244,16 @@ class RuntimeContext:
         # === ⑮ NEW: Handoff bundle 存储 ===
         self.handoff_store = None  # 在 initialize() 中真正初始化
 
-        # === CCAR8 Task 12 NEW: mailbox + agent_name + trace_sink + aux_llm_client ===
+        # === CCAR8 Task 12 NEW: mailbox + agent_name + trace_sink ===
         # mailbox：teammate 异步邮箱（Task 8 遗留接线）
         # agent_name：当前 agent 名（mailbox 收件人，默认 "main"）
         # trace_sink：本地 trace sink（Task 5 遗留接线，/trace 命令读这个）
-        # aux_llm_client：辅助 LLM（Task 3 遗留接线，工具 handler 通过 agent_ref 拿）
         # 字段都先 None，在 initialize() 中真正填充
+        # 注：aux_llm_client / aux_model 已删（CCAR8 final fix）——死字段，
+        # 工具 dispatch 和 goal decompose 都走 agent_ref.aux_llm_router
         self.mailbox = None
         self.agent_name = "main"
         self.trace_sink = None
-        self.aux_llm_client = None  # 真实值在 _create_agent 里 aux_llm_router 创建后回填
-        self.aux_model = None
         self._poor_mode_on = False  # /poor 命令状态
 
         # X2 fix: atexit 兜底 shutdown（即使主循环异常/SystemExit 也会清理 SQLite 锁等）
@@ -624,12 +623,8 @@ class RuntimeContext:
         # http / mcp_tool / agent 三种 handler 类型
         set_config_provider(lambda: self.config)
 
-        # === CCAR8 Task 12 NEW: 回填 aux_llm_client 到 RuntimeContext ===
-        # Task 3 遗留接线：工具 handler 通过 ctx.aux_llm_client 拿 aux client
-        # （goal.decompose_with_llm 等场景用）。aux_llm_router 为 None 时保持 None
-        # （fail-open，goal 命令跳过拆解直接跑）。
-        self.aux_llm_client = aux_llm_router
-        self.aux_model = (aux_cfg or {}).get("model") if aux_cfg else None
+        # 注：aux_llm_client / aux_model 回填已删（CCAR8 final fix）——
+        # 死字段，agent_ref.aux_llm_router 是单一来源。
 
         # === P4.1 NEW: 给 PermissionChecker 注入 aux_llm + config provider ===
         # 闸门 4（aux_llm 分类）需要这两个 provider。PermissionChecker 比 aux_llm_router
@@ -700,6 +695,56 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("vision_client 初始化失败（用主 client 回退）: %s", e)
                 agent._vision_client = None
+
+        # === CCAR8 final fix NEW: 接线 MCP notifications → ChannelInbox ===
+        # 背景：MCPTransport.set_notification_handler + StdioTransport._reader_loop
+        # 都实现了，但没人把 ChannelInbox.push 注册成 handler，导致 MCP server 推
+        # notification 时 handler=None 被丢弃，/inbox 永远空。这里补上接线。
+        # fail-open：任何异常只 log warning，不影响 agent/MCP 功能。
+        try:
+            from agent.channel_inbox import ChannelInbox
+            from agent.mcp_client import get_mcp_manager
+            channel_inbox = ChannelInbox(base_dir=self.home)
+            mgr = get_mcp_manager()
+            # 遍历所有已连接的 MCP client，给底层 transport 注册 handler
+            # 闭包变量捕获：server_name 用默认参数绑定（避免循环变量漂移）
+            with mgr._lock:
+                clients_snapshot = list(mgr._clients.items())
+            for _server_name, _client in clients_snapshot:
+                try:
+                    _transport = getattr(_client, "_transport", None)
+                    if _transport is None:
+                        continue
+                    # handler 收 (method, params)，把 server + payload 推入 inbox
+                    # 不做 method 过滤：所有 notifications/* 都进 inbox（ChannelInbox
+                    # 本身不过滤，由 LLM 通过 format_digest 自己判断）
+                    def _make_handler(sname, inbox):
+                        def _handler(method, params):
+                            try:
+                                inbox.push(sname, {"method": method, **(params or {})})
+                            except Exception as e:
+                                logger.warning(
+                                    "channel_inbox.push fail-open (server=%s): %s",
+                                    sname, e,
+                                )
+                        return _handler
+                    _transport.set_notification_handler(
+                        _make_handler(_server_name, channel_inbox)
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "MCP server %s notification handler 注册失败（fail-open）: %s",
+                        _server_name, e,
+                    )
+            # 把 inbox 挂到 agent（主循环 _build_channel_injection 会读这个）
+            agent.set_channel_inbox(channel_inbox)
+            if clients_snapshot:
+                logger.info(
+                    "ChannelInbox 已接线 %d 个 MCP server",
+                    len(clients_snapshot),
+                )
+        except Exception as e:
+            logger.warning("ChannelInbox 接线失败（fail-open）: %s", e)
 
         return agent
 
@@ -1761,7 +1806,9 @@ def _start_new_goal(rt, objective: str) -> None:
     rt.agent.set_goal_state(gs)
 
     # 3. 尝试用 aux_llm 拆解为子 task（fail-open，无 aux 跳过）
-    aux_client = getattr(rt, "aux_llm_client", None)
+    # CCAR8 final fix: 直接走 agent.aux_llm_router（不再走 RuntimeContext.aux_llm_client 死字段，
+    # 工具 dispatch 路径早已统一到 agent_ref.aux_llm_router）
+    aux_client = getattr(rt.agent, "aux_llm_router", None)
     if aux_client is not None:
         try:
             # 异步函数：用 asyncio.run 包装（CLI sync 路径）
@@ -2024,7 +2071,8 @@ def _handle_mailbox_command(args: str, rt) -> bool:
         console.print(Panel(
             "[bold]/mailbox 子命令[/bold]\n\n"
             "[cyan]/mailbox send <to> <content>[/cyan]  发邮件给另一个 agent\n"
-            "[cyan]/mailbox check[/cyan]                列自己邮箱未读邮件\n"
+            "[cyan]/mailbox check[/cyan]                列自己邮箱全部邮件（含已读）\n"
+            "[cyan]/mailbox check --unread[/cyan]       只看未读\n"
             "[cyan]/mailbox clear[/cyan]                清空自己邮箱\n",
             border_style="blue",
         ))
@@ -2041,7 +2089,17 @@ def _handle_mailbox_command(args: str, rt) -> bool:
         return True
 
     if sub in ("check", "ls", "list"):
-        unread_only = "all" not in rest.lower()
+        # CCAR8 final fix: 默认读 check_all（含已读）。
+        # 之前默认 unread_only=True，但主循环 _build_mail_injection 每轮 check_unread
+        # 后立即 mark_read，导致用户敲 /mailbox check 时邮件已被注入路径清空 → 永远空。
+        # 修法：默认显示全部，加 --unread / -u 才过滤未读；"all" 关键字向后兼容。
+        rest_lower = rest.lower()
+        if "--unread" in rest_lower or "-u" in rest_lower.split():
+            unread_only = True
+        elif "all" in rest_lower:
+            unread_only = False
+        else:
+            unread_only = False  # 默认显示全部（关键修复）
         if unread_only:
             msgs = mailbox.check_unread(agent_name)
             label = "未读"
