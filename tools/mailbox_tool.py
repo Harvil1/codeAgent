@@ -5,8 +5,8 @@
 - mailbox_check: 检查自己 mailbox 的邮件（默认只看未读）
 - mailbox_clear: 清空自己 mailbox
 
-ctx 需要暴露 mailbox 和 agent_name，本 task 用 getattr 优雅 fallback
-（这两个字段由 Task 12 在 RuntimeContext 接入）。
+ctx 通过 kwargs["agent_ref"] 拿到 AIAgent 实例，再从 _mailbox/_agent_name
+字段读取（Task 12 在 RuntimeContext 注入 mailbox 并 set_mailbox 到 agent）。
 
 并发分类（Task F1 规则）：
 - mailbox_send: isConcurrencySafe=False（写投递）
@@ -14,7 +14,6 @@ ctx 需要暴露 mailbox 和 agent_name，本 task 用 getattr 优雅 fallback
 - mailbox_clear: isConcurrencySafe=False（删除）
 """
 import json
-from typing import Any
 
 from tools.registry import registry
 
@@ -58,30 +57,46 @@ MAILBOX_CLEAR_SCHEMA = {
 }
 
 
-def _handle_mailbox_send(args: dict, kwargs: dict, ctx: Any) -> str:
-    mailbox = getattr(ctx, "mailbox", None)
-    agent_name = getattr(ctx, "agent_name", "main")
+def _resolve_mailbox_ctx(kwargs: dict):
+    """从工具调用的 kwargs 里提取 mailbox + agent_name。
+
+    Task 12 接线：registry.dispatch 把 agent_ref（AIAgent 实例）作为 kwargs 透传。
+    AIAgent 把 mailbox 挂在 `_mailbox` 字段，agent_name 挂在 `_agent_name`。
+    本函数集中处理 fallback（无 agent_ref / 字段缺失）。
+    """
+    agent_ref = kwargs.get("agent_ref")
+    if agent_ref is None:
+        return None, "main"
+    # AIAgent 内部字段是 _mailbox / _agent_name（私有意），外部通过 agent_ref 读取
+    mailbox = getattr(agent_ref, "_mailbox", None) or getattr(agent_ref, "mailbox", None)
+    agent_name = getattr(agent_ref, "_agent_name", None) or getattr(
+        agent_ref, "agent_name", "main"
+    )
+    return mailbox, agent_name
+
+
+def _handle_mailbox_send(args: dict, **kwargs) -> str:
+    mailbox, agent_name = _resolve_mailbox_ctx(kwargs)
     if mailbox is None:
         return json.dumps(
             {"error": "mailbox not configured", "error_type": "not_configured"}
         )
     msg_id = mailbox.send(
-        to=kwargs["to"],
+        to=args["to"],
         from_=agent_name,
-        content=kwargs["content"],
-        kind=kwargs.get("kind", "message"),
+        content=args["content"],
+        kind=args.get("kind", "message"),
     )
-    return json.dumps({"msg_id": msg_id, "to": kwargs["to"]})
+    return json.dumps({"msg_id": msg_id, "to": args["to"]})
 
 
-def _handle_mailbox_check(args: dict, kwargs: dict, ctx: Any) -> str:
-    mailbox = getattr(ctx, "mailbox", None)
-    agent_name = getattr(ctx, "agent_name", "main")
+def _handle_mailbox_check(args: dict, **kwargs) -> str:
+    mailbox, agent_name = _resolve_mailbox_ctx(kwargs)
     if mailbox is None:
         return json.dumps(
             {"error": "mailbox not configured", "error_type": "not_configured"}
         )
-    unread_only = kwargs.get("unread_only", True)
+    unread_only = args.get("unread_only", True)
     if unread_only:
         msgs = mailbox.check_unread(agent_name)
     else:
@@ -89,9 +104,8 @@ def _handle_mailbox_check(args: dict, kwargs: dict, ctx: Any) -> str:
     return json.dumps({"messages": msgs, "count": len(msgs)})
 
 
-def _handle_mailbox_clear(args: dict, kwargs: dict, ctx: Any) -> str:
-    mailbox = getattr(ctx, "mailbox", None)
-    agent_name = getattr(ctx, "agent_name", "main")
+def _handle_mailbox_clear(args: dict, **kwargs) -> str:
+    mailbox, agent_name = _resolve_mailbox_ctx(kwargs)
     if mailbox is None:
         return json.dumps(
             {"error": "mailbox not configured", "error_type": "not_configured"}

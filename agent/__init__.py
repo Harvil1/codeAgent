@@ -603,19 +603,20 @@ class AIAgent:
         return Path(self.omnimate_home) / ".goal" / "current.json"
 
     def _check_all_goal_tasks_done(self) -> bool:
-        """goal 的所有 task_ids 是否全部 completed（Task 12 才有 TaskStore 集成，
-        本 task 用简单内联版：无 task_ids 视为未完成，避免误判 complete）。
+        """goal 的所有 task_ids 是否全部 completed。
 
-        Task 12 会上 replace 为 `self.goal.check_all_tasks_done(self._goal_state)`。
+        Task 12 替换原占位（恒 False）为真实 TaskStore 查询：
+        - 无 goal_state → False
+        - 调 agent.goal.check_all_tasks_done(goal_state)
         """
         if self._goal_state is None:
             return False
-        task_ids = self._goal_state.task_ids
-        if not task_ids:
-            return False  # 无关联任务，不自动 complete
-        # 简单版：TaskStore 未接入前，只能查 task_store（如有）
-        # 这里返回 False（保守，Task 12 会修）
-        return False
+        from agent.goal import check_all_tasks_done
+        try:
+            return check_all_tasks_done(self._goal_state)
+        except Exception as e:
+            logger.warning("_check_all_goal_tasks_done 查询失败（fail-open False）: %s", e)
+            return False
 
     def _extract_turn_tokens(self, response) -> int:
         """从 response.usage 提取本轮总 token 数（prompt + completion）。

@@ -346,6 +346,26 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "enabled": False,
         },
     },
+
+    # === CCAR8 Task 12 NEW: goal/trace/handoff 配置项 ===
+    # goal：目标驱动多轮（/goal 命令触发）
+    "goal": {
+        "enabled": True,
+        "default_token_budget": 200_000,  # 默认预算上限（防无限跑）
+        "reflection_interval": 5,          # 每 N 轮触发一次 reflection
+    },
+
+    # trace：本地 trace sink（jsonl 落盘）
+    "trace": {
+        "enabled": True,
+        "retention_days": 7,  # 超过 N 天的 jsonl 自动清理
+    },
+
+    # handoff 扩展（现有字段保留，auto_save_on_exit 是 Task 7 跨项目恢复用）
+    "handoff": {
+        "auto_save_on_exit": True,   # 退出时自动 save bundle
+        "auto_save_max_keep": 20,    # 最多保留 N 个 auto-save bundle（防爆盘）
+    },
 }
 
 

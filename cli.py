@@ -19,6 +19,7 @@
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -243,6 +244,19 @@ class RuntimeContext:
         # === ⑮ NEW: Handoff bundle 存储 ===
         self.handoff_store = None  # 在 initialize() 中真正初始化
 
+        # === CCAR8 Task 12 NEW: mailbox + agent_name + trace_sink + aux_llm_client ===
+        # mailbox：teammate 异步邮箱（Task 8 遗留接线）
+        # agent_name：当前 agent 名（mailbox 收件人，默认 "main"）
+        # trace_sink：本地 trace sink（Task 5 遗留接线，/trace 命令读这个）
+        # aux_llm_client：辅助 LLM（Task 3 遗留接线，工具 handler 通过 agent_ref 拿）
+        # 字段都先 None，在 initialize() 中真正填充
+        self.mailbox = None
+        self.agent_name = "main"
+        self.trace_sink = None
+        self.aux_llm_client = None  # 真实值在 _create_agent 里 aux_llm_router 创建后回填
+        self.aux_model = None
+        self._poor_mode_on = False  # /poor 命令状态
+
         # X2 fix: atexit 兜底 shutdown（即使主循环异常/SystemExit 也会清理 SQLite 锁等）
         import atexit
         atexit.register(self.shutdown)
@@ -389,6 +403,37 @@ class RuntimeContext:
         except Exception as e:
             logger.warning("HandoffStore 初始化失败: %s", e)
             self.handoff_store = None
+
+        # === CCAR8 Task 12 NEW: 初始化 mailbox + trace_sink，注入 agent ===
+        # mailbox 接线（Task 8 遗留）：用 team 目录，跟 team_bus 共享一个 mailbox 根
+        try:
+            from agent.team.mailbox import Mailbox
+            mb_dir = Path(self.home) / ".team"
+            mb_dir.mkdir(parents=True, exist_ok=True)
+            self.mailbox = Mailbox(mb_dir)
+            self.agent_name = "main"
+            # 把 mailbox + agent_name 挂到 AIAgent（mailbox_tool 通过 agent_ref 读这两个）
+            self.agent.set_mailbox(self.mailbox, self.agent_name)
+            logger.info("mailbox 已注入 AIAgent（agent_name=%s）", self.agent_name)
+        except Exception as e:
+            logger.warning("mailbox 初始化失败（fail-open）: %s", e)
+            self.mailbox = None
+
+        # trace_sink 接线（Task 5 遗留）：从 config.trace.enabled 读开关
+        trace_cfg = self.config.get("trace", {})
+        if trace_cfg.get("enabled", True):
+            try:
+                from agent.trace import TraceSink
+                self.trace_sink = TraceSink(base_dir=Path(self.home))
+                # 回填到 agent（让 _register_trace_hooks 能拿到）
+                if self.agent is not None:
+                    self.agent._trace_sink = self.trace_sink
+                    from agent.trace import _register_trace_hooks
+                    if self.agent.hooks_registry is not None:
+                        _register_trace_hooks(self.agent.hooks_registry, self.trace_sink)
+            except Exception as e:
+                logger.warning("TraceSink 初始化失败（fail-open）: %s", e)
+                self.trace_sink = None
 
         # 6. 后台触发 curator（不阻塞启动）
         self._maybe_trigger_curator()
@@ -578,6 +623,13 @@ class RuntimeContext:
         # P3.2: 注入 config provider，让 dispatch_hook 能读 feature flag 门控
         # http / mcp_tool / agent 三种 handler 类型
         set_config_provider(lambda: self.config)
+
+        # === CCAR8 Task 12 NEW: 回填 aux_llm_client 到 RuntimeContext ===
+        # Task 3 遗留接线：工具 handler 通过 ctx.aux_llm_client 拿 aux client
+        # （goal.decompose_with_llm 等场景用）。aux_llm_router 为 None 时保持 None
+        # （fail-open，goal 命令跳过拆解直接跑）。
+        self.aux_llm_client = aux_llm_router
+        self.aux_model = (aux_cfg or {}).get("model") if aux_cfg else None
 
         # === P4.1 NEW: 给 PermissionChecker 注入 aux_llm + config provider ===
         # 闸门 4（aux_llm 分类）需要这两个 provider。PermissionChecker 比 aux_llm_router
@@ -1445,6 +1497,22 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             console.print(f"[red]读取 cache 统计失败：[/red]{e}")
         return True
 
+    # === CCAR8 Task 12 NEW: 6 个新命令 ===
+    if name == "/goal":
+        return _handle_goal_command(args, rt)
+    if name == "/poor":
+        return _handle_poor_command(args, rt)
+    if name == "/trace":
+        return _handle_trace_command(args, rt)
+    if name == "/mailbox":
+        return _handle_mailbox_command(args, rt)
+    if name == "/inbox":
+        return _handle_inbox_command(args, rt)
+    if name == "/resume_bundle":
+        # /resume 已被会话级 _resume_session_interactive 占用，跨项目 bundle
+        # 恢复用 /resume_bundle 区分
+        return _handle_resume_command(args, rt)
+
     return False
 
 
@@ -1629,11 +1697,453 @@ def _show_help():
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
+        "[cyan]/goal[/cyan]      目标驱动多轮（/goal <obj>|status|pause|resume|clear|tasks）\n"
+        "[cyan]/poor[/cyan]      穷鬼模式（on|off|status，一键关烧钱功能）\n"
+        "[cyan]/trace[/cyan]     本地 trace（today|yesterday|<date>|tail [N]）\n"
+        "[cyan]/mailbox[/cyan]   队友邮箱（send|check|clear）\n"
+        "[cyan]/inbox[/cyan]     显示 ChannelInbox 未消费消息\n"
+        "[cyan]/resume_bundle[/cyan]  跨项目恢复 bundle（/resume_bundle [id]）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
         border_style="blue",
     ))
+
+
+# ---------------------------------------------------------------------------
+# CCAR8 Task 12 NEW: 6 个新命令的 handler
+# ---------------------------------------------------------------------------
+
+def _goal_state_path(rt) -> Path:
+    """goal 持久化路径：~/.OmniMate/.goal/current.json。"""
+    return Path(rt.home) / ".goal" / "current.json"
+
+
+def _goal_status_output(rt, capsys_safe: bool = True) -> None:
+    """打印 goal 状态（直接 console.print）。"""
+    gs = getattr(rt.agent, "_goal_state", None)
+    if gs is None:
+        console.print("[yellow]无 active goal（未启用目标驱动）[/yellow]")
+        console.print(
+            "[dim]用法: /goal <objective> 启动新目标 | "
+            "/goal status 看状态 | /goal clear 取消[/dim]"
+        )
+        return
+    console.print(f"[cyan]objective:[/cyan] {gs.objective}")
+    console.print(f"[cyan]status:[/cyan] {gs.status}")
+    console.print(f"[cyan]iteration:[/cyan] {gs.iteration_count}")
+    console.print(f"[cyan]token_budget:[/cyan] {gs.token_budget}/{gs.token_budget_limit or '∞'}")
+    if gs.pause_reason:
+        console.print(f"[cyan]pause_reason:[/cyan] {gs.pause_reason}")
+    if gs.task_ids:
+        console.print(f"[cyan]task_ids:[/cyan] {len(gs.task_ids)} 个")
+
+
+def _start_new_goal(rt, objective: str) -> None:
+    """启动新 goal：pause 旧 goal（如有）+ 建新 GoalState + 持久化 + 注入 agent。"""
+    from agent.goal import GoalState
+
+    # 1. 先 pause 旧 goal（如有）
+    old_gs = getattr(rt.agent, "_goal_state", None)
+    if old_gs is not None and old_gs.status == "active":
+        old_gs.pause(reason="superseded_by_new_goal")
+        old_gs.save(_goal_state_path(rt))
+        console.print(f"[dim]已自动 pause 旧 goal: {old_gs.objective}[/dim]")
+
+    # 2. 建新 GoalState
+    goal_cfg = rt.config.get("goal", {}) if rt.config else {}
+    budget_limit = goal_cfg.get("default_token_budget", 200_000)
+    gs = GoalState(
+        objective=objective,
+        token_budget_limit=budget_limit,
+    )
+    gs.save(_goal_state_path(rt))
+    rt.agent.set_goal_state(gs)
+
+    # 3. 尝试用 aux_llm 拆解为子 task（fail-open，无 aux 跳过）
+    aux_client = getattr(rt, "aux_llm_client", None)
+    if aux_client is not None:
+        try:
+            # 异步函数：用 asyncio.run 包装（CLI sync 路径）
+            import asyncio as _asyncio
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    # 已在事件循环里（如测试环境），跳过同步调
+                    task_ids = []
+                else:
+                    task_ids = _asyncio.run(
+                        _goal_decompose_safe(gs, objective, aux_client)
+                    )
+            except RuntimeError:
+                task_ids = _asyncio.run(
+                    _goal_decompose_safe(gs, objective, aux_client)
+                )
+            if task_ids:
+                gs.save(_goal_state_path(rt))
+                console.print(f"[dim]aux_llm 拆出 {len(task_ids)} 个子任务[/dim]")
+        except Exception as e:
+            logger.warning("goal decompose 失败（fail-open）: %s", e)
+
+    # 4. 把 objective 作为下一轮 user 输入（让 agent 开始追目标）
+    # 设计：直接塞 conversation_history 末尾，主循环下次跑就看到
+    if hasattr(rt.agent, "conversation_history"):
+        rt.agent.conversation_history.append({
+            "role": "user",
+            "content": f"[goal_start] {objective}",
+        })
+
+    console.print(
+        f"[green]✓ goal 已启动：{objective}[/green] "
+        f"[dim](budget={budget_limit}, iteration=0)[/dim]"
+    )
+
+
+async def _goal_decompose_safe(gs, objective: str, aux_client):
+    """安全包装 decompose_with_llm（任何异常返回空列表）。"""
+    from agent.goal import decompose_with_llm
+    try:
+        return await decompose_with_llm(gs, objective, aux_client)
+    except Exception as e:
+        logger.warning("goal decompose 异常（fail-open）: %s", e)
+        return []
+
+
+def _handle_goal_command(args: str, rt) -> bool:
+    """处理 /goal 命令。
+
+    /goal <objective>       启动新 goal
+    /goal status            查看状态
+    /goal pause [reason]    手动 pause
+    /goal resume            resume
+    /goal continue          立即触发下一轮（pause → active）
+    /goal clear             取消
+    /goal tasks             列出关联 task
+    """
+    parts = args.split(None, 1) if args else []
+    if not parts:
+        _goal_status_output(rt)
+        return True
+    sub = parts[0]
+
+    if sub == "status":
+        _goal_status_output(rt)
+        return True
+
+    if sub == "clear":
+        gs = getattr(rt.agent, "_goal_state", None)
+        if gs is None:
+            console.print("[yellow]无 active goal[/yellow]")
+            return True
+        gs.cancel()
+        gs.save(_goal_state_path(rt))
+        rt.agent.set_goal_state(None)
+        # 删持久化文件
+        try:
+            p = _goal_state_path(rt)
+            if p.exists():
+                p.unlink()
+        except Exception as e:
+            logger.warning("goal 持久化文件删除失败（忽略）: %s", e)
+        console.print("[green]goal 已取消[/green]")
+        return True
+
+    if sub == "pause":
+        gs = getattr(rt.agent, "_goal_state", None)
+        if gs is None:
+            console.print("[yellow]无 active goal[/yellow]")
+            return True
+        reason = parts[1] if len(parts) > 1 else "manual"
+        gs.pause(reason=reason)
+        gs.save(_goal_state_path(rt))
+        console.print(f"[green]goal 已 pause（reason={reason}）[/green]")
+        return True
+
+    if sub in ("resume", "continue"):
+        gs = getattr(rt.agent, "_goal_state", None)
+        if gs is None:
+            console.print("[yellow]无 active goal[/yellow]")
+            return True
+        gs.resume()
+        gs.save(_goal_state_path(rt))
+        console.print("[green]goal 已 resume[/green]")
+        return True
+
+    if sub == "tasks":
+        gs = getattr(rt.agent, "_goal_state", None)
+        if gs is None or not gs.task_ids:
+            console.print("[yellow]无关联 task（goal 未启动或未拆解）[/yellow]")
+            return True
+        try:
+            from agent.task_store import get_task_store
+            store = get_task_store()
+            for tid in gs.task_ids:
+                t = store.get(tid)
+                if t:
+                    console.print(
+                        f"  [cyan]{tid}[/cyan] [{t['status']}] {t['subject']}"
+                    )
+                else:
+                    console.print(f"  [dim]{tid}（已删）[/dim]")
+        except Exception as e:
+            console.print(f"[red]列 task 失败：[/red]{e}")
+        return True
+
+    # 否则当作 objective 启动新 goal
+    objective = args.strip()
+    if not objective:
+        console.print("[yellow]用法: /goal <objective> | status | pause | resume | clear | tasks[/yellow]")
+        return True
+    _start_new_goal(rt, objective)
+    return True
+
+
+def _handle_poor_command(args: str, rt) -> bool:
+    """处理 /poor on|off|status。"""
+    arg = args.strip().lower() if args else ""
+    if not arg or arg == "status":
+        is_on = getattr(rt, "_poor_mode_on", False)
+        console.print(f"Poor Mode: [cyan]{'ON' if is_on else 'OFF'}[/cyan]")
+        return True
+    if arg == "on":
+        from agent.poor_mode import apply_poor_preset
+        rt.config = apply_poor_preset(rt.config, on=True)
+        rt._poor_mode_on = True
+        console.print(
+            "[green]Poor Mode 已开启（runtime）[/green] "
+            "[dim]（reflection/9段摘要/cache监控等已关，重启恢复默认）[/dim]"
+        )
+        return True
+    if arg == "off":
+        rt._poor_mode_on = False
+        console.print(
+            "[green]Poor Mode 已关闭（runtime 标记）[/green] "
+            "[dim]（配置改动不回滚，重启会话恢复默认配置）[/dim]"
+        )
+        return True
+    console.print("[yellow]用法: /poor on|off|status[/yellow]")
+    return True
+
+
+def _handle_trace_command(args: str, rt) -> bool:
+    """/trace today|yesterday|<YYYY-MM-DD>|tail [N]。"""
+    sink = getattr(rt, "trace_sink", None)
+    if sink is None:
+        console.print("[yellow]Trace 未启用（config.trace.enabled=False 或未初始化）[/yellow]")
+        return True
+    parts = (args or "today").split()
+    when = parts[0] if parts else "today"
+
+    if when == "tail":
+        n = 10
+        if len(parts) > 1:
+            try:
+                n = int(parts[1])
+            except ValueError:
+                pass
+        records = sink.query(limit=n)
+        if not records:
+            console.print("[yellow]无 trace 记录[/yellow]")
+            return True
+        for r in records:
+            console.print(f"  [{r.get('ts', '')[:19]}] {r.get('event', '?')}")
+        return True
+
+    # summary 路径：today / yesterday / 具体日期
+    import datetime as _dt
+    if when == "today":
+        date_str = _dt.datetime.now().strftime("%Y-%m-%d")
+    elif when == "yesterday":
+        date_str = (_dt.datetime.now() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        date_str = when  # 假设用户给了 YYYY-MM-DD
+
+    try:
+        summary = sink.summary(date_str=date_str)
+    except Exception as e:
+        console.print(f"[red]trace 查询失败：[/red]{e}")
+        return True
+
+    if not summary.get("total_events"):
+        console.print(f"[yellow]{date_str} 无 trace 记录[/yellow]")
+        return True
+
+    console.print(f"[cyan]{date_str} trace summary[/cyan]")
+    console.print(f"  total_events: {summary['total_events']}")
+    console.print(f"  input_tokens: {summary['total_input_tokens']}")
+    console.print(f"  output_tokens: {summary['total_output_tokens']}")
+    console.print(f"  error_count: {summary['error_count']}")
+    console.print(f"  by_event: {summary['by_event']}")
+    return True
+
+
+def _handle_inbox_command(args: str, rt) -> bool:
+    """/inbox 显示 ChannelInbox 未消费消息。
+
+    ChannelInbox 是 MCP server notifications 的落地 inbox。
+    本命令只读展示，消费（mark_consumed）由主循环 _assemble_turn_messages 完成。
+    """
+    # channel_inbox 在 AIAgent._channel_inbox（Task 11 setter 注入）
+    inbox = getattr(rt.agent, "_channel_inbox", None)
+    if inbox is None:
+        console.print("[yellow]ChannelInbox 未初始化（无 MCP server 推送）[/yellow]")
+        return True
+    try:
+        msgs = inbox.unconsumed()
+    except Exception as e:
+        console.print(f"[red]读取 inbox 失败：[/red]{e}")
+        return True
+    if not msgs:
+        console.print("[green]收件箱为空[/green]")
+        return True
+    console.print(f"[cyan]未消费消息 {len(msgs)} 条：[/cyan]")
+    for m in msgs:
+        server = m.get("server", "?")
+        ts = m.get("ts", "")
+        payload = m.get("payload", {})
+        payload_str = json.dumps(payload, ensure_ascii=False)
+        if len(payload_str) > 200:
+            payload_str = payload_str[:200] + "..."
+        console.print(f"  [{ts}] [{server}] {payload_str}")
+    return True
+
+
+def _handle_mailbox_command(args: str, rt) -> bool:
+    """/mailbox send|check|clear（teammate 邮箱 CLI 包装）。"""
+    mailbox = getattr(rt, "mailbox", None)
+    if mailbox is None:
+        console.print("[red]mailbox 未初始化[/red]")
+        return True
+    agent_name = getattr(rt, "agent_name", "main")
+
+    parts = args.split(None, 1)
+    sub = parts[0].lower() if parts else "help"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if sub in ("help", "h", "?", ""):
+        console.print(Panel(
+            "[bold]/mailbox 子命令[/bold]\n\n"
+            "[cyan]/mailbox send <to> <content>[/cyan]  发邮件给另一个 agent\n"
+            "[cyan]/mailbox check[/cyan]                列自己邮箱未读邮件\n"
+            "[cyan]/mailbox clear[/cyan]                清空自己邮箱\n",
+            border_style="blue",
+        ))
+        return True
+
+    if sub == "send":
+        send_parts = rest.split(None, 1)
+        if len(send_parts) < 2:
+            console.print("[yellow]用法: /mailbox send <to> <content>[/yellow]")
+            return True
+        to, content = send_parts[0], send_parts[1]
+        msg_id = mailbox.send(to=to, from_=agent_name, content=content)
+        console.print(f"[green]✓ 已投递给 {to}（id={msg_id}）[/green]")
+        return True
+
+    if sub in ("check", "ls", "list"):
+        unread_only = "all" not in rest.lower()
+        if unread_only:
+            msgs = mailbox.check_unread(agent_name)
+            label = "未读"
+        else:
+            msgs = mailbox.check_all(agent_name)
+            label = "全部"
+        if not msgs:
+            console.print(f"[green]{agent_name} 邮箱无{label}邮件[/green]")
+            return True
+        console.print(f"[cyan]{agent_name} 邮箱{label}邮件 {len(msgs)} 条：[/cyan]")
+        for m in msgs:
+            ts = m.get("ts", "")
+            frm = m.get("from", "?")
+            content = m.get("content", "")
+            if len(content) > 100:
+                content = content[:100] + "..."
+            read_flag = "" if not m.get("read") else "[已读]"
+            console.print(f"  [{ts}] from={frm}{read_flag}: {content}")
+        return True
+
+    if sub == "clear":
+        count = mailbox.clear(agent_name)
+        console.print(f"[green]已清空 {count} 条邮件[/green]")
+        return True
+
+    console.print(f"[yellow]未知子命令：{sub}（send/check/clear）[/yellow]")
+    return True
+
+
+def _handle_resume_command(args: str, rt) -> bool:
+    """/resume_bundle [id|--cwd <path>]：跨项目列出/加载 bundle。
+
+    无参数：列出最近 10 个 bundle（跨所有项目）。
+    有参数：load bundle 注入 conversation_history（覆盖当前会话）。
+    """
+    handoff_store = getattr(rt, "handoff_store", None)
+    if handoff_store is None:
+        console.print("[red]handoff 存储未初始化[/red]")
+        return True
+
+    args = (args or "").strip()
+    if not args:
+        # 列出
+        try:
+            from agent.cross_project import list_recent_bundles_across_projects
+            bundles = list_recent_bundles_across_projects(handoff_store, limit=10)
+        except Exception as e:
+            console.print(f"[red]列 bundle 失败：[/red]{e}")
+            return True
+        if not bundles:
+            console.print("[yellow]无 bundle（跨项目）[/yellow]")
+            return True
+        console.print(f"[cyan]最近 {len(bundles)} 个 bundle：[/cyan]")
+        for b in bundles:
+            title = b.title or "(无标题)"
+            cwd = b.source_cwd or ""
+            cwd_short = Path(cwd).name if cwd else ""
+            auto_tag = " [auto]" if getattr(b, "auto_saved", False) else ""
+            # created_at 是 datetime 对象（不是字符串）
+            ca = b.created_at
+            ca_str = ca.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ca, "strftime") else str(ca)[:19]
+            console.print(
+                f"  [cyan]{b.bundle_id[:12]}[/cyan] {ca_str} "
+                f"[{cwd_short}]{auto_tag} {title}"
+            )
+        console.print("[dim]用法: /resume_bundle <id> 加载某个 bundle[/dim]")
+        return True
+
+    # 加载指定 bundle
+    bid = args
+    # 支持短 id 前缀匹配
+    try:
+        all_bundles = handoff_store.list_bundles()
+        matches = [b for b in all_bundles if b.bundle_id.startswith(bid)]
+        if not matches:
+            console.print(f"[red]找不到 bundle：{bid}[/red]")
+            return True
+        if len(matches) > 1:
+            console.print(
+                f"[yellow]ID 前缀歧义（{len(matches)} 个匹配），"
+                f"请用更长的前缀[/yellow]"
+            )
+            return True
+        bid = matches[0].bundle_id
+        bundle = handoff_store.load(bid)
+    except Exception as e:
+        console.print(f"[red]load bundle 失败：[/red]{e}")
+        return True
+
+    # 注入 conversation_history（覆盖当前）
+    # HandoffBundle 是 dataclass，transcript 是字段
+    transcript = getattr(bundle, "transcript", None) or []
+    if not transcript:
+        console.print("[yellow]bundle 无 transcript（空 bundle）[/yellow]")
+        return True
+
+    rt.agent.conversation_history = list(transcript)
+    console.print(
+        f"[green]✓ 已加载 bundle {bid[:12]}（{len(transcript)} 条消息）[/green] "
+        "[dim]（已覆盖当前会话历史）[/dim]"
+    )
+    return True
 
 
 def _handle_skills_command(rt: RuntimeContext, args: str):
