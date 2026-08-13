@@ -128,20 +128,31 @@ def run_reflection(
     if not trajectory.strip():
         return []
 
-    # 批次 B: 传入已有记忆(让 LLM 避免重复 + 检测矛盾)
+    # CCAR9 Task 5: 预注入已有记忆清单（防 tanke 式重复存储——曾存 10+ 条重复）。
+    # 读 memory_store.list_all()（Task 3 已合并双区），取前 100 条拼成 manifest，
+    # 让 LLM 在生成新 insight 前就看到已有内容，避免产出语义重复的条目。
+    # fail-open：读取失败 → manifest 为空串，reflection 照常跑。
+    manifest = ""
     try:
-        existing = memory_store.list_all()
-        existing_memories = "\n".join(
-            f"- [{e.type}] {e.name}: {e.description}"
-            + (f" | {e.summary}" if e.summary else "")
-            for e in existing[:50]  # 最多 50 条,避免 prompt 太长
-        )
-    except Exception:
-        existing_memories = "(无法读取已有记忆)"
+        if memory_store is not None:
+            existing = memory_store.list_all()[:100]
+            if existing:
+                lines = [
+                    f"- [{e.type}] {e.name}: {(e.description or '')[:60]}"
+                    for e in existing
+                ]
+                manifest = (
+                    "## 已有记忆清单（以下条目已存在，不要重复存储；"
+                    "只在新信息与它们有实质差异时才更新）：\n"
+                    + "\n".join(lines)
+                )
+    except Exception as e:
+        logger.debug("读取已有记忆清单失败（fail-open，manifest 留空）: %s", e)
+        manifest = ""
 
     prompt = REFLECTION_PROMPT_TEMPLATE.format(
         trajectory=trajectory,
-        existing_memories=existing_memories or "(暂无已有记忆)",
+        existing_memories=manifest or "(暂无已有记忆)",
     )
     try:
         kwargs = {}
