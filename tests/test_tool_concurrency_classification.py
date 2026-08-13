@@ -41,6 +41,8 @@ SAFE_TOOLS = {
     # 上下文自查（只读）
     "ctx_inspect",      # Task L: 读 messages_count / cache_stats / token 估算
     "brief",            # CCAR8 Task 2: 纯 echo 输出格式约定，无副作用
+    # mailbox（只读）
+    "mailbox_check",    # CCAR8 Task 8: 读自己 mailbox 的邮件
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -91,6 +93,9 @@ UNSAFE_TOOLS = {
     "team_spawn",       # 启动子 agent 进程
     "team_shutdown",    # 关子 agent 进程
     "idle",             # 改 worker 状态机
+    # mailbox（副作用）
+    "mailbox_send",     # CCAR8 Task 8: 写投递邮件
+    "mailbox_clear",    # CCAR8 Task 8: 清空 mailbox
     # 网络（外部调用）
     "web_fetch",        # 抓 URL
     "web_search",       # Tavily 搜索
@@ -150,7 +155,7 @@ def test_safe_subset_consistent_with_plan():
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 13  # CCAR8 Task 2: brief 加入（纯 echo 无副作用）
+    expected_safe_count = 14  # CCAR8 Task 8: mailbox_check 加入（只读 mailbox）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
