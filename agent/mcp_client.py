@@ -53,6 +53,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -155,8 +156,7 @@ class StdioTransport(MCPTransport):
         self._lock = threading.Lock()
         self._connected = False
         # Task 9：reader 线程相关
-        import queue as queue_module
-        self._response_queue: "queue_module.Queue" = queue_module.Queue()
+        self._response_queue: "queue.Queue" = queue.Queue()
         self._reader_thread: Optional[threading.Thread] = None
         self._notification_handler = None  # 默认 None（向后兼容）
         # send_request 等响应的超时（秒）；可被子类/测试覆盖
@@ -285,17 +285,14 @@ class StdioTransport(MCPTransport):
                 raise RuntimeError(f"MCP stdio 写入失败: {e}")
 
         # 从 queue 拿响应（reader 线程已把 response 投递过来）
-        # 注意：不在 _lock 内等——reader 线程可能需要 lock 写 queue
-        # （实际 queue 是 thread-safe，不需要 lock，但避免持锁阻塞）
-        import queue as queue_module
-        # 清掉可能存在的过期 response（id 不匹配的）
-        deadline = None
+        # 注意：必须在 _lock 外等——queue 是 thread-safe 的，但持锁阻塞
+        # 会让 reader 无法拿到写 stdin 需要的 _lock（死锁）。
         while True:
             try:
                 data = self._response_queue.get(
                     timeout=self._response_timeout,
                 )
-            except queue_module.Empty:
+            except queue.Empty:
                 raise RuntimeError(
                     f"MCP stdio request 超时（{self._response_timeout}s）"
                 )

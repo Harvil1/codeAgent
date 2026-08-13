@@ -114,6 +114,16 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._cached_snapshot: str = ""
+        # topic 行内存缓存（锁内访问）：读路径不再每次读盘，写路径全量重写
+        # 仅发生在更新/删除（低频）；新建走文件 append（O(1)）。
+        # mtime 失效：跨 MemoryStore 实例写文件（如 curator 自建实例）自动重读。
+        self._rows_cache: dict = {}  # topic -> (mtime_at_load, rows)
+        # 压力测试优化（Round 3）：写路径只标 dirty，读 snapshot/index 时才
+        # 惰性 rebuild。原实现每次 save 全量重扫所有 topic + 重写 MEMORY.md，
+        # n 条记忆批量写入是 O(n²)（500 条 2.45s，万条估算 100s+）。
+        # 语义安全：记忆写入后本会话不注入（prompt cache 保护设计），
+        # 下次会话构造时 build_index_text 会 ensure fresh。
+        self._index_dirty = False
         # 启动时迁移老格式（每记忆一 .md → topic jsonl）
         self._migrate_legacy_if_any()
         self._rebuild_index()
@@ -127,35 +137,68 @@ class MemoryStore:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "-", (topic or "general"))
         return self._memory_dir / f"{safe}.jsonl"
 
-    def _read_topic_rows(self, topic: str) -> List[dict]:
-        """读 topic 文件的全部行（JSON dict）。"""
-        path = self._topic_path(topic)
-        if not path.exists():
-            return []
-        rows = []
+    def _topic_mtime(self, topic: str) -> tuple:
+        """topic 文件的 (mtime, size) 双因子缓存键（不存在返回 (-1.0, -1)）。
+
+        双因子防 mtime 精度窗口（Windows ~15ms）内写入误判缓存有效。
+        """
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("topic 文件 %s 有损坏行，跳过", path)
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
-        except Exception as e:
-            logger.warning("读 topic 文件失败 %s: %s", path, e)
+            st = self._topic_path(topic).stat()
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return (-1.0, -1)
+
+    def _read_topic_rows(self, topic: str) -> List[dict]:
+        """读 topic 全部行（内存缓存 + mtime 失效，miss 时读盘一次）。
+
+        返回的是缓存 list 本身——调用方（锁内）对其的 mutation
+        会同步到缓存，这是有意设计（save/update 就地改 rows 后写回）。
+        外部实例改了文件（mtime 变）自动重读。
+        """
+        mtime = self._topic_mtime(topic)
+        cached = self._rows_cache.get(topic)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        path = self._topic_path(topic)
+        rows = []
+        if path.exists():
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning("topic 文件 %s 有损坏行，跳过", path)
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+            except Exception as e:
+                logger.warning("读 topic 文件失败 %s: %s", path, e)
+        self._rows_cache[topic] = (mtime, rows)
         return rows
 
     def _write_topic_rows(self, topic: str, rows: List[dict]) -> None:
-        """原子写 topic 文件（JSONL）。"""
+        """原子写 topic 文件（JSONL）+ 同步缓存（更新/删除路径用）。"""
         path = self._topic_path(topic)
         text = "\n".join(
             json.dumps(r, ensure_ascii=False) for r in rows
         ) + ("\n" if rows else "")
         atomic_write_text(path, text)
+        self._rows_cache[topic] = (self._topic_mtime(topic), rows)
+
+    def _append_topic_row(self, topic: str, row: dict) -> None:
+        """新建路径：缓存 append + 文件 append（O(1)，免全量重写）。"""
+        rows = self._read_topic_rows(topic)  # 确保缓存已加载
+        rows.append(row)
+        path = self._topic_path(topic)
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning("append topic 行失败 %s: %s", path, e)
+        self._rows_cache[topic] = (self._topic_mtime(topic), rows)
 
     def _find_row(self, topic: str, uid: str) -> Optional[dict]:
         for r in self._read_topic_rows(topic):
@@ -236,9 +279,11 @@ class MemoryStore:
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
         # 缓存 snapshot(跳过前 4 行头)
         self._cached_snapshot = "\n".join(lines[4:]) if len(lines) > 4 else ""
+        self._index_dirty = False
 
     def snapshot_for_prompt(self) -> str:
         """索引注入 system prompt（截断：200 行 / 25KB，先到者，对齐 Claude Code）。"""
+        self._ensure_index_fresh()
         snap = self._cached_snapshot
         lines = snap.splitlines()
         if len(lines) > _INDEX_MAX_LINES:
@@ -251,7 +296,19 @@ class MemoryStore:
 
     def full_index_text(self) -> str:
         """完整记忆索引（供 memory_retriever 按需检索，不被注入截断影响）。"""
+        self._ensure_index_fresh()
         return self._cached_snapshot
+
+    def _mark_index_dirty(self) -> None:
+        """写路径调用：标记索引待重建（不立即 rebuild，防批量写 O(n²)）。"""
+        self._index_dirty = True
+
+    def _ensure_index_fresh(self) -> None:
+        """读路径调用：dirty 时才 rebuild（惰性）。线程安全（拿锁）。"""
+        if self._index_dirty:
+            with self._lock:
+                if self._index_dirty:
+                    self._rebuild_index()
 
     def build_index_text(self) -> str:
         """重建并返回索引（启动时用）。"""
@@ -327,7 +384,7 @@ class MemoryStore:
                     "updated_at": _now_iso(),
                 })
                 self._write_topic_rows(topic, rows)
-                self._rebuild_index()
+                self._mark_index_dirty()
                 return f"{topic}#{existing['id']}"
 
             now = datetime.now()
@@ -342,9 +399,8 @@ class MemoryStore:
                 "source_session_id": source_session_id,
                 "state": "active",
             }
-            rows.append(row)
-            self._write_topic_rows(topic, rows)
-            self._rebuild_index()
+            self._append_topic_row(topic, row)
+            self._mark_index_dirty()
             return f"{topic}#{uid}"
 
     def update(
@@ -391,7 +447,7 @@ class MemoryStore:
                 target["source_session_id"] = source_session_id
             target["updated_at"] = _now_iso()
             self._write_topic_rows(topic, rows)
-            self._rebuild_index()
+            self._mark_index_dirty()
             return self._row_to_entry(topic, target)
 
     def delete(self, memory_id: str) -> bool:
@@ -419,7 +475,7 @@ class MemoryStore:
             # 从 topic 文件移除
             rows = [r for r in rows if r.get("id") != uid]
             self._write_topic_rows(topic, rows)
-            self._rebuild_index()
+            self._mark_index_dirty()
             return True
 
     def clear_all(self) -> int:
@@ -445,7 +501,7 @@ class MemoryStore:
                 except Exception as e:
                     logger.warning("清空 topic %s 失败: %s", topic, e)
                     continue
-            self._rebuild_index()
+            self._mark_index_dirty()
             return total
 
     # ------------------------------------------------------------------

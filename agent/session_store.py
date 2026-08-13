@@ -76,6 +76,10 @@ class SessionStore:
         self._index_path = self._sessions_dir / "index.json"
         self._lock = threading.Lock()
         self._index_cache: Optional[List[dict]] = None  # 内存缓存（首次访问加载）
+        # 消息缓存（Round 3 压力优化）：session_id -> ((mtime, size), msgs)，
+        # search/get_messages/get_stats 热路径免重复读盘 + JSON 解析。
+        # 双因子键防 mtime 精度窗口（Windows ~15ms）内 append 误判。
+        self._msgs_cache: dict = {}
         # 自动迁移老 SQLite（如果检测到）
         self._maybe_migrate_sqlite()
 
@@ -114,10 +118,21 @@ class SessionStore:
         return self._sessions_dir / f"{session_id}.jsonl"
 
     def _read_session_msgs(self, session_id: str) -> List[dict]:
-        """读 .jsonl 全部消息（不动 index）。"""
+        """读 .jsonl 全部消息（不动 index；mtime 缓存，只读共享）。
+
+        压力优化（Round 3）：search/get_messages/get_stats/fork 每次
+        全量读盘 + JSON 解析是热路径（万条消息每次 ~100ms+）。缓存
+        (mtime, msgs)，文件变了自动失效重读。调用方全部只读遍历。
+        """
         path = self._session_file(session_id)
-        if not path.exists():
+        try:
+            st = path.stat()
+            cache_key = (st.st_mtime, st.st_size)
+        except OSError:
             return []
+        cached = self._msgs_cache.get(session_id)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
         msgs = []
         try:
             content = path.read_text(encoding="utf-8")
@@ -131,6 +146,7 @@ class SessionStore:
                 msgs.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+        self._msgs_cache[session_id] = (cache_key, msgs)
         return msgs
 
     def _compute_turn_index(self, session_id: str, role: str) -> int:
@@ -293,6 +309,9 @@ class SessionStore:
             # 追加到 .jsonl（单行写入，POSIX 上 < PIPE_BUF 原子）
             with self._session_file(session_id).open("a", encoding="utf-8") as f:
                 f.write(json.dumps(line_obj, ensure_ascii=False) + "\n")
+            # 主动失效消息缓存（mtime 粒度 ~15ms，同窗口 append 前后
+            # mtime 可能相同导致缓存误判有效——见 test_fork_session_does_not_mutate_source）
+            self._msgs_cache.pop(session_id, None)
             # 更新 index（updated_at + message_count）
             index = self._load_index()
             for entry in index:
