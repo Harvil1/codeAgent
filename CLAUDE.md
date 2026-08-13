@@ -293,6 +293,9 @@ uv sync                                 # 同步已声明依赖
 | teammateMailbox（CCAR8） | `agent/team/mailbox.py:Mailbox`（异步队列：send/check_unread/check_all/mark_read/clear，复用 bus._with_lock）+ `tools/mailbox_tool.py`（3 工具，`_resolve_mailbox_ctx` 从 agent_ref 取）；CLI `/mailbox`；与 MessageBus 分工：异步 fire-and-forget vs 同步 request-response |
 | Trace 本地 sink（CCAR8） | `agent/trace.py:TraceSink`（daily jsonl `~/.OmniMate/.trace/` + emit/query/summary，fail-open）+ `_register_trace_hooks`（6 hook 点：pre/post_llm_call + post_tool_use/failure + subagent_start/stop）；AIAgent 构造参数 `trace_sink=`；CLI `/trace today|yesterday|<date>|tail N`；config `trace.enabled/retention_days` |
 | 工具 handler dispatch 契约（CCAR8 教训） | `tools/registry.py:dispatch` 调 `handler(args, **dispatch_kwargs)`——工具参数从 `args` 取，命名上下文（memory_store/agent_ref/hooks_registry 等）从 kwargs 取；新工具签名必须 `(args, **kwargs)`，契约测试 `test_handler_signature_matches_dispatch_contract`（inspect.signature 验 VAR_KEYWORD）防 silent-dead-code |
+| 记忆分层项目隔离（CCAR9） | `agent/project_scope.py:get_project_memory_key`（canonical git root 用 `--git-common-dir`，worktree 归一，非 git 退 cwd，fail-open）+ `agent/memory_store.py` 按 type 路由（user/feedback/other → 全局 `.memory/`；project/reference → `.memory/projects/<key>/`）；MEMORY.md 双节合并索引（全局 + 当前项目）；`_ensure_index_fresh` 含 cwd 切换感知（`_index_built_key`） |
+| /init 生成 OMNIMATE.md（CCAR9） | `cli.py:_handle_init_command`（目录树/配置文件/类型统计 fail-open 收集 → 主 LLM 四段式生成：项目本质/常用命令/架构/约定 → 写 `<cwd>/OMNIMATE.md`；已存在不覆盖，`--force` 覆盖）；prompt_builder 递归扫注入闭环已有 |
+| reflection 防重复（CCAR9） | `agent/reflection.py:run_reflection`（prompt 预注入已有记忆清单 manifest——前 100 条 name + description 前 60 字符 + "不要重复存储"提示，fail-open） |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -313,6 +316,8 @@ uv sync                                 # 同步已声明依赖
 - **context:fork 同步等待** —— 技能子代理跑完才回主循环（对齐官方 `background:false`）；子代理用 minimal 工具集，spawn_depth+1 防递归。
 - **Hooks 通知型事件 fail-open** —— round3 加的 7 个事件都是通知型，hook 异常只 log 不影响主流程。
 - **子代理 transcript 落盘 fail-open** —— Task I 加的 sidechain transcript 持久化（`~/.OmniMate/.agent-sessions/`）所有操作 try/except，写盘失败不影响主流程；默认开（`delegation.subagent_persistence_enabled`），7 天 retention 清理；Phase 2 才做 `subagent_resume` 工具。
+- **记忆分层项目隔离（CCAR9）** —— project/reference 类存 `.memory/projects/<canonical-git-root>/`，项目 A 的记忆在项目 B 物理不可见；user/feedback/other 全局共享。MEMORY.md 合并索引只含"当前项目"分区（切换项目后下次 rebuild 跟随，同实例有 `_index_built_key` 感知）。worktree 与主 repo 共享项目区。
+- **/init 生成的是 cwd 的 OMNIMATE.md** —— 对齐 Claude Code /init；prompt_builder 递归扫注入（`_scan_project_memory_files`）是既有闭环。
 
 ## 测试策略
 
