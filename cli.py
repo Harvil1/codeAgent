@@ -1558,6 +1558,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         # 恢复用 /resume_bundle 区分
         return _handle_resume_command(args, rt)
 
+    # === CCAR9 Task 4: /init 生成 OMNIMATE.md（对标 Claude Code /init）===
+    if name == "/init":
+        return _handle_init_command(rt, args)
+
     return False
 
 
@@ -2021,6 +2025,150 @@ def _handle_trace_command(args: str, rt) -> bool:
     console.print(f"  output_tokens: {summary['total_output_tokens']}")
     console.print(f"  error_count: {summary['error_count']}")
     console.print(f"  by_event: {summary['by_event']}")
+    return True
+
+
+def _handle_init_command(rt, args: str) -> bool:
+    """生成 <cwd>/OMNIMATE.md（CCAR9 Task 4，对标 Claude Code /init）。
+
+    收集项目信息（目录树/关键文件/类型统计，fail-open 缺哪跳哪）
+    → 主 LLM 生成四段式（项目本质/常用命令/架构/约定）
+    → 写 cwd/OMNIMATE.md（下次会话由 prompt_builder 自动注入 system prompt）。
+
+    - /init            已存在不覆盖
+    - /init --force    覆盖重新生成
+    """
+    # 局部 import：与 codebase 一致（agent_defs/prompt_builder 等都这么干）
+    from agent.workspace_context import get_workspace_cwd
+
+    force = "--force" in (args or "")
+    cwd = Path(get_workspace_cwd())
+    target = cwd / "OMNIMATE.md"
+    if target.exists() and not force:
+        console.print(
+            "[yellow]OMNIMATE.md 已存在[/yellow] "
+            "[dim]（/init --force 覆盖重新生成）[/dim]"
+        )
+        return True
+
+    # ── 收集项目信息（fail-open，缺哪跳哪）──
+    parts = []
+
+    # 1. 目录结构（顶层 + 部分二层）
+    try:
+        skip = {
+            "node_modules", ".git", "__pycache__", ".venv",
+            "dist", "build", ".next", "target",
+        }
+        entries = sorted(
+            e.name for e in cwd.iterdir()
+            if e.name not in skip and not e.name.startswith(".")
+        )
+        sub_tree = []
+        for name in entries[:20]:
+            if (cwd / name).is_dir():
+                try:
+                    subs = [
+                        f"{name}/{s}" for s in
+                        sorted(p.name for p in (cwd / name).iterdir())[:10]
+                    ]
+                    sub_tree.extend(subs[:10])
+                except OSError:
+                    pass
+            else:
+                sub_tree.append(name)
+        parts.append(
+            "## 目录结构（顶层 + 部分二层）\n"
+            + "\n".join(entries + sub_tree[:60])
+        )
+    except Exception as e:
+        logger.debug("收集目录结构失败（跳过）: %s", e)
+
+    # 2. 关键配置文件（前 4KB）
+    for fname in (
+        "README.md", "README.rst", "pyproject.toml",
+        "package.json", "requirements.txt", "Makefile",
+        "setup.py", "go.mod", "Cargo.toml",
+    ):
+        f = cwd / fname
+        if f.exists():
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")[:4096]
+                parts.append(f"## {fname}\n{content}")
+            except Exception:
+                continue
+
+    # 3. 文件类型统计（前 5）
+    try:
+        from collections import Counter
+        exts = Counter(
+            p.suffix for p in cwd.rglob("*")
+            if p.is_file() and p.suffix
+            and ".git" not in str(p) and "node_modules" not in str(p)
+        )
+        top = ", ".join(f"{e}({c})" for e, c in exts.most_common(5))
+        parts.append(f"## 文件类型统计（前 5）\n{top}")
+    except Exception as e:
+        logger.debug("文件类型统计失败（跳过）: %s", e)
+
+    info = "\n\n".join(parts) or "（空项目，无可用信息）"
+
+    # ── 构造 prompt → 主 LLM 四段式生成 ──
+    prompt = (
+        "根据以下项目信息生成 OMNIMATE.md（项目指导文件，给 AI 编程助手看）。"
+        "输出 Markdown，含且仅含这四节：\n"
+        "## 项目本质（一句话 + 核心技术栈）\n"
+        "## 常用命令（运行/测试/构建，从配置文件推断）\n"
+        "## 架构（模块划分 + 依赖方向）\n"
+        "## 约定（语言/编码/测试等能从项目验证的规则）\n\n"
+        "要求：只写能从信息中验证的事实，不猜测；"
+        "命令给出具体形式（如 uv run pytest tests/）；中文书写。\n\n"
+        f"# 项目信息\n{info}"
+    )
+
+    async def _gen():
+        resp = await rt.agent.llm_client.chat_completions(
+            [{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content or ""
+
+    # asyncio.run 在已有事件循环时会 RuntimeError（测试环境/REPL）
+    # —— 走 try/except 兜底，对齐 _start_new_goal 的同款模式
+    text = ""
+    try:
+        text = asyncio.run(_gen())
+    except RuntimeError:
+        # 已在事件循环内（如 pytest-asyncio 管理时）→ 尝试拿到 loop 跑
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # loop 已在跑：用 run_until_complete 会冲突，
+                # 直接 await（仅在已有 loop 上下文可用，同步 CLI 路径不会进这）
+                import asyncio as _a
+                text = _a.get_event_loop().run_until_complete(
+                    _a.ensure_future(_gen())
+                )
+        except Exception as e:
+            logger.warning("init 生成失败（事件循环冲突）: %s", e)
+            text = ""
+    except Exception as e:
+        logger.warning("init 生成失败（LLM 调用异常）: %s", e)
+        text = ""
+
+    if not text.strip():
+        console.print("[red]OMNIMATE.md 生成失败（LLM 返回空）[/red]")
+        return True
+
+    try:
+        target.write_text(text.strip() + "\n", encoding="utf-8")
+    except Exception as e:
+        console.print(f"[red]写入失败：[/red]{e}")
+        return True
+
+    console.print(
+        f"[green]✓ OMNIMATE.md 已生成[/green] "
+        f"[dim]（{target}，下次会话自动注入 system prompt）[/dim]"
+    )
     return True
 
 
