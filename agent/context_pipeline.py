@@ -126,8 +126,11 @@ def strip_internal_fields(messages: list) -> list:
 
     prompt cache 神圣不可侵犯：_timestamp 等内部字段绝不能进 LLM messages。
     在 _assemble_turn_messages 组装发给 LLM 的 messages 时调用。
+
+    CCAR8 Task 11：新增 `_ephemeral` 标记，标记的消息 strip 后保留 content/role
+    但去除标记本身（_ephemeral 是 AIAgent 内部追踪用的，LLM 不需要看到）。
     """
-    INTERNAL_KEYS = ("_timestamp",)
+    INTERNAL_KEYS = ("_timestamp", "_ephemeral")
     out = []
     for m in messages:
         if any(k in m for k in INTERNAL_KEYS):

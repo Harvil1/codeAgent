@@ -36,6 +36,114 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# CCAR8 Task 11：ephemeral 注入纯函数（可独立测试）
+# ============================================================================
+# 设计原则：
+# - 所有 ephemeral 消息走 user 角色，**永不修改 system prompt**（保护 cache）
+# - helper 返回带 `_ephemeral=True` 的 dict，调用方 append 到 messages（发给 LLM）
+#   但**不追加到 conversation_history**（不进持久化）
+# - fail-open：channel/mailbox 任一异常只 log warning，不影响主循环
+
+def _build_goal_continue_message(goal_state) -> Optional[dict]:
+    """构造 `<continue_goal>` ephemeral user 消息驱动下一轮。
+
+    Args:
+        goal_state: GoalState 实例（active 时才注入）；None 返回 None
+
+    Returns:
+        带 `_ephemeral=True` 的 user 消息 dict，或 None（不注入）
+    """
+    if goal_state is None:
+        return None
+    if goal_state.status != "active":
+        return None
+    return {
+        "role": "user",
+        "content": (
+            f'<continue_goal objective="{goal_state.objective}" '
+            f'iteration="{goal_state.iteration_count}" />'
+        ),
+        "_ephemeral": True,
+    }
+
+
+def _build_channel_injection(inbox) -> Optional[dict]:
+    """构造 `<channel_push>` ephemeral user 消息（MCP notifications）。
+
+    从 inbox 取 unconsumed，注入后 mark_consumed（fail-open）。
+
+    Args:
+        inbox: ChannelInbox 实例；None 返回 None
+
+    Returns:
+        ephemeral user 消息 dict，或 None（无消息/无 inbox）
+    """
+    if inbox is None:
+        return None
+    try:
+        unconsumed = inbox.unconsumed()
+        if not unconsumed:
+            return None
+        digest = inbox.format_digest(unconsumed)
+        msg = {
+            "role": "user",
+            "content": (
+                f'<channel_push count="{len(unconsumed)}">\n'
+                f'{digest}\n</channel_push>'
+            ),
+            "_ephemeral": True,
+        }
+        inbox.mark_consumed([m["id"] for m in unconsumed])
+        return msg
+    except Exception as e:
+        logger.warning("channel 注入 fail-open: %s", e)
+        return None
+
+
+def _build_mail_injection(mailbox, agent_name: str) -> Optional[dict]:
+    """构造 `<mail>` ephemeral user 消息（teammate 邮件）。
+
+    从 mailbox 取 unread，注入后 mark_read（fail-open）。
+
+    Args:
+        mailbox: Mailbox 实例；None 返回 None
+        agent_name: 当前 agent 名（查收件人）；空串返回 None
+
+    Returns:
+        ephemeral user 消息 dict，或 None（无邮件/无 mailbox）
+    """
+    if mailbox is None or not agent_name:
+        return None
+    try:
+        unread = mailbox.check_unread(agent_name)
+        if not unread:
+            return None
+        digest_lines = []
+        for m in unread:
+            sender = m.get("from", "?")
+            ts = m.get("ts", "")
+            content = m.get("content", "")
+            if len(content) > 500:
+                content = content[:500] + "..."
+            kind = m.get("kind", "message")
+            digest_lines.append(f"[{ts}] from={sender} kind={kind}\n{content}")
+        digest = "\n\n".join(digest_lines)
+        msg = {
+            "role": "user",
+            "content": (
+                f'<mail unread="{len(unread)}">\n'
+                f'{digest}\n</mail>'
+            ),
+            "_ephemeral": True,
+        }
+        mailbox.mark_read(agent_name, [m["id"] for m in unread])
+        return msg
+    except Exception as e:
+        logger.warning("mailbox 注入 fail-open: %s", e)
+        return None
+
+
 class AIAgent:
     """核心 Agent 类。一个实例对应一个会话。"""
 
@@ -80,6 +188,10 @@ class AIAgent:
         initial_messages: list = None,  # === Task H NEW: fork 子代理初始 messages ===
         omit_project_memory: bool = False,  # === Task N NEW: 子代理跳过项目 OMNIMATE.md ===
         trace_sink=None,  # === CCAR8 Task 5 NEW: 本地 trace sink ===
+        goal_state=None,  # === CCAR8 Task 11 NEW: 目标驱动状态机 ===
+        channel_inbox=None,  # === CCAR8 Task 11 NEW: MCP notification 收件箱 ===
+        mailbox=None,  # === CCAR8 Task 11 NEW: teammate 异步邮箱 ===
+        agent_name: str = "main",  # === CCAR8 Task 11 NEW: 当前 agent 名（mailbox 收件人）===
     ):
         """
         参数：
@@ -326,6 +438,21 @@ class AIAgent:
             (config or {}).get("reflection", {}).get("cooldown_turns", 3)
         )
 
+        # === CCAR8 Task 11 NEW: Goal/Channel/Mailbox 三件套 ===
+        # goal_state：goal-driven 自动多轮的状态机（None=未启用）
+        # channel_inbox：MCP server notifications 落地 inbox
+        # mailbox：teammate 异步邮箱（_agent_name 是收件人）
+        # 设计：所有三个都用 setter（构造参数也支持，最灵活）
+        self._goal_state = goal_state
+        self._channel_inbox = channel_inbox
+        self._mailbox = mailbox
+        self._agent_name = agent_name
+        # 待注入 ephemeral 消息队列：goal continue 跨轮注入用
+        # 设计：主循环里 goal continue 时把 ephemeral 消息塞这里（不进 history），
+        # 下一轮 _assemble_turn_messages 末尾消费并清空。这样既让 LLM 看到，
+        # 又不污染 conversation_history（保护持久化 + prompt cache）
+        self._pending_ephemeral_messages: list = []
+
     async def _retrieve_relevant_memories(self, query: str) -> str:
         """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情（async：retrieve_relevant 已改 async）。
 
@@ -449,6 +576,64 @@ class AIAgent:
             )
         except Exception as e:
             logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
+
+    # ------------------------------------------------------------------
+    # CCAR8 Task 11：Goal/Channel/Mailbox setter + goal 持久化路径
+    # ------------------------------------------------------------------
+    # 设计：构造参数 + setter 都支持（构造参数用于子代理场景，
+    # setter 用于 CLI 启动后按需注入——如 /goal 命令触发后才创建 GoalState）
+
+    def set_goal_state(self, goal_state) -> None:
+        """注入 GoalState（None=清除）。"""
+        self._goal_state = goal_state
+
+    def set_channel_inbox(self, inbox) -> None:
+        """注入 ChannelInbox（None=清除）。"""
+        self._channel_inbox = inbox
+
+    def set_mailbox(self, mailbox, agent_name: str = None) -> None:
+        """注入 Mailbox。agent_name 为空时保留原值。"""
+        self._mailbox = mailbox
+        if agent_name:
+            self._agent_name = agent_name
+
+    def _goal_state_path(self):
+        """goal 持久化路径：~/.OmniMate/.goal/current.json。"""
+        from pathlib import Path
+        return Path(self.omnimate_home) / ".goal" / "current.json"
+
+    def _check_all_goal_tasks_done(self) -> bool:
+        """goal 的所有 task_ids 是否全部 completed（Task 12 才有 TaskStore 集成，
+        本 task 用简单内联版：无 task_ids 视为未完成，避免误判 complete）。
+
+        Task 12 会上 replace 为 `self.goal.check_all_tasks_done(self._goal_state)`。
+        """
+        if self._goal_state is None:
+            return False
+        task_ids = self._goal_state.task_ids
+        if not task_ids:
+            return False  # 无关联任务，不自动 complete
+        # 简单版：TaskStore 未接入前，只能查 task_store（如有）
+        # 这里返回 False（保守，Task 12 会修）
+        return False
+
+    def _extract_turn_tokens(self, response) -> int:
+        """从 response.usage 提取本轮总 token 数（prompt + completion）。
+
+        用于 goal_state.evaluate_after_turn 累加 token_budget。
+        fail-open：无 usage 字段返回 0。
+        """
+        if response is None:
+            return 0
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return 0
+        try:
+            prompt = getattr(usage, "prompt_tokens", 0) or 0
+            completion = getattr(usage, "completion_tokens", 0) or 0
+            return int(prompt) + int(completion)
+        except Exception:
+            return 0
 
     @staticmethod
     def _extract_cache_read(usage) -> int:
@@ -940,6 +1125,43 @@ class AIAgent:
             if self._stop_hook_forced:
                 # STOP hook 注入了 force_msg，跳回 while 让 LLM 再跑一轮
                 continue
+
+            # === CCAR8 Task 11：goal continue（goal-driven 自动多轮）===
+            # 设计：
+            # - 只在 goal_state active 且本轮有 LLM response 时评估
+            # - 决策 continue → 把 <continue_goal> ephemeral 消息塞 _pending_ephemeral_messages
+            #   （**不进 conversation_history**，保护持久化 + prompt cache）
+            # - 下一轮 _assemble_turn_messages 末尾会消费 _pending_ephemeral_messages
+            #   并 append 到 messages（让 LLM 看到）
+            # - 决策 pause/complete → break 正常返回
+            # - prompt cache 保护：不动 system prompt，只加 user 消息
+            if self._goal_state is not None and self._goal_state.status == "active":
+                # 提取本轮 token 用量（从 response.usage）
+                turn_tokens = self._extract_turn_tokens(response)
+                decision = self._goal_state.evaluate_after_turn(
+                    tokens_used=turn_tokens,
+                    all_tasks_done=self._check_all_goal_tasks_done(),
+                )
+                # 持久化 goal 状态
+                self._goal_state.save(self._goal_state_path())
+
+                if decision == "continue":
+                    # 注入 ephemeral user 消息驱动下一轮（不进 history）
+                    cont_msg = _build_goal_continue_message(self._goal_state)
+                    if cont_msg is not None:
+                        self._pending_ephemeral_messages.append(cont_msg)
+                    logger.info(
+                        "goal continue: iteration=%d, tokens=%d",
+                        self._goal_state.iteration_count,
+                        self._goal_state.token_budget,
+                    )
+                    continue
+                # pause / complete / fail → break
+                logger.info(
+                    "goal %s: reason=%s",
+                    decision, self._goal_state.pause_reason,
+                )
+
             return final_content
 
         # ---------- 循环结束（预算耗尽或中断）----------
@@ -1051,11 +1273,26 @@ class AIAgent:
 
         injected 里 bg/cron/team 注入后会被原地清空（避免下轮重复）。
         plan_mode reminder 每轮重算（不消费）。
+
+        CCAR8 Task 11：channel/mailbox 走 ephemeral 注入（fail-open），
+        不进 conversation_history（保护 prompt cache + 持久化）。
         """
         messages = [
             {"role": "system", "content": system_prompt},
             *self.conversation_history,
         ]
+
+        # === CCAR8 Task 11：channel/mailbox ephemeral 注入（fail-open）===
+        # 用模块级 helper：失败只 log warning，不影响主流程
+        # 注入位置在 history 之后、bg/cron/team 之前——channel/mailbox 优先级更高
+        # （外部协作消息比内部任务通知更紧急）
+        channel_msg = _build_channel_injection(self._channel_inbox)
+        if channel_msg is not None:
+            messages.append(channel_msg)
+
+        mail_msg = _build_mail_injection(self._mailbox, self._agent_name)
+        if mail_msg is not None:
+            messages.append(mail_msg)
 
         # 后台任务通知（消费型）
         if injected.get("bg_notifications"):
@@ -1145,6 +1382,13 @@ class AIAgent:
         # 上下文管理提示（接近上限时建议主动 /compact /new）
         self._maybe_inject_context_tip(messages)
 
+        # === CCAR8 Task 11：消费 _pending_ephemeral_messages（goal continue 注入点）===
+        # 主循环里 goal continue 时把 ephemeral 消息塞这里（不进 history），
+        # 本轮组装时消费并清空——让 LLM 看到但不污染持久化
+        if self._pending_ephemeral_messages:
+            messages.extend(self._pending_ephemeral_messages)
+            self._pending_ephemeral_messages = []
+
         # 注意：不在这里 strip _timestamp——time-based MC 需要读 _timestamp
         # strip 移到主循环 _run_context_compression 之后、发 LLM 之前
         return messages
@@ -1217,7 +1461,10 @@ class AIAgent:
                 logger.warning("on_pre_compress 编排异常: %s", e)
 
         # 压缩修改了历史，同步并重建 system prompt
-        self.conversation_history = messages[1:]  # 跳过 system
+        # CCAR8 Task 11：strip ephemeral 消息（保护持久化——ephemeral 不应进 history）
+        self.conversation_history = [
+            m for m in messages[1:] if not m.get("_ephemeral")
+        ]
         self.invalidate_system_prompt()
         system_prompt = self._get_system_prompt()
         self._compression_attempts += 1
@@ -1459,13 +1706,37 @@ class AIAgent:
                 )
                 if changed:
                     self._reacted = True  # 向后兼容标记
-                    self.conversation_history = messages[1:]  # 跳过 system
+                    # CCAR8 Task 11：strip ephemeral（保护持久化）
+                    self.conversation_history = [
+                        m for m in messages[1:] if not m.get("_ephemeral")
+                    ]
                     self.invalidate_system_prompt()
                     logger.warning("reactive_compact 后重试本轮")
                     return self._REACTIVE_RETRY
                 # changed=False：冷却中或达到上限，走正常错误路径
 
             logger.error("LLM API 调用失败（重试后）: %s", e)
+
+            # === CCAR8 Task 11：goal 网络异常自动 pause ===
+            # 关键词触发：529 / overloaded / timeout / connection / network
+            # 只在 goal active 时 pause（避免无 goal 时副作用）
+            # fail-open：pause 本身失败只 log
+            if self._goal_state is not None and self._goal_state.status == "active":
+                network_keywords = (
+                    "529", "overloaded", "timeout",
+                    "connection", "network", "timed out",
+                    "connectionerror", "connectionreseterror",
+                )
+                if any(kw in err_str for kw in network_keywords):
+                    try:
+                        self._goal_state.pause(reason="network")
+                        self._goal_state.save(self._goal_state_path())
+                        logger.warning(
+                            "goal 自动 pause（网络异常）: %s", self._goal_state.pause_reason,
+                        )
+                    except Exception as pause_err:
+                        logger.warning("goal pause 失败（fail-open）: %s", pause_err)
+
             # 错误作为助手消息塞回，让模型有机会自我修正
             self.conversation_history.append({
                 "role": "assistant",

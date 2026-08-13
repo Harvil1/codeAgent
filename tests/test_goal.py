@@ -123,3 +123,311 @@ def test_goal_notes_appended():
     assert any("manual" in n for n in g.notes)
     g.resume()
     assert any("resume" in n.lower() for n in g.notes)
+
+
+# ============================================================================
+# CCAR8 Task 11：主循环集成测试
+# ============================================================================
+# 策略：抽纯函数（_build_goal_continue_message / _build_channel_injection /
+# _build_mail_injection）测，再用一个集成测试验证 AIAgent 字段接线。
+
+import asyncio  # noqa: E402
+import json  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+from agent.channel_inbox import ChannelInbox  # noqa: E402
+from agent.team.mailbox import Mailbox  # noqa: E402
+
+
+def _make_mock_llm_client(response_text="hello", tool_calls=None):
+    """构造 mock LLMClient（async chat_completions，返回 OpenAI 兼容响应）。"""
+    msg = SimpleNamespace(content=response_text, tool_calls=tool_calls)
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=5,
+        prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0,
+    )
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=usage)
+    client = MagicMock()
+    client.chat_completions = AsyncMock(return_value=resp)
+    return client
+
+
+# ---------------------------------------------------------------------------
+# 纯函数测试（不需要 AIAgent 实例）
+# ---------------------------------------------------------------------------
+
+def test_build_goal_continue_message_basic():
+    """goal active 时构造 <continue_goal> ephemeral user 消息。"""
+    from agent import _build_goal_continue_message
+    g = GoalState(objective="完成 X", iteration_count=3)
+    msg = _build_goal_continue_message(g)
+    assert msg is not None
+    assert msg["role"] == "user"
+    assert msg.get("_ephemeral") is True
+    content = msg["content"]
+    assert "<continue_goal" in content
+    assert "完成 X" in content
+    assert 'iteration="3"' in content or "iteration=3" in content
+
+
+def test_build_goal_continue_message_none_returns_none():
+    """goal_state=None 时返回 None（调用方跳过注入）。"""
+    from agent import _build_goal_continue_message
+    assert _build_goal_continue_message(None) is None
+
+
+def test_build_channel_injection_with_unconsumed(tmp_path):
+    """channel inbox 有未消费消息时构造 <channel_push> ephemeral。"""
+    from agent import _build_channel_injection
+    inbox = ChannelInbox(tmp_path / ".inbox_base")
+    inbox.push("server_A", {"event": "build_done"})
+    msg = _build_channel_injection(inbox)
+    assert msg is not None
+    assert msg["role"] == "user"
+    assert msg.get("_ephemeral") is True
+    assert "<channel_push" in msg["content"]
+    assert "server_A" in msg["content"]
+    assert "build_done" in msg["content"]
+    # 注入后已 mark_consumed
+    assert inbox.unconsumed() == []
+
+
+def test_build_channel_injection_empty_returns_none(tmp_path):
+    """channel inbox 无消息时返回 None。"""
+    from agent import _build_channel_injection
+    inbox = ChannelInbox(tmp_path / ".inbox_base")
+    assert _build_channel_injection(inbox) is None
+
+
+def test_build_channel_injection_none_returns_none():
+    """inbox=None 时返回 None。"""
+    from agent import _build_channel_injection
+    assert _build_channel_injection(None) is None
+
+
+def test_build_mail_injection_with_unread(tmp_path):
+    """mailbox 有未读邮件时构造 <mail> ephemeral。"""
+    from agent import _build_mail_injection
+    mailbox = Mailbox(tmp_path)
+    mailbox.send(to="main", from_="alice", content="hello")
+    msg = _build_mail_injection(mailbox, agent_name="main")
+    assert msg is not None
+    assert msg["role"] == "user"
+    assert msg.get("_ephemeral") is True
+    assert "<mail" in msg["content"]
+    assert "alice" in msg["content"]
+    assert "hello" in msg["content"]
+    # 注入后已 mark_read
+    assert mailbox.check_unread("main") == []
+
+
+def test_build_mail_injection_empty_returns_none(tmp_path):
+    """mailbox 无未读邮件时返回 None。"""
+    from agent import _build_mail_injection
+    mailbox = Mailbox(tmp_path)
+    assert _build_mail_injection(mailbox, agent_name="main") is None
+
+
+def test_build_mail_injection_none_returns_none():
+    """mailbox=None 或 agent_name 为空时返回 None。"""
+    from agent import _build_mail_injection
+    assert _build_mail_injection(None, agent_name="main") is None
+
+
+# ---------------------------------------------------------------------------
+# AIAgent 字段接线测试（不跑主循环）
+# ---------------------------------------------------------------------------
+
+def test_ai_agent_has_goal_state_field(tmp_path):
+    """AIAgent 构造后 goal_state 默认 None，setter 真生效。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    assert agent._goal_state is None
+    g = GoalState(objective="x")
+    agent.set_goal_state(g)
+    assert agent._goal_state is g
+
+
+def test_ai_agent_has_channel_inbox_field(tmp_path):
+    """AIAgent 构造后 channel_inbox 默认 None，setter 真生效。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    assert agent._channel_inbox is None
+    inbox = ChannelInbox(tmp_path / ".inbox_base")
+    agent.set_channel_inbox(inbox)
+    assert agent._channel_inbox is inbox
+
+
+def test_ai_agent_has_mailbox_field(tmp_path):
+    """AIAgent 构造后 mailbox 默认 None，setter 真生效。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    assert agent._mailbox is None
+    assert agent._agent_name == "main"  # 默认值
+    mailbox = Mailbox(tmp_path)
+    agent.set_mailbox(mailbox, agent_name="worker-1")
+    assert agent._mailbox is mailbox
+    assert agent._agent_name == "worker-1"
+
+
+# ---------------------------------------------------------------------------
+# 集成测试：主循环 ephemeral 不进持久化 + system prompt 不变
+# ---------------------------------------------------------------------------
+
+async def test_goal_continue_does_not_modify_system_prompt(tmp_path):
+    """goal active 时 system prompt 不变（保护 prompt cache）。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="工作完成")
+    sp_before = agent._get_system_prompt()
+
+    g = GoalState(objective="测试目标")
+    agent.set_goal_state(g)
+    # 模拟 run_conversation 完成一轮（不会 continue，因为 mock 单轮就 return）
+    await agent.chat("start")
+
+    sp_after = agent._get_system_prompt()
+    assert sp_before == sp_after, "system prompt 在 goal active 时不能变"
+
+
+async def test_goal_continue_message_not_in_persisted_history(tmp_path):
+    """<continue_goal> ephemeral 消息不进 conversation_history。"""
+    from agent import AIAgent
+    from agent import _build_goal_continue_message
+
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    agent.llm_client = _make_mock_llm_client(response_text="ok")
+
+    g = GoalState(objective="x")
+    agent.set_goal_state(g)
+
+    # 调用 helper（模拟主循环逻辑）
+    msg = _build_goal_continue_message(g)
+    # 关键断言：helper 返回的消息有 _ephemeral 标记
+    assert msg is not None
+    assert msg.get("_ephemeral") is True
+
+    # 模拟主循环：把消息加到 messages（发给 LLM 的）但不加到 conversation_history
+    # 这里直接验证 conversation_history 里没有 <continue_goal>
+    await agent.chat("hi")
+    for m in agent.conversation_history:
+        content = m.get("content", "")
+        assert "<continue_goal" not in str(content), \
+            "ephemeral 消息不能进 conversation_history"
+
+
+async def test_channel_injection_in_assemble_turn_messages(tmp_path):
+    """_assemble_turn_messages 注入 <channel_push> ephemeral，不进 history。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    inbox = ChannelInbox(tmp_path / ".inbox_base")
+    inbox.push("server_X", {"event": "ready"})
+    agent.set_channel_inbox(inbox)
+
+    # 调 _assemble_turn_messages 前需要先把 user 消息塞 history
+    agent.conversation_history.append({"role": "user", "content": "hi"})
+
+    messages = agent._assemble_turn_messages("sys_prompt", {})
+
+    # 找出 channel_push 注入
+    found_channel = None
+    for m in messages:
+        if "<channel_push" in str(m.get("content", "")):
+            found_channel = m
+            break
+    assert found_channel is not None, "channel_push 消息应注入 messages"
+    # 但 conversation_history 不含
+    for m in agent.conversation_history:
+        assert "<channel_push" not in str(m.get("content", ""))
+
+
+async def test_mail_injection_in_assemble_turn_messages(tmp_path):
+    """_assemble_turn_messages 注入 <mail> ephemeral，不进 history。"""
+    from agent import AIAgent
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    mailbox = Mailbox(tmp_path)
+    mailbox.send(to="main", from_="bob", content="ping")
+    agent.set_mailbox(mailbox, agent_name="main")
+
+    agent.conversation_history.append({"role": "user", "content": "hi"})
+
+    messages = agent._assemble_turn_messages("sys_prompt", {})
+
+    found_mail = None
+    for m in messages:
+        if "<mail" in str(m.get("content", "")):
+            found_mail = m
+            break
+    assert found_mail is not None, "<mail> 消息应注入 messages"
+    for m in agent.conversation_history:
+        assert "<mail" not in str(m.get("content", ""))
+
+
+async def test_goal_auto_pause_on_network_error(tmp_path):
+    """_call_llm_with_escalation 网络异常时 goal 自动 pause。"""
+    from agent import AIAgent
+
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    # mock LLM 抛网络异常
+    err_client = MagicMock()
+    err_client.chat_completions = AsyncMock(
+        side_effect=ConnectionError("connection timeout"),
+    )
+    agent.llm_client = err_client
+
+    g = GoalState(objective="x")
+    agent.set_goal_state(g)
+
+    # 跑主循环（会因 LLM 异常退出，但 goal 应已 pause）
+    await agent.chat("start")
+
+    assert g.status == "paused"
+    assert g.pause_reason == "network"
+
+
+async def test_goal_not_paused_on_non_network_error(tmp_path):
+    """非网络异常不触发 goal pause（如 400 参数错误）。"""
+    from agent import AIAgent
+
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+    )
+    err_client = MagicMock()
+    err_client.chat_completions = AsyncMock(
+        side_effect=ValueError("invalid parameter"),
+    )
+    agent.llm_client = err_client
+
+    g = GoalState(objective="x")
+    agent.set_goal_state(g)
+
+    await agent.chat("start")
+
+    # 非网络异常不 pause goal
+    assert g.status == "active"
