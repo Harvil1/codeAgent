@@ -79,6 +79,7 @@ class AIAgent:
         permission_mode: str = "default",  # === B2 NEW: default | bypassPermissions ===
         initial_messages: list = None,  # === Task H NEW: fork 子代理初始 messages ===
         omit_project_memory: bool = False,  # === Task N NEW: 子代理跳过项目 OMNIMATE.md ===
+        trace_sink=None,  # === CCAR8 Task 5 NEW: 本地 trace sink ===
     ):
         """
         参数：
@@ -228,6 +229,19 @@ class AIAgent:
 
         # === batch2-T3 NEW: 辅助 LLM 路由器 ===
         self.aux_llm_router = aux_llm_router
+
+        # === CCAR8 Task 5 NEW: trace sink hook 接入（fail-open）===
+        # 把 sink 接到 6 个 hook 点（pre/post_llm_call + post_tool_use/failure
+        # + subagent_start/stop）。hook 内部已 try/except，写盘失败只 log。
+        # 防 Silent-Dead-Code：AIAgent 构造时必须真调 _register_trace_hooks，
+        # 否则单元测试过但生产路径不 emit trace（CLAUDE.md 教训）。
+        self._trace_sink = trace_sink
+        if trace_sink is not None and hooks_registry is not None:
+            try:
+                from agent.trace import _register_trace_hooks
+                _register_trace_hooks(hooks_registry, trace_sink)
+            except Exception as e:
+                logger.warning("trace hook 注册失败（不影响主流程）: %s", e)
 
         # === PlanMode NEW: 计划模式状态 + 审批回调 ===
         # plan_mode=True 时下一轮起切换到 ["plan"] 工具集（只读）

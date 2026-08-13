@@ -146,3 +146,128 @@ class TraceSink:
             "total_output_tokens": total_out,
             "error_count": error_count,
         }
+
+
+# =============================================================================
+# CCAR8 Task 5: trace sink hook 接入
+# =============================================================================
+
+
+def _register_trace_hooks(hooks_registry, sink: "TraceSink") -> None:
+    """把 sink 接到 6 个 hook 点。fail-open（hook 内部已 try/except）。
+
+    6 个 hook：
+      - PRE_LLM_CALL / POST_LLM_CALL：token 用量追踪
+      - POST_TOOL_USE / POST_TOOL_USE_FAILURE：工具调用追踪
+      - SUBAGENT_START / SUBAGENT_STOP：子代理生命周期
+
+    HookRegistry 各事件的 fn 签名不同，严格按调用约定写：
+      - pre_llm_call:    fn(messages, tools)
+      - post_llm_call:   fn(response)
+      - post_tool_use:   fn(tool_name, args, result)
+      - post_tool_use_failure: fn(payload: dict)   ← 不是 3 参数！
+      - subagent_start/stop: fn(payload: dict)
+    """
+    hooks_registry.register_pre_llm_call(
+        lambda messages, tools: (
+            sink.emit(
+                "pre_llm_call",
+                input_tokens=_estimate_messages_tokens(messages),
+                model=None,
+            )
+            or None  # 返回 None 表示不修改
+        ),
+        name="trace_pre_llm_call",
+    )
+    hooks_registry.register_post_llm_call(
+        lambda response: (
+            sink.emit(
+                "post_llm_call",
+                output_tokens=_extract_response_tokens(response),
+                duration_ms=None,
+                model=_extract_response_model(response),
+            )
+            or None
+        ),
+        name="trace_post_llm_call",
+    )
+    hooks_registry.register_post_tool_use(
+        lambda tool_name, args, result: (
+            sink.emit("post_tool_use", tool=tool_name) or None
+        ),
+        name="trace_post_tool_use",
+    )
+    # POST_TOOL_USE_FAILURE 的 fn 签名是 fn(payload: dict)（见 hooks.py:622）
+    # 不是 (tool_name, args, result)——brief 原文是错的，这里按实际签名实现
+    hooks_registry.register_post_tool_use_failure(
+        lambda payload: (
+            sink.emit(
+                "tool_failed",
+                tool=payload.get("tool"),
+                error=str(payload.get("error", ""))[:200],
+            )
+            or None
+        ),
+        name="trace_post_tool_use_failure",
+    )
+    hooks_registry.register_subagent_start(
+        lambda payload: sink.emit(
+            "subagent_start",
+            subagent_type=payload.get("subagent_type") or payload.get("subagent"),
+            session_id=payload.get("session_id", ""),
+        ),
+        name="trace_subagent_start",
+    )
+    hooks_registry.register_subagent_stop(
+        lambda payload: sink.emit(
+            "subagent_stop",
+            subagent_type=payload.get("subagent_type") or payload.get("subagent"),
+            session_id=payload.get("session_id", ""),
+        ),
+        name="trace_subagent_stop",
+    )
+
+
+def _estimate_messages_tokens(messages: Optional[list]) -> int:
+    """粗估 messages 总 token 数（4 字符 ≈ 1 token）。
+
+    OpenAI/Anthropic 都没有 client-side token 计数，这里用经验比例估。
+    fail-open：任何异常返回 0。
+    """
+    try:
+        total_chars = 0
+        for m in messages or []:
+            content = m.get("content", "") if isinstance(m, dict) else str(m)
+            total_chars += len(str(content))
+        return total_chars // 4
+    except Exception:
+        return 0
+
+
+def _extract_response_tokens(response) -> int:
+    """从 LLM response 提取 completion_tokens（兼容对象/dict）。fail-open 返回 0。"""
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+        if usage is None:
+            return 0
+        # 对象路径
+        ct = getattr(usage, "completion_tokens", None)
+        if ct is None and isinstance(usage, dict):
+            ct = usage.get("completion_tokens")
+        return int(ct or 0)
+    except Exception:
+        return 0
+
+
+def _extract_response_model(response) -> Optional[str]:
+    """从 LLM response 提取 model 名（兼容对象/dict）。fail-open 返回 None。"""
+    try:
+        if hasattr(response, "model"):
+            return response.model
+        if isinstance(response, dict):
+            return response.get("model")
+    except Exception:
+        pass
+    return None
