@@ -53,7 +53,7 @@ Claude Code 的 `/init` 命令——收集项目信息（目录树/关键文件/
 - `uv run pytest tests/ -q` → **2164 passed / 1 skipped / 0 failed**
 
 ## Commit
-`<待填>` — `feat(init): /init 命令生成 OMNIMATE.md（CCAR9 Task 4，对标 /init）`
+`a26f6bd4` — `feat(init): /init 命令生成 OMNIMATE.md（CCAR9 Task 4，对标 /init）`
 
 ## Concerns / Follow-up
 1. **Minor**：LLM 调用走 `chat_completions`（主 LLM）而非 aux_llm_router——对标 Claude Code 的 /init 用主 LLM 生成，语义一致。如果未来想做"轻量 init"（用 aux LLM 省成本），可以加 config 开关。
