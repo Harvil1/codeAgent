@@ -29,6 +29,8 @@ _CORE_TOOLS = [
     "subagent_kill",  # Task K: 中断 async 子代理（set cancel_event）
     # 澄清（AskUserQuestion 复刻）
     "ask_user",
+    # 结构化简报（CCAR8 Task 2：LLM 在重要操作前给用户预览）
+    "brief",
     # 持久化任务系统（P3 Task System，带 DAG 依赖）
     "task_create", "task_update", "task_complete", "task_list",
     # 任务系统扩展（Kanban）
