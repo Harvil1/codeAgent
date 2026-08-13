@@ -106,3 +106,54 @@ def test_key_cached_per_base(tmp_path):
     assert key1 == key2
     # 缓存命中：tmp_path 已在 _key_cache
     assert str(tmp_path) in ps._key_cache
+
+
+def test_daemon_thread_inherits_workspace_cwd():
+    """daemon thread 用 copy_context 启动后能看到主线程的 workspace_cwd。
+
+    CCAR9 final review Important：curator/reflection 线程不传 contextvars
+    会 fallback os.getcwd()，导致多项目场景漏扫/写错项目区。
+    """
+    import contextvars
+    import threading
+
+    from agent.workspace_context import get_workspace_cwd, workspace_cwd_context
+
+    results = []
+
+    def _worker():
+        results.append(get_workspace_cwd())
+
+    with workspace_cwd_context(r"D:\fake\project"):
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=lambda: ctx.run(_worker), daemon=True)
+        t.start()
+        t.join(timeout=5)
+
+    assert results == [r"D:\fake\project"]
+
+
+def test_daemon_thread_without_copy_context_falls_back_to_os_getcwd():
+    """对照组：daemon thread 不 copy_context → 看不到主线程 workspace_cwd。
+
+    用这个对照证明修法（copy_context().run）真的生效，而不是碰巧通过。
+    """
+    import threading
+
+    from agent.workspace_context import get_workspace_cwd, workspace_cwd_context
+
+    results = []
+    original = os.getcwd()
+
+    def _worker():
+        results.append(get_workspace_cwd())
+
+    # 用一个肯定不是当前 cwd 的假路径
+    fake = r"Z:\definitely\not\real" if os.name == "nt" else "/definitely/not/real"
+    with workspace_cwd_context(fake):
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=5)
+
+    # 不 copy_context → fallback os.getcwd()（= 启动进程的 cwd）
+    assert results == [original]

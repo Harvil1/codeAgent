@@ -19,6 +19,7 @@
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -462,7 +463,18 @@ class RuntimeContext:
                     except Exception as e:
                         logger.warning("Memory Curator 后台运行失败: %s", e)
 
-                threading.Thread(target=_run_memory_curator, daemon=True).start()
+                # CCAR9 final review Important：daemon 线程不自动继承主线程
+                # contextvars（threading.Thread 在 3.12- 不 copy context）。
+                # 项目分区键依赖 workspace_cwd ContextVar，不传 → fallback
+                # os.getcwd()，多项目场景下他项目的 project/reference
+                # 记忆永远不会被 curate。
+                # 修法：在主线程里 copy_context()，target 用 ctx.run 包一层。
+                _curator_ctx = contextvars.copy_context()
+                threading.Thread(
+                    target=lambda: _curator_ctx.run(_run_memory_curator),
+                    daemon=True,
+                    name="memory-curator",
+                ).start()
         except Exception as e:
             logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
 

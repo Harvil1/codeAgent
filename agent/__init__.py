@@ -2292,6 +2292,7 @@ class AIAgent:
         - 反思针对当前会话最近 N 条消息（含本轮用户消息+最终响应+中间过程）
         - 节流：任意时刻最多 1 个反思在跑 + 距上次启动不足 cooldown_turns 轮时跳过
         """
+        import contextvars
         import threading
         # 拷贝引用（thread 启动后 conversation_history 可能继续变化）
         store = self.memory_store
@@ -2342,5 +2343,13 @@ class AIAgent:
                 with self._reflection_lock:
                     self._active_reflections -= 1
 
-        t = threading.Thread(target=_bg, daemon=True, name="reflection")
+        # CCAR9 final review Minor：daemon 线程不自动继承主线程 contextvars。
+        # 会话内切 cwd 后，reflection 的 project 记忆会落错项目区（fallback
+        # os.getcwd()）。修法：主线程里 copy_context()，target 用 ctx.run 包一层。
+        _reflection_ctx = contextvars.copy_context()
+        t = threading.Thread(
+            target=lambda: _reflection_ctx.run(_bg),
+            daemon=True,
+            name="reflection",
+        )
         t.start()
