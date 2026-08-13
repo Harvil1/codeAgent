@@ -24,8 +24,6 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-import anyio
-
 logger = logging.getLogger(__name__)
 
 
