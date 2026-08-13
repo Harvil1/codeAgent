@@ -63,4 +63,6 @@ registry.register(
     schema=BRIEF_SCHEMA,
     handler=_handle_brief,
     toolset="core",
+    emoji="📋",
+    isConcurrencySafe=True,  # CCAR8 fix: 纯 echo 无副作用，可并发
 )

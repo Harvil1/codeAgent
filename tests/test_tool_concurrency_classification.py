@@ -40,6 +40,7 @@ SAFE_TOOLS = {
     "team_members",     # 列成员状态
     # 上下文自查（只读）
     "ctx_inspect",      # Task L: 读 messages_count / cache_stats / token 估算
+    "brief",            # CCAR8 Task 2: 纯 echo 输出格式约定，无副作用
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -93,6 +94,8 @@ UNSAFE_TOOLS = {
     # 网络（外部调用）
     "web_fetch",        # 抓 URL
     "web_search",       # Tavily 搜索
+    # 记忆召回（外部 LLM）
+    "memory_recall",    # CCAR8 Task 3: 调 aux_llm（retrieve_relevant），消耗配额
 }
 
 
@@ -147,7 +150,7 @@ def test_safe_subset_consistent_with_plan():
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 12
+    expected_safe_count = 13  # CCAR8 Task 2: brief 加入（纯 echo 无副作用）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"

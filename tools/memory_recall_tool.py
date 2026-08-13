@@ -120,4 +120,6 @@ registry.register(
     handler=_handle_memory_recall,
     toolset="memory",
     is_async=True,
+    emoji="🔍",
+    isConcurrencySafe=False,  # CCAR8 fix: 调 aux_llm（retrieve_relevant），消耗配额，串行更稳
 )
