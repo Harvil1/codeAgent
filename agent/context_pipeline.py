@@ -154,10 +154,15 @@ def snip_compact(
     """
     system, conv = _split_system(messages)
     # 已有占位 → 不二次裁（幂等）
-    # 用占位前缀 "[snip_compact:" 匹配（占位格式见 line 195），
-    # 不能用裸子串 "snip_compact"——否则用户消息提到这个字样就会让幂等检查误判，
-    # 永久阻止自动裁剪（压力测试发现：压测指令含 "snip_compact" 字样 → snip 永不触发）
-    placeholders = [m for m in conv if "[snip_compact:" in str(m.get("content", ""))]
+    # 用占位前缀 "[snip_compact:" + role=="user" + startswith 三重限定
+    # 不能用裸子串 "snip_compact"——用户消息提到这字样会误判（Bug 5）
+    # 不能只看子串 "[snip_compact:"——tool 消息读源码/输出含该子串也误判（Bug 6）
+    # 真实占位格式见 line 195-199，role 是 user，content 以 "[snip_compact:" 开头
+    placeholders = [
+        m for m in conv
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith("[snip_compact:")
+    ]
     if placeholders:
         return messages, False
     if len(conv) <= threshold:
