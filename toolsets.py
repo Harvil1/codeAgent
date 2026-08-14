@@ -14,6 +14,7 @@ _CORE_TOOLS = [
     "read_file",       # 读文件
     "write_file",      # 写文件
     "search_files",    # 搜索文件内容（grep）
+    "glob",            # 按文件名模式查找（CCAR11 Task 1，与 search_files 正交）
     "str_replace",     # 文件定点替换编辑
     # 技能相关（05 实现）
     "skills_list",

@@ -23,6 +23,7 @@ SAFE_TOOLS = {
     # 文件类（只读）
     "read_file",        # 读文件内容
     "search_files",     # grep 文件内容
+    "glob",             # CCAR11 Task 1: 文件名模式匹配（只读，不读内容）
     # 技能类（只读）
     "skills_list",      # 列技能目录
     "skill_view",       # 看技能正文（bump view 是小副作用，对并发不致命）
@@ -156,7 +157,7 @@ def test_safe_subset_consistent_with_plan():
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 14  # CCAR8 Task 8: mailbox_check 加入（只读 mailbox）
+    expected_safe_count = 15  # CCAR11 Task 1: glob 加入（只读文件名匹配）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
