@@ -296,6 +296,9 @@ uv sync                                 # 同步已声明依赖
 | 记忆分层项目隔离（CCAR9） | `agent/project_scope.py:get_project_memory_key`（canonical git root 用 `--git-common-dir`，worktree 归一，非 git 退 cwd，fail-open）+ `agent/memory_store.py` 按 type 路由（user/feedback/other → 全局 `.memory/`；project/reference → `.memory/projects/<key>/`）；MEMORY.md 双节合并索引（全局 + 当前项目）；`_ensure_index_fresh` 含 cwd 切换感知（`_index_built_key`） |
 | /init 生成 OMNIMATE.md（CCAR9） | `cli.py:_handle_init_command`（目录树/配置文件/类型统计 fail-open 收集 → 主 LLM 四段式生成：项目本质/常用命令/架构/约定 → 写 `<cwd>/OMNIMATE.md`；已存在不覆盖，`--force` 覆盖）；prompt_builder 递归扫注入闭环已有 |
 | reflection 防重复（CCAR9） | `agent/reflection.py:run_reflection`（prompt 预注入已有记忆清单 manifest——前 100 条 name + description 前 60 字符 + "不要重复存储"提示，fail-open） |
+| 检索式记忆注入（CCAR10，直接替代 snapshot） | `agent/memory_injection.py:build_relevant_memories_message`（aux_llm Top5 → `<relevant_memories>` ephemeral user；同轮缓存 LRU1 + `reset_injection_cache` 每轮）+ `_fallback_snapshot_message`（无 aux 降级，`_snapshot_injected` 一次性）+ 接入 `run_conversation` 开场（仅 spawn_depth==0）；prompt_builder/memory_manager 的 snapshot 注入已退役；旧路径 `_initial_memory_recall`/`_retrieve_relevant_memories` 已删 |
+| statusline（CCAR10） | `cli.py:_render_statusline`（⚡model/会话 token（`_llm_usage_stats`）/goal:状态#轮次/项目名，每轮响应后 dim 一行）+ `_format_tokens`；RuntimeContext `_statusline_project_key`（initialize 赋一次）；config `statusline.enabled`（默认 true）；中断/异常路径不打 |
+| subagent_resume（CCAR10，补 CCAR5-I Phase 2） | `tools/subagent_resume_tool.py:_run_resume`（load_transcript → `_spawn_resumed_agent`（initial_messages 重启 + spawn_depth+1 + minimal）→ append_message 续写同文件）+ CLI `cli.py:/resumable`（列表 + 恢复，Rich `\[id]` 转义）；core toolset + UNSAFE 分类 |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -318,6 +321,8 @@ uv sync                                 # 同步已声明依赖
 - **子代理 transcript 落盘 fail-open** —— Task I 加的 sidechain transcript 持久化（`~/.OmniMate/.agent-sessions/`）所有操作 try/except，写盘失败不影响主流程；默认开（`delegation.subagent_persistence_enabled`），7 天 retention 清理；Phase 2 才做 `subagent_resume` 工具。
 - **记忆分层项目隔离（CCAR9）** —— project/reference 类存 `.memory/projects/<canonical-git-root>/`，项目 A 的记忆在项目 B 物理不可见；user/feedback/other 全局共享。MEMORY.md 合并索引只含"当前项目"分区（切换项目后下次 rebuild 跟随，同实例有 `_index_built_key` 感知）。worktree 与主 repo 共享项目区。
 - **/init 生成的是 cwd 的 OMNIMATE.md** —— 对齐 Claude Code /init；prompt_builder 递归扫注入（`_scan_project_memory_files`）是既有闭环。
+- **检索式记忆注入每轮一次（CCAR10）** —— 主代理 only（spawn_depth==0）；检索结果走 ephemeral（不进 history/system prompt）；无 aux_llm_router 降级 snapshot（会话只注入一次）；memory_recall 工具仍可主动深查（含 L2 全文）。
+- **subagent_resume 的轨迹边界（CCAR10）** —— transcript 只存完整对话的最终响应（on_response 时机）；真正中断的子代理无轨迹可恢复，resume 适用于"完成过/恢复过"的代理；补完整轨迹（主循环每轮 append）留 CCAR5-I Phase 2。
 
 ## 测试策略
 
