@@ -452,6 +452,10 @@ class AIAgent:
         # 下一轮 _assemble_turn_messages 末尾消费并清空。这样既让 LLM 看到，
         # 又不污染 conversation_history（保护持久化 + prompt cache）
         self._pending_ephemeral_messages: list = []
+        # CCAR10 Task 2: 降级 snapshot 一次性注入标志
+        # 无 aux_llm_router 时主循环降级回 snapshot 索引注入；对齐旧"会话级 frozen"
+        # 语义，注入一次后本会话不再重复注入（避免每轮重复塞同一索引）
+        self._snapshot_injected: bool = False
 
     async def _retrieve_relevant_memories(self, query: str) -> str:
         """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情（async：retrieve_relevant 已改 async）。
@@ -1004,6 +1008,37 @@ class AIAgent:
             "role": "user",
             "content": user_message_for_history,
         })
+
+        # === CCAR10 Task 2: 检索式记忆注入（仅主代理 spawn_depth==0）===
+        # snapshot 已从 system prompt 退役——改走 ephemeral 注入（保护 prompt cache）。
+        # 每轮一次：放在 user 输入刚进主循环处（不是工具循环里）。
+        # 降级链：aux_llm_router 为 None → snapshot 索引（实例级 flag 只注入一次，
+        # 对齐旧"会话级 frozen"语义防每轮重复注入同一索引）。
+        if (self.spawn_depth == 0 and self.memory_store is not None
+                and self._pending_ephemeral_messages is not None):
+            from agent.memory_injection import (
+                build_relevant_memories_message, reset_injection_cache,
+                _fallback_snapshot_message,
+            )
+            # 每轮开头清缓存（防跨轮 LRU 串）
+            reset_injection_cache()
+            try:
+                msg = None
+                if self.aux_llm_router is not None:
+                    # 检索路径：每轮按 query 用 aux_llm 检索 Top N
+                    msg = await build_relevant_memories_message(
+                        query=user_message, memory_store=self.memory_store,
+                        aux_llm_router=self.aux_llm_router,
+                    )
+                elif not self._snapshot_injected:
+                    # 降级路径：无 aux → snapshot 一次性注入（本会话仅一次）
+                    msg = _fallback_snapshot_message(self.memory_store)
+                    if msg is not None:
+                        self._snapshot_injected = True
+                if msg is not None:
+                    self._pending_ephemeral_messages.append(msg)
+            except Exception as e:
+                logger.debug("记忆注入 fail-open: %s", e)
 
         system_prompt = self._get_system_prompt()
 

@@ -177,7 +177,13 @@ async def test_mock_conversation_with_tool_call(tmp_path):
 
 
 async def test_mock_conversation_with_memory_injection(tmp_path):
-    """记忆快照被注入到 system prompt。"""
+    """CCAR10 Task 2: 记忆 snapshot 从 system prompt 退役——改走 ephemeral 注入。
+
+    无 aux_llm_router 时走降级链：snapshot 作为 ephemeral user 消息注入
+    （_pending_ephemeral_messages → _assemble_turn_messages 消费）。
+    验证：记忆内容出现在 LLM 收到的 messages 里（user 消息，非 system），
+    且 system prompt 不含记忆索引。
+    """
     memory_store = MemoryStore(omnimate_home=tmp_path)
     memory_store.add("memory", "特殊标记 XYZ")
 
@@ -199,11 +205,17 @@ async def test_mock_conversation_with_memory_injection(tmp_path):
 
     await agent.chat("test")
 
-    # system prompt 包含记忆
+    # CCAR10: 记忆改走 ephemeral 注入，出现在 LLM 收到的 messages 里
     assert len(captured_messages) > 0
+    flat_text = "\n".join(
+        str(m.get("content", "")) for m in captured_messages[0]
+    )
+    assert "特殊标记 XYZ" in flat_text
+    # system prompt 不应含记忆索引（已退役）
     system_msg = captured_messages[0][0]
     assert system_msg["role"] == "system"
-    assert "特殊标记 XYZ" in system_msg["content"]
+    assert "特殊标记 XYZ" not in system_msg["content"]
+    assert "## 记忆索引" not in system_msg["content"]
 
 
 async def test_interrupt_stops_conversation(tmp_path):

@@ -199,14 +199,13 @@ class MemoryManager:
             return []
 
     def build_system_prompt(self) -> str:
-        """组装要注入 system prompt 的记忆部分。"""
-        parts = []
+        """组装要注入 system prompt 的记忆部分。
 
-        # 内置记忆（frozen snapshot）
-        if self.memory_store:
-            snapshot = self.memory_store.snapshot_for_prompt()
-            if snapshot:
-                parts.append(snapshot)
+        CCAR10 Task 2: 内置记忆的 frozen snapshot 已从 system prompt 退役。
+        snapshot 改走 ephemeral 注入（主循环 _pending_ephemeral_messages），
+        保护 prompt cache。此处只保留外部 provider 的静态块。
+        """
+        parts = []
 
         # 外部 provider 的静态块
         if self.external_provider and self._initialized:

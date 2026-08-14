@@ -141,17 +141,22 @@ def test_stable_unchanged_when_volatile_changes():
 # context 层内容
 # ----------------------------------------------------------------------------
 
-def test_context_includes_memory_index(tmp_path: Path):
-    """memory_store.snapshot_for_prompt() 返回的内容进 context 层。"""
+def test_context_no_longer_includes_memory_index(tmp_path: Path):
+    """CCAR10 Task 2：memory_store 的 snapshot 不再进 context 层。
+
+    snapshot 改走 ephemeral 注入（_pending_ephemeral_messages），
+    system prompt（含 context 层）永不含记忆索引（保护 prompt cache）。
+    memory_store 参数保留签名向后兼容，但不再注入任何内容。
+    """
     from agent.prompt_builder import build_system_prompt_layers
     fake_store = MagicMock()
     fake_store.snapshot_for_prompt.return_value = (
         "- [测试专用记忆](.memory/abc123.md) — 独一无二的内容XYZ789"
     )
     layers = build_system_prompt_layers(memory_store=fake_store)
-    assert "独一无二的内容XYZ789" in layers.context
-    assert "记忆索引" in layers.context
-    # stable 不含这条独特内容（确保分层）
+    # CCAR10: 记忆索引不再注入 context 层
+    assert "独一无二的内容XYZ789" not in layers.context
+    assert "记忆索引" not in layers.context
     assert "独一无二的内容XYZ789" not in layers.stable
 
 

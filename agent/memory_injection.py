@@ -76,3 +76,27 @@ async def build_relevant_memories_message(
     }
     _last_query, _last_result = query, msg
     return msg
+
+
+def _fallback_snapshot_message(memory_store) -> Optional[dict]:
+    """无 aux_llm_router 时的降级：退回 snapshot 索引注入。
+
+    直接替代决策的保底链——用户没配 aux 模型时记忆功能不丢。
+    返回 ephemeral user 消息（同轮注入后即弃）。
+    fail-open：任何异常返回 None。
+    """
+    try:
+        snap = memory_store.snapshot_for_prompt()
+    except Exception as e:
+        logger.warning("snapshot 降级注入失败: %s", e)
+        return None
+    if not snap or not snap.strip():
+        return None
+    return {
+        "role": "user",
+        "content": (
+            "<memory_index>\n" + snap + "\n</memory_index>\n"
+            "（以上是记忆索引（降级模式），供参考）"
+        ),
+        "_ephemeral": True,
+    }

@@ -32,7 +32,12 @@ def test_build_system_prompt_no_guidance():
 
 
 def test_build_system_prompt_with_memory(tmp_path):
-    """包含记忆快照（使用索引格式）。"""
+    """CCAR10 Task 2：snapshot 从 system prompt 退役——不再含记忆索引段。
+
+    检索改走 ephemeral 注入（_pending_ephemeral_messages），
+    system prompt 永不含记忆索引（保护 prompt cache）。
+    memory_store 参数仍保留签名不变（向后兼容）。
+    """
     from agent.memory_store import MemoryStore
     store = MemoryStore(omnimate_home=tmp_path)
     # 添加一些测试记忆（使用 project 类型）
@@ -44,10 +49,21 @@ def test_build_system_prompt_with_memory(tmp_path):
     )
 
     sp = build_system_prompt(memory_store=store)
-    # 新格式：记忆索引段
-    assert "## 记忆索引" in sp
-    # 记忆描述应该在索引中
-    assert "测试记忆条目" in sp
+    # CCAR10: 记忆索引段已退役——不再注入 system prompt
+    assert "## 记忆索引" not in sp
+    # 记忆描述也不应通过索引进入 system prompt
+    assert "测试记忆条目" not in sp
+
+
+def test_system_prompt_no_memory_index_section(tmp_path):
+    """集成验证：带 memory_store 构建的 system prompt 无记忆索引（CCAR10 Task 2）。"""
+    from agent.memory_store import MemoryStore
+    from agent.prompt_builder import build_system_prompt
+
+    ms = MemoryStore(omnimate_home=tmp_path)
+    ms.save(name="n", description="d", type="user")
+    sp = build_system_prompt(memory_store=ms, include_guidance=False)
+    assert "记忆索引" not in sp
 
 
 def test_build_system_prompt_with_skills(tmp_path):

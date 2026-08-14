@@ -170,7 +170,7 @@ def build_system_prompt_layers(
 
     # ---- context 层 ----
     context_parts = []
-    # 当前工作目录（log.log 案例：新会话里 LLM 被记忆索引中其他项目的
+    # 当前工作目录（log.log 案例：新会话里 LLM 被记忆检索结果中其他项目的
     # 条目带偏，跑去探索记忆里的旧项目。明确注入当前目录 + "以当前为准"）
     try:
         from agent.workspace_context import get_workspace_cwd
@@ -178,7 +178,7 @@ def build_system_prompt_layers(
             "## 当前工作目录\n"
             f"{get_workspace_cwd()}\n\n"
             "用户在此目录启动了会话。用户说\"这个项目\"时指当前工作目录；"
-            "下方记忆索引或历史会话中出现的**其他项目路径是历史信息**，"
+            "记忆检索结果或历史会话中出现的**其他项目路径是历史信息**，"
             "不代表用户当前所在的项目——除非用户明确点名，一律以当前目录为准。"
         )
     except Exception as e:
@@ -193,13 +193,10 @@ def build_system_prompt_layers(
         skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
-    if memory_store:
-        try:
-            index_block = memory_store.snapshot_for_prompt()
-            if index_block:
-                context_parts.append(f"## 记忆索引\n{index_block}")
-        except Exception as e:
-            logger.warning("读取记忆索引失败: %s", e)
+    # CCAR10 Task 2: 记忆索引不再注入 system prompt（保护 prompt cache）。
+    # snapshot 改走 ephemeral 注入（_pending_ephemeral_messages），
+    # 每轮按 query 检索后注入（无 aux_llm_router 时降级回 snapshot 一次性注入）。
+    # memory_store 参数保留签名向后兼容，但不再注入任何内容到 system prompt。
     if memory_manager:
         try:
             ext_block = memory_manager.build_system_prompt()

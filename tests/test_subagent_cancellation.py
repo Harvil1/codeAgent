@@ -400,6 +400,10 @@ class TestRunConversationCancelEvent:
         agent.aux_llm_router = None
         agent.plan_approval_callback = None
         agent.memory_store = None
+        # CCAR10 Task 2: 新增字段（主循环检索式记忆注入用）
+        agent.spawn_depth = 0
+        agent._pending_ephemeral_messages = []
+        agent._snapshot_injected = False
         agent._trigger_stop_failure_hook = MagicMock()
         agent._sync_memory = MagicMock()
         agent._trigger_reflection_async = lambda: None

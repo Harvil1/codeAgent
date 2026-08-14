@@ -106,3 +106,46 @@ def test_same_query_cached_within_round():
         asyncio.run(build_relevant_memories_message(
             query="same", memory_store=store, aux_llm_router=MagicMock()))
     assert mock_rr.await_count == 1
+
+
+# ============================================================================
+# CCAR10 Task 2: snapshot 退役 + 降级链
+# ============================================================================
+
+
+def test_snapshot_removed_from_system_prompt(tmp_path):
+    """system prompt 不再含记忆索引段（直接替代决策）。
+
+    snapshot 改走 ephemeral 注入（_pending_ephemeral_messages），
+    不进 system prompt（保护 prompt cache）。
+    """
+    from agent.memory_store import MemoryStore
+    from agent.prompt_builder import build_system_prompt_layers
+    from agent.workspace_context import workspace_cwd_context
+
+    with workspace_cwd_context(str(tmp_path)):
+        ms = MemoryStore(omnimate_home=tmp_path)
+        ms.save(name="某记忆", description="描述", type="user")
+        layers = build_system_prompt_layers(
+            memory_store=ms, include_guidance=False,
+        )
+    assert "记忆索引" not in layers.context
+
+
+def test_fallback_to_snapshot_without_aux():
+    """无 aux_llm_router 时主循环降级回 snapshot 注入。
+
+    验证降级函数：_fallback_snapshot_message(ms) 构造 snapshot 注入。
+    """
+    from agent.memory_injection import _fallback_snapshot_message
+    ms = MagicMock()
+    ms.snapshot_for_prompt.return_value = "索引内容"
+    msg = _fallback_snapshot_message(ms)
+    assert msg is not None and "索引内容" in msg["content"]
+    assert msg["_ephemeral"] is True
+    # 空 snapshot → None
+    ms.snapshot_for_prompt.return_value = ""
+    assert _fallback_snapshot_message(ms) is None
+    # 异常 fail-open
+    ms.snapshot_for_prompt.side_effect = RuntimeError("boom")
+    assert _fallback_snapshot_message(ms) is None
