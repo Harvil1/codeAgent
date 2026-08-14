@@ -162,3 +162,27 @@ def test_safe_subset_consistent_with_plan():
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
     )
+
+
+def test_all_builtin_schemas_use_openai_parameters_key():
+    """【CCAR11 防回归】所有内置工具 schema 必须用 "parameters" 键（OpenAI 格式）。
+
+    背景：registry.get_definitions 直接 {"type":"function","function":schema}
+    塞给 LLM——参数键必须是 "parameters"（OpenAI 标准）。CCAR8-10 曾有 5 个
+    工具误用 Anthropic 风格 "inputSchema"，导致参数定义对 LLM 不可见
+    （handler 靠 args.get 能跑，测试全过——silent-dead-code 第 5 例）。
+    """
+    builtin_names = {
+        n for n in registry.list_all() if not n.startswith("mcp__")
+    }
+    bad = []
+    for name in builtin_names:
+        entry = registry.get(name)
+        if entry is None or not entry.schema:
+            continue
+        if "parameters" not in entry.schema and "inputSchema" in entry.schema:
+            bad.append(name)
+    assert not bad, (
+        f"以下工具 schema 用了 inputSchema（LLM 看不到参数定义），"
+        f"改成 parameters: {sorted(bad)}"
+    )

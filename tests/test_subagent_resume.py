@@ -158,8 +158,8 @@ def test_tool_registered_in_core_toolset():
     # schema 字段
     schema = entry.schema
     assert schema["name"] == "subagent_resume"
-    assert "agent_id" in schema["inputSchema"]["properties"]
-    assert "agent_id" in schema["inputSchema"]["required"]
+    assert "agent_id" in schema["parameters"]["properties"]
+    assert "agent_id" in schema["parameters"]["required"]
 
 
 # ===========================================================================

@@ -297,7 +297,7 @@ SUBAGENT_RESUME_SCHEMA = {
         "- transcript 为空\n"
         "- 想从某个具体 checkpoint 继续（本工具只支持从 transcript 末尾续）"
     ),
-    "inputSchema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "agent_id": {

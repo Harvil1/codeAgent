@@ -6,12 +6,12 @@ from tools.brief_tool import _handle_brief, BRIEF_SCHEMA
 def test_brief_schema_required_fields():
     """schema 必须有 headline（必填）+ steps/risks/audience（可选）。"""
     assert BRIEF_SCHEMA["name"] == "brief"
-    props = BRIEF_SCHEMA["inputSchema"]["properties"]
+    props = BRIEF_SCHEMA["parameters"]["properties"]
     assert "headline" in props
     assert "steps" in props
     assert "risks" in props
     assert "audience" in props
-    assert "headline" in BRIEF_SCHEMA["inputSchema"]["required"]
+    assert "headline" in BRIEF_SCHEMA["parameters"]["required"]
 
 
 def test_brief_minimal_headline_only():

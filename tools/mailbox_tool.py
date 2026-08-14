@@ -24,7 +24,7 @@ MAILBOX_SEND_SCHEMA = {
         "异步投递邮件给另一个 agent（不等响应）。"
         "用于跨 agent 的非阻塞通信（fire-and-forget）。"
     ),
-    "inputSchema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "to": {"type": "string", "description": "收件人 agent 名"},
@@ -42,7 +42,7 @@ MAILBOX_SEND_SCHEMA = {
 MAILBOX_CHECK_SCHEMA = {
     "name": "mailbox_check",
     "description": "检查自己 mailbox 的邮件。",
-    "inputSchema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "unread_only": {"type": "boolean", "default": True},
@@ -53,7 +53,7 @@ MAILBOX_CHECK_SCHEMA = {
 MAILBOX_CLEAR_SCHEMA = {
     "name": "mailbox_clear",
     "description": "清空自己 mailbox。",
-    "inputSchema": {"type": "object", "properties": {}},
+    "parameters": {"type": "object", "properties": {}},
 }
 
 

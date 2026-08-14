@@ -10,11 +10,11 @@ from tools.memory_recall_tool import _handle_memory_recall, MEMORY_RECALL_SCHEMA
 
 def test_schema_basic():
     assert MEMORY_RECALL_SCHEMA["name"] == "memory_recall"
-    props = MEMORY_RECALL_SCHEMA["inputSchema"]["properties"]
+    props = MEMORY_RECALL_SCHEMA["parameters"]["properties"]
     assert "query" in props
     assert "top_k" in props
     assert props["top_k"]["default"] == 5
-    assert "query" in MEMORY_RECALL_SCHEMA["inputSchema"]["required"]
+    assert "query" in MEMORY_RECALL_SCHEMA["parameters"]["required"]
 
 
 def test_handle_no_memory_store_returns_not_configured():

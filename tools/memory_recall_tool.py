@@ -29,7 +29,7 @@ MEMORY_RECALL_SCHEMA = {
         "用于你中途想查'用户上次提过 X 吗'的场景。"
         "与会话开始时注入的索引正交——按需查，不污染 system prompt。"
     ),
-    "inputSchema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "query": {

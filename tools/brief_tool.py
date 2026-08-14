@@ -15,7 +15,7 @@ BRIEF_SCHEMA = {
         "(2) 在 Plan Mode 之外提供更轻量的'我打算这么做'摘要。"
         "与 Plan Mode 互补：Plan 详细，Brief 一句话。"
     ),
-    "inputSchema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "headline": {
