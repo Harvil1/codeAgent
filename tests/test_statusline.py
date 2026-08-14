@@ -179,3 +179,12 @@ def test_no_model_omits_model_segment():
     rt, agent = _make_rt_agent(model="")
     line = _render_statusline(rt, agent)
     assert "⚡" not in line
+
+
+def test_failed_goal_shows_failed():
+    """goal failed 状态显示（CCAR10 final review #1：设计意图与实现对齐）。"""
+    from cli import _render_statusline
+    goal = MagicMock()
+    goal.status = "failed"
+    rt, agent = _make_rt_agent(goal=goal)
+    assert "goal:失败" in _render_statusline(rt, agent)

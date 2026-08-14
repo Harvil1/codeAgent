@@ -3278,7 +3278,7 @@ def _render_statusline(rt, agent) -> str:
             tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
         segs.append(f"会话 {_format_tokens(tokens)} tok")
 
-        # 4. goal 段：active/paused/completed 显示；cancelled 隐藏（视为废弃）
+        # 4. goal 段：active/paused/completed/failed 显示；cancelled 隐藏（视为废弃）
         goal = getattr(agent, "_goal_state", None)
         if goal is not None:
             gstatus = getattr(goal, "status", "") or ""
@@ -3289,6 +3289,8 @@ def _render_statusline(rt, agent) -> str:
                 segs.append("goal:已暂停")
             elif gstatus == "completed":
                 segs.append("goal:已完成")
+            elif gstatus == "failed":
+                segs.append("goal:失败")
             # cancelled / 未知 → 不显示
 
         # 5. 项目段：取 project_key 末段（canonical-git-root 后缀）
