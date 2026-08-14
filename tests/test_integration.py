@@ -1241,9 +1241,12 @@ def test_aiagent_accepts_memory_retriever_kwarg():
 
 
 async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
-    """retriever 返回 id → store 读 body → 注入 <relevant_memories>。
+    """Task 2.5: 旧 _initial_memory_recall 已删除——记忆注入走 CCAR10 ephemeral。
 
-    Plan 2B: retriever 已 async，用 AsyncMock。
+    验证新行为：
+    - conversation_history[0] 不含 <relevant_memories>（旧包裹路径已删）
+    - user 消息原样入 history
+    - memory_retriever 参数仍接受（构造兼容），但不再被调用
     """
     from unittest.mock import AsyncMock
     from agent import AIAgent
@@ -1257,7 +1260,7 @@ async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
         body="运行测试用 uv run pytest tests/ -v",
     )
 
-    # mock retriever 返回 [mid]（async 调用）
+    # mock retriever 返回 [mid]（async 调用）——参数仍兼容但不再被 AIAgent 调用
     fake_retriever = AsyncMock(return_value=[mid])
 
     agent = AIAgent(
@@ -1268,12 +1271,13 @@ async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
     agent.llm_client = _mock_llm_simple_response("ok")
     await agent.run_conversation("怎么跑测试")
 
-    # conversation_history[0] 应含 <relevant_memories> + mid body
+    # Task 2.5: 旧路径删除后——conversation_history[0] 应原样为 user_message
     first_user = agent.conversation_history[0]["content"]
-    assert "<relevant_memories>" in first_user
-    assert "uv run pytest" in first_user
-    # 原始 user message 也应在
-    assert "怎么跑测试" in first_user
+    assert first_user == "怎么跑测试", (
+        f"开场 user 消息应原样入 history（无记忆前缀），实际: {first_user!r}"
+    )
+    # 旧路径的 <relevant_memories> 包裹不应出现在 history 中
+    assert "<relevant_memories>" not in first_user
 
 
 async def test_aiagent_no_memory_retriever_backward_compat(tmp_path):
@@ -1314,11 +1318,12 @@ async def test_retrieval_failure_does_not_break_main_loop(tmp_path):
 async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     """端到端：会话 1 save → 会话 2 检索 + 注入。
 
-    模拟两个会话（两次 AIAgent 实例化）。
-    - 会话 1：MemoryStore.save 落盘一条记忆
-    - 会话 2：新建 MemoryStore（重建索引），真实 retrieve_relevant 用 mock LLM 选到 mid
-    - 主 LLM 也是 mock：第 1 次调用是 retriever，第 2 次是主 LLM 返回 stop
-    - 验证 conversation_history[0] 含 <relevant_memories> + memory body + 原始 user message
+    Task 2.5 更新：旧 _initial_memory_recall 已删除——记忆注入走 CCAR10 ephemeral。
+    新断言：
+    - conversation_history[0] 不含 <relevant_memories>（记忆不进 history）
+    - user 消息原样入 history
+    - 记忆上下文来源只是 CCAR10 ephemeral（不污染持久化）
+    - memory_retriever 参数仍兼容（保留字段），但不再被 AIAgent 调用
 
     Plan 2B: retrieve_relevant 已 async，主 LLM chat_completions 已 async。
     """
@@ -1334,20 +1339,12 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
         body="uv run pytest tests/ -v",
     )
 
-    # === 会话 2：索引应能看到，retriever 应能选到 ===
+    # === 会话 2：索引应能看到（retriever 仍可独立调用，但 AIAgent 不再调）===
     store2 = MemoryStore(omnimate_home=tmp_path)  # 重建索引
 
-    # mock LLM：第 1 次调用是 retriever（返回 [mid]），第 2 次是主 LLM（返回 stop）
-    call_count = [0]
-
+    # mock LLM：主 LLM 调用返回 stop（Task 2.5 后不再有 retriever 调用分支）
     async def side_effect(msgs, **kw):
-        call_count[0] += 1
         resp = MagicMock()
-        if call_count[0] == 1:
-            # retriever 调用：返回 JSON 数组 [mid]
-            resp.choices = [MagicMock(message=MagicMock(content=f'["{mid}"]'))]
-            return resp
-        # 主 LLM 调用：返回 stop
         resp.choices = [MagicMock(
             message=MagicMock(content="ok", tool_calls=None),
             finish_reason="stop",
@@ -1357,7 +1354,7 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     main_llm = MagicMock()
     main_llm.chat_completions = AsyncMock(side_effect=side_effect)
 
-    # 直接用 retrieve_relevant 函数（AIAgent 把 memory_retriever 当 callable 调）
+    # retriever 参数仍接受（构造兼容）——AIAgent 不再调用它
     retriever_obj = retrieve_relevant
 
     agent = AIAgent(
@@ -1368,11 +1365,13 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     agent.llm_client = main_llm
     await agent.run_conversation("怎么跑测试")
 
-    # 第一次入 history 的 user 消息应含 <relevant_memories> + memory body + 原始 message
+    # Task 2.5: 旧路径删除后——第一次入 history 的 user 消息应原样为 user_message
     first_user = agent.conversation_history[0]["content"]
-    assert "<relevant_memories>" in first_user
-    assert "uv run pytest" in first_user
-    assert "怎么跑测试" in first_user
+    assert first_user == "怎么跑测试", (
+        f"开场 user 消息应原样入 history（无记忆前缀），实际: {first_user!r}"
+    )
+    # 旧路径的 <relevant_memories> 包裹不应出现在 history 中
+    assert "<relevant_memories>" not in first_user
 
 
 # ---------------------------------------------------------------------------

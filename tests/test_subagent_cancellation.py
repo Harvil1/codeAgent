@@ -408,11 +408,7 @@ class TestRunConversationCancelEvent:
         agent._sync_memory = MagicMock()
         agent._trigger_reflection_async = lambda: None
         agent._run_prompt_submit_hook = lambda msg: msg
-        agent._initial_memory_recall = lambda msg: None  # async → 同步 mock（不会 await）
-        # _initial_memory_recall 是 async：用返回 None 协程的 mock
-        async def _fake_recall(msg):
-            return None
-        agent._initial_memory_recall = _fake_recall
+        # Task 2.5: _initial_memory_recall 已删除（记忆注入走 CCAR10 ephemeral）
         agent._drain_injected_messages = lambda: {
             "bg_notifications": [], "cron_messages": [], "team_messages_text": "",
         }

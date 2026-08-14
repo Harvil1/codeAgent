@@ -457,47 +457,6 @@ class AIAgent:
         # 语义，注入一次后本会话不再重复注入（避免每轮重复塞同一索引）
         self._snapshot_injected: bool = False
 
-    async def _retrieve_relevant_memories(self, query: str) -> str:
-        """用 aux_llm(轻量模型)检索跟当前 query 相关的记忆详情（async：retrieve_relevant 已改 async）。
-
-        返回格式化文本(多条记忆的 name + description + summary)。
-        fail-open:任何异常返回空串(不影响主循环)。
-        只在 conversation_history 末尾是 user 消息时调用(每个用户输入 1 次)。
-
-        Task D4 fix: 改 async + await retrieve_relevant。
-        """
-        if not self.memory_store or not self.aux_llm_router:
-            return ""
-        try:
-            index_text = self.memory_store.full_index_text()
-            if not index_text or len(index_text.strip()) < 50:
-                return ""  # 记忆太少不值得检索
-
-            from agent.memory_retriever import retrieve_relevant
-            ids = await retrieve_relevant(
-                query=query,
-                index_text=index_text,
-                llm_client=self.aux_llm_router,
-                model=None,  # aux_llm_router 内部选模型(haiku/flash)
-                max_results=3,
-            )
-            if not ids:
-                return ""
-
-            # 加载详情(name + description + summary)
-            parts = []
-            for mid in ids[:3]:
-                entry = self.memory_store.get(mid)
-                if entry:
-                    line = f"- **{entry.name}**({entry.type}): {entry.description}"
-                    if entry.summary:
-                        line += f" | {entry.summary}"
-                    parts.append(line)
-            return "\n".join(parts) if parts else ""
-        except Exception as e:
-            logger.debug("动态记忆检索失败(fail-open): %s", e)
-            return ""
-
     def cleanup(self):
         """清理 agent 持有的资源（调用方：RuntimeContext.shutdown）。
 
@@ -993,20 +952,13 @@ class AIAgent:
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
         # S9 fix: 不在此 drain（每轮 while 内重新 drain，避免多轮 tool_calls 中途消息收不到）
-        memories_text = await self._initial_memory_recall(user_message)
 
-        # 组装实际入 history 的 user_content（记忆前置包裹）
-        if memories_text:
-            user_message_for_history = (
-                f"<relevant_memories>\n{memories_text}\n</relevant_memories>\n\n"
-                f"{user_message}"
-            )
-        else:
-            user_message_for_history = user_message
-
+        # Task 2.5: 旧 _initial_memory_recall 已删除——记忆注入统一走 CCAR10
+        # ephemeral（见下方 _pending_ephemeral_messages 块），user 消息原样入 history
+        # （保护 prompt cache + 不污染持久化）
         self.conversation_history.append({
             "role": "user",
-            "content": user_message_for_history,
+            "content": user_message,
         })
 
         # === CCAR10 Task 2: 检索式记忆注入（仅主代理 spawn_depth==0）===
@@ -1271,39 +1223,6 @@ class AIAgent:
             "delegation_results": delegation_results,
         }
 
-    async def _initial_memory_recall(self, user_message: str) -> str:
-        """开场记忆检索（基于 user_message）。返回记忆正文（fail-open 返回空串）。
-
-        Task D4 fix: 改 async + await self.memory_retriever（retrieve_relevant 已 async）。
-        """
-        if not (self.memory_retriever and self.memory_store
-                and self._cached_memory_index):
-            return ""
-        try:
-            mem_cfg = (self.config or {}).get("memory", {})
-            retrieval_model = mem_cfg.get("retrieval_model") or self.model
-            max_results = mem_cfg.get("retrieval_max_results", 5)
-            # batch2-T3: 优先用 aux_llm_router 做检索（便宜模型）
-            retrieval_client = self.aux_llm_router or self.llm_client
-            relevant_ids = await self.memory_retriever(
-                query=user_message,
-                index_text=self._cached_memory_index,
-                llm_client=retrieval_client,
-                model=retrieval_model,
-                max_results=max_results,
-            )
-            if not relevant_ids:
-                return ""
-            bodies = []
-            for mid in relevant_ids:
-                body = self.memory_store.load_body(mid)
-                if body:
-                    bodies.append(f"[memory:{mid}]\n{body}")
-            return "\n\n".join(bodies) if bodies else ""
-        except Exception as e:
-            logger.warning("memory retrieval 失败（fail-open）: %s", e)
-            return ""
-
     def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
         """组装本轮 messages：system + history + 注入临时消息 + reminder。
 
@@ -1556,11 +1475,14 @@ class AIAgent:
         return messages, system_prompt, True
 
     async def _prepare_toolset_and_injections(self, messages: list) -> list:
-        """刷新工具集（plan_mode 切换）+ 注入 retry_warning + 动态记忆 + PRE_LLM_CALL hook（async：_retrieve_relevant_memories 已改 async）。
+        """刷新工具集（plan_mode 切换）+ 注入 retry_warning + PRE_LLM_CALL hook。
 
         会原地修改 messages（追加 reminder）。返回 tool_schemas（可能被 hook 修改）。
 
-        Task D4 fix: 改 async + await _retrieve_relevant_memories。
+        Task 2.5: 动态记忆注入块已删除——记忆上下文统一由 CCAR10 ephemeral
+        在 run_conversation 开场注入（每 user 轮一次，不重复、不污染 history）。
+
+        Task D4 fix: 方法本身仍是 async（PRE_LLM_CALL hook + 其他异步依赖保留）。
         """
         from model_tools import get_tool_definitions
 
@@ -1588,19 +1510,6 @@ class AIAgent:
                 ),
             })
             self._tool_failure_streak = 0  # 重置（提醒一次就够）
-
-        # 动态记忆检索（用 aux_llm 轻量模型，只在最新消息是 user 时触发）
-        if (self.aux_llm_router and self.memory_store
-                and self.conversation_history
-                and self.conversation_history[-1].get("role") == "user"):
-            relevant = await self._retrieve_relevant_memories(
-                self.conversation_history[-1].get("content", "")
-            )
-            if relevant:
-                messages.append({
-                    "role": "user",
-                    "content": f"<relevant_memories>\n{relevant}\n</relevant_memories>",
-                })
 
         # PRE_LLM_CALL hook
         if (self.hooks_registry
