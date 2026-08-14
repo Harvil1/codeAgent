@@ -27,6 +27,7 @@ _CORE_TOOLS = [
     # 委托（09 实现）
     "subagent",  # 子代理（对齐 Claude Code Agent；delegate_task 为兼容别名）
     "subagent_kill",  # Task K: 中断 async 子代理（set cancel_event）
+    "subagent_resume",  # CCAR10 Task 4: 恢复中断的子代理续跑（load transcript + spawn）
     # 澄清（AskUserQuestion 复刻）
     "ask_user",
     # 结构化简报（CCAR8 Task 2：LLM 在重要操作前给用户预览）
