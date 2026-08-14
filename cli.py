@@ -167,12 +167,12 @@ class RuntimeContext:
         self.config = load_config()
         self.home = get_omnimate_home()
         # === CCAR11 Task 4 NEW: /add-dir 持久化白名单启动加载 ===
-        # config 的 security.extra_allowed_roots → 运行时 safe_path 白名单
-        #（fail-open：单条失败跳过，不阻塞启动）
+        # settings.json（load_config 读出的 config）的 security.extra_allowed_roots
+        # → 运行时 safe_path 白名单（fail-open：单条失败跳过，不阻塞启动）
         try:
             n = _load_persisted_extra_roots(self.config)
             if n:
-                logger.info("已从 config 加载 %d 个额外白名单目录", n)
+                logger.info("已从 settings.json 加载 %d 个额外白名单目录", n)
         except Exception as e:
             logger.warning("加载 extra_allowed_roots 失败（跳过）: %s", e)
         self.memory_store = None
@@ -563,6 +563,17 @@ class RuntimeContext:
                 api_key_env,
                 f"{provider}_API_KEY" if provider else None,
             ]
+            # 新模式 llm 扁平配置下 provider 是档位名（opus/haiku/sonnet），
+            # <档位>_API_KEY 通常不存在；再按 base_url 域名 + 常见 provider
+            # 环境变量兜底（如默认 DeepSeek 端点 → DEEPSEEK_API_KEY）
+            base_url = str(model_cfg.get("base_url") or "").lower()
+            for _host in ("deepseek", "openai", "anthropic", "openrouter"):
+                if _host in base_url:
+                    candidates.append(f"{_host.upper()}_API_KEY")
+            candidates.extend(
+                ["DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]
+            )
             for cand in candidates:
                 if cand and os.environ.get(cand):
                     api_key = os.environ.get(cand)
@@ -2897,31 +2908,20 @@ def _handle_diff_cli(args: str, rt) -> bool:
 # CCAR11 Task 4 NEW: /add-dir 运行时白名单 + 持久化
 # ---------------------------------------------------------------------------
 
-def _persist_extra_root(root: str, config_file: Optional[Path] = None) -> bool:
-    """把额外白名单根目录持久化到用户 config.yaml 的 security.extra_allowed_roots。
+def _persist_extra_root(root: str) -> bool:
+    """把额外白名单根目录持久化到 settings.json 的 security.extra_allowed_roots。
 
-    读-改-写：yaml.safe_load 已有内容 → append（去重）→ yaml.safe_dump 写回。
-    ⚠️ yaml.safe_dump 重写整个文件，**原有注释会丢失**（yaml 格式限制，无法保留）。
+    读-改-写：load_settings() 已有内容（含默认值深合并）→ append（去重）→
+    save_settings() 原子写回。走 load_config 同源的真实配置轨
+    （config.yaml 首次启动会被迁走改名 .bak，写 yaml 是断轨的）。
 
     返回 True 表示新写入，False 表示已存在（幂等，不重复写）。
     fail-open：读/写失败抛异常给调用方（命令层捕获提示，不影响运行时白名单）。
     """
-    import yaml
+    from agent.settings import load_settings, save_settings
 
-    if config_file is None:
-        from constants import config_path
-        config_file = config_path()
-    config_file = Path(config_file)
-
-    data: dict = {}
-    if config_file.exists():
-        try:
-            loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception as e:
-            logger.warning("读 config 失败（按空配置处理）%s: %s", config_file, e)
-            data = {}
+    # load_settings 深合并 DEFAULT_SETTINGS，用户已有字段全部保留
+    data = load_settings()
 
     sec = data.get("security")
     if not isinstance(sec, dict):
@@ -2933,19 +2933,16 @@ def _persist_extra_root(root: str, config_file: Optional[Path] = None) -> bool:
     roots.append(root)
     sec["extra_allowed_roots"] = roots
 
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    # 注：safe_dump 无法保留原文件注释（重写整个 yaml）
-    config_file.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    save_settings(data)  # 原子写（ensure_ascii=False + indent=2）
     return True
 
 
 def _load_persisted_extra_roots(config: dict) -> int:
-    """启动时把 config 的 security.extra_allowed_roots 灌进运行时白名单。
+    """启动时把 settings.json 的 security.extra_allowed_roots 灌进运行时白名单。
 
-    RuntimeContext.__init__ 调用。返回成功加载数（fail-open：单条失败跳过）。
+    RuntimeContext.__init__ 调用（config 来自 load_config()，默认读
+    settings.json——与 _persist_extra_root 写入同一文件，闭环不断轨）。
+    返回成功加载数（fail-open：单条失败跳过）。
     """
     from agent.permission import add_extra_allowed_root
     sec = (config or {}).get("security") or {}
@@ -2967,7 +2964,7 @@ def _handle_add_dir_cli(args: str, rt) -> bool:
 
     - 无参数：列出当前白名单（cwd + ~/.OmniMate + 额外追加）
     - 带目录：resolve + is_dir 校验 → 运行时追加（去重幂等）→ 持久化到
-      config.yaml 的 security.extra_allowed_roots（下次启动自动加载）
+      settings.json 的 security.extra_allowed_roots（下次启动自动加载）
     - 安全底线不变：受保护路径（~/.ssh 等）和项目代码写保护在 safe_path
       里先于白名单检查，加白名单不能绕过。
     """
@@ -2985,7 +2982,7 @@ def _handle_add_dir_cli(args: str, rt) -> bool:
             mark = "  [cyan](/add-dir 追加)[/cyan]" if str(r) in extras else ""
             console.print(f"  {r}{mark}")
         console.print(
-            "[dim]用法: /add-dir <目录> 追加白名单（运行时生效 + 持久化到 config）[/dim]"
+            "[dim]用法: /add-dir <目录> 追加白名单（运行时生效 + 持久化到 settings.json）[/dim]"
         )
         return True
 
@@ -2996,17 +2993,17 @@ def _handle_add_dir_cli(args: str, rt) -> bool:
 
     # 1) 运行时生效：追加进 default_allowed_roots（safe_path 默认路径）
     added = add_extra_allowed_root(target)
-    # 2) 持久化：config.yaml security.extra_allowed_roots（读-改-写）
+    # 2) 持久化：settings.json security.extra_allowed_roots（读-改-写）
     try:
         persisted = _persist_extra_root(str(target))
     except Exception as e:
         persisted = False
-        console.print(f"[yellow]⚠️  持久化到 config 失败（运行时仍生效）: {e}[/yellow]")
+        console.print(f"[yellow]⚠️  持久化到 settings.json 失败（运行时仍生效）: {e}[/yellow]")
 
     if added or persisted:
         console.print(f"[green]已添加白名单:[/green] {target}")
         if not persisted:
-            console.print("[dim]（该目录已在 config 中，未重复写入）[/dim]")
+            console.print("[dim]（该目录已在 settings.json 中，未重复写入）[/dim]")
     else:
         console.print(f"[yellow]已在白名单中（幂等跳过）:[/yellow] {target}")
     return True

@@ -694,14 +694,15 @@ def test_add_dir_rejects_missing_dir(tmp_path, capsys):
 
 
 def test_add_dir_runtime_and_persist(tmp_path, capsys, monkeypatch):
-    """/add-dir 添加后 safe_path 放行 + 路径出现在 config 文件里。"""
+    """/add-dir 添加后 safe_path 放行 + 路径出现在 settings.json 里。"""
     from cli import _handle_command
     import constants
     from agent.permission import safe_path, clear_extra_allowed_roots
 
     clear_extra_allowed_roots()
-    cfg_file = tmp_path / "config.yaml"
-    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+    home = tmp_path / "omnimate_home"
+    home.mkdir()
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: home)
 
     target = tmp_path / "extra_root"
     target.mkdir()
@@ -719,14 +720,14 @@ def test_add_dir_runtime_and_persist(tmp_path, capsys, monkeypatch):
     # 运行时生效：safe_path 放行（Task 4 核心断言）
     assert safe_path(probe, write=True).allowed is True
 
-    # 持久化：config 文件 security.extra_allowed_roots 出现该路径
-    import yaml
-    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    # 持久化：settings.json 的 security.extra_allowed_roots 出现该路径
+    settings_file = home / "settings.json"
+    data = json.loads(settings_file.read_text(encoding="utf-8"))
     assert str(target.resolve()) in data["security"]["extra_allowed_roots"]
 
 
 def test_add_dir_idempotent(tmp_path, capsys, monkeypatch):
-    """重复 /add-dir 同一目录幂等：运行时不重复 + config 只存一份。"""
+    """重复 /add-dir 同一目录幂等：运行时不重复 + settings.json 只存一份。"""
     from cli import _handle_command
     import constants
     from agent.permission import (
@@ -734,8 +735,9 @@ def test_add_dir_idempotent(tmp_path, capsys, monkeypatch):
     )
 
     clear_extra_allowed_roots()
-    cfg_file = tmp_path / "config.yaml"
-    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+    home = tmp_path / "omnimate_home"
+    home.mkdir()
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: home)
     target = tmp_path / "dup_root"
     target.mkdir()
 
@@ -750,35 +752,77 @@ def test_add_dir_idempotent(tmp_path, capsys, monkeypatch):
     # 运行时只挂一份
     resolved = target.resolve()
     assert list_extra_allowed_roots().count(resolved) == 1
-    # config 文件里也只存一份
-    import yaml
-    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    # settings.json 里也只存一份
+    data = json.loads((home / "settings.json").read_text(encoding="utf-8"))
     roots = data["security"]["extra_allowed_roots"]
     assert roots.count(str(resolved)) == 1
 
 
 def test_persist_extra_root_preserves_other_keys(tmp_path, monkeypatch):
-    """持久化读-改-写不破坏 config.yaml 已有的其他字段。"""
-    import yaml
+    """持久化读-改-写不破坏 settings.json 已有的其他字段。"""
     import constants
     import cli as cli_mod
 
-    cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text(
-        "model:\n  name: deepseek-chat\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+    home = tmp_path / "omnimate_home"
+    home.mkdir()
+    # 预置用户已有配置（非默认值，验证不被覆盖）
+    (home / "settings.json").write_text(json.dumps({
+        "security": {"command_approval": "never"},
+        "display": {"show_tool_progress": False},
+        "enabled_toolsets": ["core"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: home)
     target = tmp_path / "keep_root"
     target.mkdir()
 
     assert cli_mod._persist_extra_root(str(target)) is True
-    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
-    assert data["model"]["name"] == "deepseek-chat"
+    data = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+    assert data["security"]["command_approval"] == "never"
+    assert data["display"]["show_tool_progress"] is False
+    assert data["enabled_toolsets"] == ["core"]
     assert str(target) in data["security"]["extra_allowed_roots"]
     # 幂等：重复持久化返回 False 且不重复写
     assert cli_mod._persist_extra_root(str(target)) is False
-    data2 = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    data2 = json.loads((home / "settings.json").read_text(encoding="utf-8"))
     assert data2["security"]["extra_allowed_roots"].count(str(target)) == 1
+
+
+def test_add_dir_end_to_end_via_load_config(tmp_path, monkeypatch):
+    """端到端闭环：_persist_extra_root 写 settings.json → load_config 真实函数
+    读回该路径 → _load_persisted_extra_roots 灌回运行时白名单。
+
+    防"写错轨"回归：此前写 config.yaml，而 load_config 默认只读
+    settings.json（首次启动还会把 config.yaml 迁走改名 .bak），
+    真实部署灌回 0 条。
+    """
+    import constants
+    from config import load_config
+    import cli as cli_mod
+    from agent.permission import (
+        clear_extra_allowed_roots, list_extra_allowed_roots, safe_path,
+    )
+
+    home = tmp_path / "omnimate_home"
+    home.mkdir()
+    monkeypatch.setattr(constants, "get_omnimate_home", lambda: home)
+
+    clear_extra_allowed_roots()
+    target = tmp_path / "e2e_root"
+    target.mkdir()
+
+    # 1) /add-dir 持久化写入 settings.json
+    assert cli_mod._persist_extra_root(str(target)) is True
+
+    # 2) 用 load_config 真实函数（默认路径 = settings.json）读回该路径
+    cfg = load_config()
+    assert str(target) in cfg["security"]["extra_allowed_roots"]
+
+    # 3) 启动灌回：RuntimeContext 启动路径 → 运行时白名单生效
+    n = cli_mod._load_persisted_extra_roots(cfg)
+    assert n == 1
+    assert any(r == target.resolve() for r in list_extra_allowed_roots())
+    assert safe_path(target / "z.txt", write=True).allowed is True
+    clear_extra_allowed_roots()
 
 
 def test_load_persisted_extra_roots_at_startup(tmp_path):

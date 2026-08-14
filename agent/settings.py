@@ -11,6 +11,7 @@
 API key 直接存 JSON（用户明确要求 JSON 化）。⚠️ 注意权限保护。
 """
 
+import copy
 import json
 import logging
 import os
@@ -109,6 +110,10 @@ def load_settings() -> Dict[str, Any]:
 
     不存在时触发迁移：从 config.yaml + .env + .mcp.json 合并生成。
     都没有则写默认配置。
+
+    ⚠️ 返回深拷贝（含 DEFAULT_SETTINGS 的嵌套 dict）——调用方读-改-写
+    save_settings 时不得污染模块级 DEFAULT_SETTINGS（曾因此把
+    extra_allowed_roots 泄漏进后续所有"默认配置"加载）。
     """
     path = settings_path()
     if not path.exists():
@@ -116,16 +121,18 @@ def load_settings() -> Dict[str, Any]:
         if not migrated:
             save_settings(DEFAULT_SETTINGS)
             logger.info("已写入默认 settings.json: %s", path)
-            return _deep_merge(dict(DEFAULT_SETTINGS), {})
+            return copy.deepcopy(DEFAULT_SETTINGS)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return dict(DEFAULT_SETTINGS)
-        return _deep_merge(dict(DEFAULT_SETTINGS), data)
+            return copy.deepcopy(DEFAULT_SETTINGS)
+        # deepcopy 基底：_deep_merge 会原地改 base 的嵌套 dict，
+        # 浅拷贝（dict(...)）会把用户数据泄进 DEFAULT_SETTINGS 全局
+        return _deep_merge(copy.deepcopy(DEFAULT_SETTINGS), data)
     except Exception as e:
         logger.warning("读取 settings.json 失败，用默认: %s", e)
-        return dict(DEFAULT_SETTINGS)
+        return copy.deepcopy(DEFAULT_SETTINGS)
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
