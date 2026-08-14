@@ -40,6 +40,7 @@ def _spawn_resumed_agent(
     model: Optional[str] = None,
     model_format: Optional[str] = None,
     config: Optional[dict] = None,
+    memory_store=None,
 ) -> str:
     """构造子代理跑续命任务。被测试 patch 的接缝。
 
@@ -48,6 +49,7 @@ def _spawn_resumed_agent(
     - minimal 工具集（对齐 leaf 子代理，避免乱 spawn）
     - summary_only 关闭（resume 要完整结果，不要 300 字摘要）
     - 同步执行（asyncio.run 驱动 child.chat）
+    - memory_store 透传（Task 5 follow-up：让续跑子代理复用父记忆库）
 
     Args:
         messages: 续跑历史（load_transcript 读出的 + 末尾追加的 user 指令）
@@ -55,6 +57,7 @@ def _spawn_resumed_agent(
         agent_ref: 父 AIAgent 引用（取 spawn_depth + LLM 配置 fallback）
         base_url/api_key/auth_token/model/model_format: LLM 配置透传
         config: 配置 dict（参考 _run_child 的 LLM 配置 fallback 链）
+        memory_store: 父记忆库（可选，None 则 child 自建默认 store）
 
     Returns:
         子代理最终响应文本
@@ -105,6 +108,7 @@ def _spawn_resumed_agent(
         spawn_depth=child_spawn_depth,
         permission_mode="default",
         config=config,
+        memory_store=memory_store,  # Task 5 follow-up：透传父记忆库
         initial_messages=messages,  # 复用 CCAR5 的 initial_messages 机制
         on_response=None,  # resume 不再递归落盘（主入口已 append）
     )
@@ -189,17 +193,23 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
     # 所以这里不在 initial_messages 里重复——_spawn_resumed_agent 内部用 chat(instruction)
     # 触发对话，initial_messages 是"之前的历史"
     # ④ 调 _spawn_resumed_agent（接缝，可能被测试 patch）
+    # Task 5 follow-up：从 agent_ref 取 memory_store 透传给续跑子代理（复用父记忆库）
+    _agent_ref = dispatch_kwargs.get("agent_ref")
+    _memory_store = dispatch_kwargs.get("memory_store")
+    if _memory_store is None and _agent_ref is not None:
+        _memory_store = getattr(_agent_ref, "memory_store", None)
     try:
         result = _spawn_resumed_agent(
             clean_msgs,
             instruction,
-            agent_ref=dispatch_kwargs.get("agent_ref"),
+            agent_ref=_agent_ref,
             base_url=dispatch_kwargs.get("base_url"),
             api_key=dispatch_kwargs.get("api_key"),
             auth_token=dispatch_kwargs.get("auth_token"),
             model=dispatch_kwargs.get("model"),
             model_format=dispatch_kwargs.get("model_format"),
             config=dispatch_kwargs.get("config"),
+            memory_store=_memory_store,
         )
     except Exception as e:
         logger.warning("subagent_resume 跑失败 [%s]: %s", agent_id, e)

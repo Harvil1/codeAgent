@@ -1585,6 +1585,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/init":
         return _handle_init_command(rt, args)
 
+    # === CCAR10 Task 5: /resumable 列出/恢复可续跑子代理 ===
+    if name == "/resumable":
+        return _handle_resumable_command(args, rt)
+
     return False
 
 
@@ -1775,6 +1779,7 @@ def _show_help():
         "[cyan]/mailbox[/cyan]   队友邮箱（send|check|clear）\n"
         "[cyan]/inbox[/cyan]     显示 ChannelInbox 未消费消息\n"
         "[cyan]/resume_bundle[/cyan]  跨项目恢复 bundle（/resume_bundle [id]）\n"
+        "[cyan]/resumable[/cyan] 列出/恢复可续跑子代理（/resumable [agent_id]）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
@@ -2364,6 +2369,110 @@ def _handle_resume_command(args: str, rt) -> bool:
         f"[green]✓ 已加载 bundle {bid[:12]}（{len(transcript)} 条消息）[/green] "
         "[dim]（已覆盖当前会话历史）[/dim]"
     )
+    return True
+
+
+def _handle_resumable_command(args: str, rt) -> bool:
+    """/resumable [agent_id]：列出/恢复可续跑的子代理（CCAR10 Task 5）。
+
+    - 无参：列出 status=running 的子代理（含 agent_id/status/消息数/时间），
+            并提示语义边界——只有存了 transcript 的子代理才能真正恢复
+    - 有参：<agent_id> 调 _run_resume 续命，成功绿色显示结果前 2000 字符，
+            失败红色提示
+
+    实现要点：
+    - subagent_persistence 的 list_resumable() **不接 base_dir**（走模块级
+      _sessions_dir()），所以本 handler 也不传 base_dir；测试通过 monkeypatch
+      _sessions_dir 来隔离
+    - LLM 配置和 agent_ref 从 rt 取（与 _handle_trace/_handle_poor 同款模式）
+    """
+    import json as _json
+    from agent import subagent_persistence as sp
+
+    parts = (args or "").split()
+
+    # ── 无参：列表分支 ──
+    if not parts:
+        try:
+            items = sp.list_resumable()
+        except Exception as e:
+            console.print(f"[red]列出子代理失败：[/red]{e}")
+            return True
+
+        if not items:
+            console.print("[dim]无中断的子代理可恢复[/dim]")
+            return True
+
+        console.print(f"[cyan]可恢复的子代理（{len(items)} 个，status=running）：[/cyan]")
+        for it in items:
+            aid = it.get("agent_id", "?")
+            status = it.get("status", "?")
+            # 消息数：现场读 transcript 算（meta 里没存）
+            try:
+                n_msgs = len(sp.load_transcript(aid))
+            except Exception:
+                n_msgs = "?"
+            # 时间：优先 updated_at，其次 created_at
+            ts = it.get("updated_at") or it.get("created_at") or ""
+            if isinstance(ts, (int, float)):
+                import time as _time
+                ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(ts))
+            # agent_type 只读着好看
+            atype = it.get("agent_type", "")
+            atype_tag = f"[dim]({atype})[/dim] " if atype else ""
+            # 关键：agent_id 用 \[ 转义——避免被 Rich 当成 style tag 吃掉
+            console.print(
+                f"  \\[{aid}] {atype_tag}status={status} msgs={n_msgs} {ts}"
+            )
+        console.print(
+            "[dim]用 /resumable <agent_id> 恢复。"
+            "（注：只有存了 transcript 的子代理可恢复，"
+            "真正中断可能没有轨迹）[/dim]"
+        )
+        return True
+
+    # ── 有参：恢复分支 ──
+    agent_id = parts[0]
+    instruction = "继续完成剩余工作"
+    # 支持用户在 agent_id 后附带自定义续命指令
+    if len(parts) > 1:
+        instruction = " ".join(parts[1:])
+
+    from tools.subagent_resume_tool import _run_resume
+
+    # 从 rt 取上下文（LLM 配置 + agent_ref），对齐 _handle_poor/_handle_trace 模式
+    agent_ref = getattr(rt, "agent", None)
+    config = getattr(rt, "config", None)
+    memory_store = getattr(rt, "memory_store", None)
+
+    try:
+        result_json = _run_resume(
+            agent_id,
+            instruction,
+            agent_ref=agent_ref,
+            config=config,
+            memory_store=memory_store,
+        )
+    except Exception as e:
+        console.print(f"[red]恢复失败：[/red]{e}")
+        return True
+
+    try:
+        data = _json.loads(result_json)
+    except Exception:
+        # 非 JSON 直接原样显示（理论上不会，_run_resume 一定返 JSON）
+        console.print(f"[yellow]{result_json[:2000]}[/yellow]")
+        return True
+
+    if "error" in data:
+        err = data.get("error", "")
+        console.print(f"[red]恢复失败：[/red]{err}")
+        return True
+
+    # 成功：绿色显示前 2000 字符
+    text = data.get("result", "")
+    truncated_tag = " [dim](已截断到 2000 字符)[/dim]" if len(text) > 2000 else ""
+    console.print(f"[green]恢复完成：[/green]{text[:2000]}{truncated_tag}")
     return True
 
 
