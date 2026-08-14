@@ -299,6 +299,10 @@ uv sync                                 # 同步已声明依赖
 | 检索式记忆注入（CCAR10，直接替代 snapshot） | `agent/memory_injection.py:build_relevant_memories_message`（aux_llm Top5 → `<relevant_memories>` ephemeral user；同轮缓存 LRU1 + `reset_injection_cache` 每轮）+ `_fallback_snapshot_message`（无 aux 降级，`_snapshot_injected` 一次性）+ 接入 `run_conversation` 开场（仅 spawn_depth==0）；prompt_builder/memory_manager 的 snapshot 注入已退役；旧路径 `_initial_memory_recall`/`_retrieve_relevant_memories` 已删 |
 | statusline（CCAR10） | `cli.py:_render_statusline`（⚡model/会话 token（`_llm_usage_stats`）/goal:状态#轮次/项目名，每轮响应后 dim 一行）+ `_format_tokens`；RuntimeContext `_statusline_project_key`（initialize 赋一次）；config `statusline.enabled`（默认 true）；中断/异常路径不打 |
 | subagent_resume（CCAR10，补 CCAR5-I Phase 2） | `tools/subagent_resume_tool.py:_run_resume`（load_transcript → `_spawn_resumed_agent`（initial_messages 重启 + spawn_depth+1 + minimal）→ append_message 续写同文件）+ CLI `cli.py:/resumable`（列表 + 恢复，Rich `\[id]` 转义）；core toolset + UNSAFE 分类 |
+| Glob 工具（CCAR11） | `tools/glob_tool.py:_handle_glob(args, **kw)`（pathlib glob + mtime 降序 + 截断 + safe_path 读校验）；core toolset + SAFE 分类 |
+| 缺口命令（CCAR11） | `cli.py:/compact`（确认 + 强制 L4 + 降级 snip）+ `/context`（token 分布表）+ `/status`（model/goal/MCP/项目）+ `/doctor`（6 项自诊断）+ `/diff`（checkpoint tracked_files）+ `/add-dir`（safe_path 白名单 + settings.json 持久化）+ `/paste`（PowerShell 剪贴板图片） |
+| 桌面通知（CCAR11） | `agent/notifier.py:notify(title, msg)`（Windows toast 零依赖 + 30s 节流 + fail-open + config `notifications.enabled`）+ 3 触发点（bg 完成/权限审批/goal network pause） |
+| 工具 schema OpenAI 格式契约（CCAR11 教训） | registry.get_definitions 直接 `{"type":"function","function":schema}` 塞 LLM——schema 键必须是 **"parameters"**（OpenAI）不是 "inputSchema"（Anthropic 风格）。契约测试 `test_all_builtin_schemas_use_openai_parameters_key` 遍历防回归（CCAR8-10 的 brief/mailbox×3/memory_recall/subagent_resume 曾用 inputSchema → 参数定义对 LLM 不可见） |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -323,6 +327,9 @@ uv sync                                 # 同步已声明依赖
 - **/init 生成的是 cwd 的 OMNIMATE.md** —— 对齐 Claude Code /init；prompt_builder 递归扫注入（`_scan_project_memory_files`）是既有闭环。
 - **检索式记忆注入每轮一次（CCAR10）** —— 主代理 only（spawn_depth==0）；检索结果走 ephemeral（不进 history/system prompt）；无 aux_llm_router 降级 snapshot（会话只注入一次）；memory_recall 工具仍可主动深查（含 L2 全文）。
 - **subagent_resume 的轨迹边界（CCAR10）** —— transcript 只存完整对话的最终响应（on_response 时机）；真正中断的子代理无轨迹可恢复，resume 适用于"完成过/恢复过"的代理；补完整轨迹（主循环每轮 append）留 CCAR5-I Phase 2。
+- **/add-dir 持久化走 settings.json（CCAR11）** —— load_config 默认只读 settings.json（config.yaml 首启被迁走）；白名单写 config.yaml 会导致灌回 0 条。
+- **/paste 只保存不分析（CCAR11）** —— PowerShell 读剪贴板存 `.paste/img_<ts>.png`，用户在消息中引用路径让 LLM 调 image_analyze。
+- **notifier 仅 Windows（CCAR11）** —— 零依赖 PowerShell toast；非 Windows no-op；bg title 统一"后台任务"（30s 节流防刷屏）。
 
 ## 测试策略
 
