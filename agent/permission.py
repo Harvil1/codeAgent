@@ -827,6 +827,14 @@ class PermissionChecker:
                 except Exception:
                     pass  # fail-open
 
+            # CCAR11 Task 6 NEW: 桌面通知——用户可能没盯屏幕，弹 toast 提醒审批
+            # fail-open：notify 异常不影响审批流程
+            try:
+                from agent.notifier import notify as _notify
+                _notify("需要审批", "agent 请求执行命令")
+            except Exception:
+                pass
+
             try:
                 approved = bool(self.approval_callback(command))
             except Exception:

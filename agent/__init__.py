@@ -1183,6 +1183,19 @@ class AIAgent:
         if self.bg_manager:
             try:
                 bg_notifications = self.bg_manager.drain_notifications()
+                # CCAR11 Task 6 NEW: bg 完成/失败时桌面通知（用户切走也能感知）
+                # fail-open：notify 异常不影响主循环
+                try:
+                    from agent.notifier import notify as _bg_notify
+                    for n in bg_notifications:
+                        status = n.get("status")
+                        if status in ("completed", "failed"):
+                            _bg_notify(
+                                "后台任务",
+                                f"{n.get('task_id', '?')} {status}",
+                            )
+                except Exception as notify_err:
+                    logger.debug("bg notify fail-open: %s", notify_err)
             except Exception as e:
                 logger.warning("drain_notifications 异常: %s", e)
 
@@ -1679,6 +1692,16 @@ class AIAgent:
                         logger.warning(
                             "goal 自动 pause（网络异常）: %s", self._goal_state.pause_reason,
                         )
+                        # CCAR11 Task 6 NEW: goal pause 桌面通知
+                        # fail-open：notify 异常不影响 pause 已完成的语义
+                        try:
+                            from agent.notifier import notify as _goal_notify
+                            _goal_notify(
+                                "Goal 已暂停",
+                                f"原因: {self._goal_state.pause_reason or 'network'}",
+                            )
+                        except Exception as notify_err:
+                            logger.debug("goal pause notify fail-open: %s", notify_err)
                     except Exception as pause_err:
                         logger.warning("goal pause 失败（fail-open）: %s", pause_err)
 

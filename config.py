@@ -375,6 +375,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "auto_save_on_exit": True,   # 退出时自动 save bundle
         "auto_save_max_keep": 20,    # 最多保留 N 个 auto-save bundle（防爆盘）
     },
+
+    # CCAR11 Task 6 NEW: 桌面通知（Windows toast，零依赖 PowerShell）
+    # 控制所有 notify() 调用：bg 完成 / 权限审批 / goal pause 三类触发点
+    "notifications": {
+        "enabled": True,  # False 时所有 notify() 短路返回 False（不调 PowerShell）
+    },
 }
 
 
