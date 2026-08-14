@@ -361,6 +361,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retention_days": 7,  # 超过 N 天的 jsonl 自动清理
     },
 
+    # statusline：每轮 AI 响应后尾部打一行紧凑状态
+    #（model / 会话累计 token / goal 状态 / 项目名）（CCAR10 Task 3）
+    "statusline": {
+        "enabled": True,
+    },
+
     # handoff 扩展（现有字段保留，auto_save_on_exit 是 Task 7 跨项目恢复用）
     "handoff": {
         "auto_save_on_exit": True,   # 退出时自动 save bundle

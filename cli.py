@@ -256,6 +256,8 @@ class RuntimeContext:
         self.agent_name = "main"
         self.trace_sink = None
         self._poor_mode_on = False  # /poor 命令状态
+        # CCAR10 Task 3: statusline 项目分区键（initialize 里赋值一次，fail-open None）
+        self._statusline_project_key = None
 
         # X2 fix: atexit 兜底 shutdown（即使主循环异常/SystemExit 也会清理 SQLite 锁等）
         import atexit
@@ -498,6 +500,15 @@ class RuntimeContext:
                     )
             except Exception as e:
                 logger.debug("子代理持久化清理失败（不阻塞）: %s", e)
+
+        # === CCAR10 Task 3 NEW: statusline 项目分区键（赋值一次，fail-open） ===
+        # 放在 initialize 末尾（所有依赖就绪后），失败不影响主流程
+        try:
+            from agent.project_scope import get_project_memory_key
+            self._statusline_project_key = get_project_memory_key()
+        except Exception as e:
+            logger.debug("statusline 项目键获取失败（不阻塞）: %s", e)
+            self._statusline_project_key = ""
 
         # === Hooks: SESSION_START（会话已建立，声明式 hooks 已加载） ===
         self._fire_session_start()
@@ -3100,6 +3111,89 @@ def _auto_resume_last(rt: RuntimeContext):
     _show_history_messages(rt)
 
 
+# ---------------------------------------------------------------------------
+# CCAR10 Task 3: statusline（每轮尾部状态行）
+# ---------------------------------------------------------------------------
+# 设计：在每轮 AI 响应完全输出后（不是流式中）console.print 一行 dim。
+# 不用 rich.Live —— Windows + input() 冲突，且 Live 会刷掉滚动历史。
+# fail-open：_render_statusline 任何异常返回 ""，主循环 if line 才打印。
+
+def _format_tokens(n: int) -> str:
+    """token 数格式化。12300 → '12.3K'；1234567 → '1.2M'；0 → '0'。
+
+    1000 以下直接显示原数，避免 "0.9K" 这种短数过度缩写。
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n / 1000:.1f}K"
+    return str(n)
+
+
+def _render_statusline(rt, agent) -> str:
+    """构造状态行内容（CCAR10 Task 3）。
+
+    返回值：非空字符串 → 主循环 console.print("[dim]...[/dim]")；
+            空串      → 不打印。
+
+    任何异常都吞掉返回 ""（statusline 不能影响主流程）。
+    段顺序：model │ 会话 token │ goal 状态 │ 项目名
+    """
+    try:
+        # 1. 开关检查（默认 enabled=True）
+        cfg = (getattr(rt, "config", None) or {})
+        sl_cfg = cfg.get("statusline", {}) if isinstance(cfg, dict) else {}
+        if not sl_cfg.get("enabled", True):
+            return ""
+
+        segs = []
+
+        # 2. model 段（agent.model 是实例字段，不带 ⚡ 也行——这里前缀 emoji 做视觉锚）
+        model = getattr(agent, "model", "") or ""
+        if model:
+            segs.append(f"⚡{model}")
+
+        # 3. token 段：优先用 _llm_usage_stats（实时累加，含 cache）；
+        #    fallback 到 session_total_tokens（兼容旧字段 / mock）。
+        usage_stats = getattr(agent, "_llm_usage_stats", None)
+        if usage_stats and isinstance(usage_stats, dict):
+            tokens = (
+                int(usage_stats.get("total_prompt_tokens", 0) or 0)
+                + int(usage_stats.get("total_completion_tokens", 0) or 0)
+            )
+        else:
+            tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
+        segs.append(f"会话 {_format_tokens(tokens)} tok")
+
+        # 4. goal 段：active/paused/completed 显示；cancelled 隐藏（视为废弃）
+        goal = getattr(agent, "_goal_state", None)
+        if goal is not None:
+            gstatus = getattr(goal, "status", "") or ""
+            if gstatus == "active":
+                iter_cnt = getattr(goal, "iteration_count", 0) or 0
+                segs.append(f"goal:进行中#{iter_cnt}")
+            elif gstatus == "paused":
+                segs.append("goal:已暂停")
+            elif gstatus == "completed":
+                segs.append("goal:已完成")
+            # cancelled / 未知 → 不显示
+
+        # 5. 项目段：取 project_key 末段（canonical-git-root 后缀）
+        proj_key = getattr(rt, "_statusline_project_key", "") or ""
+        if proj_key:
+            tail = proj_key.rsplit("-", 1)[-1]
+            if tail:
+                segs.append(f"项目:{tail}")
+
+        return " │ ".join(segs)
+    except Exception:
+        return ""
+
+
 def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     """启动交互式 CLI。
 
@@ -3259,6 +3353,16 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 rt.session_store.append_message(
                     rt.session_id, "assistant", response,
                 )
+
+            # CCAR10 Task 3 NEW: 每轮响应完打印 statusline（model/token/goal/项目）
+            # 放在 response 完整输出之后、不接 Live（Windows + input() 冲突）；
+            # 中断/异常路径都不打 statusline（用户主动断开就不该再追加信息）。
+            try:
+                _sl = _render_statusline(rt, rt.agent)
+                if _sl:
+                    console.print(f"[dim]{_sl}[/dim]")
+            except Exception as _e:
+                logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
         except KeyboardInterrupt:
             rt.agent.interrupt()
             console.print("[yellow]\n[已中断][/yellow]")
