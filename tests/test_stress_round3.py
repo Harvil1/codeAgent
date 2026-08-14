@@ -184,10 +184,11 @@ def test_stress_skill_index_300_skills(tmp_path):
     assert "skill_000" in index or "技能 0" in index
     assert "skill_299" in index or "技能 299" in index
     assert elapsed < 5.0, f"300 技能索引耗时 {elapsed:.2f}s 超 5s"
-    # 二次构建（有 OS 文件缓存）应该更快
+    # 二次构建也应在时限内（不比第一次快——OS 缓存/调度抖动不保证单调，
+    # 旧断言 "< elapsed" 是 flaky 源，曾致 CCAR10-11 多轮偶发失败）
     t1 = time.perf_counter()
     _build_skill_index(skills)
-    assert time.perf_counter() - t1 < elapsed
+    assert time.perf_counter() - t1 < 5.0
 
 
 def test_stress_cron_500_jobs_tick(tmp_path):
