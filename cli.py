@@ -1595,6 +1595,14 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/context":
         return _handle_context_cli(args, rt)
 
+    # === CCAR11 Task 3: /status 状态一览 + /doctor 自诊断 + /diff 会话改动 ===
+    if name == "/status":
+        return _handle_status_cli(args, rt)
+    if name == "/doctor":
+        return _handle_doctor_cli(args, rt)
+    if name == "/diff":
+        return _handle_diff_cli(args, rt)
+
     return False
 
 
@@ -1788,6 +1796,9 @@ def _show_help():
         "[cyan]/resumable[/cyan] 列出/恢复可续跑子代理（/resumable [agent_id]）\n"
         "[cyan]/compact[/cyan]   手动压缩上下文（L4 摘要；--yes 跳过确认）\n"
         "[cyan]/context[/cyan]   显示上下文 token 分布与压缩状态\n"
+        "[cyan]/status[/cyan]    状态一览（模型/goal/MCP/工具数）\n"
+        "[cyan]/doctor[/cyan]    自诊断 6 项（配置/API key/目录/依赖）\n"
+        "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
@@ -2660,6 +2671,211 @@ def _handle_context_cli(args: str, rt) -> bool:
         str(len(pending)) if pending is not None else "0",
     )
     console.print(table)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 3 NEW: /status + /doctor + /diff
+# ---------------------------------------------------------------------------
+
+def _status_row(label: str, fn):
+    """安全构建 /status 表格行：段内异常 → 显示"读取失败"，不影响其他段。"""
+    try:
+        return (label, fn())
+    except Exception as e:
+        logger.debug("/status 段 %s 读取失败: %s", label, e)
+        return (label, f"[red]读取失败：{e}[/red]")
+
+
+def _handle_status_cli(args: str, rt) -> bool:
+    """/status 状态一览（CCAR11 Task 3）。
+
+    Rich Table 展示（每段独立 try，一段挂了不影响其他段）：
+    - 主模型（rt.config model 段）/ aux LLM 有无
+    - goal（objective 前 30 字 + status + iteration）
+    - 当前项目记忆键（rt._statusline_project_key）
+    - MCP 各 server 连接状态（get_mcp_manager 遍历 _clients 的 is_connected）
+    - 工具总数（registry.list_all）
+    """
+    cfg = getattr(rt, "config", None) or {}
+    agent = getattr(rt, "agent", None)
+
+    def _model_desc() -> str:
+        m = cfg.get("model", {}) or {}
+        return f"{m.get('name', '?')}（provider: {m.get('provider', '?')}）"
+
+    def _aux_desc() -> str:
+        aux = getattr(agent, "aux_llm_router", None)
+        return "已配置" if aux is not None else "未配置"
+
+    def _goal_desc() -> str:
+        gs = getattr(agent, "_goal_state", None)
+        if gs is None:
+            return "无 active goal"
+        obj = str(getattr(gs, "objective", ""))[:30]
+        return (
+            f"{obj}（status={getattr(gs, 'status', '?')}, "
+            f"iter={getattr(gs, 'iteration_count', 0)}）"
+        )
+
+    def _project_desc() -> str:
+        key = getattr(rt, "_statusline_project_key", "") or ""
+        return key if key else "（未获取 / 非 git 项目）"
+
+    def _mcp_desc() -> str:
+        from agent.mcp_client import get_mcp_manager
+        clients = dict(getattr(get_mcp_manager(), "_clients", {}) or {})
+        if not clients:
+            return "无已注册 server"
+        parts = []
+        for name, client in sorted(clients.items()):
+            ok = bool(getattr(client, "is_connected", False))
+            parts.append(
+                f"{name} {'[green]已连接[/green]' if ok else '[red]断开[/red]'}"
+            )
+        return "  ".join(parts)
+
+    def _tools_desc() -> str:
+        from tools.registry import registry
+        return str(len(registry.list_all()))
+
+    table = Table(title="Status 一览")
+    table.add_column("项", style="cyan")
+    table.add_column("值")
+    for label, value in (
+        _status_row("主模型", _model_desc),
+        _status_row("aux LLM", _aux_desc),
+        _status_row("goal", _goal_desc),
+        _status_row("项目记忆键", _project_desc),
+        _status_row("MCP", _mcp_desc),
+        _status_row("工具总数", _tools_desc),
+    ):
+        table.add_row(label, value)
+    console.print(table)
+    return True
+
+
+def _handle_doctor_cli(args: str, rt) -> bool:
+    """/doctor 自诊断 6 项（CCAR11 Task 3，fail-open 每项独立）。
+
+    1. load_config() 成功
+    2. provider API key env 已设置（config model.api_key_env，默认 DEEPSEEK_API_KEY）
+    3. agent home 可写（tmp 文件写删）
+    4. .mcp.json 可解析（存在才查）
+    5. 关键依赖可 import（rich / httpx / openai）
+    6. sessions / skills 目录可用（自动创建也算 ✓）
+    """
+    import importlib
+
+    cfg = getattr(rt, "config", None) or {}
+    home = Path(getattr(rt, "home", None) or get_omnimate_home())
+    results = []  # [(通过?, 标题, 详情)]
+
+    # 1. config 可加载
+    try:
+        from config import load_config
+        load_config()
+        results.append((True, "配置加载", "load_config OK"))
+    except Exception as e:
+        results.append((False, "配置加载", f"load_config 失败：{e}"))
+
+    # 2. API key env
+    try:
+        env_name = (cfg.get("model", {}) or {}).get("api_key_env") or "DEEPSEEK_API_KEY"
+        if os.environ.get(env_name):
+            results.append((True, "API key", f"{env_name} 已设置"))
+        else:
+            results.append((False, "API key", f"{env_name} 未设置"))
+    except Exception as e:
+        results.append((False, "API key", f"检查失败：{e}"))
+
+    # 3. agent home 可写
+    try:
+        probe = home / ".doctor_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        results.append((True, "agent home 可写", str(home)))
+    except Exception as e:
+        results.append((False, "agent home 可写", f"{home} 不可写：{e}"))
+
+    # 4. .mcp.json 解析（存在才查）
+    try:
+        mcp_path = home / ".mcp.json"
+        if not mcp_path.exists():
+            results.append((True, ".mcp.json", "未配置（跳过）"))
+        else:
+            json.loads(mcp_path.read_text(encoding="utf-8"))
+            results.append((True, ".mcp.json", "解析 OK"))
+    except Exception as e:
+        results.append((False, ".mcp.json", f"解析失败：{e}"))
+
+    # 5. 关键依赖 import
+    try:
+        missing = []
+        for mod in ("rich", "httpx", "openai"):
+            try:
+                importlib.import_module(mod)
+            except Exception:
+                missing.append(mod)
+        if missing:
+            results.append((False, "关键依赖", f"缺失：{', '.join(missing)}"))
+        else:
+            results.append((True, "关键依赖", "rich / httpx / openai OK"))
+    except Exception as e:
+        results.append((False, "关键依赖", f"检查失败：{e}"))
+
+    # 6. sessions / skills 目录（自动创建也算 ✓）
+    try:
+        for d in (home / ".sessions", home / "skills"):
+            d.mkdir(parents=True, exist_ok=True)
+        results.append((True, "sessions/skills 目录", "存在（必要时已创建）"))
+    except Exception as e:
+        results.append((False, "sessions/skills 目录", f"创建失败：{e}"))
+
+    for ok, title, detail in results:
+        mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        console.print(f"{mark} {title}：{detail}")
+    passed = sum(1 for ok, _, _ in results if ok)
+    color = "green" if passed == len(results) else "yellow"
+    console.print(
+        f"[{color}]汇总：{passed}/{len(results)} 项通过[/{color}]"
+    )
+    return True
+
+
+def _handle_diff_cli(args: str, rt) -> bool:
+    """/diff 本会话文件改动（CCAR11 Task 3）。
+
+    基于 CheckpointManager 的实际能力：列 tracked_files（编辑工具改过的
+    文件）+ 快照数。无 checkpoint manager / 无追踪记录时提示。
+    """
+    mgr = getattr(rt, "checkpoint_mgr", None)
+    if mgr is None:
+        console.print(
+            "[yellow]本会话无 checkpoint 记录（文件快照未启用）[/yellow]"
+        )
+        return True
+
+    try:
+        files = list(mgr.tracked_files())
+    except Exception as e:
+        console.print(f"[red]读取改动记录失败：{e}[/red]")
+        return True
+
+    if not files:
+        console.print(
+            "[yellow]本会话无文件改动记录（write_file/str_replace 修改过的文件会出现在这里）[/yellow]"
+        )
+        return True
+
+    console.print(f"[cyan]本会话改动文件（{len(files)}）：[/cyan]")
+    for f in files:
+        console.print(f"  [red]M[/red] {f}")
+    try:
+        snaps = list(mgr.list_snapshots())
+        console.print(f"[dim]checkpoint 快照数：{len(snaps)}（/rewind 可回滚）[/dim]")
+    except Exception:
+        pass
     return True
 
 

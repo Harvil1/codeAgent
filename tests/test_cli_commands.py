@@ -488,3 +488,172 @@ def test_resume_load_bundle_into_history(tmp_path, capsys):
     contents = [m.get("content", "") for m in rt.agent.conversation_history]
     assert any("hello" in c for c in contents)
     assert any("world" in c for c in contents)
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 3: /status + /doctor + /diff
+# ---------------------------------------------------------------------------
+
+class _FakeMCPClient:
+    def __init__(self, connected: bool):
+        self.is_connected = connected
+
+
+class _FakeMCPManager:
+    def __init__(self, clients: dict):
+        self._clients = clients
+
+
+def test_status_basic(tmp_path, capsys, monkeypatch):
+    """/status 显示模型/aux/goal/项目键/MCP/工具数。"""
+    from cli import _handle_command
+    import agent.mcp_client as mcp_mod
+
+    rt = _FakeRT(tmp_path)
+    rt._statusline_project_key = "proj-abc123"
+    gs = GoalState(objective="写一份完整的测试报告文档", iteration_count=3)
+    rt.agent._goal_state = gs
+    monkeypatch.setattr(
+        mcp_mod, "get_mcp_manager",
+        lambda: _FakeMCPManager({
+            "server_a": _FakeMCPClient(True),
+            "server_b": _FakeMCPClient(False),
+        }),
+    )
+
+    handled = _handle_command("/status", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "deepseek-chat" in out          # 主模型
+    assert "aux" in out.lower()            # aux 段
+    assert "写一份完整的测试报告文档"[:30] in out  # goal objective
+    assert "active" in out                 # goal status
+    assert "3" in out                      # iteration
+    assert "proj-abc123" in out            # 项目键
+    assert "server_a" in out and "server_b" in out  # MCP servers
+    assert "工具" in out                   # 工具总数段
+
+
+def test_status_no_goal_no_mcp(tmp_path, capsys, monkeypatch):
+    """/status 无 goal / 无 MCP server / aux 未配置时给出提示而不是报错。"""
+    from cli import _handle_command
+    import agent.mcp_client as mcp_mod
+
+    rt = _FakeRT(tmp_path)
+    monkeypatch.setattr(
+        mcp_mod, "get_mcp_manager", lambda: _FakeMCPManager({}),
+    )
+    handled = _handle_command("/status", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "无" in out  # 无 active goal / 无 MCP server
+
+
+def test_status_section_failure_fail_open(tmp_path, capsys, monkeypatch):
+    """/status 某段数据源抛异常时其余段仍然输出（fail-open）。"""
+    from cli import _handle_command
+    import agent.mcp_client as mcp_mod
+
+    rt = _FakeRT(tmp_path)
+    # _statusline_project_key 是 property 且抛异常 → 该段显示读取失败
+    monkeypatch.setattr(
+        _FakeRT, "_statusline_project_key",
+        property(lambda self: (_ for _ in ()).throw(RuntimeError("boom"))),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mcp_mod, "get_mcp_manager", lambda: _FakeMCPManager({}),
+    )
+    handled = _handle_command("/status", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "deepseek-chat" in out  # 模型段不受影响
+
+
+def test_doctor_all_pass(tmp_path, capsys, monkeypatch):
+    """/doctor 全部通过时显示 6/6。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    handled = _handle_command("/doctor", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "6/6" in out
+    assert "✓" in out
+
+
+def test_doctor_missing_api_key(tmp_path, capsys, monkeypatch):
+    """/doctor API key env 未设置时该项 ✗ 且汇总 < 6/6。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    handled = _handle_command("/doctor", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "✗" in out
+    assert "6/6" not in out
+
+
+def test_doctor_config_broken(tmp_path, capsys, monkeypatch):
+    """/doctor load_config 抛异常时第 1 项 ✗（fail-open 不崩）。"""
+    from cli import _handle_command
+    import config as config_mod
+
+    rt = _FakeRT(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("bad config")
+
+    monkeypatch.setattr(config_mod, "load_config", _boom)
+    handled = _handle_command("/doctor", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "✗" in out
+    assert "6/6" not in out
+
+
+def test_diff_no_checkpoint(tmp_path, capsys):
+    """/diff 无 checkpoint manager（或无追踪记录）时提示。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)  # 无 checkpoint_mgr
+    handled = _handle_command("/diff", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "无" in out
+
+
+def test_diff_tracked_files(tmp_path, capsys):
+    """/diff 列出 checkpoint 追踪的本会话改动文件。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+
+    class _FakeCkpt:
+        def tracked_files(self):
+            return ["D:/proj/a.py", "D:/proj/b.md"]
+
+        def list_snapshots(self):
+            return [{"id": "s1", "files": ["D:/proj/a.py"]}]
+
+    rt.checkpoint_mgr = _FakeCkpt()
+    handled = _handle_command("/diff", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "a.py" in out and "b.md" in out
+    assert "1" in out  # 快照数
+
+
+def test_help_contains_three_commands(tmp_path, capsys):
+    """/help 帮助文本包含三个新命令。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+    _handle_command("/help", rt)
+    out = capsys.readouterr().out
+    assert "/status" in out
+    assert "/doctor" in out
+    assert "/diff" in out
