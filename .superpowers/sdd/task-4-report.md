@@ -1,61 +1,53 @@
-# CCAR9 Task 4 Report: /init 命令生成 OMNIMATE.md
+# CCAR11 Task 4 Report: /add-dir 运行时白名单 + 持久化
 
-> 注：本文件路径与早期 task-4-report（CCAR8 TraceSink，commit 6573ce25；以及更早的 features flags 示例，commit c7cc5ea9）同名。
-> 之前的报告已被本 CCAR9 Task 4 报告覆盖。
-> 原 TraceSink 要点：`agent/trace.py` 新增 148 行（TraceSink 本地 sink，emit/query/summary）。
-> 原 features flags 要点：`examples/settings-features.json` 10 个 feature flags 示例。
+> 注：本文件路径之前承载过 CCAR8 TraceSink / CCAR9 /init / CCAR10 subagent_resume 等报告，本份覆盖为 CCAR11 Task 4。
 
-## 状态
-**完成**（4/4 测试通过，全套 2164 passed / 1 skipped 无回归）
+**Commit:** `955776d6`
+**Branch:** cli-dev
+**Date:** 2026-08-14
+**Status:** 完成
 
-## 对标
-Claude Code 的 `/init` 命令——收集项目信息（目录树/关键文件/类型统计）→ 主 LLM 四段式生成（项目本质/常用命令/架构/约定）→ 写 `<cwd>/OMNIMATE.md`。prompt_builder 已有 OMNIMATE.md 注入闭环（`prompt_builder.py:240` 扫 cwd 下的 OMNIMATE.md），**本 task 零改动**。
+## 任务范围
 
-## 改动
-| 文件 | 类型 | 说明 |
-|---|---|---|
-| `cli.py` | Modify | 加 `/init` 命令分发（`_handle_command` 内）+ `_handle_init_command` 函数 |
-| `tests/test_init_command.py` | Test | 4 个新测试（正常/已存在不带 force/--force 覆盖/空目录 fail-open） |
+`/add-dir <path>` 命令：运行时追加 safe_path 写白名单 + 持久化到用户 config（`security.extra_allowed_roots`），下次启动自动加载。
 
-## 接口
-- **Consumes**: `rt.agent.llm_client.chat_completions`（主 LLM）/ `agent.workspace_context.get_workspace_cwd`
-- **Produces**: `<cwd>/OMNIMATE.md`（下次会话由 prompt_builder 自动注入 system prompt）
+## 实施步骤
 
-## 实现要点
-1. **fail-open 收集**：目录树扫描、关键文件读取、文件类型统计三段，每段独立 try/except，缺哪跳哪（空目录也能生成）
-2. **--force 语义**：不带 `--force` 且文件已存在 → 提示并返回，不覆盖；带 `--force` 走完整流程覆盖
-3. **asyncio.run 兜底**：参考 `_start_new_goal` 的同款模式——`asyncio.run` 在已有事件循环时 RuntimeError，走 try/except 兜底；进一步有 `loop.is_running()` 检测避免 `run_until_complete` 冲突
-4. **中文 prompt + 四节固定结构**：要求 LLM 只写可从信息验证的事实，命令给出具体形式（如 `uv run pytest tests/`）
-5. **局部 import**：`get_workspace_cwd` 在函数内局部 import（与 codebase 一致，agent_defs/prompt_builder/permission 等都这么干）
-6. **LLM 返回空 → fail-open**：提示生成失败，不写空文件
-7. **写入失败 → fail-open**：提示写入失败原因，不抛
+### Step 1：读现状（brief 点名要先查的三件事）
 
-## 测试
-- `test_init_generates_file` — 正常流程（空目录+README → 生成 OMNIMATE.md 含 LLM 输出）
-- `test_init_existing_without_force` — 已存在不带 `--force` 不覆盖
-- `test_init_force_overwrites` — `--force` 覆盖重新生成
-- `test_init_collection_failopen` — 空目录也能生成（fail-open）
+1. **allowed_roots 的真实存取方式**：`safe_path` 的 `allowed_roots` 是**函数参数**（不是 PermissionChecker 实例字段），缺省时 fallback 到 `default_allowed_roots()`（workspace cwd + `~/.OmniMate`）。`PermissionChecker.check_path`（write_file 实际走的路径）根本不做白名单检查（闸门 3 全通过）。→ 结论：运行时追加要生效，必须挂在 `default_allowed_roots()` 上，做成 permission.py 模块级注册表。
+2. **config 文件定位**：`constants.config_path()` → `~/.OmniMate/config.yaml`（`OMNIMATE_HOME` env 可覆盖）。注意 `load_config()` 默认优先读 settings.json（新 JSON 配置），config.yaml 是旧路径但仍是用户可手编的文件——持久化按 brief 走 yaml 读-改-写。
+3. **cli 命令接入模式**：`_handle_command` 的 `if name == "/xxx"` 链 + Task 3 的 `_handle_status_cli` 系列 + help Panel + `tests/test_cli_commands.py` 的 `_FakeRT` 模式。
 
-测试 mock 了 `RuntimeContext` + `agent.llm_client`（`AsyncMock`），patch 源头 `agent.workspace_context.get_workspace_cwd`（局部 import 模式，patch `cli.get_workspace_cwd` 无效）。
+### Step 2：TDD——先写 7 个失败测试
 
-## 遵循的约束（逐项确认）
-- [x] 文件 I/O `encoding="utf-8"`：read_text/write_text 都显式指定
-- [x] 中文注释/commit：全部注释 + commit message 中文
-- [x] TDD：先写 4 失败测试 → ImportError 确认 → 实现 → 通过
-- [x] fail-open：三段信息收集 + LLM 调用 + 写入，每段独立 try/except
-- [x] `--force` 语义正确（test_init_force_overwrites + test_init_existing_without_force 验证）
-- [x] 局部 import `get_workspace_cwd`（对齐 codebase 约定）
-- [x] `asyncio.run` 在已有 loop 的兜底（对齐 `_start_new_goal` 模式）
-- [x] `tests/` 在 `.gitignore`，用 `git add -f`
+追加到 `tests/test_cli_commands.py`：列白名单 / 拒绝不存在的目录 / **添加后 safe_path 放行 + config 出现该路径**（核心断言）/ 幂等 / 持久化不破坏其他字段 / 启动加载 / help 含 /add-dir。首跑 7 failed 确认红。
+
+### Step 3：实现
+
+1. **`agent/permission.py`**：`_EXTRA_ALLOWED_ROOTS` 模块级注册表 + `add_extra_allowed_root`（resolve + 去重幂等，返回是否新增）/ `list_extra_allowed_roots`（拷贝）/ `clear_extra_allowed_roots`（测试用）；`default_allowed_roots()` 末尾 `roots.extend(_EXTRA_ALLOWED_ROOTS)`。
+2. **`cli.py`**：
+   - `_persist_extra_root(root, config_file=None)`：yaml.safe_load 已有 config → `security.extra_allowed_roots` append（去重）→ `yaml.safe_dump(allow_unicode=True, sort_keys=False)` 写回；**代码注释注明注释会丢**；读失败按空配置处理（fail-open），返回是否新写入。
+   - `_load_persisted_extra_roots(config)`：启动把 config 里的列表灌进运行时注册表（单条失败跳过）。
+   - `_handle_add_dir_cli(args, rt)`：无参数列白名单（默认根 + 标注 /add-dir 追加项）；带参数 resolve + is_dir 校验 → 运行时追加 → 持久化（持久化失败仅黄字警告，运行时仍生效）→ 按新增/已存在分别提示。
+   - `RuntimeContext.__init__` 开头调 `_load_persisted_extra_roots`（try/except 包裹）。
+   - `_handle_command` 加 `/add-dir` 路由 + `_show_help` 加一行。
+3. **`config.py`**：`DEFAULT_CONFIG["security"]` 加 `"extra_allowed_roots": []`（可发现性）。
+
+### Step 4：修一处测试措辞
+
+`test_add_dir_idempotent` 断言文案与实现输出对齐（"已在白名单"）。
 
 ## 测试结果
-- `uv run pytest tests/test_init_command.py -v` → **4 passed**
-- `uv run pytest tests/ -q` → **2164 passed / 1 skipped / 0 failed**
 
-## Commit
-`a26f6bd4` — `feat(init): /init 命令生成 OMNIMATE.md（CCAR9 Task 4，对标 /init）`
+- 新增 7 个测试全过；`tests/test_cli_commands.py` 42 passed
+- 全套 `uv run pytest tests/`：**2248 passed, 1 skipped**
+- `uv run python scripts/verify.py`：**22/22 ALL PASS**
 
-## Concerns / Follow-up
-1. **Minor**：LLM 调用走 `chat_completions`（主 LLM）而非 aux_llm_router——对标 Claude Code 的 /init 用主 LLM 生成，语义一致。如果未来想做"轻量 init"（用 aux LLM 省成本），可以加 config 开关。
-2. **Minor**：写 cwd 不走 safe_path 包装——target 是 `cwd / "OMNIMATE.md"`，cwd 本身在 safe_path 白名单内（默认允许 cwd + `~/.OmniMate`），所以不需要额外声明 allowed_roots。
-3. **环境噪声**：全套测试时出现一个 `UnicodeDecodeError` warning（来自无关测试在后台线程用 gbk 读 PNG），不是本 task 引入的。
+## 关键设计点 / concerns
+
+1. **白名单不能绕过硬底线**：`safe_path` 里受保护路径（~/.ssh / /etc / C:\Windows）和项目代码写保护**先于**白名单检查，`/add-dir` 加任意目录都绕不过（代码注释已写明）。
+2. **`check_path` 不查白名单**：`write_file` 走的是 `PermissionChecker.check_path`（闸门 3 全通过），所以 `/add-dir` 的运行时效果只作用于 `safe_path` 默认路径的调用方（offload/transcript 等显式传 allowed_roots 的不受影响）。与 brief 要求一致（测试核心断言就是 `safe_path(target/"x.txt", write=True)` 通过），但语义上 /add-dir 对 write_file 工具没有收紧或放宽效果——留 follow-up 如需让 write_file 也感知。
+3. **yaml 注释会丢**：`yaml.safe_dump` 重写整个文件，用户 config.yaml 里手写的注释无法保留（yaml 格式限制），函数 docstring + 代码注释均注明。
+4. **settings.json vs config.yaml 双轨**：`load_config()` 默认读 settings.json，`/add-dir` 持久化写的是 config.yaml——两轨并存时用户在 settings.json 手写的 `security.extra_allowed_roots` 也会被启动加载（`_load_persisted_extra_roots` 读的是 load_config 合并结果），但 `/add-dir` 只写 yaml 侧。
+5. **注册表是进程级全局**：`_EXTRA_ALLOWED_ROOTS` 所有线程共享（与 default_allowed_roots 语义一致）；`list_extra_allowed_roots` 返回拷贝防外部篡改。
