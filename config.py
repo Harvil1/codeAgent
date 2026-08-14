@@ -258,6 +258,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # OS 沙箱（对齐 Claude Code /sandbox）
         "sandbox_mode": "off",           # "off" | "on"（启动时灌进 PermissionChecker）
         "sandbox_writable_roots": [],    # 额外允许写的目录（默认 cwd + ~/.OmniMate 已含）
+        # CCAR11 Task 4: /add-dir 持久化的 safe_path 写白名单
+        #（运行时 /add-dir 追加 + 写回；启动时 RuntimeContext 加载）
+        "extra_allowed_roots": [],
     },
 
     # 显示

@@ -166,6 +166,15 @@ class RuntimeContext:
     def __init__(self):
         self.config = load_config()
         self.home = get_omnimate_home()
+        # === CCAR11 Task 4 NEW: /add-dir 持久化白名单启动加载 ===
+        # config 的 security.extra_allowed_roots → 运行时 safe_path 白名单
+        #（fail-open：单条失败跳过，不阻塞启动）
+        try:
+            n = _load_persisted_extra_roots(self.config)
+            if n:
+                logger.info("已从 config 加载 %d 个额外白名单目录", n)
+        except Exception as e:
+            logger.warning("加载 extra_allowed_roots 失败（跳过）: %s", e)
         self.memory_store = None
         self.memory_manager = None
         self.session_store = None
@@ -1603,6 +1612,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/diff":
         return _handle_diff_cli(args, rt)
 
+    # === CCAR11 Task 4: /add-dir 追加 safe_path 写白名单（运行时 + 持久化） ===
+    if name == "/add-dir":
+        return _handle_add_dir_cli(args, rt)
+
     return False
 
 
@@ -1799,6 +1812,7 @@ def _show_help():
         "[cyan]/status[/cyan]    状态一览（模型/goal/MCP/工具数）\n"
         "[cyan]/doctor[/cyan]    自诊断 6 项（配置/API key/目录/依赖）\n"
         "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
+        "[cyan]/add-dir[/cyan]   追加 safe_path 写白名单（无参数列出；运行时生效 + 持久化到 config）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
@@ -2876,6 +2890,125 @@ def _handle_diff_cli(args: str, rt) -> bool:
         console.print(f"[dim]checkpoint 快照数：{len(snaps)}（/rewind 可回滚）[/dim]")
     except Exception:
         pass
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 4 NEW: /add-dir 运行时白名单 + 持久化
+# ---------------------------------------------------------------------------
+
+def _persist_extra_root(root: str, config_file: Optional[Path] = None) -> bool:
+    """把额外白名单根目录持久化到用户 config.yaml 的 security.extra_allowed_roots。
+
+    读-改-写：yaml.safe_load 已有内容 → append（去重）→ yaml.safe_dump 写回。
+    ⚠️ yaml.safe_dump 重写整个文件，**原有注释会丢失**（yaml 格式限制，无法保留）。
+
+    返回 True 表示新写入，False 表示已存在（幂等，不重复写）。
+    fail-open：读/写失败抛异常给调用方（命令层捕获提示，不影响运行时白名单）。
+    """
+    import yaml
+
+    if config_file is None:
+        from constants import config_path
+        config_file = config_path()
+    config_file = Path(config_file)
+
+    data: dict = {}
+    if config_file.exists():
+        try:
+            loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception as e:
+            logger.warning("读 config 失败（按空配置处理）%s: %s", config_file, e)
+            data = {}
+
+    sec = data.get("security")
+    if not isinstance(sec, dict):
+        sec = {}
+        data["security"] = sec
+    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
+    if root in roots:
+        return False  # 幂等：已存在
+    roots.append(root)
+    sec["extra_allowed_roots"] = roots
+
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    # 注：safe_dump 无法保留原文件注释（重写整个 yaml）
+    config_file.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return True
+
+
+def _load_persisted_extra_roots(config: dict) -> int:
+    """启动时把 config 的 security.extra_allowed_roots 灌进运行时白名单。
+
+    RuntimeContext.__init__ 调用。返回成功加载数（fail-open：单条失败跳过）。
+    """
+    from agent.permission import add_extra_allowed_root
+    sec = (config or {}).get("security") or {}
+    roots = sec.get("extra_allowed_roots") or []
+    loaded = 0
+    for root in roots:
+        if not isinstance(root, str):
+            continue
+        try:
+            if add_extra_allowed_root(root):
+                loaded += 1
+        except Exception as e:
+            logger.warning("加载 extra_allowed_root 失败（跳过 %s）: %s", root, e)
+    return loaded
+
+
+def _handle_add_dir_cli(args: str, rt) -> bool:
+    """/add-dir <path>：追加 safe_path 写白名单（CCAR11 Task 4）。
+
+    - 无参数：列出当前白名单（cwd + ~/.OmniMate + 额外追加）
+    - 带目录：resolve + is_dir 校验 → 运行时追加（去重幂等）→ 持久化到
+      config.yaml 的 security.extra_allowed_roots（下次启动自动加载）
+    - 安全底线不变：受保护路径（~/.ssh 等）和项目代码写保护在 safe_path
+      里先于白名单检查，加白名单不能绕过。
+    """
+    from agent.permission import (
+        default_allowed_roots, list_extra_allowed_roots,
+        add_extra_allowed_root,
+    )
+
+    parts = (args or "").split()
+    if not parts:
+        # 列出当前白名单
+        extras = {str(r) for r in list_extra_allowed_roots()}
+        console.print("[bold]当前 safe_path 写白名单：[/bold]")
+        for r in default_allowed_roots():
+            mark = "  [cyan](/add-dir 追加)[/cyan]" if str(r) in extras else ""
+            console.print(f"  {r}{mark}")
+        console.print(
+            "[dim]用法: /add-dir <目录> 追加白名单（运行时生效 + 持久化到 config）[/dim]"
+        )
+        return True
+
+    target = Path(parts[0]).expanduser().resolve()
+    if not target.is_dir():
+        console.print(f"[red]目录不存在:[/red] {target}")
+        return True
+
+    # 1) 运行时生效：追加进 default_allowed_roots（safe_path 默认路径）
+    added = add_extra_allowed_root(target)
+    # 2) 持久化：config.yaml security.extra_allowed_roots（读-改-写）
+    try:
+        persisted = _persist_extra_root(str(target))
+    except Exception as e:
+        persisted = False
+        console.print(f"[yellow]⚠️  持久化到 config 失败（运行时仍生效）: {e}[/yellow]")
+
+    if added or persisted:
+        console.print(f"[green]已添加白名单:[/green] {target}")
+        if not persisted:
+            console.print("[dim]（该目录已在 config 中，未重复写入）[/dim]")
+    else:
+        console.print(f"[yellow]已在白名单中（幂等跳过）:[/yellow] {target}")
     return True
 
 

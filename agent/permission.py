@@ -352,8 +352,36 @@ def is_write_protected_path(path) -> Optional[str]:
 # 路径白名单（写操作检查）
 # ---------------------------------------------------------------------------
 
+# 运行时额外白名单（/add-dir 命令追加；进程级，重启靠 config 持久化 + 启动加载）。
+# 注意：受保护路径（~/.ssh / /etc 等）和项目代码写保护在 safe_path 里先于
+# 白名单检查——追加白名单不能绕过这些硬底线（安全默认 > 事后补救）。
+_EXTRA_ALLOWED_ROOTS: List[Path] = []
+
+
+def add_extra_allowed_root(root) -> bool:
+    """运行时追加 safe_path 写白名单根目录（幂等）。
+
+    返回 True 表示新增，False 表示已存在（去重，不重复加）。
+    """
+    resolved = Path(root).expanduser().resolve()
+    if resolved in _EXTRA_ALLOWED_ROOTS:
+        return False
+    _EXTRA_ALLOWED_ROOTS.append(resolved)
+    return True
+
+
+def list_extra_allowed_roots() -> List[Path]:
+    """列出运行时追加的额外白名单（拷贝，防外部改内部列表）。"""
+    return list(_EXTRA_ALLOWED_ROOTS)
+
+
+def clear_extra_allowed_roots() -> None:
+    """清空运行时额外白名单（测试用）。"""
+    _EXTRA_ALLOWED_ROOTS.clear()
+
+
 def default_allowed_roots() -> List[Path]:
-    """默认允许写入的根目录：cwd + ~/.OmniMate。
+    """默认允许写入的根目录：cwd + ~/.OmniMate + /add-dir 追加的额外白名单。
 
     Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩到别人的 cwd。
     改走 get_workspace_cwd()（线程局部 ContextVar），子代理在自己 worktree 内
@@ -366,6 +394,8 @@ def default_allowed_roots() -> List[Path]:
         roots.append(get_omnimate_home().resolve())
     except Exception:
         pass
+    # CCAR11 Task 4: /add-dir 运行时追加的额外白名单（含启动时从 config 加载的）
+    roots.extend(_EXTRA_ALLOWED_ROOTS)
     return roots
 
 

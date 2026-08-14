@@ -657,3 +657,155 @@ def test_help_contains_three_commands(tmp_path, capsys):
     assert "/status" in out
     assert "/doctor" in out
     assert "/diff" in out
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 4: /add-dir 运行时白名单 + 持久化
+# ---------------------------------------------------------------------------
+
+def _clear_extra_roots():
+    """清空运行时额外白名单（防其他测试污染）。"""
+    from agent.permission import clear_extra_allowed_roots
+    clear_extra_allowed_roots()
+
+
+def test_add_dir_no_args_lists_whitelist(tmp_path, capsys):
+    """/add-dir 无参数列出当前 safe_path 写白名单。"""
+    from cli import _handle_command
+    _clear_extra_roots()
+    rt = _FakeRT(tmp_path)
+    handled = _handle_command("/add-dir", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "白名单" in out
+    # 默认白名单包含 cwd
+    assert str(Path.cwd().resolve()) in out
+
+
+def test_add_dir_rejects_missing_dir(tmp_path, capsys):
+    """/add-dir 指向不存在的目录时拒绝并提示。"""
+    from cli import _handle_command
+    _clear_extra_roots()
+    rt = _FakeRT(tmp_path)
+    handled = _handle_command(f"/add-dir {tmp_path / 'no_such_dir'}", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "不存在" in out
+
+
+def test_add_dir_runtime_and_persist(tmp_path, capsys, monkeypatch):
+    """/add-dir 添加后 safe_path 放行 + 路径出现在 config 文件里。"""
+    from cli import _handle_command
+    import constants
+    from agent.permission import safe_path, clear_extra_allowed_roots
+
+    clear_extra_allowed_roots()
+    cfg_file = tmp_path / "config.yaml"
+    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+
+    target = tmp_path / "extra_root"
+    target.mkdir()
+    probe = target / "x.txt"
+
+    # 添加前：白名单外写入被拒
+    assert safe_path(probe, write=True).allowed is False
+
+    rt = _FakeRT(tmp_path)
+    handled = _handle_command(f"/add-dir {target}", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "已添加" in out
+
+    # 运行时生效：safe_path 放行（Task 4 核心断言）
+    assert safe_path(probe, write=True).allowed is True
+
+    # 持久化：config 文件 security.extra_allowed_roots 出现该路径
+    import yaml
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert str(target.resolve()) in data["security"]["extra_allowed_roots"]
+
+
+def test_add_dir_idempotent(tmp_path, capsys, monkeypatch):
+    """重复 /add-dir 同一目录幂等：运行时不重复 + config 只存一份。"""
+    from cli import _handle_command
+    import constants
+    from agent.permission import (
+        clear_extra_allowed_roots, list_extra_allowed_roots,
+    )
+
+    clear_extra_allowed_roots()
+    cfg_file = tmp_path / "config.yaml"
+    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+    target = tmp_path / "dup_root"
+    target.mkdir()
+
+    rt = _FakeRT(tmp_path)
+    _handle_command(f"/add-dir {target}", rt)
+    capsys.readouterr()
+    handled = _handle_command(f"/add-dir {target}", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "已在白名单" in out  # 第二次提示幂等跳过
+
+    # 运行时只挂一份
+    resolved = target.resolve()
+    assert list_extra_allowed_roots().count(resolved) == 1
+    # config 文件里也只存一份
+    import yaml
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    roots = data["security"]["extra_allowed_roots"]
+    assert roots.count(str(resolved)) == 1
+
+
+def test_persist_extra_root_preserves_other_keys(tmp_path, monkeypatch):
+    """持久化读-改-写不破坏 config.yaml 已有的其他字段。"""
+    import yaml
+    import constants
+    import cli as cli_mod
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "model:\n  name: deepseek-chat\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(constants, "config_path", lambda: cfg_file)
+    target = tmp_path / "keep_root"
+    target.mkdir()
+
+    assert cli_mod._persist_extra_root(str(target)) is True
+    data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert data["model"]["name"] == "deepseek-chat"
+    assert str(target) in data["security"]["extra_allowed_roots"]
+    # 幂等：重复持久化返回 False 且不重复写
+    assert cli_mod._persist_extra_root(str(target)) is False
+    data2 = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert data2["security"]["extra_allowed_roots"].count(str(target)) == 1
+
+
+def test_load_persisted_extra_roots_at_startup(tmp_path):
+    """启动加载：config security.extra_allowed_roots → 运行时 safe_path 白名单。"""
+    import cli as cli_mod
+    from agent.permission import (
+        clear_extra_allowed_roots, list_extra_allowed_roots, safe_path,
+    )
+
+    clear_extra_allowed_roots()
+    target = tmp_path / "boot_root"
+    target.mkdir()
+
+    n = cli_mod._load_persisted_extra_roots(
+        {"security": {"extra_allowed_roots": [str(target)]}}
+    )
+    assert n == 1
+    assert any(r == target.resolve() for r in list_extra_allowed_roots())
+    assert safe_path(target / "y.txt", write=True).allowed is True
+    clear_extra_allowed_roots()
+
+
+def test_help_contains_add_dir(tmp_path, capsys):
+    """/help 帮助文本包含 /add-dir。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+    _handle_command("/help", rt)
+    out = capsys.readouterr().out
+    assert "/add-dir" in out
