@@ -341,6 +341,133 @@ def test_resume_list_with_bundles(tmp_path, capsys):
     assert "测试 bundle" in out
 
 
+# ---------------------------------------------------------------------------
+# CCAR11 Task 2: /compact + /context
+# ---------------------------------------------------------------------------
+
+class _FakeCompactLLM:
+    """压缩摘要用 mock LLM client（chat_completions 返回固定摘要）。"""
+
+    def __init__(self, summary: str = "这是 L4 压缩摘要（测试）"):
+        self.summary = summary
+        self.calls = 0
+
+    async def chat_completions(self, messages, model=None, **kwargs):
+        self.calls += 1
+        msg = MagicMock()
+        msg.content = self.summary
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+
+def _make_history(n_msgs: int) -> list:
+    """构造 n 条交替 user/assistant 历史（每条 content 有长度）。"""
+    hist = []
+    for i in range(n_msgs):
+        role = "user" if i % 2 == 0 else "assistant"
+        hist.append({"role": role, "content": f"消息 {i} " + "x" * 100})
+    return hist
+
+
+def _setup_compact_agent(rt, n_msgs: int = 6, llm: bool = True):
+    """给 _FakeAgent 挂上 /compact 需要的最小属性。"""
+    from agent.context_pipeline import CompressionSessionState
+    import agent.context_compressor as _cc
+    # 重置摘要熔断器全局（防其他测试污染）
+    _cc._consecutive_failures = 0
+    _cc._compact_circuit_open = False
+    rt.agent.conversation_history = _make_history(n_msgs)
+    rt.agent.llm_client = _FakeCompactLLM() if llm else None
+    rt.agent.model = "deepseek-chat"
+    rt.agent._compress_session_state = CompressionSessionState()
+    rt.agent._pending_ephemeral_messages = []
+    rt.config["context"] = {"llm_compact_keep_recent": 2}
+
+
+def test_compact_command_runs_llm_compact(tmp_path, capsys):
+    """/compact --yes 触发 L4 压缩：history 缩短 + llm_compact_count +1。"""
+    from cli import _handle_command
+    rt = _FakeRT(tmp_path)
+    _setup_compact_agent(rt, n_msgs=6)
+    before = len(rt.agent.conversation_history)
+    handled = _handle_command("/compact --yes", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "压缩完成" in out
+    # history 被压缩：1 个摘要占位 + keep_recent(2) = 3 条 < 原 6 条
+    assert len(rt.agent.conversation_history) < before
+    assert rt.agent._compress_session_state.llm_compact_count == 1
+    # 打印了前后 token 对比
+    assert "tokens" in out.lower()
+
+
+def test_compact_confirms_before_force(tmp_path, capsys, monkeypatch):
+    """/compact 无 --yes 时先确认，拒绝则不压。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    rt = _FakeRT(tmp_path)
+    _setup_compact_agent(rt, n_msgs=6)
+    before = list(rt.agent.conversation_history)
+    monkeypatch.setattr(cli_mod.console, "input", lambda *a, **k: "n")
+    handled = _handle_command("/compact", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "已取消" in out
+    # 未压缩
+    assert rt.agent.conversation_history == before
+    assert rt.agent._compress_session_state.llm_compact_count == 0
+
+
+def test_compact_confirmed_yes_runs(tmp_path, capsys, monkeypatch):
+    """确认输入 y 时执行压缩。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    rt = _FakeRT(tmp_path)
+    _setup_compact_agent(rt, n_msgs=6)
+    monkeypatch.setattr(cli_mod.console, "input", lambda *a, **k: "y")
+    handled = _handle_command("/compact", rt)
+    assert handled is True
+    assert rt.agent._compress_session_state.llm_compact_count == 1
+
+
+def test_compact_fallback_snip_when_no_llm(tmp_path, capsys):
+    """LLM client 为 None 时降级 snip_compact（无损裁剪）。"""
+    from cli import _handle_command
+    rt = _FakeRT(tmp_path)
+    _setup_compact_agent(rt, n_msgs=20, llm=False)
+    handled = _handle_command("/compact --yes", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "snip" in out.lower()
+    assert len(rt.agent.conversation_history) < 20
+
+
+def test_context_command_renders_table(tmp_path, capsys):
+    """/context 渲染 token 分布表。"""
+    from cli import _handle_command
+    from agent.context_pipeline import CompressionSessionState
+    rt = _FakeRT(tmp_path)
+    rt.agent.conversation_history = [
+        {"role": "user", "content": "你好" * 50},
+        {"role": "assistant", "content": "在的" * 50},
+        {"role": "user", "content": "继续"},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+    ]
+    rt.agent._compress_session_state = CompressionSessionState()
+    rt.agent._pending_ephemeral_messages = []
+    handled = _handle_command("/context", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "消息数" in out
+    assert "tokens" in out.lower()
+    assert "current_turn" in out
+    assert "llm_compact_count" in out
+    assert "reactive_count" in out
+
+
 def test_resume_load_bundle_into_history(tmp_path, capsys):
     """/resume_bundle <id> 加载 bundle 注入 conversation_history。"""
     from cli import _handle_command

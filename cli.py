@@ -1589,6 +1589,12 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/resumable":
         return _handle_resumable_command(args, rt)
 
+    # === CCAR11 Task 2: /compact 手动 L4 压缩 + /context token 分布 ===
+    if name == "/compact":
+        return _handle_compact_cli(args, rt)
+    if name == "/context":
+        return _handle_context_cli(args, rt)
+
     return False
 
 
@@ -1780,6 +1786,8 @@ def _show_help():
         "[cyan]/inbox[/cyan]     显示 ChannelInbox 未消费消息\n"
         "[cyan]/resume_bundle[/cyan]  跨项目恢复 bundle（/resume_bundle [id]）\n"
         "[cyan]/resumable[/cyan] 列出/恢复可续跑子代理（/resumable [agent_id]）\n"
+        "[cyan]/compact[/cyan]   手动压缩上下文（L4 摘要；--yes 跳过确认）\n"
+        "[cyan]/context[/cyan]   显示上下文 token 分布与压缩状态\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
@@ -2473,6 +2481,185 @@ def _handle_resumable_command(args: str, rt) -> bool:
     text = data.get("result", "")
     truncated_tag = " [dim](已截断到 2000 字符)[/dim]" if len(text) > 2000 else ""
     console.print(f"[green]恢复完成：[/green]{text[:2000]}{truncated_tag}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 2 NEW: /compact + /context
+# ---------------------------------------------------------------------------
+
+def _sync_history_after_compact(agent, new_messages: list) -> None:
+    """压缩后同步 agent.conversation_history + 失效 system prompt 缓存。
+
+    对齐 AIAgent._run_context_compression 的收尾逻辑：
+    - strip 头部 system（压缩函数输入是纯 history，正常无 system，防御性处理）
+    - strip ``_ephemeral`` 标记消息（ephemeral 不进持久化 history）
+    - invalidate_system_prompt（前缀已变，必须重建，否则下次发 LLM 的
+      system prompt 还是旧缓存）
+    """
+    msgs = list(new_messages or [])
+    if msgs and msgs[0].get("role") == "system":
+        msgs = msgs[1:]
+    agent.conversation_history = [m for m in msgs if not m.get("_ephemeral")]
+    invalidate = getattr(agent, "invalidate_system_prompt", None)
+    if callable(invalidate):
+        try:
+            invalidate()
+        except Exception:
+            pass
+
+
+def _print_compact_delta(
+    before_msgs: int, before_tokens: int,
+    after_msgs: int, after_tokens: int,
+    *, mode: str,
+) -> None:
+    """打印压缩前后 token 对比。"""
+    saved = max(0, before_tokens - after_tokens)
+    console.print(f"[green]压缩完成（{mode}）[/green]")
+    console.print(
+        f"  消息数 {before_msgs} → {after_msgs}，"
+        f"估算 tokens ~{before_tokens} → ~{after_tokens}"
+        f"（节省 ~{saved}）"
+    )
+
+
+def _handle_compact_cli(args: str, rt) -> bool:
+    """/compact 手动触发 L4 压缩（CCAR11 Task 2）。
+
+    - ``--yes`` 跳过确认，否则交互确认（EOF/输入异常视为拒绝）
+    - 正常路径：llm_compact 强制走 L4（token_threshold=0 绕过自动阈值判定，
+      手动压缩语义 = "现在就压"，与自动压缩的"接近窗口才压"不同）
+    - LLM 不可用（client None / 调用异常 / 事件循环冲突）→ 降级 snip_compact
+      （无损裁剪，threshold=0 强制）+ 提示
+    - 压缩后同步 agent 状态 + 记录 llm_compact_count（对齐自动压缩收尾）
+    """
+    agent = getattr(rt, "agent", None)
+    if agent is None:
+        console.print("[yellow]Agent 未初始化，无法压缩[/yellow]")
+        return True
+
+    # --yes 跳过确认，否则交互确认（EOF/异常视为拒绝）
+    arg_parts = (args or "").split()
+    if "--yes" not in arg_parts:
+        try:
+            ans = console.input("压缩会用 LLM 摘要总结早期对话，继续？(y/n) ")
+        except Exception:
+            ans = "n"
+        if str(ans).strip().lower() not in ("y", "yes"):
+            console.print("[yellow]已取消压缩[/yellow]")
+            return True
+
+    from agent.context_compressor import estimate_message_tokens
+    from agent.context_pipeline import llm_compact, snip_compact
+
+    history = list(agent.conversation_history)
+    before_msgs = len(history)
+    before_tokens = estimate_message_tokens(history)
+    ctx_cfg = (getattr(rt, "config", None) or {}).get("context", {}) or {}
+    keep_recent = int(ctx_cfg.get("llm_compact_keep_recent", 30))
+
+    compacted = False
+    new_messages = history
+    llm_client = getattr(agent, "llm_client", None)
+    if llm_client is not None:
+        try:
+            new_messages, compacted = asyncio.run(llm_compact(
+                history,
+                llm_client=llm_client,
+                model=getattr(agent, "model", None),
+                keep_recent=keep_recent,
+                token_threshold=0,  # 强制触发（手动压缩不受自动阈值限制）
+                precomputed_tokens=before_tokens,  # 空历史时 0>0 自然短路
+            ))
+        except RuntimeError:
+            # 已在事件循环内（嵌入环境）——降级 snip（对齐 /init 的桥接模式）
+            console.print("[yellow]事件循环冲突，降级为 snip_compact（无损裁剪）[/yellow]")
+        except Exception as e:
+            console.print(f"[red]LLM 压缩失败：[/red]{e}")
+
+    if compacted:
+        # L4 成功：同步 agent 状态（对齐 _run_context_compression 收尾）
+        _sync_history_after_compact(agent, new_messages)
+        state = getattr(agent, "_compress_session_state", None)
+        if state is not None:
+            try:
+                state.record_llm_compact()
+            except Exception:
+                pass
+        after_tokens = estimate_message_tokens(agent.conversation_history)
+        _print_compact_delta(
+            before_msgs, before_tokens,
+            len(agent.conversation_history), after_tokens,
+            mode="llm_compact（L4 摘要）",
+        )
+        return True
+
+    # 降级路径：snip_compact（无损，threshold=0 强制触发）
+    new_messages, snipped = snip_compact(
+        history, keep_first=3, keep_last=10, threshold=0,
+    )
+    if not snipped:
+        console.print("[yellow]历史太短，无需压缩[/yellow]")
+        return True
+    console.print("[yellow]LLM 不可用，已降级 snip_compact（无损裁剪）[/yellow]")
+    _sync_history_after_compact(agent, new_messages)
+    after_tokens = estimate_message_tokens(agent.conversation_history)
+    _print_compact_delta(
+        before_msgs, before_tokens,
+        len(agent.conversation_history), after_tokens,
+        mode="snip_compact（无损）",
+    )
+    return True
+
+
+def _handle_context_cli(args: str, rt) -> bool:
+    """/context 显示当前上下文 token 分布表（CCAR11 Task 2）。
+
+    Rich Table 展示：
+    - role 分布（system/user/assistant/tool 计数）
+    - estimate_message_tokens 估算总量
+    - 压缩会话状态（current_turn / llm_compact_count / reactive_count）
+    - _pending_ephemeral_messages 长度（待注入的临时消息）
+    """
+    from collections import Counter
+
+    from agent.context_compressor import estimate_message_tokens
+
+    agent = getattr(rt, "agent", None)
+    history = list(getattr(agent, "conversation_history", None) or []) \
+        if agent is not None else []
+    role_counts = Counter(m.get("role", "?") for m in history)
+    total_tokens = estimate_message_tokens(history)
+
+    table = Table(title="Context 状态")
+    table.add_column("指标", style="cyan")
+    table.add_column("值", justify="right")
+    table.add_row("消息数", str(len(history)))
+    for role in ("system", "user", "assistant", "tool"):
+        table.add_row(f"  role={role}", str(role_counts.get(role, 0)))
+    other = sum(
+        v for k, v in role_counts.items()
+        if k not in ("system", "user", "assistant", "tool")
+    )
+    if other:
+        table.add_row("  role=其他", str(other))
+    table.add_row("估算 tokens", f"~{total_tokens}")
+
+    state = getattr(agent, "_compress_session_state", None) if agent else None
+    if state is not None:
+        table.add_row("current_turn", str(getattr(state, "current_turn", 0)))
+        table.add_row("llm_compact_count", str(getattr(state, "llm_compact_count", 0)))
+        table.add_row("reactive_count", str(getattr(state, "reactive_count", 0)))
+    else:
+        table.add_row("压缩会话状态", "未初始化")
+
+    pending = getattr(agent, "_pending_ephemeral_messages", None) if agent else None
+    table.add_row(
+        "pending_ephemeral",
+        str(len(pending)) if pending is not None else "0",
+    )
+    console.print(table)
     return True
 
 
