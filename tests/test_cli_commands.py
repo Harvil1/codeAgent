@@ -853,3 +853,153 @@ def test_help_contains_add_dir(tmp_path, capsys):
     _handle_command("/help", rt)
     out = capsys.readouterr().out
     assert "/add-dir" in out
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 5: /paste 剪贴板图片
+# ---------------------------------------------------------------------------
+
+def _fake_ps_run_factory(returncode: int, create_file: bool = True, exc: Exception = None):
+    """构造假的 subprocess.run（模拟 PowerShell 剪贴板读取）。
+
+    - 从 PowerShell 命令文本里抠出 $img.Save('<path>') 的输出路径
+    - create_file=True 时预创建该文件（模拟保存成功）
+    - exc 非 None 时直接抛（模拟 PowerShell 不存在/超时等）
+    """
+    saved_paths = []
+
+    def _fake_run(cmd, **kwargs):
+        if exc is not None:
+            raise exc
+        ps_text = cmd[-1]
+        out_path = Path(ps_text.split("$img.Save('")[1].split("')")[0])
+        if create_file:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"\x89PNG-fake")
+        saved_paths.append(out_path)
+        r = MagicMock()
+        r.returncode = returncode
+        return r
+
+    _fake_run.saved_paths = saved_paths
+    return _fake_run
+
+
+def test_paste_saves_clipboard_image(tmp_path, capsys, monkeypatch):
+    """/paste 剪贴板有图片时保存到 <workspace>/.paste/img_*.png 并打印路径。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    from agent.workspace_context import workspace_cwd_context
+
+    fake_run = _fake_ps_run_factory(returncode=0, create_file=True)
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_mod.sys, "platform", "win32")
+
+    rt = _FakeRT(tmp_path)
+    with workspace_cwd_context(str(tmp_path)):
+        handled = _handle_command("/paste", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "已保存" in out
+    # 提示里包含保存路径 + image_analyze 引导
+    assert ".paste" in out
+    assert "image_analyze" in out
+    # 文件落在 workspace cwd 的 .paste/ 下（不是进程 cwd）
+    assert len(fake_run.saved_paths) == 1
+    saved = fake_run.saved_paths[0]
+    assert saved.parent == tmp_path / ".paste"
+    assert saved.name.startswith("img_")
+    assert saved.suffix == ".png"
+    assert saved.exists()
+
+
+def test_paste_no_image_in_clipboard(tmp_path, capsys, monkeypatch):
+    """PowerShell 退出码 2（剪贴板无图片）→ 提示而非报错。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    from agent.workspace_context import workspace_cwd_context
+
+    fake_run = _fake_ps_run_factory(returncode=2, create_file=False)
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_mod.sys, "platform", "win32")
+
+    rt = _FakeRT(tmp_path)
+    with workspace_cwd_context(str(tmp_path)):
+        handled = _handle_command("/paste", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "剪贴板中没有图片" in out
+
+
+def test_paste_fail_open_on_error(tmp_path, capsys, monkeypatch):
+    """PowerShell 抛异常（超时/不存在）→ fail-open 提示手动给路径，不崩。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    from agent.workspace_context import workspace_cwd_context
+
+    fake_run = _fake_ps_run_factory(
+        returncode=1, create_file=False,
+        exc=RuntimeError("powershell not found"),
+    )
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_mod.sys, "platform", "win32")
+
+    rt = _FakeRT(tmp_path)
+    with workspace_cwd_context(str(tmp_path)):
+        handled = _handle_command("/paste", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "粘贴失败" in out
+    assert "手动" in out  # 引导手动保存后给路径
+
+
+def test_paste_fail_open_on_returncode(tmp_path, capsys, monkeypatch):
+    """PowerShell 退出码非 0/2 且文件未生成 → 同样 fail-open 提示。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    from agent.workspace_context import workspace_cwd_context
+
+    fake_run = _fake_ps_run_factory(returncode=1, create_file=False)
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_mod.sys, "platform", "win32")
+
+    rt = _FakeRT(tmp_path)
+    with workspace_cwd_context(str(tmp_path)):
+        handled = _handle_command("/paste", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "粘贴失败" in out
+
+
+def test_paste_non_windows_fail_open(tmp_path, capsys, monkeypatch):
+    """非 Windows 平台直接走 fail-open 提示（不调用 PowerShell）。"""
+    import cli as cli_mod
+    from cli import _handle_command
+    from agent.workspace_context import workspace_cwd_context
+
+    called = []
+
+    def _spy_run(cmd, **kwargs):
+        called.append(cmd)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", _spy_run)
+    monkeypatch.setattr(cli_mod.sys, "platform", "linux")
+
+    rt = _FakeRT(tmp_path)
+    with workspace_cwd_context(str(tmp_path)):
+        handled = _handle_command("/paste", rt)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "粘贴失败" in out or "Windows" in out
+    assert called == []  # 非 Windows 不启动 PowerShell 子进程
+
+
+def test_help_contains_paste(tmp_path, capsys):
+    """/help 帮助文本包含 /paste。"""
+    from cli import _handle_command
+
+    rt = _FakeRT(tmp_path)
+    _handle_command("/help", rt)
+    out = capsys.readouterr().out
+    assert "/paste" in out

@@ -23,6 +23,7 @@ import contextvars
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -1627,6 +1628,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/add-dir":
         return _handle_add_dir_cli(args, rt)
 
+    # === CCAR11 Task 5: /paste 读剪贴板图片存 .paste/ ===
+    if name == "/paste":
+        return _handle_paste_command(args, rt)
+
     return False
 
 
@@ -1824,6 +1829,7 @@ def _show_help():
         "[cyan]/doctor[/cyan]    自诊断 6 项（配置/API key/目录/依赖）\n"
         "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
         "[cyan]/add-dir[/cyan]   追加 safe_path 写白名单（无参数列出；运行时生效 + 持久化到 config）\n"
+        "[cyan]/paste[/cyan]     保存剪贴板图片到 .paste/（Windows；之后在消息中引用路径让 AI 分析）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",
@@ -3006,6 +3012,58 @@ def _handle_add_dir_cli(args: str, rt) -> bool:
             console.print("[dim]（该目录已在 settings.json 中，未重复写入）[/dim]")
     else:
         console.print(f"[yellow]已在白名单中（幂等跳过）:[/yellow] {target}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CCAR11 Task 5 NEW: /paste 剪贴板图片保存
+# ---------------------------------------------------------------------------
+
+def _handle_paste_command(args: str, rt) -> bool:
+    """/paste：读剪贴板图片保存到 <workspace>/.paste/（CCAR11 Task 5）。
+
+    小而美的 Windows 快捷路径：PowerShell Clipboard API 读图 → 存 PNG →
+    打印路径。只保存不自动分析（用户可能想配文字再发给 AI）。
+
+    fail-open 约束（设计如此，不是 bug）：
+    - 非 Windows 平台不启动子进程，直接提示手动保存
+    - PowerShell 失败/超时/剪贴板无图片 → 提示手动给路径，不崩
+    - 保存路径走 get_workspace_cwd()（worktree 子代理 context 隔离）
+    """
+    from datetime import datetime
+
+    from agent.workspace_context import get_workspace_cwd
+
+    paste_dir = Path(get_workspace_cwd()) / ".paste"
+    out = paste_dir / f"img_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$img = [System.Windows.Forms.Clipboard]::GetImage(); "
+        "if ($img -eq $null) { exit 2 } "
+        f"$img.Save('{out}'); exit 0"
+    )
+    try:
+        if sys.platform != "win32":
+            # 非 Windows 没有 PowerShell Clipboard，直接走 fail-open 提示
+            raise RuntimeError("仅支持 Windows（其他平台请手动保存图片后给路径）")
+        paste_dir.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, timeout=15,
+        )
+        if r.returncode == 2:
+            console.print("[yellow]剪贴板中没有图片[/yellow]")
+            return True
+        if r.returncode != 0 or not out.exists():
+            raise RuntimeError(f"PowerShell 退出码 {r.returncode}")
+        console.print(
+            f"[green]已保存剪贴板图片:[/green] {out}\n"
+            "[dim]在消息中引用该路径即可让 AI 分析（image_analyze）[/dim]"
+        )
+    except Exception as e:
+        console.print(
+            f"[yellow]粘贴失败（{e}）。可手动保存图片后在消息中给路径。[/yellow]"
+        )
     return True
 
 
