@@ -1311,33 +1311,38 @@ def _handle_handoff_command(args: str, rt) -> bool:
 
 
 def cli_plan_approval_callback(plan: str) -> tuple:
-    """Plan Mode 审批回调：打印计划 + 询问 y/N/edit。
+    """Plan Mode 审批回调：打印计划 + 询问 y/N/edit/c。
 
-    返回 (approved: bool, feedback: str)。
-    - y/yes → (True, "")
-    - edit → 收集一行 feedback → (False, feedback)
-    - 其他（n/空/任意）→ (False, "用户拒绝")
+    返回 (approved: bool, feedback: str, clear_context: bool)。
+    - y/yes → (True, "", False)  批准，保留上下文继续执行
+    - c/clear → (True, "", True) 批准并清空上下文执行（T9：调研过程的消息
+      全部丢弃只留计划指令，执行阶段不烧调研 token；完整历史仍在
+      transcripts/会话库可查）
+    - edit → 收集一行 feedback → (False, feedback, False)
+    - 其他（n/空/任意）→ (False, "用户拒绝", False)
     """
     print("\n" + "=" * 60)
     print("Agent 提交了以下计划，请审批：")
     print("=" * 60)
     print(plan)
     print("=" * 60)
-    print("\n批准？[y/N/edit]")
+    print("\n批准？[y=批准 / c=批准并清空上下文执行 / N=拒绝 / edit=修订]")
     try:
         choice = input("> ").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        return False, "用户中断输入"
+        return False, "用户中断输入", False
     if choice in ("y", "yes"):
-        return True, ""
+        return True, "", False
+    if choice in ("c", "clear"):
+        return True, "", True
     if choice == "edit":
         print("请输入修订建议（单行）：")
         try:
             feedback = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
-            return False, "用户中断输入"
-        return False, feedback or "用户未输入修订建议"
-    return False, "用户拒绝（未提供原因）"
+            return False, "用户中断输入", False
+        return False, feedback or "用户未输入修订建议", False
+    return False, "用户拒绝（未提供原因）", False
 
 
 def _handle_command(cmd: str, rt: RuntimeContext) -> bool:

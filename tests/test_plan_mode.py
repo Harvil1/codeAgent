@@ -422,16 +422,17 @@ def test_cli_plan_approval_callback_approve_with_y():
     """输入 y → 批准。"""
     from cli import cli_plan_approval_callback
     with patch("builtins.input", side_effect=["y"]):
-        approved, feedback = cli_plan_approval_callback("我的计划")
+        approved, feedback, clear = cli_plan_approval_callback("我的计划")
     assert approved is True
     assert feedback == ""
+    assert clear is False  # T9：y 不清上下文
 
 
 def test_cli_plan_approval_callback_reject_with_n():
     """输入 n/空 → 拒绝。"""
     from cli import cli_plan_approval_callback
     with patch("builtins.input", side_effect=["n"]):
-        approved, feedback = cli_plan_approval_callback("我的计划")
+        approved, feedback, _clear = cli_plan_approval_callback("我的计划")
     assert approved is False
 
 
@@ -439,7 +440,7 @@ def test_cli_plan_approval_callback_edit_collects_feedback():
     """输入 edit → 收集 feedback。"""
     from cli import cli_plan_approval_callback
     with patch("builtins.input", side_effect=["edit", "步骤 3 改成 X"]):
-        approved, feedback = cli_plan_approval_callback("我的计划")
+        approved, feedback, _clear = cli_plan_approval_callback("我的计划")
     assert approved is False
     assert feedback == "步骤 3 改成 X"
 

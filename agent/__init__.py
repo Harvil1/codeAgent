@@ -2000,6 +2000,32 @@ class AIAgent:
         self._update_failure_streak(tool_content)
         return tool_content
 
+    def _apply_post_plan_clear(self, plan_text: str) -> None:
+        """T9（核心机制对齐第 9 项）：批准后清空上下文执行。
+
+        - conversation_history 截断为一条 <post_plan_brief> user 消息
+          （含计划全文 + "开始执行"指令），调研阶段的对话从 LLM 上下文移除
+        - system prompt 的 context 层重建（invalidate_system_prompt，
+          stable 段保留 → prompt cache 仍命中 stable）
+        - 会话库 / transcripts 落盘不动（完整调研记录可查、可恢复——
+          只清 LLM 上下文，不做不可逆删除）
+
+        fail-open：任何异常只 log，history 保持现状（不清空优于清错）。
+        """
+        try:
+            brief = (
+                "<post_plan_brief>\n"
+                "用户刚批准了以下计划。调研阶段的对话已清空（执行阶段专注执行，"
+                "省 token），从现在开始按计划执行。\n\n"
+                f"{plan_text}\n\n"
+                "</post_plan_brief>"
+            )
+            self.conversation_history = [{"role": "user", "content": brief}]
+            self.invalidate_system_prompt()
+            logger.info("T9: post-plan 清空上下文执行，history 截断为计划 brief")
+        except Exception as e:
+            logger.warning("T9: post-plan 清空失败（fail-open 保留现状）: %s", e)
+
     def _maybe_handle_plan_approval(self, tc, result):
         """如果 tool 结果是 plan_approval_required，跑审批回调并返回最终 content。
 
@@ -2015,9 +2041,18 @@ class AIAgent:
             return result
 
         plan_text = result_data.get("plan", "")
+        clear_context = False
         try:
             if self.plan_approval_callback is not None:
-                approved, feedback = self.plan_approval_callback(plan_text)
+                cb_result = self.plan_approval_callback(plan_text)
+                # T9：三元组 (approved, feedback, clear_context)；
+                # 二元组向后兼容（clear_context 默认 False）
+                if isinstance(cb_result, tuple) and len(cb_result) >= 3:
+                    approved, feedback, clear_context = (
+                        cb_result[0], cb_result[1], cb_result[2],
+                    )
+                else:
+                    approved, feedback = cb_result
             else:
                 approved, feedback = True, ""
         except Exception as cb_exc:
@@ -2029,6 +2064,18 @@ class AIAgent:
             self.plan_mode = False
             # T2：记录已批准计划全文（compact 后恢复用）
             self._last_approved_plan = plan_text
+            # T9：清空上下文执行——history 截断为计划指令，调研消息全部丢弃
+            if clear_context and plan_text.strip():
+                self._apply_post_plan_clear(plan_text)
+                return json.dumps({
+                    "plan_approved": True,
+                    "context_cleared": True,
+                    "message": (
+                        "用户已批准计划并清空上下文执行。历史已截断为计划指令"
+                        "（完整调研记录在会话库/transcripts 可查），现在开始执行："
+                        "用 task_create 列出步骤，每步完成调 task_complete。"
+                    ),
+                }, ensure_ascii=False)
             return json.dumps({
                 "plan_approved": True,
                 "message": "用户已批准计划。现在可以开始执行：用 task_create 列出步骤，每步完成调 task_complete，依赖关系用 blocked_by。",
