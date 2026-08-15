@@ -1026,7 +1026,9 @@ class PermissionChecker:
 
         # 3.1 会话缓存命中：目标路径在已批准的写入根目录下 → 放行
         # （relative_to 对相等路径也成立，目录本身命中同样放行）
-        for approved_root in self._approved_write_roots:
+        # 迭代副本：主线程审批 .add() 与 async 子代理 daemon 线程并发迭代
+        # 会抛 "Set changed size during iteration"（final review Minor）
+        for approved_root in tuple(self._approved_write_roots):
             try:
                 resolved.relative_to(approved_root)
                 return PermissionResult(True, "已批准（写入根目录）", "approval")
