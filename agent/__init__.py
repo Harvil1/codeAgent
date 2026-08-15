@@ -294,15 +294,6 @@ class AIAgent:
         # === P2c-T4 NEW: cron 调度器 ===
         self.cron_scheduler = cron_scheduler
 
-        # 缓存 memory 索引（会话内 frozen，保护 prompt cache）
-        self._cached_memory_index = ""
-        if self.memory_store:
-            try:
-                # 检索用完整索引（不受注入截断影响，能按需检索全部记忆）
-                self._cached_memory_index = self.memory_store.full_index_text()
-            except Exception as e:
-                logger.warning("缓存 memory 索引失败: %s", e)
-
         # === P4a-T6 NEW: team 消息总线 + 协调器 ===
         self.team_bus = team_bus
         self.team_coordinator = team_coordinator
