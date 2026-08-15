@@ -1,7 +1,7 @@
 """子代理 sidechain transcript 持久化（借鉴 claude-code-main）。
 
 存储：
-- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 子代理最终响应（on_response 触发，目前一条/会话）
+- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 子代理轨迹（CCAR13 Task 3 起：user 指令 + 每轮 assistant 文本）
 - ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据（agent_id / agent_type / parent_session / status / created_at / updated_at）
 
 agent_id 格式：sub-{parent_session_id 前 8 位}-{YYYYMMDD-HHMMSS}-{random8}
@@ -9,9 +9,11 @@ agent_id 格式：sub-{parent_session_id 前 8 位}-{YYYYMMDD-HHMMSS}-{random8}
 
 status：running / completed / failed / interrupted
 
-⚠️ 当前 transcript 只落盘子代理的最终 assistant 响应（on_response 回调），
-   不是完整对话流（user/tool/中间 assistant）。
-   Phase 2 计划：在主循环每轮追加，支持 subagent_resume 工具跨会话恢复。
+CCAR13 Task 3（补 CCAR5-I Phase 2）：transcript 每轮 append——_run_child 给子代理
+挂独立 HookRegistry 的 POST_LLM_CALL 程序式 hook，每次 LLM 响应后落盘 assistant
+文本（旧版 on_response 只记最终响应，中断的子代理无轨迹可 resume）。
+语义：轨迹 = user 指令 + 每轮 assistant 文本；tool_calls / tool result 不落盘
+（无配对 result 会造孤儿消息 → API 400），resume 的 initial_messages 配对天然完整。
 
 设计约定（CLAUDE.md）：
 - **fail-open 硬要求**：所有持久化操作 try/except，绝不让主流程崩

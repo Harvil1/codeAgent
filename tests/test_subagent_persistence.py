@@ -16,6 +16,7 @@ import json
 import time
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -361,9 +362,6 @@ class TestEndToEndRunChild:
         captured_on_response = []
 
         async def chat_side_effect(msg):
-            # 模拟 on_response 回调（_run_child 传给 AIAgent 的）
-            # AIAgent 构造时接收 on_response；在 chat 中会调用
-            # 我们这里不直接跑 AIAgent 内部，只验证 on_response 被传入了
             return "子代理执行成功"
 
         mock_child.chat.side_effect = chat_side_effect
@@ -395,11 +393,13 @@ class TestEndToEndRunChild:
         assert meta["agent_type"] in ("general-purpose", "leaf")
         assert "completed_at" in meta
 
-        # 3. 验证 AIAgent 构造时收到了 on_response 回调
+        # 3. 验证 AIAgent 构造时收到了独立 hooks_registry（CCAR13 Task 3：
+        #    轮级 transcript 走 POST_LLM_CALL 程序式 hook，不再用 on_response）
         assert mock_ctor.called
         _, kwargs = mock_ctor.call_args
-        assert "on_response" in kwargs
-        assert callable(kwargs["on_response"])
+        assert kwargs.get("hooks_registry") is not None
+        # on_response 已删除（每轮已记，避免双写）
+        assert not kwargs.get("on_response")
 
     def test_transcript_persisted_on_failure(self, isolated_sessions_dir, monkeypatch):
         """_run_child 异常时 status=failed。"""
@@ -442,7 +442,11 @@ class TestEndToEndRunChild:
         assert meta["status"] == "failed"
 
     def test_on_response_appends_transcript(self, isolated_sessions_dir, monkeypatch):
-        """on_response 回调把 message 写入 transcript。"""
+        """（CCAR13 Task 3 改写）轮级 hook 把每轮 assistant 文本写入 transcript。
+
+        旧版 on_response 只记最终响应；现在子代理拿独立 hooks_registry，
+        每轮 LLM 响应（POST_LLM_CALL）都会 append。
+        """
         import agent.subagent_persistence as sp
 
         generated_ids = []
@@ -454,7 +458,7 @@ class TestEndToEndRunChild:
             return aid
         monkeypatch.setattr(sp, "generate_agent_id", capture_gen)
 
-        # Mock AIAgent，构造时拿到 on_response 并手动调一下
+        # Mock AIAgent，构造时拿到 hooks_registry
         mock_child = MagicMock()
         mock_child.llm_client = MagicMock()
         mock_child.model = "fake"
@@ -475,21 +479,210 @@ class TestEndToEndRunChild:
                     from tools.delegate_tool import _run_child
                     _run_child("test", "", "leaf")
 
-        # 手动调 on_response（模拟 child 内部调用）
+        # 从构造参数拿子代理的 hooks_registry，模拟 2 轮 LLM 响应
+        # （真实流程中 AIAgent._run_post_llm_call_hook 每次 LLM 调用后触发）
         _, kwargs = mock_ctor.call_args
-        on_response = kwargs.get("on_response")
-        assert on_response is not None
+        hooks = kwargs.get("hooks_registry")
+        assert hooks is not None
+
+        def _resp(text):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content=text, tool_calls=None),
+                )],
+            )
+
+        out1 = hooks.run_post_llm_call(_resp("first response"))
+        out2 = hooks.run_post_llm_call(_resp("second response"))
+        # hook 不修改 response（返回 None 表示不修改，run 链保持原对象）
+        assert out1 is not None and out2 is not None
 
         child_agent_id = generated_ids[0]
-        # 模拟两条 message
-        on_response("first response")
-        on_response("second response")
-
-        # 验证 transcript 文件有两条
         transcript = sp.load_transcript(child_agent_id)
-        # on_response 回调签名是 on_response(final_content: str)
-        # 它内部构造 message dict 并 append
-        assert len(transcript) == 2
+        # user 指令 + 2 轮 assistant = 3 条
+        assert len(transcript) == 3
+        assert transcript[0]["role"] == "user"
+        assert transcript[1]["content"] == "first response"
+        assert transcript[2]["content"] == "second response"
+
+
+# ---------------------------------------------------------------------------
+# CCAR13 Task 3: 轮级 transcript（POST_LLM_CALL 程序式 hook，每轮 append）
+# ---------------------------------------------------------------------------
+
+def _spawn_mock_child(monkeypatch, goal="test goal", context=""):
+    """公共 helper：起 mock _run_child，返回 (agent_id, mock_ctor, mock_child)。
+
+    mock AIAgent 不真正跑 LLM；轮级行为由测试拿 ctor kwargs 的
+    hooks_registry 手动触发（模拟 AIAgent._run_post_llm_call_hook）。
+    """
+    import agent.subagent_persistence as sp
+
+    generated_ids = []
+    orig_gen = sp.generate_agent_id
+
+    def capture_gen(parent_session_id=""):
+        aid = orig_gen(parent_session_id)
+        generated_ids.append(aid)
+        return aid
+    monkeypatch.setattr(sp, "generate_agent_id", capture_gen)
+
+    mock_child = MagicMock()
+    mock_child.llm_client = MagicMock()
+    mock_child.model = "fake"
+
+    async def chat_side_effect(msg):
+        return "子代理执行成功"
+    mock_child.chat.side_effect = chat_side_effect
+
+    with patch("agent.AIAgent", return_value=mock_child) as mock_ctor:
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "fake"}):
+            with patch("config.load_config", return_value={
+                "model": {
+                    "name": "fake-model",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                    "base_url": "http://fake",
+                }
+            }):
+                from tools.delegate_tool import _run_child
+                _run_child(goal, context, "leaf", session_id="parent-session-1234")
+    return generated_ids[0], mock_ctor, mock_child
+
+
+def _llm_resp(content, tool_calls=None):
+    """构造 OpenAI 风格的 mock LLM response（POST_LLM_CALL hook 的入参）。"""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content, tool_calls=tool_calls),
+        )],
+    )
+
+
+class TestPerTurnTranscript:
+    """CCAR13 Task 3：subagent transcript 每轮 append（完整轨迹，可 resume 中断代理）。"""
+
+    def test_transcript_records_multiple_turns(self, isolated_sessions_dir, monkeypatch):
+        """mock 2 轮 LLM 响应 → transcript ≥3 条（user + 2 assistant）。"""
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs.get("hooks_registry")
+        assert hooks is not None, "子代理应拿到独立 hooks_registry"
+
+        hooks.run_post_llm_call(_llm_resp("第一轮：我先查一下文件"))
+        hooks.run_post_llm_call(_llm_resp("最终结果：任务完成"))
+
+        transcript = sp.load_transcript(aid)
+        assert len(transcript) >= 3
+        # 第 1 条是 user 指令（轨迹开头，resume 的对话起点）
+        assert transcript[0]["role"] == "user"
+        assert "test goal" in transcript[0]["content"]
+        assistants = [m for m in transcript if m["role"] == "assistant"]
+        assert len(assistants) == 2
+        assert assistants[0]["content"] == "第一轮：我先查一下文件"
+        assert assistants[1]["content"] == "最终结果：任务完成"
+
+    def test_user_directive_with_context(self, isolated_sessions_dir, monkeypatch):
+        """带 context 时 user 指令含上下文（对齐子代理 directive 格式）。"""
+        import agent.subagent_persistence as sp
+        aid, _, _ = _spawn_mock_child(
+            monkeypatch, goal="查日志", context="项目是 HermesAgent")
+
+        transcript = sp.load_transcript(aid)
+        assert transcript[0]["role"] == "user"
+        assert "查日志" in transcript[0]["content"]
+        assert "HermesAgent" in transcript[0]["content"]
+
+    def test_tool_calls_only_turn_not_appended(self, isolated_sessions_dir, monkeypatch):
+        """纯 tool_calls 轮（content=None）不 append——没有文本可记。"""
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs["hooks_registry"]
+
+        before = len(sp.load_transcript(aid))
+        hooks.run_post_llm_call(_llm_resp(None, tool_calls=[{"id": "call_1"}]))
+        hooks.run_post_llm_call(_llm_resp("", tool_calls=[{"id": "call_2"}]))
+        after = sp.load_transcript(aid)
+
+        assert len(after) == before  # 无文本轮不产生记录
+        # 关键契约：轨迹永不带 tool_calls（无配对 tool result 会造孤儿 → API 400）
+        assert all("tool_calls" not in m for m in after)
+
+    def test_anthropic_list_content_blocks(self, isolated_sessions_dir, monkeypatch):
+        """Anthropic 风格 content blocks（list）只拼 text 块。"""
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs["hooks_registry"]
+
+        hooks.run_post_llm_call(_llm_resp([
+            {"type": "text", "text": "先分析"},
+            {"type": "tool_use", "id": "tu_1"},
+            {"type": "text", "text": "再执行"},
+        ]))
+
+        assistants = [m for m in sp.load_transcript(aid) if m["role"] == "assistant"]
+        assert len(assistants) == 1
+        assert "先分析" in assistants[0]["content"]
+        assert "再执行" in assistants[0]["content"]
+
+    def test_hook_fail_open_on_append_error(self, isolated_sessions_dir, monkeypatch):
+        """append_message 抛异常时 hook 不崩、不修改 response。"""
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs["hooks_registry"]
+
+        def _raise(agent_id, message):
+            raise OSError("disk full")
+        monkeypatch.setattr(sp, "append_message", _raise)
+
+        resp = _llm_resp("这轮写入会失败")
+        out = hooks.run_post_llm_call(resp)  # 不应抛
+        assert out is resp  # response 原样返回
+
+    def test_malformed_response_fail_open(self, isolated_sessions_dir, monkeypatch):
+        """畸形 response（choices 空/属性缺失）安全跳过。"""
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs["hooks_registry"]
+
+        before = len(sp.load_transcript(aid))
+        hooks.run_post_llm_call(SimpleNamespace(choices=[]))
+        hooks.run_post_llm_call(SimpleNamespace(choices=None))
+        hooks.run_post_llm_call(object())  # 任意怪对象
+        assert len(sp.load_transcript(aid)) == before
+
+    def test_final_response_no_double_write(self, isolated_sessions_dir, monkeypatch):
+        """on_response 路径已删——最终响应只由轮级 hook 记一次。
+
+        mock chat 返回后（真实场景 on_response 曾在这里补记最终响应），
+        轮级 hook 再触发最终轮，transcript 中该文本只出现一次。
+        """
+        import agent.subagent_persistence as sp
+        aid, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        assert not kwargs.get("on_response"), "on_response 应已从 _run_child 移除"
+
+        hooks = kwargs["hooks_registry"]
+        hooks.run_post_llm_call(_llm_resp("子代理执行成功"))
+
+        transcript = sp.load_transcript(aid)
+        contents = [m["content"] for m in transcript]
+        assert contents.count("子代理执行成功") == 1  # 不双写
+
+    def test_hooks_registry_not_shared_with_parent(self, isolated_sessions_dir, monkeypatch):
+        """子代理的 hooks_registry 是独立新建实例（不共享主 agent，零污染）。"""
+        from agent.hooks import HookEvent, HookRegistry
+        _, mock_ctor, _ = _spawn_mock_child(monkeypatch)
+        _, kwargs = mock_ctor.call_args
+        hooks = kwargs["hooks_registry"]
+        assert isinstance(hooks, HookRegistry)
+        # 只注册了 POST_LLM_CALL 一个程序式 hook（轮级 transcript），别的事件为空
+        assert len(hooks._hooks[HookEvent.POST_LLM_CALL]) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -1,66 +1,73 @@
-# CCAR11 Task 3 报告：/status + /doctor + /diff 三命令
+# CCAR13 Task 3 报告：subagent transcript 每轮 append（完整轨迹）
 
 **Status**: DONE
-**Date**: 2026-08-14
+**Date**: 2026-08-15
 
-## 实现内容
+## 机制选择（第一步 grep 结论 + 理由）
 
-### cli.py（修改）
-
-1. **`_handle_status_cli(args, rt)`** — Rich Table「Status 一览」，6 段每段独立 try（`_status_row` helper，段内异常 → 显示「读取失败：…」不影响其他段）：
-   - 主模型（`rt.config["model"]` name + provider）
-   - aux LLM（`rt.agent.aux_llm_router` 有无 → 已配置/未配置）
-   - goal（`rt.agent._goal_state`：objective 前 30 字 + status + iteration_count；无 → 「无 active goal」）
-   - 项目记忆键（`rt._statusline_project_key`，空 → 提示）
-   - MCP：`agent.mcp_client.get_mcp_manager()` 遍历 `_clients`，逐 server 打 is_connected（已连接/断开，带颜色）；空 → 「无已注册 server」
-   - 工具总数（`tools.registry.registry.list_all()` 长度）
-
-2. **`_handle_doctor_cli(args, rt)`** — 6 项检查，逐项独立 try/except，输出 `[green]✓[/green]` / `[red]✗[/red]` + 详情 + 汇总「N/6 项通过」：
-   1. `load_config()` 成功
-   2. API key env（`config["model"]["api_key_env"]`，缺省 `DEEPSEEK_API_KEY`，查 `os.environ`）
-   3. agent home 可写（`.doctor_probe` tmp 文件写删；home 取 `rt.home` 回退 `get_omnimate_home()`）
-   4. `.mcp.json` 解析（存在才查，`json.loads`；不存在 → 「未配置（跳过）」记 ✓）
-   5. 关键依赖 import（rich / httpx / openai 逐个 `importlib.import_module`）
-   6. sessions / skills 目录（`mkdir(parents=True, exist_ok=True)` 自动创建也算 ✓）
-
-3. **`_handle_diff_cli(args, rt)`** — 基于 `agent/checkpoint.py` 实际能力（读源码确认，未新建基建）：
-   - `rt.checkpoint_mgr` 为 None → 「本会话无 checkpoint 记录」
-   - `tracked_files()` 空 → 「本会话无文件改动记录」（附说明：write_file/str_replace 修改过的文件会出现在这里）
-   - 有记录 → 列改动文件（`M <path>`）+ `list_snapshots()` 快照数 + `/rewind` 提示
-
-4. **命令链接入**：`_handle_command` 三条 dispatch（紧跟 Task 2 的 /compact /context 之后）+ `/help` 帮助文本 3 行。
-
-## 依赖接口确认（先读再写，未猜）
-
-| 接口 | 实际 API |
+| grep 项 | 结论 |
 |---|---|
-| MCP manager | `agent/mcp_client.py:get_mcp_manager()` → `MCPManager._clients: Dict[str, MCPClient]`，client 有 `is_connected` 属性 |
-| checkpoint | `CheckpointManager.tracked_files()`（本会话编辑过的文件，去重排序）+ `list_snapshots()`；**无单文件操作类型记录**（只存 path），故 /diff 只标 `M`（modified），不虚构 add/delete |
-| API key env | `config.py:DEFAULT_CONFIG["model"]["api_key_env"] = "DEEPSEEK_API_KEY"` |
+| `on_response` 触发点 | `agent/__init__.py:2112`，仅 `run_conversation` 末尾一次，只拿 `final_content` |
+| `POST_LLM_CALL` payload | `agent/__init__.py:1083`（`_run_post_llm_call_hook`），主循环**每次 LLM 调用后**触发（流式/非流式汇合点之后），hook 收到完整 response 对象（`response.choices[0].message`） |
+| `_run_child` 的 `hooks_registry` | **未传** → 子代理拿 `None`。**不共享主 agent**（无污染风险） |
+| `mark_completed` 是否依赖 on_response | **不依赖**——`_run_child` try/finally 直接调（成功 `completed` / 异常 `failed`），删 on_response append 不破 completed 语义 |
 
-## 测试
+**选择：POST_LLM_CALL 方案（brief 首选）**。理由：
 
-`tests/test_cli_commands.py` 追加 9 个测试（照 `_FakeRT` 模式，git add -f）：
+1. grep 确认子代理 hooks_registry 不共享主 agent → brief 决策树允许注册；
+2. `HookRegistry()` 构造是纯内存的（声明式 hook 由 cli.py 的 hook_loader 加载，registry 本身不自动扫盘）→ 新建空实例零副作用；
+3. 不改 AIAgent 签名，复用既有扩展点（对齐"核心是窄腰"）。
 
-- `test_status_basic` — 全字段断言（模型/goal 前 30 字/status/iter/项目键/MCP 双 server/工具段）
-- `test_status_no_goal_no_mcp` — 空 goal / 空 MCP 的提示路径
-- `test_status_section_failure_fail_open` — `_statusline_project_key` monkeypatch 成抛异常 property，断言其余段仍输出
-- `test_doctor_all_pass` — DEEPSEEK_API_KEY setenv → 「6/6」+「✓」
-- `test_doctor_missing_api_key` — delenv → 「✗」且非 6/6
-- `test_doctor_config_broken` — monkeypatch `config.load_config` 抛异常 → 第 1 项 ✗ 不崩
-- `test_diff_no_checkpoint` — 无 mgr → 提示
-- `test_diff_tracked_files` — fake mgr → 列文件 + 快照数
-- `test_help_contains_three_commands` — /help 含三命令
+**已知耦合（写进 CLAUDE.md 已知约束）**：走 `AIAgent._run_post_llm_call_hook`，受 `config["hooks"]["enabled"]` 门控（默认 True）。用户显式关 hooks 时轮级记录停摆（transcript 只剩开头 user 指令一条）。评估：hooks.enabled=False 本义是关 hook 系统，可接受；如未来要解耦，退化方案是 AIAgent 加 `on_turn` 参数（本次未做，避免不必要的核心改动）。
 
-全套回归：**2241 passed, 1 skipped**（无回归）。
+## 实现
 
-## 踩坑记录
+### `tools/delegate_tool.py`（_run_child）
 
-- rich 会把 `[status=active, iter=3]` 当 markup tag 吞掉（测试断言「active」失败发现）——值里的括号改用全角括号 `（status=…, iter=…）`。
-- `monkeypatch.setattr(_FakeRT, "_statusline_project_key", property(...))` 需 `raising=False`（_FakeRT 类本身无该属性，只有实例属性）。
+1. **user 指令开头 append（新增）**：transcript 初始化（write_metadata）后立刻 append `{"role":"user","content": goal 或 goal+"\n上下文: "+context}`。注：brief 说"既有"，实际 grep 发现旧版**没有** user append（transcript 只有一条最终 assistant 响应）——本轮补上，resume 才有对话起点。
+2. **轮级 hook（替换 on_response）**：构造子代理前新建 `HookRegistry()` + 注册程序式 `POST_LLM_CALL` hook `_on_llm_turn`：
+   - `_extract_turn_text`：None 安全提取 assistant 文本；Anthropic 风格 content blocks（list）只拼 `type=="text"` 块
+   - 有文本才 append `{"role":"assistant","content":text,"_ts":...}`，fail-open（异常吞掉），返回 `None` 不修改 response
+3. **子代理构造**：`on_response=_on_response_cb` → `hooks_registry=_child_hooks`（独立空实例）
+4. **删除** `_on_response_cb`（每轮已记最终轮，避免双写）
+
+### 关键语义决策：轨迹永不带 tool_calls
+
+POST_LLM_CALL 拿得到 LLM 响应但拿不到 tool result。若轨迹记录带 tool_calls 的 assistant 消息，resume 时 `initial_messages` 会出现孤儿 tool_calls（无配对 tool result）→ API 400（项目史上踩过）。因此轮级记录**只存文本 content**，resume 的 initial_messages 是纯 user/assistant 文本流，配对天然完整。`subagent_resume_tool._run_resume` 的 clean 字段过滤（含 tool_calls）天然兼容——轨迹里根本没有该键。
+
+### 文档同步
+
+- `agent/subagent_persistence.py` 模块 docstring：删"⚠️ 只落盘最终响应 / Phase 2 计划"，改写每轮语义
+- `CLAUDE.md`：更新 CCAR5-I 关键代码位置行 + CCAR10"轨迹边界"约束行（已过时的"中断代理无轨迹"改为新语义）
+
+## 测试（tests/test_subagent_persistence.py，TDD 先红后绿）
+
+新增 `TestPerTurnTranscript`（8 个）+ 公共 helper `_spawn_mock_child` / `_llm_resp`：
+
+| 测试 | 断言 |
+|---|---|
+| test_transcript_records_multiple_turns | 2 轮 LLM 响应 → transcript ≥3 条（user + 2 assistant），顺序/内容正确 |
+| test_user_directive_with_context | 带 context 时 user 指令含上下文 |
+| test_tool_calls_only_turn_not_appended | content=None/"" 的纯 tool_calls 轮不 append；全轨迹无 tool_calls 键 |
+| test_anthropic_list_content_blocks | content blocks 只拼 text 块 |
+| test_hook_fail_open_on_append_error | append 抛异常 → hook 不崩、response 原样返回 |
+| test_malformed_response_fail_open | choices 空/None/怪对象安全跳过 |
+| test_final_response_no_double_write | on_response 已删；最终轮文本只出现 1 次 |
+| test_hooks_registry_not_shared_with_parent | 独立 HookRegistry 实例，仅 1 个 POST_LLM_CALL hook |
+
+改写 2 个既有测试：
+
+- `test_transcript_persisted_on_success`：断言 on_response → 改为 hooks_registry 非 None + on_response 为空
+- `test_on_response_appends_transcript`：改写为轮级版（拿 ctor kwargs 的 hooks_registry 模拟 2 轮 → 3 条）
+
+## 验证
+
+- `tests/test_subagent_persistence.py` + `tests/test_subagent_resume.py`：51 passed（resume 闭环：完整轨迹作 initial_messages 跑绿，completed 标记语义不破）
+- 定向：delegation + hooks + persistence + resume = 132 passed
+- **全套：2432 passed, 1 skipped（207s）**
 
 ## Concerns
 
-1. `/doctor` 第 1 项 `load_config()` 读的是**真实磁盘配置**（rt.config 是 RuntimeContext 已加载的），测试用 monkeypatch 注入失败——生产语义是「重新加载一次确认配置文件没被改坏」，可接受。
-2. `/diff` 的操作类型只有 `M`（checkpoint 只存 path，无 add/delete 语义）——brief 明确「API 不满足列文件清单就够」，未新建基建。
-3. `/status` 的 MCP 段直接读 `mgr._clients`（带 lock 的 `servers` property 只给名字）——用 `dict(...)` 拷贝快照，避免迭代期间并发变更；`tools/mcp_tool.py` 内部同样直接访问 `_clients`，属既有惯例。
+1. **hooks.enabled 耦合**（上述，已写进 CLAUDE.md 约束；如需彻底解耦留 AIAgent.on_turn 退化方案）
+2. **给子代理传 registry 的表面变化**：子代理从此 hooks_registry 非 None——空 registry 对其余 26 种事件全是 no-op；`auto_heartbeat` 会注册但其 OMNIMATE_KANBAN_TASK env 门控不满足时 no-op；trace/声明式 hook 均不加载。全套测试无回归佐证。
+3. **多轮连续 assistant 消息**：resume 时 initial_messages 可能出现连续 assistant（中间轮无 user/tool 间隔），OpenAI 兼容 API 允许；Anthropic 格式也未报错（resume 测试全绿）。如未来 API 挑剔，可在 _run_resume 里合并相邻 assistant。

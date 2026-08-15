@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -574,7 +575,15 @@ def _run_child(
                 "parent_session_id": kwargs.get("session_id", ""),
                 "description": f"{goal[:100]}",
                 "status": "running",
-                "created_at": __import__("time").time(),
+                "created_at": time.time(),
+            })
+            # === CCAR13 Task 3: user 指令先进 transcript（轨迹开头）===
+            # 真正中断的子代理 resume 时，原始指令是对话起点。
+            from agent.subagent_persistence import append_message as _sp_append
+            _sp_append(_child_agent_id, {
+                "role": "user",
+                "content": f"{goal}\n上下文: {context}" if context else goal,
+                "_ts": time.time(),
             })
             logger.debug("Task I: 子代理 transcript 持久化启用: %s", _child_agent_id)
         except Exception as e:
@@ -891,23 +900,58 @@ def _run_child(
                             f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
                         )
 
-        # === Task I: on_response 回调把每轮 message 追加到 transcript ===
-        def _on_response_cb(final_content: str):
-            """子代理每轮响应的回调（写入 sidechain transcript）。
-
-            fail-open：写盘失败不影响子代理正常返回。
-            """
-            if not _child_agent_id:
-                return
+        # === CCAR13 Task 3: 每轮 transcript 落盘（POST_LLM_CALL 程序式 hook）===
+        # 机制选择（grep 结论）：子代理的 hooks_registry 不共享主 agent
+        # （此前 _run_child 未传，child 拿 None）→ 新建独立空 HookRegistry
+        # 注册程序式 hook，零污染主 agent 的 registry。
+        # 语义：轨迹 = user 指令 + 每轮 assistant 文本；tool_calls / tool result
+        # 不落盘（POST_LLM_CALL 只拿得到 LLM 响应；带 tool_calls 无配对 result
+        # 会造孤儿消息 → API 400）。resume 时 initial_messages 是纯 user/assistant
+        # 文本流，配对天然完整。
+        # 已知耦合：走 AIAgent._run_post_llm_call_hook，受 config["hooks"]["enabled"]
+        # 门控（默认 True）；用户显式关 hooks 会停轮级记录（只留 user 指令一条）。
+        _child_hooks = None
+        if _child_agent_id:
             try:
-                from agent.subagent_persistence import append_message
-                append_message(_child_agent_id, {
-                    "role": "assistant",
-                    "content": final_content,
-                    "_ts": __import__("time").time(),
-                })
-            except Exception:
-                pass  # fail-open
+                from agent.hooks import HookRegistry
+
+                def _extract_turn_text(response):
+                    """从 LLM 响应提取 assistant 文本（None 安全，格式兼容）。"""
+                    try:
+                        msg = response.choices[0].message
+                    except Exception:
+                        return None
+                    content = getattr(msg, "content", None)
+                    if isinstance(content, list):
+                        # Anthropic 风格 content blocks → 只拼 text 块
+                        parts = [
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        ]
+                        content = "\n".join(p for p in parts if p)
+                    return content or None
+
+                def _on_llm_turn(response):
+                    """每轮 LLM 响应后 append assistant 文本（fail-open）。"""
+                    try:
+                        text = _extract_turn_text(response)
+                        if text:
+                            from agent.subagent_persistence import append_message
+                            append_message(_child_agent_id, {
+                                "role": "assistant",
+                                "content": text,
+                                "_ts": time.time(),
+                            })
+                    except Exception:
+                        pass  # fail-open：落盘失败不影响子代理
+                    return None  # 不修改 response
+
+                _child_hooks = HookRegistry()
+                _child_hooks.register_post_llm_call(_on_llm_turn)
+            except Exception as e:
+                logger.debug(
+                    "Task 3: 轮级 transcript hook 注册失败（fail-open）: %s", e)
+                _child_hooks = None
 
         child = AIAgent(
             base_url=base_url,
@@ -924,7 +968,9 @@ def _run_child(
             config=child_config,
             memory_store=child_memory_store,
             initial_messages=child_initial_messages,
-            on_response=_on_response_cb,  # Task I: transcript 持久化 hook
+            # CCAR13 Task 3: 轮级 transcript 持久化（独立空 registry + POST_LLM_CALL
+            # 程序式 hook，每轮 append；on_response 最终响应 append 已删避免双写）
+            hooks_registry=_child_hooks,
             omit_project_memory=bool(custom_def.omit_claude_md) if custom_def else False,
         )
 
