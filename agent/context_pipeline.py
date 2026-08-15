@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional, Tuple
 
 from agent.context_compressor import (
@@ -630,6 +631,24 @@ def apply_context_collapse(
     return new_messages, True
 
 
+def _build_compact_boundary(coverage: str, preserved: str) -> str:
+    """构造 compact boundary 标注（T8，对齐 CCB annotateBoundaryWithPreservedSegment）。
+
+    三要素：压缩时间 / 摘要覆盖范围 / 保留段范围，
+    外加"保留段精确 vs 摘要转述"提示——帮模型区分哪些内容是原文、
+    哪些是转述（引用具体数据/路径/命令输出时以保留段为准）。
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return (
+        "[compact_boundary]\n"
+        f"- 压缩时间：{ts}\n"
+        f"- 摘要覆盖范围：{coverage}（由 LLM 转述，细节可能有省略）\n"
+        f"- 保留段范围：{preserved}（原样保留，含工具结果原文）\n"
+        "- 注意：保留段内容是精确的，摘要内容是转述；"
+        "引用具体数据/路径/命令输出以保留段为准。\n"
+    )
+
+
 async def llm_compact(
     messages: list,
     *,
@@ -688,7 +707,12 @@ async def llm_compact(
         placeholder = {
             "role": "user",
             "content": (
-                f"[对话摘要（{from_idx}-{effective_up_to}）]\n\n"
+                _build_compact_boundary(
+                    f"消息 {from_idx}-{effective_up_to}",
+                    f"head（消息 0~{from_idx}，{len(head)} 条原文）"
+                    f"+ tail（消息 {effective_up_to}~，{len(tail)} 条原文）",
+                )
+                + f"\n[对话摘要（{from_idx}-{effective_up_to}）]\n\n"
                 f"{summary}\n\n"
                 "[以下是压缩段之后的对话，请继续]"
             ),
@@ -727,7 +751,11 @@ async def llm_compact(
     placeholder = {
         "role": "user",
         "content": (
-            "[之前的对话已自动总结]\n\n"
+            _build_compact_boundary(
+                f"conv 第 1~{len(to_summarize)} 条消息（共 {len(to_summarize)} 条）",
+                f"最近 {len(keep)} 条消息",
+            )
+            + "\n[之前的对话已自动总结]\n\n"
             f"{summary}\n\n"
             "[以下是最近的对话，请继续]"
         ),
