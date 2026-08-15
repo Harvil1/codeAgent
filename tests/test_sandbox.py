@@ -45,15 +45,28 @@ def test_is_available_macos_with_sandbox_exec():
         assert is_available() is True
 
 
-def test_is_available_windows_unsupported():
-    """Windows 平台 → False，reason 明确说不支持。"""
-    from agent.sandbox_runner import is_available, availability_reason
-    with patch("sys.platform", "win32"):
-        import agent.sandbox_runner as mod
+def test_is_available_windows_with_job_object(monkeypatch):
+    """CCAR12: Windows + win_job_object 可导入 → True（Job Object 模式）。"""
+    import agent.sandbox_runner as mod
+    monkeypatch.setattr(sys, "platform", "win32")
+    mod._availability_cache = None
+    assert mod.is_available() is True
+    assert mod.availability_reason() == ""
+
+
+def test_is_available_windows_import_fails_failopen(monkeypatch):
+    """CCAR12: Windows + win_job_object 导入失败 → False（fail-open）。"""
+    import agent.sandbox_runner as mod
+    monkeypatch.setattr(sys, "platform", "win32")
+    # sys.modules 塞 None 让 `from agent.win_job_object import ...` 抛 ImportError
+    monkeypatch.setitem(sys.modules, "agent.win_job_object", None)
+    mod._availability_cache = None
+    try:
+        assert mod.is_available() is False
+        reason = mod.availability_reason()
+        assert "win_job_object" in reason or "不可用" in reason
+    finally:
         mod._availability_cache = None
-        assert is_available() is False
-        reason = availability_reason()
-        assert "Windows" in reason or "不支持" in reason
 
 
 def test_is_available_caches_result(monkeypatch):
@@ -263,6 +276,8 @@ def test_terminal_with_sandbox_on_uses_argv(monkeypatch):
         return R()
 
     monkeypatch.setattr(sr, "is_available", lambda: True)
+    # CCAR12: 这些测试验证 bwrap/seatbelt argv 路径，强制关 Job Object 模式
+    monkeypatch.setattr(sr, "uses_job_object", lambda: False)
     monkeypatch.setattr(sr, "wrap_command",
                         lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
     monkeypatch.setattr(tt.subprocess, "run", fake_run)
@@ -369,6 +384,8 @@ def test_terminal_reads_sandbox_mode_from_default_checker(monkeypatch):
         set_default_checker(temp_checker)
 
         monkeypatch.setattr(sr, "is_available", lambda: True)
+        # CCAR12: 验证 argv 路径，强制关 Job Object 模式
+        monkeypatch.setattr(sr, "uses_job_object", lambda: False)
         monkeypatch.setattr(sr, "wrap_command",
                             lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
         monkeypatch.setattr(tt.subprocess, "run", fake_run)
@@ -444,3 +461,202 @@ def test_bwrap_wrap_cwd_under_tmp_skips_tmpfs():
     # 正常 cwd（不在 /tmp 下）仍应加 --tmpfs /tmp
     argv3 = _bwrap_wrap("x", cwd="/home/user/proj", writable_roots=[])
     assert _has_tmpfs(argv3), f"正常 cwd 应加 --tmpfs /tmp: {argv3}"
+
+
+# ---------------------------------------------------------------------------
+# CCAR12 Task 2: Windows Job Object 模式
+# ---------------------------------------------------------------------------
+
+def test_uses_job_object_only_on_windows(monkeypatch):
+    """uses_job_object() 仅 win32 返回 True。"""
+    import agent.sandbox_runner as mod
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mod.uses_job_object() is True
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert mod.uses_job_object() is False
+
+
+def test_sandbox_description_windows_text(monkeypatch):
+    """Windows 描述文案含 Job Object + 进程管控定位。"""
+    import agent.sandbox_runner as mod
+    monkeypatch.setattr(sys, "platform", "win32")
+    desc = mod.sandbox_description()
+    assert "Job Object" in desc
+    assert "进程管控" in desc
+    assert "safe_path" in desc
+
+
+def test_attach_job_forwards_to_win_job_object(monkeypatch):
+    """attach_job 转发 win_job_object.create_job_for_subprocess（fail-open）。"""
+    import agent.sandbox_runner as mod
+    sentinel = object()
+    monkeypatch.setattr(
+        "agent.win_job_object.create_job_for_subprocess", lambda p: sentinel
+    )
+    assert mod.attach_job("fake_popen") is sentinel
+
+    # 转发抛异常 → fail-open 返回 None（不冒泡）
+    def boom(p):
+        raise RuntimeError("mock boom")
+    monkeypatch.setattr("agent.win_job_object.create_job_for_subprocess", boom)
+    assert mod.attach_job("fake_popen") is None
+
+
+class _FakeJob:
+    """哨兵 job：记录事件顺序。"""
+
+    def __init__(self, events):
+        self._events = events
+
+    def close(self):
+        self._events.append("close")
+
+
+class _FakePopen:
+    """假 Popen：配合 terminal_tool 的 Windows job 分支。"""
+
+    def __init__(self, cmd, events, **kwargs):
+        self.cmd = cmd
+        self.pid = 12345
+        self.returncode = 0
+        self._events = events
+        events.append("popen")
+
+    def communicate(self, timeout=None):
+        self._events.append("communicate")
+        return ("hi", "")
+
+
+def _win_job_env(monkeypatch, tt, sr, job, events):
+    """公共脚手架：mock Windows Job Object 沙箱环境。"""
+    monkeypatch.setattr(sr, "is_available", lambda: True)
+    monkeypatch.setattr(sr, "uses_job_object", lambda: True)
+    monkeypatch.setattr(sr, "attach_job", lambda popen: job)
+    # wrap_command 必须不被调用（Job Object 模式命令不包装）
+    monkeypatch.setattr(
+        sr, "wrap_command",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应调用 wrap_command")),
+    )
+    monkeypatch.setattr(
+        tt.subprocess, "Popen",
+        lambda cmd, **kw: _FakePopen(cmd, events, **kw),
+    )
+    monkeypatch.setattr(
+        tt.subprocess, "run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Job 模式不走 subprocess.run")),
+    )
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+
+def test_terminal_sandbox_windows_uses_job(monkeypatch):
+    """sandbox on + Windows：命令正常跑 + job attach 被调 + close 在 communicate 后。"""
+    import json
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+    job = _FakeJob(events)
+    _win_job_env(monkeypatch, tt, sr, job, events)
+    captured = {}
+    monkeypatch.setattr(
+        sr, "attach_job",
+        lambda popen: (captured.setdefault("attached", []).append(popen), job)[1],
+    )
+
+    result = tt._handle_terminal(
+        {"command": "echo hi"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    parsed = json.loads(result)
+    # 命令正常执行，输出正常
+    assert parsed["stdout"] == "hi"
+    assert parsed["exit_code"] == 0
+    # attach 被调且拿到的是 Popen 实例
+    assert len(captured["attached"]) == 1
+    assert isinstance(captured["attached"][0], _FakePopen)
+    # 顺序：popen → attach(在 Popen 之后，events 里无标记但 attached 非空) →
+    # communicate → close（close 必须在 communicate 之后，句柄保活到进程结束）
+    assert events == ["popen", "communicate", "close"]
+
+
+def test_terminal_sandbox_windows_attach_fail_failopen(monkeypatch):
+    """attach 失败返回 None → fail-open：命令照常执行，不阻断。"""
+    import json
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+    _win_job_env(monkeypatch, tt, sr, None, events)  # job=None 模拟 attach 失败
+
+    result = tt._handle_terminal(
+        {"command": "echo hi"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    parsed = json.loads(result)
+    assert parsed["stdout"] == "hi"  # 命令仍执行
+    assert "error" not in parsed
+    # 无 job → 无 close 事件
+    assert events == ["popen", "communicate"]
+
+
+def test_terminal_sandbox_windows_timeout_closes_job(monkeypatch):
+    """超时 → communicate 抛 TimeoutExpired → finally 里 job.close 仍被调
+    （KILL_ON_JOB_CLOSE 顺带清理整棵子进程树）。"""
+    import json
+    import subprocess as sp
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+
+    class TimeoutPopen(_FakePopen):
+        def communicate(self, timeout=None):
+            self._events.append("communicate")
+            raise sp.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+
+    job = _FakeJob(events)
+    _win_job_env(monkeypatch, tt, sr, job, events)
+    monkeypatch.setattr(
+        tt.subprocess, "Popen", lambda cmd, **kw: TimeoutPopen(cmd, events, **kw)
+    )
+
+    result = tt._handle_terminal(
+        {"command": "ping -n 100 localhost"},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    parsed = json.loads(result)
+    assert "超时" in parsed.get("error", "")
+    # close 在 communicate 之后仍被调用（finally 保活语义）
+    assert events == ["popen", "communicate", "close"]
+
+
+def test_terminal_sandbox_off_does_not_attach_job(monkeypatch):
+    """sandbox off → 不走 Job Object（attach 不被调，走 subprocess.run）。"""
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+    job = _FakeJob(events)
+    monkeypatch.setattr(sr, "attach_job", lambda p: (_ for _ in ()).throw(
+        AssertionError("sandbox off 不应 attach job")))
+    monkeypatch.setattr(
+        sr, "uses_job_object", lambda: (_ for _ in ()).throw(
+            AssertionError("sandbox off 不应查询 job 模式")))
+
+    def fake_run(cmd, *args, **kwargs):
+        class R:
+            stdout = "ok"
+            stderr = ""
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(tt.subprocess, "run", fake_run)
+    monkeypatch.setattr(tt, "check_terminal_requirements", lambda: True)
+
+    result = tt._handle_terminal({"command": "echo hi"}, sandbox_mode="off")
+    import json
+    parsed = json.loads(result)
+    assert parsed["stdout"] == "ok"

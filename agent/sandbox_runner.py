@@ -3,13 +3,18 @@
 对齐 Claude Code `/sandbox` 行为：
   - Linux:  Bubblewrap（bwrap）内核命名空间隔离
   - macOS:  Seatbelt（sandbox-exec）profile 隔离
-  - Windows / 其他: 不支持，调用方 fail-open 降级
+  - Windows: Job Object 进程管控（CCAR12，agent/win_job_object.py）；
+             命令不包装，正常 Popen 启动后 attach job（进程树不逃逸）
+  - 其他:   不支持，调用方 fail-open 降级
 
 公开 API：
   - SandboxUnavailableError：wrapper 构造失败的异常基类
   - is_available() -> bool：当前平台是否有可用沙箱
   - availability_reason() -> str：不可用原因（用于警告日志）
   - wrap_command(command, *, cwd, writable_roots) -> list[str]：包装 argv
+  - uses_job_object() -> bool：当前平台是否走 Job Object 模式（Windows）
+  - attach_job(popen)：给已启动的 Popen 挂 Job Object（fail-open 返回 None）
+  - sandbox_description() -> str：当前平台沙箱机制描述（/sandbox status 文案）
 """
 import logging
 import shutil
@@ -52,7 +57,12 @@ def _detect_availability() -> Tuple[bool, str]:
         return False, "未找到 sandbox-exec（macOS 系统自带，正常不会缺）"
 
     if platform == "win32":
-        return False, "Windows 不支持原生沙箱，请用 WSL2 或 Docker"
+        # CCAR12: Windows 走 Job Object 进程管控（import 成功即视为可用）
+        try:
+            from agent.win_job_object import create_job_for_subprocess  # noqa: F401
+            return True, ""
+        except Exception as e:
+            return False, f"win_job_object 模块不可用（fail-open）: {e}"
 
     return False, f"不支持的平台: {platform}"
 
@@ -89,6 +99,44 @@ def reset_availability_cache() -> None:
     """清缓存（测试用）。"""
     global _availability_cache
     _availability_cache = None
+
+
+# ---------------------------------------------------------------------------
+# Windows: Job Object 进程管控（CCAR12）
+# ---------------------------------------------------------------------------
+
+def uses_job_object() -> bool:
+    """当前平台沙箱是否走 Job Object 模式（Windows）。
+
+    区别于 bwrap/seatbelt 的 argv 包装：Job Object 模式下命令不包装，
+    正常 Popen 启动后挂 job（进程树管控，文件防线仍靠 safe_path 层）。
+    """
+    return sys.platform == "win32"
+
+
+def attach_job(popen):
+    """给已启动的 Popen 挂 Job Object。转发 win_job_object（fail-open）。
+
+    返回 job 实例（调用方必须保活到 popen.wait() 之后再 close()，
+    否则 KILL_ON_JOB_CLOSE 会提前清理子进程树）；任何失败返回 None。
+    """
+    try:
+        from agent.win_job_object import create_job_for_subprocess
+        return create_job_for_subprocess(popen)
+    except Exception as e:
+        logger.warning("attach_job fail-open: %s", e)
+        return None
+
+
+def sandbox_description() -> str:
+    """当前平台沙箱机制描述（/sandbox status 文案）。"""
+    if sys.platform == "win32":
+        return "Job Object 模式（进程管控；文件防线=safe_path 白名单层）"
+    if sys.platform == "linux":
+        return "bwrap（Bubblewrap）内核命名空间隔离"
+    if sys.platform == "darwin":
+        return "sandbox-exec（Seatbelt）profile 隔离"
+    return f"不支持的平台: {sys.platform}"
 
 
 # ---------------------------------------------------------------------------

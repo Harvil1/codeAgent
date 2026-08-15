@@ -59,3 +59,28 @@ def test_create_job_for_subprocess_failopen(monkeypatch):
         assert create_job_for_subprocess(p) is None
     finally:
         p.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# CCAR12 Task 2: terminal 工具端到端（真实 job，无 mock）
+# ---------------------------------------------------------------------------
+
+def test_terminal_sandbox_on_real_job_end_to_end():
+    """真实链路：sandbox on → terminal 命令正常执行 + job attach/close 全程无异常。"""
+    import json
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    # 前置：Windows 上沙箱应可用且走 Job Object 模式
+    sr.reset_availability_cache()
+    assert sr.is_available() is True
+    assert sr.uses_job_object() is True
+
+    result = tt._handle_terminal(
+        {"command": "echo hi"},
+        sandbox_mode="on",
+    )
+    parsed = json.loads(result)
+    assert "error" not in parsed, f"沙箱命令执行异常: {parsed}"
+    assert "hi" in parsed.get("stdout", "")
+    assert parsed.get("exit_code") == 0

@@ -1454,7 +1454,9 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         # OS 沙箱（对齐 Claude Code /sandbox）
         # 用法：/sandbox on | off | status（无参数 = status）
         arg = args.strip().lower() if args else ""
-        from agent.sandbox_runner import is_available, availability_reason
+        from agent.sandbox_runner import (
+            is_available, availability_reason, sandbox_description,
+        )
         from agent.permission import get_default_checker
         checker = get_default_checker()
 
@@ -1468,9 +1470,11 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             if hasattr(checker, "set_sandbox_mode"):
                 checker.set_sandbox_mode("on")
                 console.print(
-                    "[green]sandbox: on[/green]\n"
-                    "[dim]terminal 工具命令将走 bwrap（Linux）/ sandbox-exec（macOS）。"
-                    "写文件被限制在 cwd + ~/.OmniMate + 配置的 sandbox_writable_roots。[/dim]"
+                    f"[green]sandbox: on[/green]\n"
+                    f"[dim]机制：{sandbox_description()}。"
+                    "Linux/macOS 写文件被限制在 cwd + ~/.OmniMate + 配置的 "
+                    "sandbox_writable_roots；Windows Job Object 为进程管控"
+                    "（文件防线=safe_path 白名单层）。[/dim]"
                 )
             else:
                 console.print(
@@ -1487,7 +1491,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         else:  # status 或无参数
             mode = getattr(checker, "sandbox_mode", "off")
             if is_available():
-                avail = "[green]available[/green]"
+                avail = f"[green]available[/green] — {sandbox_description()}"
             else:
                 avail = f"[red]unavailable[/red] ({availability_reason()})"
             console.print(f"sandbox: [cyan]{mode}[/cyan]  ({avail})")
@@ -1810,7 +1814,7 @@ def _show_help():
         "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
         "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
         "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass|acceptEdits]）\n"
-        "[cyan]/sandbox[/cyan]    开启/关闭 OS 沙箱（/sandbox [on|off|status]，Linux 用 bwrap、macOS 用 sandbox-exec）\n"
+        "[cyan]/sandbox[/cyan]    开启/关闭 OS 沙箱（/sandbox [on|off|status]，Linux 用 bwrap、macOS 用 sandbox-exec、Windows 用 Job Object）\n"
         "[cyan]/hooks[/cyan]    查看会话启动时锁定的 hook 快照（含磁盘 diff 检测）\n"
         "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.OmniMate/agents/*.md）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"

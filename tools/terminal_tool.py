@@ -165,7 +165,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     # === OS 沙箱 wrapper 注入 ===
-    # sandbox_mode="on" 时把 command 包进 bwrap/seatbelt argv；
+    # sandbox_mode="on" 时：Linux/macOS 把 command 包进 bwrap/seatbelt argv；
+    # Windows（CCAR12）走 Job Object 模式——命令不包装，启动后挂 job；
     # 不可用 → fail-open 警告并降级到原 shell=True 路径
     # C1 fix: sandbox_mode 优先从 kwargs 读（测试/子代理透传）；
     # 缺省时从默认 PermissionChecker 读（生产路径：/sandbox on 设到 checker 上）
@@ -177,6 +178,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             sandbox_mode = "off"
     wrapped_argv = None
     sandbox_active = False
+    win_job_mode = False  # CCAR12: Windows Job Object 模式（命令不包装，启动后挂 job）
     if sandbox_mode == "on":
         # GUI 命令强制跳过 sandbox（GUI 程序在沙箱里启不来）
         is_gui_launch = bool(_GUI_LAUNCH_RE.match(command)) or any(
@@ -188,25 +190,31 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             try:
                 from agent.sandbox_runner import (
                     wrap_command, is_available, availability_reason,
-                    SandboxUnavailableError,
+                    SandboxUnavailableError, uses_job_object,
                 )
                 if is_available():
-                    # 收集 writable_roots：cwd + ~/.OmniMate + config 扩展
-                    # I5 fix: 移除冗余 inline import（Path 已在模块顶部导入）
-                    writable_roots = []
-                    try:
-                        from constants import get_omnimate_home
-                        writable_roots.append(str(get_omnimate_home()))
-                    except Exception:
-                        writable_roots.append(str(Path.home() / ".OmniMate"))
-                    cfg = kwargs.get("config") or {}
-                    extra = ((cfg.get("security") or {}).get("sandbox_writable_roots") or [])
-                    writable_roots.extend(extra)
+                    if uses_job_object():
+                        # CCAR12: Windows Job Object——命令不包装，
+                        # 正常 Popen 启动后 attach job（进程管控）
+                        sandbox_active = True
+                        win_job_mode = True
+                    else:
+                        # 收集 writable_roots：cwd + ~/.OmniMate + config 扩展
+                        # I5 fix: 移除冗余 inline import（Path 已在模块顶部导入）
+                        writable_roots = []
+                        try:
+                            from constants import get_omnimate_home
+                            writable_roots.append(str(get_omnimate_home()))
+                        except Exception:
+                            writable_roots.append(str(Path.home() / ".OmniMate"))
+                        cfg = kwargs.get("config") or {}
+                        extra = ((cfg.get("security") or {}).get("sandbox_writable_roots") or [])
+                        writable_roots.extend(extra)
 
-                    wrapped_argv = wrap_command(
-                        command, cwd=cwd, writable_roots=writable_roots,
-                    )
-                    sandbox_active = True
+                        wrapped_argv = wrap_command(
+                            command, cwd=cwd, writable_roots=writable_roots,
+                        )
+                        sandbox_active = True
                 else:
                     logger.warning(
                         "OS 沙箱不可用（%s），fail-open 降级到原路径",
@@ -249,6 +257,42 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 "command": command,
                 "cwd": cwd,
             }, ensure_ascii=False)
+        elif sandbox_active and win_job_mode:
+            # CCAR12: Windows Job Object 模式——命令不包装正常启动，
+            # 启动后 attach job（进程树管控；attach 失败 fail-open 继续执行）
+            from agent.sandbox_runner import attach_job
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd,
+                env=safe_env,
+                encoding="utf-8",
+                errors="replace",
+            )
+            job = attach_job(proc)
+            if job is None:
+                logger.warning(
+                    "Windows Job Object attach 失败，fail-open 继续执行: %s",
+                    command[:80],
+                )
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            finally:
+                # job 句柄必须保活到进程结束后再关：
+                #   - 正常结束 → close() 幂等清理句柄
+                #   - 超时 → KILL_ON_JOB_CLOSE 顺带清理整棵子进程树
+                # （早关会在子进程还在跑时触发全树 kill——那是误杀）
+                if job is not None:
+                    job.close()
+            result = subprocess.CompletedProcess(
+                args=command,
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
         elif sandbox_active and wrapped_argv:
             # OS 沙箱路径：用包装后的 argv，shell=False
             result = subprocess.run(
