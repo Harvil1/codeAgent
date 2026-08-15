@@ -773,6 +773,96 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
 
 
 # ---------------------------------------------------------------------------
+# R16 #6：危险删除路径判定（rm/rmdir/del/erase/rd 目标参数化检查）
+# ---------------------------------------------------------------------------
+
+# Windows 盘根（C: 或 C:/）
+_WIN_DRIVE_ROOT_RE = re.compile(r"^[A-Za-z]:/?$")
+# Windows 盘根直接子目录（C:/Windows、C:/Users）
+_WIN_DRIVE_CHILD_RE = re.compile(r"^[A-Za-z]:/[^/]+$")
+
+
+def is_dangerous_removal_path(resolved_path) -> bool:
+    r"""删除命令的目标路径是否危险（对齐 CCB isDangerousRemovalPath）。
+
+    危险目标：
+    - 裸通配符 *（删目录下全部内容）/ 任何 /* 结尾
+    - 根目录 /
+    - 家目录
+    - 根直接子目录（/usr、/tmp、/etc——但 /usr/local 不是）
+    - Windows 盘根（C:\）与盘根直接子目录（C:\Windows、C:\Users）
+    """
+    s = re.sub(r"[\\/]+", "/", str(resolved_path))
+
+    if s == "*" or s.endswith("/*"):
+        return True
+
+    normalized = s if s == "/" else (s.rstrip("/") or "/")
+    if normalized == "/":
+        return True
+    if _WIN_DRIVE_ROOT_RE.match(normalized):
+        return True
+
+    home = re.sub(r"[\\/]+", "/", str(Path.home()))
+    if normalized.lower() == home.lower():
+        return True
+
+    # 根直接子目录：/usr、/tmp（parent == /）
+    if normalized.startswith("/"):
+        parts = normalized.lstrip("/").split("/")
+        if len(parts) == 1 and parts[0]:
+            return True
+
+    if _WIN_DRIVE_CHILD_RE.match(normalized):
+        return True
+    return False
+
+
+# 删除类动词（首 token；Remove-Item 走闸门 2 破坏性审批兜底，不在此列）
+_REMOVAL_VERBS = frozenset({"rm", "rmdir", "del", "erase", "rd"})
+# 复合命令切段（与只读通道同款）
+_CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+# Windows del/rd 的斜杠 flag（/s /q）；不匹配 /usr 这类真路径
+_CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]?$")
+
+
+def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional[str]:
+    """R16 #6：rm/del 类删除命令的目标为危险路径 → 拒。
+
+    任何审批模式下默认拒（不进 fatal——bypassPermissions 仍放行；
+    default/acceptEdits/autoDeny 都拒，不接受审批解锁：y/n 误点正是
+    这类检查要防的）。复合命令逐段检查。返回拒绝原因，未命中返回 None。
+    """
+    if not command:
+        return None
+    base_dir = cwd or os.getcwd()
+    for seg in _CMD_SEGMENT_SPLIT_RE.split(command):
+        toks = seg.split()
+        if not toks:
+            continue
+        verb = toks[0].replace("\\", "/").split("/")[-1].lower()
+        if verb not in _REMOVAL_VERBS:
+            continue
+        for tok in toks[1:]:
+            if _CMD_FLAG_RE.match(tok):
+                continue
+            t = tok.strip("'\"")
+            if not t:
+                continue
+            if t == "*":
+                return f"危险删除目标（通配符 *）: {seg.strip()}"
+            try:
+                p = Path(t).expanduser()
+                resolved = p if p.is_absolute() else (Path(base_dir) / p)
+                rp = str(Path(str(resolved)).resolve())
+            except (OSError, ValueError, RuntimeError):
+                continue  # 解析失败的 token 交给其他闸门
+            if is_dangerous_removal_path(rp):
+                return f"危险删除目标: {rp}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 完整命令权限检查器（带审批缓存）
 # ---------------------------------------------------------------------------
 
@@ -988,6 +1078,14 @@ class PermissionChecker:
         # 用户已明确接受风险,不需要审批。闸门 0 的两道底线仍生效。
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
+
+        # === R16 #6：危险删除路径（任何非 bypass 模式默认拒，不可审批解锁）===
+        # rm/del 目标为 * / 根 / 家 / 根直接子目录 / 盘根(直接子目录) → 拒。
+        # 必须在 acceptEdits 之前：rm 在 SAFE_FS 动词表里，否则 "rm -rf *" 会
+        # 被 cwd 内 safe-fs 自动放行。
+        dangerous_rm = check_dangerous_removal(command, cwd)
+        if dangerous_rm:
+            return self._deny(command, f"危险删除: {dangerous_rm}", "deny")
 
         # acceptEdits: safe-fs 命令在 cwd 内自动放行；其他命令走原闸门
         if effective_mode == "acceptEdits" and _is_safe_fs_in_cwd(command, cwd):

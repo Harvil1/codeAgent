@@ -197,3 +197,91 @@ def test_dual_path_lexical_form_still_checked(tmp_path, monkeypatch):
     )
     # 不存在的深层路径：realpath 可能失败/保留词法——词法形式兜底命中
     assert is_protected_path(protected_dir / "a" / "b.txt") is not None
+
+
+# ---------------------------------------------------------------------------
+# R16 #6：危险删除路径判定
+# ---------------------------------------------------------------------------
+
+from agent.permission import (
+    check_dangerous_removal,
+    is_dangerous_removal_path,
+)
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("*", True),
+    ("/", True),
+    ("C:", True),
+    ("C:/", True),
+    ("D:\\", True),
+    ("C:/Windows", True),
+    ("C:\\Users", True),
+    ("/usr", True),
+    ("/tmp", True),
+    ("/etc", True),
+    ("/home", True),
+    ("//", True),
+])
+def test_is_dangerous_removal_path_hits(path, expected):
+    assert is_dangerous_removal_path(path) is expected
+
+
+@pytest.mark.parametrize("path", [
+    ("/usr/local"),
+    ("/home/user/project"),
+    ("C:/Users/Administrator/project"),
+    ("D:/project/HermesAgent/build"),
+    ("relative/dir"),
+])
+def test_is_dangerous_removal_path_safe(path):
+    assert not is_dangerous_removal_path(path)
+
+
+def test_dangerous_removal_home_tilde():
+    """rm -rf ~ → 解析到家目录 → 命中。"""
+    assert check_dangerous_removal("rm -rf ~") is not None
+    assert check_dangerous_removal("rm -rf ~/") is not None
+
+
+def test_dangerous_removal_root_child(tmp_path):
+    assert check_dangerous_removal("rm -rf /usr") is not None
+    assert check_dangerous_removal("rm -rf /usr/local") is None  # 二级子目录 OK
+    assert check_dangerous_removal("rm -rf build", cwd=str(tmp_path)) is None
+
+
+def test_dangerous_removal_windows_drive(tmp_path):
+    assert check_dangerous_removal("rm -rf C:\\") is not None
+    assert check_dangerous_removal("del /s C:\\Windows") is not None
+    assert check_dangerous_removal("rd /s /q C:\\Users") is not None
+    assert check_dangerous_removal("del /q C:\\Users\\Administrator\\x.txt") is None
+
+
+def test_dangerous_removal_check_order(tmp_path):
+    """check() 集成：default / acceptEdits / autoDeny 都拒；bypass 放行。"""
+    checker = PermissionChecker()
+    r = checker.check("rm -rf /usr", cwd=str(tmp_path))
+    assert not r.allowed and "危险删除" in r.reason
+    r2 = checker.check("rm -rf /usr", cwd=str(tmp_path),
+                       mode_override="acceptEdits")
+    assert not r2.allowed and "危险删除" in r2.reason
+    r3 = checker.check("rm -rf /usr", cwd=str(tmp_path),
+                       mode_override="autoDeny")
+    assert not r3.allowed
+    r4 = checker.check("rm -rf /usr", cwd=str(tmp_path),
+                       mode_override="bypassPermissions")
+    assert r4.allowed  # 不算 fatal：bypass 仍放行
+
+
+def test_dangerous_removal_acceptEdits_wildcard(tmp_path):
+    """acceptEdits 模式：rm -rf * 不能被 safe-fs 自动放行。"""
+    checker = PermissionChecker(mode="acceptEdits")
+    r = checker.check("rm -rf *", cwd=str(tmp_path))
+    assert not r.allowed
+    assert "危险删除" in r.reason
+
+
+def test_dangerous_removal_compound(tmp_path):
+    """复合命令逐段检查。"""
+    assert check_dangerous_removal(f"cd {tmp_path} && rm -rf /tmp") is not None
+    assert check_dangerous_removal("echo hi | rm -rf /etc") is not None
