@@ -4,7 +4,7 @@ from agent.poor_mode import apply_poor_preset, POOR_PRESET, _set_dotted
 
 
 def test_poor_preset_contains_all_flags():
-    """POOR_PRESET 必须覆盖 7 个开关。"""
+    """POOR_PRESET 必须覆盖 7 个开关（reactive 用真实开关 features.*）。"""
     expected_keys = {
         "reflection.enabled",
         "context.summarize_9section",
@@ -12,7 +12,7 @@ def test_poor_preset_contains_all_flags():
         "cache_monitor.enabled",
         "verification_agent.enabled",
         "curator.enabled",
-        "context.reactive_compact_enabled",
+        "features.reactive_compact.enabled",
     }
     assert set(POOR_PRESET.keys()) == expected_keys
     # 全是 False（全关）
@@ -32,10 +32,11 @@ def test_set_dotted_overrides_existing():
 
 
 def test_apply_poor_preset_flips_all_flags():
-    """应用 preset 后所有目标 flag 变 False。"""
+    """应用 preset 后所有目标 flag 变 False（reactive 走 features 真实开关）。"""
     config = {
         "reflection": {"enabled": True},
-        "context": {"summarize_9section": True, "reactive_compact_enabled": True},
+        "context": {"summarize_9section": True},
+        "features": {"reactive_compact": {"enabled": True}},
         "memory": {"auto_extract": True},
         "cache_monitor": {"enabled": True},
         "verification_agent": {"enabled": True},
@@ -45,7 +46,8 @@ def test_apply_poor_preset_flips_all_flags():
     # 7 个 flag 全 False
     assert new_config["reflection"]["enabled"] is False
     assert new_config["context"]["summarize_9section"] is False
-    assert new_config["context"]["reactive_compact_enabled"] is False
+    # 真实开关：agent/__init__.py 用 is_feature_enabled(config, "reactive_compact") 读
+    assert new_config["features"]["reactive_compact"]["enabled"] is False
     assert new_config["memory"]["auto_extract"] is False
     assert new_config["cache_monitor"]["enabled"] is False
     assert new_config["verification_agent"]["enabled"] is False

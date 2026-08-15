@@ -49,6 +49,16 @@ class TestWhitelist:
         assert isinstance(_CONFIG_WHITELIST, frozenset)
         assert len(_CONFIG_WHITELIST) == 7
 
+    def test_whitelist_contains_replacement_keys(self):
+        """换入的 2 键必须有真实读取点（agent/__init__.py reactive_compact 分支）。"""
+        assert "context.reactive_compact_cooldown_seconds" in _CONFIG_WHITELIST
+        assert "context.reactive_compact_max_per_session" in _CONFIG_WHITELIST
+
+    def test_whitelist_dead_keys_removed(self):
+        """dead key（全仓无读取点）绝不能回白名单（review 教训防回归）。"""
+        assert "trace.retention_days" not in _CONFIG_WHITELIST  # trace.py 无 retention 逻辑
+        assert "context.reactive_compact_enabled" not in _CONFIG_WHITELIST  # 真实开关在 features.*
+
     def test_whitelist_exact_match_not_prefix(self):
         """精确匹配：前缀相同但更长的键不在白名单里。"""
         assert "notifications.enabled" in _CONFIG_WHITELIST
@@ -118,15 +128,16 @@ class TestConfigSet:
     def test_set_roundtrip_persisted(self, settings_home):
         """set → settings.json 落盘（重新 load_settings 验证 round-trip）。"""
         result = _handle_config_set(
-            {"key": "trace.retention_days", "value": 5}, agent_ref=_make_agent_ref()
+            {"key": "context.reactive_compact_cooldown_seconds", "value": 90},
+            agent_ref=_make_agent_ref(),
         )
         data = json.loads(result)
-        assert data["key"] == "trace.retention_days"
-        assert data["value"] == 5
+        assert data["key"] == "context.reactive_compact_cooldown_seconds"
+        assert data["value"] == 90
 
         # 磁盘 round-trip
         settings = load_settings()
-        assert settings["trace"]["retention_days"] == 5
+        assert settings["context"]["reactive_compact_cooldown_seconds"] == 90
 
     def test_set_runtime_applied(self, settings_home):
         """set → agent_ref.config 同步（嵌套路径 set，runtime 立即生效）。"""
@@ -152,10 +163,35 @@ class TestConfigSet:
 
     def test_set_no_agent_ref_still_persists(self, settings_home):
         """无 agent_ref（如直接 dispatch 测试）→ 落盘照常，runtime_applied=False。"""
-        result = _handle_config_set({"key": "trace.enabled", "value": True})
+        result = _handle_config_set({"key": "statusline.enabled", "value": True})
         data = json.loads(result)
         assert data["runtime_applied"] is False
-        assert load_settings()["trace"]["enabled"] is True
+        assert load_settings()["statusline"]["enabled"] is True
+
+    def test_set_trace_enabled_next_session(self, settings_home):
+        """trace.enabled 在 cli initialize 一次性装配——runtime_applied 必须如实报
+        'next_session'（会话中改 config 不重接线 TraceSink），不能假报 True。"""
+        result = _handle_config_set(
+            {"key": "trace.enabled", "value": False},
+            agent_ref=_make_agent_ref({"trace": {"enabled": True}}),
+        )
+        data = json.loads(result)
+        assert data["runtime_applied"] == "next_session"
+        # 值照常同步 + 落盘（下次会话生效）
+        assert load_settings()["trace"]["enabled"] is False
+
+    def test_set_other_keys_runtime_applied_true(self, settings_home):
+        """非 next_session 键 → runtime_applied=True（本会话立即生效）。"""
+        for key in (
+            "notifications.enabled",
+            "context.reactive_compact_cooldown_seconds",
+            "context.reactive_compact_max_per_session",
+        ):
+            result = _handle_config_set(
+                {"key": key, "value": True}, agent_ref=_make_agent_ref()
+            )
+            data = json.loads(result)
+            assert data["runtime_applied"] is True, key
 
     def test_set_denied_outside_whitelist(self, settings_home):
         """白名单外 → permission_denied，不落盘。"""
@@ -174,6 +210,15 @@ class TestConfigSet:
             data = json.loads(result)
             assert data["error_type"] == "permission_denied"
 
+    def test_set_denied_dead_keys(self, settings_home):
+        """dead key（无读取点的黑洞键）必须拒——写进去还报成功是假生效。"""
+        for key in ("trace.retention_days", "context.reactive_compact_enabled"):
+            result = _handle_config_set(
+                {"key": key, "value": 1}, agent_ref=_make_agent_ref()
+            )
+            data = json.loads(result)
+            assert data["error_type"] == "permission_denied", key
+
     def test_set_coerce_bool(self, settings_home):
         """现有 bool → bool(value) 强转（传 1 → True）。"""
         settings = load_settings()
@@ -191,30 +236,30 @@ class TestConfigSet:
     def test_set_coerce_int_from_string(self, settings_home):
         """现有 int → int(value) 强转（LLM 传字符串数字也能落）。"""
         settings = load_settings()
-        settings["trace"] = {"retention_days": 7}
+        settings["context"] = {"reactive_compact_cooldown_seconds": 60}
         save_settings(settings)
 
         result = _handle_config_set(
-            {"key": "trace.retention_days", "value": "14"},
+            {"key": "context.reactive_compact_cooldown_seconds", "value": "90"},
             agent_ref=_make_agent_ref(),
         )
         data = json.loads(result)
-        assert data["value"] == 14
-        assert load_settings()["trace"]["retention_days"] == 14
+        assert data["value"] == 90
+        assert load_settings()["context"]["reactive_compact_cooldown_seconds"] == 90
 
     def test_set_coerce_int_garbage_rejected(self, settings_home):
         """int 键传不可转值 → invalid_args（不落盘）。"""
         settings = load_settings()
-        settings["trace"] = {"retention_days": 7}
+        settings["context"] = {"reactive_compact_max_per_session": 5}
         save_settings(settings)
 
         result = _handle_config_set(
-            {"key": "trace.retention_days", "value": "abc"},
+            {"key": "context.reactive_compact_max_per_session", "value": "abc"},
             agent_ref=_make_agent_ref(),
         )
         data = json.loads(result)
         assert data["error_type"] == "invalid_args"
-        assert load_settings()["trace"]["retention_days"] == 7
+        assert load_settings()["context"]["reactive_compact_max_per_session"] == 5
 
     def test_set_old_value_recorded(self, settings_home):
         """成功响应里带 old_value（审计友好）。"""

@@ -24,14 +24,25 @@ logger = logging.getLogger(__name__)
 
 
 # 白名单（模块级 frozenset，精确匹配）。只放"改坏了也只影响体验"的开关类键。
+# review 修正：换掉 2 个 dead key——trace.retention_days（trace.py 无 retention
+# 逻辑，全仓无读取点）和 context.reactive_compact_enabled（真实开关是
+# features.reactive_compact.enabled）——写黑洞还假报生效是 silent-dead-code。
+# 换入 context.reactive_compact_cooldown_seconds / max_per_session
+# （agent/__init__.py reactive_compact 分支有真实读取点）。
 _CONFIG_WHITELIST = frozenset({
     "notifications.enabled",
     "statusline.enabled",
     "memory.curator.enabled",
     "memory.curator.interval_hours",
     "trace.enabled",
-    "trace.retention_days",
-    "context.reactive_compact_enabled",
+    "context.reactive_compact_cooldown_seconds",
+    "context.reactive_compact_max_per_session",
+})
+
+# 这些键在 cli initialize 一次性装配（如 TraceSink），会话中改 config 不会重接线
+# ——runtime_applied 必须如实报 "next_session"，不能假报 True。
+_NEXT_SESSION_KEYS = frozenset({
+    "trace.enabled",
 })
 
 
@@ -40,8 +51,9 @@ CONFIG_GET_SCHEMA = {
     "description": (
         "读配置项的当前值（只限白名单内的 7 个安全键："
         "notifications.enabled / statusline.enabled / memory.curator.enabled / "
-        "memory.curator.interval_hours / trace.enabled / trace.retention_days / "
-        "context.reactive_compact_enabled）。优先返回运行时实际生效值。"
+        "memory.curator.interval_hours / trace.enabled / "
+        "context.reactive_compact_cooldown_seconds / "
+        "context.reactive_compact_max_per_session）。优先返回运行时实际生效值。"
     ),
     "parameters": {
         "type": "object",
@@ -62,6 +74,8 @@ CONFIG_SET_SCHEMA = {
         "修改配置项（只限白名单内的 7 个安全键，其余拒绝）。"
         "写入 settings.json 持久化 + 当前会话立即生效 + 触发 CONFIG_CHANGE hook。"
         "value 类型按现有值强转（bool/int）。"
+        "个别键（trace.enabled）在启动时一次性装配，runtime_applied='next_session'"
+        "表示下次会话才生效。"
     ),
     "parameters": {
         "type": "object",
@@ -218,11 +232,17 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
         _set_nested(settings, parts, coerced)
         save_settings(settings)
 
-        # 2. runtime 生效：同步 agent_ref.config 同键（嵌套路径 set）
+        # 2. runtime 生效：同步 agent_ref.config 同键（嵌套路径 set）。
+        #    例外：_NEXT_SESSION_KEYS 在 cli initialize 一次性装配（如 TraceSink
+        #    接线），会话中改 config 不会重接线——值照常同步（下次会话生效），
+        #    但 runtime_applied 如实报 "next_session"，不假报本会话已生效。
         runtime_applied = False
         if isinstance(runtime_cfg, dict):
             _set_nested(runtime_cfg, parts, coerced)
-            runtime_applied = True
+            if key in _NEXT_SESSION_KEYS:
+                runtime_applied = "next_session"
+            else:
+                runtime_applied = True
 
         # 3. CONFIG_CHANGE hook（fail-open：hook 异常不影响配置写入）
         hooks_registry = dispatch_kwargs.get("hooks_registry")

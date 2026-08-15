@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 # 7 个开关：dotted key → 目标值（全 False = 全关）
+# review 修正：reactive_compact 的真实开关是 features.reactive_compact.enabled
+# （agent/__init__.py 用 is_feature_enabled 读）——旧键 context.reactive_compact_enabled
+# 全仓无读取点，是 dead write。写 features 键保持 False 语义一致（reactive 默认
+# OFF，poor 是"全关"，即使 features 里被用户开过也强制压回 False）。
 POOR_PRESET: dict[str, Any] = {
     "reflection.enabled": False,
     "context.summarize_9section": False,
@@ -28,7 +32,7 @@ POOR_PRESET: dict[str, Any] = {
     "cache_monitor.enabled": False,
     "verification_agent.enabled": False,
     "curator.enabled": False,
-    "context.reactive_compact_enabled": False,
+    "features.reactive_compact.enabled": False,
 }
 
 
