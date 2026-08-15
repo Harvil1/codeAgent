@@ -186,3 +186,166 @@ class TestPersistence:
         store.upsert(_mk(scope="project:global"))
         assert store.list_all(scope="global") == []
         assert len(store.list_all(scope="project:global")) == 1
+
+    def test_fingerprint_path_repeated_upsert_still_accumulates(self, tmp_path):
+        # T1 Minor 补：同 trigger 不同 action 落指纹路径后，重复 upsert 该
+        # action 仍要走置信度累积（指纹路径重读合并，而不是每次都当新条目）
+        store = InstinctStore(tmp_path)
+        store.upsert(_mk(action="a"))
+        b1 = store.upsert(_mk(action="b", confidence=0.3))
+        assert b1.confidence == pytest.approx(0.3)  # 首插原样落盘
+        b2 = store.upsert(_mk(action="b", confidence=0.3))
+        assert b2.confidence == pytest.approx(0.52)  # 指纹路径二次 upsert 累积
+        assert len(store.list_all(scope="global")) == 2  # a / b 各一条
+
+
+# ======================================================================
+# Task 2：HeuristicObserver 四类启发信号
+# ======================================================================
+from unittest.mock import patch
+
+from agent.skill_learning import observer
+
+
+class _RecordingStore:
+    """测试替身：记录 upsert 调用，不落盘。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def upsert(self, inst):
+        self.calls.append(inst)
+        return inst
+
+
+def _obs(store, user_text="", tool_calls=None, tool_results=None, scope="global"):
+    return observer.observe_turn(
+        user_text=user_text,
+        tool_calls=tool_calls or [],
+        tool_results=tool_results or [],
+        store=store,
+        scope=scope,
+    )
+
+
+class TestUserCorrection:
+    def test_chinese_correction_creates_instinct(self):
+        store = _RecordingStore()
+        n = _obs(store, user_text="不要用grep，用ripgrep 来搜索")
+        assert n == 1
+        assert len(store.calls) == 1
+        inst = store.calls[0]
+        assert inst.trigger == "使用 grep"
+        assert inst.action == "改用 ripgrep"
+        assert inst.confidence == 0.5
+        assert inst.scope == "global"
+        assert inst.evidence and len(inst.evidence[0]) <= 80
+
+    def test_english_correction_creates_instinct(self):
+        store = _RecordingStore()
+        n = _obs(store, user_text="don't use grep, use ripgrep here")
+        assert n == 1
+        inst = store.calls[0]
+        assert inst.trigger == "使用 grep"
+        assert inst.action == "改用 ripgrep"
+
+    def test_plain_text_no_signal(self):
+        store = _RecordingStore()
+        assert _obs(store, user_text="今天天气不错") == 0
+        assert store.calls == []
+
+
+class TestFailureRecovery:
+    def test_error_then_success_same_tool(self):
+        store = _RecordingStore()
+        calls = [
+            {"name": "terminal", "arguments": {"command": "pytest tests/"}},
+            {"name": "terminal", "arguments": {"command": "pytest tests/test_a.py"}},
+        ]
+        results = [
+            {"name": "terminal", "error": "exit code 1: 3 failed", "content": ""},
+            {"name": "terminal", "content": "3 passed"},
+        ]
+        assert _obs(store, tool_calls=calls, tool_results=results) == 1
+        inst = store.calls[0]
+        assert inst.trigger == "terminal 失败时"
+        assert "重试" in inst.action
+        assert "command" in inst.action  # 参数 diff 提到变化的参数名
+        assert inst.confidence == 0.4
+        assert inst.scope == "global"
+
+    def test_error_without_recovery_no_signal(self):
+        store = _RecordingStore()
+        calls = [{"name": "terminal", "arguments": {"command": "x"}}]
+        results = [{"name": "terminal", "error": "boom", "content": ""}]
+        assert _obs(store, tool_calls=calls, tool_results=results) == 0
+        assert store.calls == []
+
+
+class TestRepeatedSequence:
+    def test_same_triple_twice_creates_instinct(self):
+        store = _RecordingStore()
+        seq = ["read_file", "search", "edit_file"]
+        calls = [{"name": n, "arguments": {}} for n in seq * 2]
+        assert _obs(store, tool_calls=calls) == 1
+        inst = store.calls[0]
+        assert inst.action == "序列 read_file→search→edit_file"
+        assert inst.trigger == "需要 edit_file"  # 目的词 = 序列终点工具
+        assert inst.confidence == 0.3
+        assert inst.scope == "global"
+
+    def test_no_repeat_no_signal(self):
+        store = _RecordingStore()
+        calls = [{"name": n, "arguments": {}} for n in ["read_file", "search", "edit_file"]]
+        assert _obs(store, tool_calls=calls) == 0
+        assert store.calls == []
+
+
+class TestProjectConvention:
+    def test_convention_uses_internal_project_scope(self):
+        store = _RecordingStore()
+        with patch.object(observer, "get_project_memory_key", return_value="test-key"):
+            n = _obs(store, user_text="提交信息必须用中文写并带模块前缀", scope="global")
+        assert n == 1
+        inst = store.calls[0]
+        assert inst.trigger == "项目约定"
+        assert "必须用中文写" in inst.action
+        assert len(inst.action) <= 80
+        assert inst.confidence == 0.45
+        assert inst.scope == "project:test-key"
+
+    def test_passed_project_key_used_for_scope(self):
+        # 调用方传入项目 key 时，信号 4 直接用它（不再内部算）
+        store = _RecordingStore()
+        with patch.object(observer, "get_project_memory_key", return_value="wrong-key"):
+            n = _obs(store, user_text="always run uv run pytest before commit", scope="my-proj")
+        assert n == 1
+        assert store.calls[0].scope == "project:my-proj"
+
+    def test_short_convention_no_signal(self):
+        store = _RecordingStore()
+        # 关键词后不足 5 字符 → 不算约定
+        assert _obs(store, user_text="必须") == 0
+        assert store.calls == []
+
+
+class TestFailOpen:
+    def test_upsert_raising_never_propagates(self):
+        class BoomStore:
+            def upsert(self, inst):
+                raise RuntimeError("disk full")
+
+        n = observer.observe_turn(
+            user_text="不要用grep，用ripgrep",
+            tool_calls=[],
+            tool_results=[],
+            store=BoomStore(),
+            scope="global",
+        )
+        assert n == 0
+
+    def test_malformed_inputs_return_zero(self):
+        store = _RecordingStore()
+        # tool_calls/tool_results 元素缺 name / arguments 也不炸
+        assert _obs(store, tool_calls=[{"arguments": None}], tool_results=[{}]) == 0
+        assert store.calls == []

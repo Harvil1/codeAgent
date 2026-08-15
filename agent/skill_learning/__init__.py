@@ -5,5 +5,6 @@
 置信度随重复观察累积，供技能生成/推荐层消费。
 """
 from agent.skill_learning.store import Instinct, InstinctStore
+from agent.skill_learning.observer import observe_turn
 
-__all__ = ["Instinct", "InstinctStore"]
+__all__ = ["Instinct", "InstinctStore", "observe_turn"]
