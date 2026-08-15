@@ -209,6 +209,9 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
 
     P3.8: hook.use_sandbox=True 时，命令被 sandbox_runner 包装（仅 Unix 可用）。
           Windows/平台不支持时 fail-open 降级到无沙箱（log warning）。
+    CCAR14 Task 2: Windows + use_sandbox=True 走 Job Object 模式——命令不包装，
+          正常 Popen 启动后 attach_job（对齐 terminal_tool 的 CCAR12 分支）；
+          attach 失败 fail-open 继续（log warning）。
     """
     if hook.script is None:
         logger.warning("hook %s 缺 script 配置", hook.name)
@@ -224,39 +227,111 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
     # P3.8: 可选 sandbox 包装
     argv = hook.script.command
     use_sandbox = getattr(hook, "use_sandbox", False)
+    # CCAR14 Task 2: Windows Job Object 模式（命令不包装，启动后挂 job）
+    win_job_mode = False
     if use_sandbox:
-        argv = _wrap_with_sandbox(hook)
+        from agent import sandbox_runner
+        try:
+            win_job_mode = (
+                sandbox_runner.uses_job_object()
+                and sandbox_runner.is_available()
+            )
+        except Exception as e:
+            # 查询失败按非 Job 模式处理（下面走 Unix wrapper 降级）
+            logger.warning("hook %s 沙箱模式查询失败（降级到 wrapper 路径）: %s",
+                           hook.name, e)
+            win_job_mode = False
+        if not win_job_mode:
+            argv = _wrap_with_sandbox(hook)
 
-    try:
-        proc = subprocess.run(
-            argv,
-            input=payload_json,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=hook.script.timeout,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
-        return None
-    except OSError as e:
-        logger.warning("hook %s 启动失败: %s", hook.name, e)
-        return None
+    if win_job_mode:
+        # ============================================================
+        # CCAR14 Task 2: Windows Job Object 分支（照 terminal_tool 模式）
+        # 命令不包装正常 Popen 启动 → attach_job（进程树管控）→
+        # try communicate / finally job.close()（句柄保活到进程结束：
+        # 早关会在子进程还在跑时触发全树 kill——那是误杀）
+        # ============================================================
+        from agent.sandbox_runner import attach_job
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+        except OSError as e:
+            logger.warning("hook %s 启动失败: %s", hook.name, e)
+            return None
 
-    if proc.returncode != 0:
+        job = attach_job(proc)
+        if job is None:
+            logger.warning(
+                "hook %s Windows Job Object attach 失败，fail-open 继续执行",
+                hook.name,
+            )
+        try:
+            stdout, stderr = proc.communicate(
+                input=payload_json, timeout=hook.script.timeout,
+            )
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            # job=None（attach 失败 fail-open）时没有 KILL_ON_JOB_CLOSE
+            # 兜底，超时进程会变孤儿继续跑——必须补杀 + communicate 收尸
+            # （对齐 CCAR13 A2 / terminal_tool 语义）。
+            # job 非 None 时 finally 的 job.close() 已带 KILL_ON_JOB_CLOSE
+            # 清整棵子进程树，不重复杀。
+            if job is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass  # 进程已退出的竞态：kill 返错不掩盖超时语义
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass  # 收尸失败不影响超时日志
+            logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
+            return None
+        finally:
+            if job is not None:
+                job.close()
+    else:
+        # 原路径：subprocess.run（无沙箱 / Unix wrapper 包装后）
+        try:
+            proc = subprocess.run(
+                argv,
+                input=payload_json,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=hook.script.timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
+            return None
+        except OSError as e:
+            logger.warning("hook %s 启动失败: %s", hook.name, e)
+            return None
+        stdout = proc.stdout
+        stderr = proc.stderr
+        returncode = proc.returncode
+
+    if returncode != 0:
         # P3.7: exit code 2 = blocking 协议（对齐 claude-code-main）
         # stderr 作为阻塞原因，返回特殊 dict 让调用方识别为 block。
         # 与 fail-open（None）区分：None = 静默失败，block = 主动拒绝。
-        if proc.returncode == 2:
-            stderr = (proc.stderr or "").strip()
-            logger.info("hook %s exit 2 (block): %s", hook.name, stderr[:200])
-            return {"action": "block", "reason": stderr or "hook blocked (exit 2)"}
+        if returncode == 2:
+            stderr_txt = (stderr or "").strip()
+            logger.info("hook %s exit 2 (block): %s", hook.name, stderr_txt[:200])
+            return {"action": "block", "reason": stderr_txt or "hook blocked (exit 2)"}
         logger.warning("hook %s exit %d: %s",
-                       hook.name, proc.returncode, (proc.stderr or "")[:200])
+                       hook.name, returncode, (stderr or "")[:200])
         return None
 
-    stdout = (proc.stdout or "").strip()
+    stdout = (stdout or "").strip()
     if not stdout:
         return {}  # 空 stdout = allow
 

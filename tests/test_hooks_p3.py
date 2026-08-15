@@ -496,3 +496,228 @@ def test_p38_sandbox_not_enabled_by_default():
         script=HookScriptConfig(command=["echo"]),
     )
     assert h.use_sandbox is False
+
+
+# ============================================================================
+# CCAR14 Task 2: Windows + use_sandbox=True 接 Job Object
+# （对齐 terminal_tool 的 CCAR12 模式：命令不包装 + Popen + attach_job +
+#   try communicate / finally close）
+# ============================================================================
+
+class _FakeJob:
+    """哨兵 job：记录事件顺序（close 时机 = 句柄保活语义）。"""
+
+    def __init__(self, events):
+        self._events = events
+
+    def close(self):
+        self._events.append("close")
+
+
+class _FakeHookPopen:
+    """假 Popen：配合 hook_exec 的 Windows job 分支（照 CCAR12 Task 2 模式）。"""
+
+    def __init__(self, argv, events, **kwargs):
+        self.argv = argv
+        self.pid = 12345
+        self.returncode = 0
+        self._events = events
+        events.append("popen")
+
+    def communicate(self, input=None, timeout=None):
+        self._events.append("communicate")
+        return ('{"decision": "allow"}', "")
+
+    def kill(self):
+        self._events.append("kill")
+
+
+def _win_job_hook_env(monkeypatch, sr, job, events):
+    """公共脚手架：mock Windows Job Object 沙箱环境（hook 版）。"""
+    monkeypatch.setattr(sr, "is_available", lambda: True)
+    monkeypatch.setattr(sr, "uses_job_object", lambda: True)
+    monkeypatch.setattr(sr, "attach_job", lambda popen: job)
+    # wrap_command 必须不被调用（Job Object 模式命令不包装）
+    monkeypatch.setattr(
+        sr, "wrap_command",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应调用 wrap_command")),
+    )
+    monkeypatch.setattr(
+        hook_exec.subprocess, "Popen",
+        lambda argv, **kw: _FakeHookPopen(argv, events, **kw),
+    )
+    monkeypatch.setattr(
+        hook_exec.subprocess, "run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Job 模式不走 subprocess.run")),
+    )
+
+
+def _sandbox_hook():
+    """use_sandbox=True 的 command hook。"""
+    return Hook(
+        name="h", event=HookEvent.STOP, kind="declarative",
+        script=HookScriptConfig(
+            handler_type="command",
+            command=["python", "-c", "print('{}')"],
+        ),
+        use_sandbox=True,
+    )
+
+
+def test_ccar14_win_job_event_order(monkeypatch):
+    """Windows + use_sandbox=True：Popen 正常启动（不包装）→ attach →
+    communicate → close（close 必须在 communicate 之后，句柄保活到进程结束）。"""
+    import agent.sandbox_runner as sr
+
+    events = []
+    job = _FakeJob(events)
+    _win_job_hook_env(monkeypatch, sr, job, events)
+    captured = {}
+    monkeypatch.setattr(
+        sr, "attach_job",
+        lambda popen: (captured.setdefault("attached", []).append(popen), job)[1],
+    )
+
+    result = hook_exec.run_script_hook(_sandbox_hook(), {"event": "stop"})
+    # 命令输出正常解析
+    assert result == {"decision": "allow"}
+    # attach 被调且拿到的是 Popen 实例
+    assert len(captured["attached"]) == 1
+    assert isinstance(captured["attached"][0], _FakeHookPopen)
+    # 事件序：popen → communicate → close
+    assert events == ["popen", "communicate", "close"]
+
+
+def test_ccar14_win_job_command_not_wrapped(monkeypatch):
+    """Job Object 模式下 Popen 收到的是原始 command（不包装、无前缀）。"""
+    import agent.sandbox_runner as sr
+
+    events = []
+    _win_job_hook_env(monkeypatch, sr, _FakeJob(events), events)
+    captured = {}
+    monkeypatch.setattr(
+        hook_exec.subprocess, "Popen",
+        lambda argv, **kw: (
+            captured.setdefault("argv", argv),
+            _FakeHookPopen(argv, events, **kw),
+        )[1],
+    )
+
+    hook = _sandbox_hook()
+    result = hook_exec.run_script_hook(hook, {"event": "stop"})
+    assert result == {"decision": "allow"}
+    # Popen 收到的就是 hook.script.command 原始 list（未被沙箱包装）
+    assert list(captured["argv"]) == list(hook.script.command)
+
+
+def test_ccar14_win_job_attach_fail_failopen(monkeypatch):
+    """attach 失败返回 None → fail-open：hook 照常执行，不阻断。"""
+    import agent.sandbox_runner as sr
+
+    events = []
+    _win_job_hook_env(monkeypatch, sr, None, events)  # job=None 模拟 attach 失败
+
+    result = hook_exec.run_script_hook(_sandbox_hook(), {"event": "stop"})
+    assert result == {"decision": "allow"}  # 命令仍执行
+    # 无 job → 无 close 事件
+    assert events == ["popen", "communicate"]
+
+
+def test_ccar14_win_job_timeout_closes_job(monkeypatch):
+    """超时 → communicate 抛 TimeoutExpired → finally 里 job.close 仍被调
+    （KILL_ON_JOB_CLOSE 顺带清理子进程树）；返回 None（fail-open）。"""
+    import subprocess as sp
+    import agent.sandbox_runner as sr
+
+    events = []
+
+    class TimeoutPopen(_FakeHookPopen):
+        def communicate(self, input=None, timeout=None):
+            self._events.append("communicate")
+            raise sp.TimeoutExpired(cmd=self.argv, timeout=timeout)
+
+    _win_job_hook_env(monkeypatch, sr, _FakeJob(events), events)
+    monkeypatch.setattr(
+        hook_exec.subprocess, "Popen",
+        lambda argv, **kw: TimeoutPopen(argv, events, **kw),
+    )
+
+    result = hook_exec.run_script_hook(_sandbox_hook(), {"event": "stop"})
+    assert result is None
+    # close 在 communicate 之后仍被调用（finally 保活语义）
+    assert events == ["popen", "communicate", "close"]
+
+
+def test_ccar14_unix_wrapper_path_regression(monkeypatch):
+    """Unix 回归：uses_job_object=False → 仍走 _wrap_with_sandbox 的
+    wrap_command 包装 + subprocess.run（不挂 job、不走 Popen）。"""
+    import agent.sandbox_runner as sr
+
+    monkeypatch.setattr(sr, "is_available", lambda: True)
+    monkeypatch.setattr(sr, "uses_job_object", lambda: False)
+    wrapped_argv = ["bwrap", "--ro-bind", "/usr", "/usr", "--", "bash", "-c", "echo hi"]
+    wrap_mock = mock.MagicMock(return_value=wrapped_argv)
+    monkeypatch.setattr(sr, "wrap_command", wrap_mock)
+    monkeypatch.setattr(
+        sr, "attach_job",
+        lambda p: (_ for _ in ()).throw(AssertionError("Unix 路径不应 attach job")),
+    )
+    monkeypatch.setattr(
+        hook_exec.subprocess, "Popen",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Unix 路径不走 Popen")),
+    )
+
+    captured = {}
+
+    class _FakeRunResult:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeRunResult()
+
+    monkeypatch.setattr(hook_exec.subprocess, "run", fake_run)
+
+    result = hook_exec.run_script_hook(_sandbox_hook(), {"event": "stop"})
+    assert result == {}
+    # wrap_command 被调用 + subprocess.run 收到包装后的 argv
+    wrap_mock.assert_called_once()
+    assert captured["argv"] == wrapped_argv
+
+
+def test_ccar14_no_sandbox_does_not_attach_job(monkeypatch):
+    """use_sandbox=False → 不挂 job（attach/uses_job_object 都不被查，
+    走原 subprocess.run 路径）。"""
+    import agent.sandbox_runner as sr
+
+    monkeypatch.setattr(
+        sr, "attach_job",
+        lambda p: (_ for _ in ()).throw(AssertionError("use_sandbox=False 不应 attach job")))
+    monkeypatch.setattr(
+        sr, "uses_job_object",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("use_sandbox=False 不应查询 job 模式")))
+
+    class _FakeRunResult:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    monkeypatch.setattr(
+        hook_exec.subprocess, "run", lambda argv, **kw: _FakeRunResult())
+    monkeypatch.setattr(
+        hook_exec.subprocess, "Popen",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("无沙箱路径不走 Popen")))
+
+    hook = Hook(
+        name="h", event=HookEvent.STOP, kind="declarative",
+        script=HookScriptConfig(
+            handler_type="command",
+            command=["python", "-c", "print('{}')"],
+        ),
+        # use_sandbox 默认 False
+    )
+    result = hook_exec.run_script_hook(hook, {"event": "stop"})
+    assert result == {}
