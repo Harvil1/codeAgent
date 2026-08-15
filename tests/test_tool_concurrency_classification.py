@@ -197,3 +197,15 @@ def test_all_builtin_schemas_use_openai_parameters_key():
         f"以下工具 schema 用了 inputSchema（LLM 看不到参数定义），"
         f"改成 parameters: {sorted(bad)}"
     )
+
+
+def test_async_disallow_contains_goal_activation():
+    """【CCAR12 Task 4 review】goal 循环激活工具必须禁用于 async 子代理。
+
+    goal-continue 分支无 spawn_depth 守卫——async 子代理（daemon 线程，
+    不可中断）激活 goal 会持续烧 token。goal_start/goal_resume 禁；
+    pause/clear 是止损工具保留。
+    """
+    from toolsets import ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "goal_start" in ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "goal_resume" in ASYNC_AGENT_DISALLOWED_TOOLS

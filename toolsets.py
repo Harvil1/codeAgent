@@ -156,6 +156,10 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     "cron_create", "cron_delete",
     # idle 挂起（后台子代理不应进 IDLE 状态影响 team 协调）
     "idle",
+    # goal 循环激活（CCAR12 Task 4 review 定夺：goal-continue 无 spawn_depth
+    # 守卫，async 子代理在 daemon 线程激活 goal 会不可中断地烧 token；
+    # pause/clear 是止损工具保留给子代理自救）
+    "goal_start", "goal_resume",
 })
 
 
