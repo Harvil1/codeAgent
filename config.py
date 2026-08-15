@@ -99,6 +99,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "llm_compact_keep_recent": 30,
         "llm_compact_cooldown_turns": 5,
         "max_compress_attempts": 3,
+        # T1（核心机制对齐第 1 项）：单轮增长预估（防压缩震荡）
+        # L4 判定 est + growth >= threshold 提前触发；growth = 最近
+        # growth_window 轮的最大单轮 token，历史不足回退 growth_default
+        "llm_compact_growth_window": 3,
+        "llm_compact_growth_default": 8000,
         # Reactive（Task D：多次触发 + 冷却窗口）
         "reactive_keep_recent": 10,
         "reactive_compact_cooldown_seconds": 60,   # 冷却窗口（60s 内最多 1 次）

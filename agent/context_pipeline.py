@@ -886,6 +886,45 @@ def reactive_compact(
     return new_messages, True
 
 
+def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000) -> int:
+    """预估"下一轮还要烧多少 token"（T1，防压缩震荡）。
+
+    对齐 CCB autoCompact 的 estimateMaxTurnGrowth：阈值 = 有效窗口 − buffer −
+    单轮增长预估。这里取最近 window 轮（user 边界分组）的**单轮 token
+    大小最大值**作为增长预估——一轮大工具结果进来会直接把下一轮顶过线，
+    提前压缩避免"压完→下一轮又到线→再压"的震荡。
+
+    Args:
+        messages: 完整消息列表（含 system，会被跳过）
+        window: 观察窗口（最近几轮），config context.llm_compact_growth_window
+        default: 历史不足 window 轮时的保守默认，config llm_compact_growth_default
+
+    Returns:
+        预估增量（tokens）。空/历史不足 → default。
+    """
+    try:
+        _, conv = _split_system(messages)
+        # 按 user 边界分轮：一条 user 消息 + 后续 assistant/tool 直到下一条 user
+        turns: list = []
+        current: list = []
+        for m in conv:
+            if m.get("role") == "user":
+                if current:
+                    turns.append(current)
+                current = [m]
+            elif current:
+                current.append(m)
+        if current:
+            turns.append(current)
+
+        if len(turns) < max(1, window):
+            return default
+        recent = turns[-window:]
+        return max(estimate_message_tokens(t) for t in recent)
+    except Exception:
+        return default
+
+
 async def compress_if_needed(
     messages: list,
     *,
@@ -1100,12 +1139,20 @@ async def compress_if_needed(
     if model and "[1m]" in str(model):
         token_threshold = max(token_threshold, 700000)
 
-    over_threshold = est_tokens > token_threshold
+    # T1（核心机制对齐第 1 项）：单轮增长预估——est + growth >= threshold 提前触发。
+    # 一次大工具结果进来会直接把下一轮顶过线，等真到线再压就是
+    # "压完→下一轮又到线→再压"的震荡；提前量 = 最近几轮的最大单轮增速。
+    growth = estimate_turn_growth(
+        messages,
+        window=config.get("llm_compact_growth_window", 3),
+        default=config.get("llm_compact_growth_default", 8000),
+    )
+    over_threshold = est_tokens + growth >= token_threshold
     cooldown_ok = session_state.cooldown_ok(cooldown)
     logger.info(
-        "L4 trigger check: over_threshold=%s, est_tokens=%d, conv_msgs=%d, "
+        "L4 trigger check: over_threshold=%s, est_tokens=%d, growth=%d, conv_msgs=%d, "
         "llm_compact_count=%d/%d, cooldown_ok=%s",
-        over_threshold, est_tokens, conv_len,
+        over_threshold, est_tokens, growth, conv_len,
         llm_compact_count, max_attempts, cooldown_ok,
     )
     if over_threshold and llm_compact_count < max_attempts and cooldown_ok:
@@ -1130,7 +1177,9 @@ async def compress_if_needed(
             model=model,
             keep_recent=config.get("llm_compact_keep_recent", 30),
             token_threshold=token_threshold,  # 自适应阈值
-            precomputed_tokens=est_tokens,
+            # T1：传入 est+growth（提前触发时 est 可能未到 threshold，
+            # llm_compact 内部门槛用同一个"下一轮预期水位"判定，避免二次拦截）
+            precomputed_tokens=est_tokens + growth,
         )
         if c4:
             session_state.record_llm_compact()
