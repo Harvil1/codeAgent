@@ -1,8 +1,9 @@
-"""CCAR11 Task 6 测试：notifier + 3 触发点接线。
+"""CCAR11 Task 6 测试：notifier + 触发点接线。
 
 覆盖：
 1. notifier 本身：Windows toast / fail-open / 非 Windows / 节流 / config 关
-2. 触发点接线：bg 完成 / 权限审批 / goal pause
+2. 触发点接线：权限审批（真实 PermissionChecker 路径）+
+   bg 完成（真实 _drain_injected_messages 路径，见文件末尾 CCAR13 用例）
 """
 from unittest.mock import patch, MagicMock
 
@@ -59,56 +60,8 @@ def test_notify_disabled_config():
 
 
 # ============================================================================
-# Part 2：3 触发点接线
+# Part 2：触发点接线
 # ============================================================================
-
-def test_trigger_bg_completion_notifies(monkeypatch):
-    """bg drain 出 completed/failed 状态时触发 notify。
-
-    触发路径：agent/__init__.py:_drain_injected_messages 内 drain_notifications 后过滤。
-    """
-    _reset_throttle_for_test()
-    called = []
-
-    def fake_notify(title, message):
-        called.append((title, message))
-        return True
-
-    # 构造 bg_manager with 两条通知（一条 completed、一条 running）
-    fake_bg = MagicMock()
-    fake_bg.drain_notifications.return_value = [
-        {"task_id": "bg-1", "status": "completed", "exit_code": 0},
-        {"task_id": "bg-2", "status": "running", "stall": True},  # 不触发
-        {"task_id": "bg-3", "status": "failed", "exit_code": 1},
-    ]
-
-    # 直接 import 触发点辅助函数（agent/__init__.py 暴露的内联逻辑，
-    # 用 importlib 触发模块加载并调内部 helper 太重——改用一个轻量间接验证：
-    # 验证 _filter_bg_for_notify 行为，即接线引入的过滤函数）
-    from agent import notifier as notifier_mod
-
-    with patch.object(notifier_mod, "notify", fake_notify):
-        # 模拟 _drain_injected_messages 内的接线：遍历 notifications 触发
-        # 这里复刻接线后的行为（实际代码在 agent/__init__.py 的 drain 处）
-        notifications = fake_bg.drain_notifications()
-        for n in notifications:
-            status = n.get("status")
-            if status in ("completed", "failed"):
-                try:
-                    notifier_mod.notify(
-                        "后台任务",
-                        f"{n.get('task_id', '?')} {status}",
-                    )
-                except Exception:
-                    pass
-
-    assert len(called) == 2
-    titles = [c[0] for c in called]
-    assert all(t == "后台任务" for t in titles)
-    # 第一条是 completed，第二条是 failed
-    assert "bg-1" in called[0][1] and "completed" in called[0][1]
-    assert "bg-3" in called[1][1] and "failed" in called[1][1]
-
 
 def test_trigger_permission_approval_notifies(monkeypatch):
     """审批 callback 被调前触发 notify。
@@ -134,35 +87,6 @@ def test_trigger_permission_approval_notifies(monkeypatch):
 
     assert called, "审批前应触发 notify"
     assert called[0][0] == "需要审批"
-
-
-def test_trigger_goal_network_pause_notifies():
-    """goal network pause 分支触发 notify。
-
-    触发路径：agent/__init__.py 的 try/except 兜住 LLM 调用，
-    网络异常时 self._goal_state.pause(reason="network") 前触发 notify。
-    直接调用 _pause_and_notify helper（接线后从主流程抽出）。
-    """
-    _reset_throttle_for_test()
-    called = []
-
-    def fake_notify(title, message):
-        called.append((title, message))
-        return True
-
-    from agent import notifier as notifier_mod
-
-    # 复刻接线后的行为
-    with patch.object(notifier_mod, "notify", fake_notify):
-        reason = "network"
-        try:
-            notifier_mod.notify("Goal 已暂停", f"原因: {reason}")
-        except Exception:
-            pass
-
-    assert called, "goal pause 应触发 notify"
-    assert called[0][0] == "Goal 已暂停"
-    assert "network" in called[0][1]
 
 
 # ============================================================================
