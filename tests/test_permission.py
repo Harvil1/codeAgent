@@ -3,6 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1293,3 +1294,36 @@ def test_check_path_gates_1_2_still_hard_before_approval(tmp_path, monkeypatch):
     assert "写保护" in r2.reason
     # 两道闸门都在审批之前：callback 一次都没被调
     assert len(calls) == 0
+
+
+def test_check_path_approval_triggers_hook_and_notify(tmp_path, monkeypatch):
+    """Task 3 fix：check_path 审批点接 PERMISSION_REQUEST hook + toast。
+
+    与 terminal 审批点（check 闸门 2）同构：进入用户审批前触发
+    run_permission_request 审计 + notify toast，两者 fail-open。
+    """
+    from unittest.mock import MagicMock
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    hooks = MagicMock()
+    with patch("agent.notifier.notify") as mock_notify:
+        c = PermissionChecker(
+            approval_callback=lambda item: True,
+            hooks_registry=hooks,
+        )
+        r = c.check_path(str(outside / "a.txt"), write=True)
+
+    assert r.allowed is True
+    # hook 在审批前被调（fail-open，异常不影响流程）
+    hooks.run_permission_request.assert_called_once()
+    hook_payload = hooks.run_permission_request.call_args[0][0]
+    assert "文件写入审批" in hook_payload["command"]
+    # toast 同步触发（标题对齐 terminal 审批点的"需要审批"）
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args[0][0] == "需要审批"
+

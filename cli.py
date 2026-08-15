@@ -930,10 +930,10 @@ def _make_approval_callback():
     """创建审批 callback（破坏性命令 + 写入路径都用这个）。
 
     callback 接收字符串,根据内容自动判断是命令还是路径,显示不同 prompt。
-    同意后:
-    - 命令 → 加入 ~/.OmniMate/approved_commands.json
-    - 路径 → 加入 ~/.OmniMate/approved_paths.json
-    跨会话不再询问相同项。
+    审批结果的作用域(如实说明,勿夸大):
+    - 命令 → 同意后加入 ~/.OmniMate/approved_commands.json,跨会话不再询问相同命令
+    - 路径 → 仅会话内有效(父目录进 PermissionChecker._approved_write_roots
+      会话缓存,同目录后续写入不再问);跨会话需用 /add-dir 加白名单
     """
     def callback(item: str) -> bool:
         # 启发式判断:含路径分隔符或 ~ 开头 → 路径,否则 → 命令

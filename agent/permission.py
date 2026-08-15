@@ -1047,6 +1047,23 @@ class PermissionChecker:
         # 类型区分靠消息文本前缀"文件写入审批"（cli.py 的 callback 按内容
         # 含路径分隔符启发式识别路径分支）。
         if self.approval_callback is not None:
+            # Task 3 fix: PERMISSION_REQUEST 审计 + toast（与 terminal 审批点同构）
+            # fail-open：hook / notify 异常不影响审批流程
+            if self._hooks_registry is not None:
+                try:
+                    self._hooks_registry.run_permission_request({
+                        "command": f"文件写入审批: {resolved}",
+                        "reason": f"写入路径不在白名单: {resolved}",
+                    })
+                except Exception:
+                    pass  # fail-open
+
+            try:
+                from agent.notifier import notify as _notify
+                _notify("需要审批", "agent 请求写入白名单外路径")
+            except Exception:
+                pass
+
             try:
                 approved = bool(self.approval_callback(f"文件写入审批: {resolved}"))
             except Exception:

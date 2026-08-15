@@ -49,3 +49,20 @@
 2. **持久化未做**（按 brief 范围）：`_approved_write_roots` 仅会话级。构造参数里已有 `paths_whitelist_file` / `_approved_paths` 持久化机制（cli.py 已传 `approved_paths.json`），但 check_path 目前**不查询也不写入**它——留作 follow-up：批准时可同步 `_approved_paths.add(parent)` + `_save_paths_whitelist()`，实现跨会话不重复问（cli callback docstring 已宣称此语义但实际未接线）。
 3. **hook / 桌面通知未接**：terminal 审批前有 PERMISSION_REQUEST hook + toast 通知；check_path 审批通道未加（brief 未要求）。用户不盯屏时文件写入审批可能被错过——建议 follow-up 同款 fail-open 接入。
 4. **缓存粒度**：批准的是 `resolved.parent`（父目录级），与 cli 提示文案"同意后整个父目录不再询问"一致。若目标本身是目录（如 mkdir 深层路径），缓存的是其父目录——语义上"该目录所在处已批"，合理。
+
+## FIX（reviewer 收尾补齐，2026-08-15）
+
+1. **check_path 审批点接 PERMISSION_REQUEST hook + toast**（Concern 3 收口）：在闸门 3.3 调 `approval_callback` 之前，照抄 terminal 审批点（`check()` 闸门 2）的两段 fail-open——
+   - `run_permission_request({"command": "文件写入审批: <path>", "reason": "写入路径不在白名单: <path>"})`（hook 异常 pass）
+   - `notify("需要审批", "agent 请求写入白名单外路径")`（lazy import，异常 pass）
+   - 位置在 `if self.approval_callback is not None:` 内部，无 callback / 缓存命中 / autoDeny 短路路径不触发（对齐 terminal 语义）
+2. **cli.py `_make_approval_callback` docstring 止损**（Concern 2 的宣称不实部分）：原文"路径 → 加入 approved_paths.json 跨会话不再询问"改为如实描述——路径审批仅会话内有效（父目录进 `_approved_write_roots` 会话缓存），跨会话用 `/add-dir`。
+
+### 测试（追加 1 个）
+
+- `test_check_path_approval_triggers_hook_and_notify`：mock hooks_registry（MagicMock）+ `patch("agent.notifier.notify")`，断言审批放行前 `run_permission_request` 被调 1 次（payload 含"文件写入审批"）且 notify 被调 1 次（标题"需要审批"）
+
+### 验证
+
+- `uv run pytest tests/test_permission.py tests/test_cli_commands.py -q`：211 passed
+- `uv run pytest tests/ -q`：**2451 passed, 0 failed**（baseline 2450 + 新 1）
