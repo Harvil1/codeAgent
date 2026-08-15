@@ -1146,9 +1146,30 @@ class PermissionChecker:
         if fatal:
             return self._deny(command, f"硬底线: {fatal}", "deny")
 
+        # === R16 #3：内容级权限规则（Bash(cmd:*) 语法，deny > ask > allow）===
+        # deny：任何模式都拒（含 bypass——用户显式 deny 是最高意图）
+        # ask：强制审批（bypass 也不豁免，对齐 CC 内容级 ask 语义）
+        # allow：标记 content_allowed，跳过后续注入面/破坏性审批
+        #        （硬底线已在闸门 0 拒掉；黑名单/危险删除在后面仍生效）
+        from agent.tool_permissions import check_command_rules
+        content_rule = check_command_rules(command)
+        if content_rule == "deny":
+            return self._deny(command, "内容级规则拒绝（permissions.deny）", "rule_deny")
+        if content_rule == "ask":
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason="内容级规则要求审批（permissions.ask）",
+                auto_deny_reason="内容级规则要求审批（permissions.ask）",
+                no_callback_message="内容级规则要求审批（permissions.ask）",
+                gate="rule_ask",
+            )
+        content_allowed = content_rule == "allow"
+
         # bypassPermissions 模式:跳过闸门 1/2/3,直接放行剩余所有命令
         # 适用场景:Claude Code 兼容的 --dangerously-skip-permissions,
         # 用户已明确接受风险,不需要审批。闸门 0 的两道底线仍生效。
+        # （R16 #3 的内容级 deny/ask 在上面已先行处理——bypass 不豁免它们）
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
 
@@ -1168,6 +1189,10 @@ class PermissionChecker:
         deny = check_command_deny(command)
         if deny:
             return self._deny(command, f"硬拒绝: {deny}", "deny")
+
+        # === R16 #3：内容级 allow 命中 → 放行（硬底线/黑名单已在前拒掉）===
+        if content_allowed:
+            return PermissionResult(True, "内容级规则允许（permissions.allow）", "rule_allow")
 
         # === R16 #1：注入面模式（命中 → 升审批，不硬拒）===
         # $()/${}/进程替换/zsh 展开/IFS/控制字符等"所见非所执行"形态，

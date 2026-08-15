@@ -608,3 +608,142 @@ def test_hard_deny_before_injection():
     r = checker.check("sudo $(echo x)")
     assert not r.allowed
     assert r.gate == "deny"
+
+
+# ---------------------------------------------------------------------------
+# R16 #3：内容级权限规则（Bash(cmd:*) 语法 + 遮蔽检测）
+# ---------------------------------------------------------------------------
+
+import agent.tool_permissions as tp
+from agent.tool_permissions import (
+    check_command_rules,
+    command_rule_matches,
+    detect_shadowed_command_rules,
+    parse_command_rule,
+)
+
+
+def test_parse_command_rule_forms():
+    assert parse_command_rule("Bash(npm test)") == ("exact", "npm test")
+    assert parse_command_rule("Bash(npm:*)") == ("prefix", "npm")
+    assert parse_command_rule("Bash(git *)") == ("wildcard", "git *")
+    assert parse_command_rule("Terminal(npm:*)") == ("prefix", "npm")  # 原生工具名
+    assert parse_command_rule("bash(npm:*)") == ("prefix", "npm")      # 大小写不敏感
+    assert parse_command_rule("read_file") is None                     # 工具可见性条目
+    assert parse_command_rule("mcp__foo__*") is None
+
+
+def test_command_rule_matching():
+    # 精确
+    assert command_rule_matches("Bash(npm test)", "npm test")
+    assert not command_rule_matches("Bash(npm test)", "npm test --flag")
+    # 旧前缀（词边界）
+    assert command_rule_matches("Bash(npm:*)", "npm")
+    assert command_rule_matches("Bash(npm:*)", "npm test")
+    assert not command_rule_matches("Bash(npm:*)", "npmx")
+    # 通配（尾部单独 " *" 匹配裸命令）
+    assert command_rule_matches("Bash(git *)", "git add -A")
+    assert command_rule_matches("Bash(git *)", "git")
+    assert not command_rule_matches("Bash(git *)", "gitt")
+    # 多通配不含尾部可选语义
+    assert command_rule_matches("Bash(* run *)", "npm run build")
+    assert not command_rule_matches("Bash(* run *)", "npm run")
+    # 转义 * 是字面量（需同时含未转义 * 才是通配规则——
+    # 纯 "\*" 无未转义星号时按 CC 语义落 exact 分支）
+    assert command_rule_matches(r"Bash(*\*)", "a*")       # 任意内容 + 字面量 *
+    assert command_rule_matches(r"Bash(*\*)", "x*y*")
+    assert not command_rule_matches(r"Bash(*\*)", "ab")
+    assert parse_command_rule(r"Bash(ls \*)") == ("exact", "ls \\*")
+
+
+def test_check_command_rules_priority():
+    rules = {
+        "deny": ["Bash(curl:*)"],
+        "ask": ["Bash(npm publish:*)"],
+        "allow": ["Bash(npm publish:*)", "Bash(git status)"],
+    }
+    assert check_command_rules("curl http://x", rules) == "deny"     # deny 最高
+    assert check_command_rules("npm publish --tag x", rules) == "ask"  # ask > allow
+    assert check_command_rules("git status", rules) == "allow"
+    assert check_command_rules("ls -la", rules) == "none"
+
+
+def _patch_rules(monkeypatch, allow=None, deny=None, ask=None):
+    monkeypatch.setattr(
+        tp, "load_tool_permission_rules",
+        lambda: {"allow": allow or [], "deny": deny or [], "ask": ask or []},
+    )
+
+
+def test_content_rule_deny_all_modes(monkeypatch):
+    """内容级 deny：任何模式都拒（含 bypass）。"""
+    _patch_rules(monkeypatch, deny=["Bash(curl:*)"])
+    checker = PermissionChecker()
+    r = checker.check("curl http://x")
+    assert not r.allowed and r.gate == "rule_deny"
+    r2 = checker.check("curl http://x", mode_override="bypassPermissions")
+    assert not r2.allowed  # bypass 不豁免显式 deny
+    assert checker.check("wget http://x", mode_override="bypassPermissions").allowed
+
+
+def test_content_rule_ask_survives_bypass(monkeypatch):
+    """内容级 ask：bypass 也不豁免，强制审批。"""
+    _patch_rules(monkeypatch, ask=["Bash(npm publish:*)"])
+    asked = []
+    checker = PermissionChecker(approval_callback=lambda c: asked.append(c) or True)
+    r = checker.check("npm publish --access public", mode_override="bypassPermissions")
+    assert r.allowed and r.gate == "approval"
+    assert len(asked) == 1
+    # autoDeny → 不能弹 UI 直接拒
+    r2 = checker.check("npm publish", mode_override="autoDeny")
+    assert not r2.allowed and r2.gate == "auto_deny"
+
+
+def test_content_rule_allow_skips_approval_gates(monkeypatch):
+    """内容级 allow：跳过注入面/破坏性审批；硬底线不受影响。
+
+    注意前缀是词边界语义：build:* 匹配 "rm -rf build" 不匹配 "rm -rf build/"
+    （对齐 CC prefix 匹配的词边界行为）。
+    """
+    _patch_rules(monkeypatch, allow=["Bash(rm -rf build:*)"])
+    checker = PermissionChecker()  # 无 callback——正常会拒
+    # 破坏性命令按前缀 allow 放行
+    r = checker.check("rm -rf build")
+    assert r.allowed and r.gate == "rule_allow"
+    # 注入面命令按前缀 allow 放行（用户显式意图）
+    r2 = checker.check("rm -rf build $(gen)")
+    assert r2.allowed and r2.gate == "rule_allow"
+    # 硬底线不受 content allow 影响
+    assert not checker.check("sudo rm -rf build").allowed           # 闸门 0/1
+    assert not checker.check("rm -rf /usr").allowed                 # R16 #6
+    # 词边界外 / 不匹配前缀的破坏性命令仍走审批
+    assert not checker.check("rm -rf build/").allowed
+    assert not checker.check("rm -rf dist/").allowed
+
+
+def test_content_rules_default_empty(monkeypatch):
+    """无规则时行为不变（回归保护）。"""
+    _patch_rules(monkeypatch)
+    checker = PermissionChecker()
+    assert checker.check("ls -la").allowed and checker.check("ls -la").gate == "auto"
+
+
+def test_shadowed_rule_detection():
+    # 整级 deny 遮蔽内容级 allow
+    w = detect_shadowed_command_rules({
+        "deny": ["Bash"], "allow": ["Bash(ls:*)"], "ask": [],
+    })
+    assert len(w) == 1 and "遮蔽" in w[0]
+    # 整级 ask 遮蔽内容级 allow（ask 优先级更高）
+    w2 = detect_shadowed_command_rules({
+        "deny": [], "allow": ["Bash(ls:*)"], "ask": ["Terminal"],
+    })
+    assert len(w2) == 1 and "ask" in w2[0]
+    # 无整级规则 → 无告警
+    assert detect_shadowed_command_rules({
+        "deny": ["Bash(curl:*)"], "allow": ["Bash(ls:*)"], "ask": [],
+    }) == []
+    # 整级 allow（非内容级）不参与遮蔽检测
+    assert detect_shadowed_command_rules({
+        "deny": ["Bash"], "allow": ["read_file"], "ask": [],
+    }) == []
