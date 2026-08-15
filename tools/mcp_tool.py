@@ -75,9 +75,105 @@ def register_mcp_tools(manager: MCPManager = None) -> int:
         except Exception as e:
             logger.warning("注册 MCP 工具 %s 失败: %s", full_name, e)
 
+    # CCAR12 Task 5：每个连接中的 server 额外注册 resources 协议工具
+    # （命名对齐 mcp__<server>__<tool> 动态模式，check_fn 同款 per-server 门控）
+    count += _register_resource_tools(manager)
+
     if count:
         logger.info("已注册 %d 个 MCP 工具", count)
     return count
+
+
+def _register_resource_tools(manager: MCPManager) -> int:
+    """为每个连接中的 MCP server 注册 list/read resources 两工具。
+
+    注册名：mcp__<server>__list_resources / mcp__<server>__read_resource，
+    走 registry 的 mcp__ 动态命名空间（model_tools 自动发现 + catalog 精简条目
+    + mcp_server_filter 过滤都天然生效，不发明新机制）。
+
+    server 不支持 resources 协议时工具仍注册（调用时返回友好错误，
+    而不是启动时探测一次就永久隐藏——能力探测留 follow-up）。
+    """
+    with manager._lock:
+        clients = {
+            name: client for name, client in manager._clients.items()
+            if client.connected
+        }
+
+    registered = 0
+    for server_name in sorted(clients):
+        # ---- mcp__<server>__list_resources（无参数）----
+        list_schema = {
+            "name": f"mcp__{server_name}__list_resources",
+            "description": (
+                f"列出 MCP server {server_name} 的 resources"
+                f"（uri/name/mimeType/description）"
+                f" [MCP server: {server_name}]"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        }
+
+        def make_list_handler(mgr, sname):
+            def handler(args: dict, **kwargs) -> str:
+                result = mgr.list_resources(sname)
+                return json.dumps(result, ensure_ascii=False)
+            return handler
+
+        # ---- mcp__<server>__read_resource（uri 参数）----
+        read_schema = {
+            "name": f"mcp__{server_name}__read_resource",
+            "description": (
+                f"读取 MCP server {server_name} 的单个 resource 内容"
+                f"（按 uri） [MCP server: {server_name}]"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uri": {
+                        "type": "string",
+                        "description": "resource 的 URI（来自 list_resources）",
+                    },
+                },
+                "required": ["uri"],
+            },
+        }
+
+        def make_read_handler(mgr, sname):
+            def handler(args: dict, **kwargs) -> str:
+                uri = (args or {}).get("uri", "")
+                result = mgr.read_resource(sname, uri)
+                return json.dumps(result, ensure_ascii=False)
+            return handler
+
+        # check_fn 复用现有 per-server 门控
+        def make_check(mgr, sname):
+            def check():
+                with mgr._lock:
+                    client = mgr._clients.get(sname)
+                return client is not None and client.connected
+            return check
+
+        for name, schema, handler in (
+            (list_schema["name"], list_schema, make_list_handler(manager, server_name)),
+            (read_schema["name"], read_schema, make_read_handler(manager, server_name)),
+        ):
+            try:
+                registry.register(
+                    name=name,
+                    toolset="mcp",
+                    schema=schema,
+                    handler=handler,
+                    check_fn=make_check(manager, server_name),
+                    emoji="🔌",
+                    # resources 读取理论上只读，但走外部进程/网络，
+                    # 与其他 MCP 工具一致保守标 False（串行）
+                    isConcurrencySafe=False,
+                )
+                registered += 1
+            except Exception as e:
+                logger.warning("注册 MCP resources 工具 %s 失败: %s", name, e)
+
+    return registered
 
 
 def initialize_mcp() -> int:

@@ -116,6 +116,30 @@ class MCPTransport(ABC):
         """返回当前注册的 notification handler（None 表示未注册）。"""
         return getattr(self, "_notification_handler", None)
 
+    # CCAR12 Task 5：MCP Resources 协议（默认实现，子类无需 override）
+    # send_request 在所有具体 transport 里已通用，基类直接复用；
+    # 服务器不支持 resources（JSON-RPC error）或任何异常 → None（fail-open）。
+    def list_resources(self) -> Optional[list]:
+        """MCP resources/list。服务器不支持/失败返回 None（fail-open）。
+
+        返回 [{uri, name, mimeType?, description?}, ...]。
+        """
+        try:
+            resp = self.send_request("resources/list", {})
+            return (resp or {}).get("resources")
+        except Exception:
+            return None
+
+    def read_resource(self, uri: str) -> Optional[dict]:
+        """MCP resources/read。失败返回 None（fail-open）。
+
+        成功返回 {contents: [{uri, text?|blob?, mimeType?}, ...]}。
+        """
+        try:
+            return self.send_request("resources/read", {"uri": uri})
+        except Exception:
+            return None
+
     # 共享：MCP 握手流程（子类 connect() 末尾调用）
     def _do_initialize_handshake(self) -> None:
         """标准 MCP initialize 握手。"""
@@ -1100,6 +1124,15 @@ class MCPClient:
             "arguments": arguments or {},
         }) or {}
 
+    # CCAR12 Task 5：resources 透传（fail-open，None = 不支持/失败）
+    def list_resources(self) -> Optional[list]:
+        """列出 server 的 resources（transport.list_resources）。"""
+        return self._transport.list_resources()
+
+    def read_resource(self, uri: str) -> Optional[dict]:
+        """读单个 resource 内容（transport.read_resource）。"""
+        return self._transport.read_resource(uri)
+
     def close(self) -> None:
         self._connected = False
         self._transport.close()
@@ -1247,6 +1280,66 @@ class MCPManager:
             return client.call_tool(tool_name, arguments)
         except Exception as e:
             return {"error": f"MCP 调用失败: {e}"}
+
+    # CCAR12 Task 5：resources 协议入口（供 mcp_resource 工具调用）
+    # 错误风格与 call() 对齐：统一返回 dict（成功/失败都是 JSON 可序列化）。
+    def list_resources(self, server_name: str) -> dict:
+        """列某个 server 的 resources。失败返回错误 dict。"""
+        with self._lock:
+            client = self._clients.get(server_name)
+        if client is None:
+            return {
+                "error": f"MCP server 未连接: {server_name}",
+                "error_type": "mcp_server_not_connected",
+            }
+        if not client.connected:
+            return {
+                "error": f"MCP server 已断开: {server_name}",
+                "error_type": "mcp_server_disconnected",
+            }
+        try:
+            resources = client.list_resources()
+        except Exception as e:
+            return {"error": f"MCP list_resources 失败: {e}"}
+        if resources is None:
+            return {
+                "error": f"MCP server {server_name} 不支持 resources 协议",
+                "error_type": "mcp_resources_unsupported",
+            }
+        return {"server": server_name, "resources": resources}
+
+    def read_resource(self, server_name: str, uri: str) -> dict:
+        """读某个 server 的单个 resource。失败返回错误 dict。"""
+        with self._lock:
+            client = self._clients.get(server_name)
+        if client is None:
+            return {
+                "error": f"MCP server 未连接: {server_name}",
+                "error_type": "mcp_server_not_connected",
+            }
+        if not client.connected:
+            return {
+                "error": f"MCP server 已断开: {server_name}",
+                "error_type": "mcp_server_disconnected",
+            }
+        if not uri:
+            return {
+                "error": "缺少 uri 参数",
+                "error_type": "invalid_args",
+            }
+        try:
+            result = client.read_resource(uri)
+        except Exception as e:
+            return {"error": f"MCP read_resource 失败: {e}"}
+        if result is None:
+            return {
+                "error": (
+                    f"读取 resource 失败（uri 可能不存在，或 server "
+                    f"{server_name} 不支持 resources 协议）"
+                ),
+                "error_type": "mcp_resources_unsupported",
+            }
+        return result
 
     def close_all(self) -> None:
         """关闭所有连接。"""
