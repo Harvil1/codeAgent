@@ -308,6 +308,9 @@ uv sync                                 # 同步已声明依赖
 | cron/goal/config/worktree 工具化（CCAR12） | `tools/cron_tool.py`（CronScheduler 补 add/remove/list_jobs CRUD）+ `tools/goal_tool.py`（`agent/goal.py:start_goal_agent` 与 CLI 同源；共享函数不碰 conversation_history——goal-continue 分支自然驱动）+ `tools/config_tool.py`（白名单 7 键精确匹配 + next_session 语义键）+ `tools/worktree_tool.py`（会话级 `set_session_workspace_cwd`）|
 | MCP Resources（CCAR12） | `agent/mcp_client.py` transport 基类 `list_resources/read_resource`（fail-open）+ Manager 透传 + `mcp__<server>__list_resources/read_resource` 动态注册（静态名在 mcp__ 前缀发现机制下不可见）|
 | async 工具 context 契约（CCAR12 教训） | sync handler 经 `asyncio.to_thread` **拷贝 context**——handler 内 contextvar set 不回透主循环。需要跨 context 生效的工具（如切会话 cwd）必须 `async def`（dispatch 直接 await 同 task 同 context）。端到端测试必须在 dispatch 外断言（`test_enter_exit_via_registry_dispatch` 防回归）|
+| skillLearning 行为学习管线（CCAR15） | `agent/skill_learning/`（store 置信度累积 → observer 四类启发信号 → evolver 簇进化 SKILL.md → llm_observer 可选后端）；主循环接线 `agent/__init__.py:_maybe_skill_learning`（轮末，仅 spawn_depth==0）；config `skill_learning` 4 键（默认关）；CLI `/skill-learning status\|start\|stop\|evolve\|prune` |
+| preventSleep Windows 防休眠（CCAR15） | `agent/prevent_sleep.py`（ctypes SetThreadExecutionState + reason 引用计数 + atexit 兜底）；主循环每轮 `agent/__init__.py:_update_prevent_sleep`（goal active / bg running 判忙，转换守卫防计数无界）；config `security.prevent_sleep` 默认 True |
+| skillLearning 进化门槛与隔离（CCAR15 裁决） | 只演化 global scope——项目约定类 instinct 落 project scope 仅存储不自动进化（生成到全局 skills 目录会跨项目泄漏 + 约定簇 trigger 恒同会撞 slug）；门槛簇平均 confidence ≥0.75 且 ≥3 条（config `evolve_threshold`/`evolve_min_cluster`）|
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -343,6 +346,8 @@ uv sync                                 # 同步已声明依赖
 - **notifier bg title 带 task_id（CCAR13）** —— `后台任务:<id 前 8 位>`，30s 同标题节流不互吞；goal pause 通知集中在 GoalState.pause()（三原因一处接）。
 - **check_path 闸门顺序 + 审批通道（CCAR14）** —— 顺序铁律：闸门 1（受保护）→ 闸门 2（agent 自身代码写保护，**acceptEdits 也不绕**）→ acceptEdits cwd 内放行 → bypass 短路 → 闸门 3 白名单；白名单外 default/acceptEdits 走审批 callback（批准→父目录进 `_approved_write_roots` 会话缓存；autoDeny 不问；无 callback 拒），审批前触发 PERMISSION_REQUEST hook + toast；跨会话持久化走 /add-dir。
 - **hook 沙箱 Windows（CCAR14）** —— command 型 hook use_sandbox=True 在 Windows 走 Job Object（terminal 同款：不包装 Popen + attach + finally 保活）；Unix wrapper 保留；approved_paths.json 持久化机制存在但未接线（docstring 已止损）。
+- **skillLearning 默认关 + 观察仅主代理（CCAR15）** —— config `skill_learning.enabled=False`，`/skill-learning start` 才开；观察/进化只在 spawn_depth==0 跑（防 feedback loop）；LLM 后端默认关（`observer="heuristic"`），熔断 3 次/冷却 30s/会话上限 20，任何失败回退启发式；整链 fail-open 不影响主对话。
+- **preventSleep 引用计数语义（CCAR15）** —— `acquire(reason)/release(reason)` 按 reason 计数，归零才恢复系统休眠策略；主循环只在闲→忙/忙→闲转换时真正调（每轮无条件调会让计数无界）；中断/cancel 提前退出路径 held 残留到下轮或 atexit 兜底（保守方向：宁多醒不久睡）；非 Windows no-op。
 
 ## 测试策略
 
