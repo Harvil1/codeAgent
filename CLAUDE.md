@@ -311,6 +311,16 @@ uv sync                                 # 同步已声明依赖
 | skillLearning 行为学习管线（CCAR15） | `agent/skill_learning/`（store 置信度累积 → observer 四类启发信号 → evolver 簇进化 SKILL.md → llm_observer 可选后端）；主循环接线 `agent/__init__.py:_maybe_skill_learning`（轮末，仅 spawn_depth==0）；config `skill_learning` 4 键（默认关）；CLI `/skill-learning status\|start\|stop\|evolve\|prune` |
 | preventSleep Windows 防休眠（CCAR15） | `agent/prevent_sleep.py`（ctypes SetThreadExecutionState + reason 引用计数 + atexit 兜底）；主循环每轮 `agent/__init__.py:_update_prevent_sleep`（goal active / bg running 判忙，转换守卫防计数无界）；config `security.prevent_sleep` 默认 True |
 | skillLearning 进化门槛与隔离（CCAR15 裁决） | 只演化 global scope——项目约定类 instinct 落 project scope 仅存储不自动进化（生成到全局 skills 目录会跨项目泄漏 + 约定簇 trigger 恒同会撞 slug）；门槛簇平均 confidence ≥0.75 且 ≥3 条（config `evolve_threshold`/`evolve_min_cluster`）|
+| 记忆检索年龄衰减（核心对齐 T4） | `agent/memory_store.py:full_index_text_with_age`（派生文本附 `[age: Nd]`，MEMORY.md 落盘不变）+ `agent/memory_retriever.py:annotate_index_with_age` + prompt"新记忆优先"规则；两个调用点（memory_injection / memory_recall_tool）已切换 |
+| 写路径审批"总是允许"档（核心对齐 T5） | `agent/permission.py:check_path`（decision=="always" 分支：会话缓存 + 运行时白名单 + settings.json 持久化）+ `agent/settings.py:persist_extra_allowed_root/remove_extra_allowed_root` + CLI 回调 a 选项 + `/approved remove-root`；回调返回 True 仍是"本次允许" |
+| 压缩边界保留段标注（核心对齐 T8） | `agent/context_pipeline.py:_build_compact_boundary`（时间/摘要覆盖/保留段三要素 + "保留段精确、摘要转述"，全量 + partial 两模式） |
+| 压缩阈值增长预估（核心对齐 T1） | `agent/context_pipeline.py:estimate_turn_growth`（最近 window 轮最大单轮 token）+ `compress_if_needed` L4 判定 `est + growth >= threshold`；config `context.llm_compact_growth_window=3` / `llm_compact_growth_default=8000` |
+| post-compact 恢复预算 + plan/async 状态（核心对齐 T2） | `agent/post_compact_recovery.py:build_post_compact_brief`（统一预算 `context.post_compact_recovery_budget=40000`，优先级 plan/async > 文件 > 技能）+ `_build_plan_async_state_brief`（`AIAgent._last_approved_plan` + `delegate_tool._async_tasks` 注册表补 goal/started_at） |
+| 技能 files: 附件（核心对齐 T3） | `agent/skill_commands.py:read_skill_attachment_files/format_skill_attachments`（相对技能目录 + traversal 防护 + 单文件 8K（config `skills.file_attachment_max_chars`）+ 总数 5）；注入两处：`execute_skill`（slash）+ `load_skill` 返回 `attachments`；skill_view 不注入 |
+| fork 全历史（核心对齐 T10） | `agent/fork_messages.py:build_forked_messages`（`full_history=True` 完整 user/assistant 流，tool result 换 placeholder，截到 `delegation.fork_full_history_max_turns=50`）；subagent `fork: true\|"full"`；T10 顺带修 fork 参数死接线（_handle_delegate_task 此前漏传 kwargs） |
+| 工具可见性规则（核心对齐 T6） | `agent/tool_permissions.py`（settings.json `permissions.allow/deny`：精确名/`mcp__server__*`/整服务器；allow 豁免 deny；mtime+size 双因子缓存）；应用点 `model_tools.get_tool_definitions` + `registry.dispatch`（permission_denied） |
+| 只读命令快速通道（核心对齐 T7） | `agent/permission.py:_is_readonly_command`（30+ 只读前缀表，复合命令逐段判定，重定向/`$()`/反引号即非只读；git branch/tag/remote 只收只读子形态，env 不进表）+ `check()` 闸门 1 后快速通道 + `_dispatch_tool_calls` 对只读 terminal 动态进并发组；config `security.readonly_fastpath_enabled=True` |
+| plan 清上下文执行（核心对齐 T9） | `agent/__init__.py:_apply_post_plan_clear`（history 截断为 `<post_plan_brief>` + invalidate_system_prompt 重建 context 层；transcripts 落盘不动）+ 回调三元组协议 `(approved, feedback, clear_context)`（二元组向后兼容）+ CLI c 选项 |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -348,6 +358,12 @@ uv sync                                 # 同步已声明依赖
 - **hook 沙箱 Windows（CCAR14）** —— command 型 hook use_sandbox=True 在 Windows 走 Job Object（terminal 同款：不包装 Popen + attach + finally 保活）；Unix wrapper 保留；approved_paths.json 持久化机制存在但未接线（docstring 已止损）。
 - **skillLearning 默认关 + 观察仅主代理（CCAR15）** —— config `skill_learning.enabled=False`，`/skill-learning start` 才开；观察/进化只在 spawn_depth==0 跑（防 feedback loop）；LLM 后端默认关（`observer="heuristic"`），熔断 3 次/冷却 30s/会话上限 20，任何失败回退启发式；整链 fail-open 不影响主对话。
 - **preventSleep 引用计数语义（CCAR15）** —— `acquire(reason)/release(reason)` 按 reason 计数，归零才恢复系统休眠策略；主循环只在闲→忙/忙→闲转换时真正调（每轮无条件调会让计数无界）；中断/cancel 提前退出路径 held 残留到下轮或 atexit 兜底（保守方向：宁多醒不久睡）；非 Windows no-op。
+- **L4 提前触发语义（核心对齐 T1）** —— 判定是 `est + growth >= threshold`（不是 `>`）：默认 growth 8000 意味着 ~92K 就压（100K 阈值）；增长预估取不到历史时回退保守默认，永不抛异常。
+- **"总是允许"持久化走 settings.json（核心对齐 T5）** —— 与 /add-dir 同通道（`security.extra_allowed_roots`），不走 config.yaml（load_config 默认只读 settings.json，写 yaml 是断轨的）；审批回调返回 True 恒为"本次允许"（会话级），只有哨兵 `"always"` 才持久化。
+- **permissions.allow 的唯一语义（核心对齐 T6）** —— allow 条目只在"豁免 deny"时生效（deny 整服务器 + allow 单工具），不是白名单模式（不在 allow 里的工具不受影响）；不搬 Bash(cmd:*) 子命令级（避免与权限闸门两套语义打架）。
+- **只读表保守优先（核心对齐 T7）** —— 识别不了的形态一律不算只读（走原闸门）；`env` 不进表（`env VAR=x cmd` 可执行任意命令）、git branch/tag/remote 只收只读子形态、find 的 -delete/-exec 写形态 token 拦截。
+- **plan 清上下文只清 LLM 上下文（核心对齐 T9）** —— 会话库是 append-only，恢复会话时调研消息仍在（可查可恢复，对齐"完全可逆"）；stable prompt 段保留（invalidate_system_prompt 只重建 context 层）。
+- **技能附件不进 MEMORY/索引（核心对齐 T3）** —— files: 附件只在触发时注入（execute_skill / load_skill），skill_view（用户视角）与技能索引不含附件内容。
 
 ## 测试策略
 
