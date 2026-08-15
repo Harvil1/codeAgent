@@ -115,6 +115,8 @@ def _handle_mailbox_clear(args: dict, **kwargs) -> str:
 
 
 # 模块顶部注册（import 即生效）
+# LLM 可见性由 toolsets._CORE_TOOLS 决定（曾漏列导致只有 CLI /mailbox 可用）
+# mailbox_send 另列入 ASYNC_AGENT_DISALLOWED_TOOLS（与 team_send 同理）
 registry.register(
     name="mailbox_send",
     schema=MAILBOX_SEND_SCHEMA,

@@ -1,7 +1,7 @@
 """AIAgent 主类：整个系统的心脏。
 
 一个 agent 实例 = 一个会话（session）。
-会话之间通过 session_id 持久化到 SQLite。
+会话之间通过 session_id 持久化到 SessionStore（JSONL 文件）。
 
 核心循环（run_conversation）：
     while 预算还有 and 没中断:
@@ -14,7 +14,7 @@
             返回最终响应
 
 关键设计：
-- 同步 while 循环（不异步，便于推理调试）
+- async while 循环（批次 2 已全量 async 化，工具分发支持 safe 并发）
 - system prompt 构建一次后缓存（保护 prompt cache）
 - 中断是协作式的（设置标志，循环自己检查）
 - 预算耗尽后给一次 grace call 让模型说最后一句话

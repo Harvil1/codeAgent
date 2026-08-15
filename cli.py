@@ -1,9 +1,9 @@
 """CLI 交互层（完整版）。
 
 启动时初始化的组件：
-  - MemoryStore（MEMORY.md + USER.md，frozen snapshot）
+  - MemoryStore（多文件 JSONL 记忆 + MEMORY.md 索引；会话内检索式 ephemeral 注入）
   - MemoryManager（编排器，可选外部 provider）
-  - SessionStore（SQLite + FTS5，会话持久化）
+  - SessionStore（JSONL 文件会话持久化，接口兼容旧 SQLite）
   - AIAgent（注入所有组件）
   - curator 检查（should_run_now 后台触发）
 
@@ -1829,6 +1829,9 @@ def _show_help():
         "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
         "[cyan]/add-dir[/cyan]   追加 safe_path 写白名单（无参数列出；运行时生效 + 持久化到 config）\n"
         "[cyan]/paste[/cyan]     保存剪贴板图片到 .paste/（Windows；之后在消息中引用路径让 AI 分析）\n"
+        "[cyan]/init[/cyan]      生成当前项目的 OMNIMATE.md（已存在不覆盖，--force 覆盖）\n"
+        "[cyan]/cache-stats[/cyan]  prompt cache 命中统计与 break 根因\n"
+        "[cyan]/skill-learning[/cyan]  行为学习（status|start|stop|evolve|prune）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
         "[cyan]/quit[/cyan]      退出\n\n"
         "[dim]输入 /技能名 触发对应技能[/dim]",

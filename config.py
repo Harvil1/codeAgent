@@ -1,18 +1,19 @@
 """配置管理（完整版）。
 
-三层配置：
-  优先级（从低到高）：
-    1. DEFAULT_CONFIG（代码内置默认值）
-    2. config.yaml（用户配置文件）
-    3. 命令行参数（临时覆盖）
-
-最终值 = DEFAULT_CONFIG ← deep-merge ← config.yaml ← CLI 参数
+配置加载（默认路径）：
+  最终值 = DEFAULT_CONFIG ← deep-merge ← settings.json（~/.OmniMate/settings.json）
+  - settings.json 由 agent/settings.py 管理，首启自动从旧 config.yaml + .env + .mcp.json 迁移
+  - load_config(config_file=...) 显式传 yaml 路径时走旧 yaml 逻辑（测试用）
+  - settings.json 读取失败时 fallback 到旧 yaml 逻辑
 
 deep-merge 策略：
   - DEFAULT_CONFIG 是基础
-  - 用户的 config.yaml 覆盖（而不是替换）对应字段
+  - 用户配置覆盖（而不是替换）对应字段
   - 新增字段不需要 bump _config_version
   - 重命名/结构性变更才需要 bump
+
+注意：save_config/save_config_value 仍写 yaml（遗留路径），
+运行时持久化主通道是 agent/settings.py 的 save_settings。
 """
 
 import copy

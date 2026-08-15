@@ -2,11 +2,13 @@
 
 存储结构（对齐 Claude Code topic 文件）：
 - ~/.OmniMate/.memory/{topic}.jsonl：一个主题一个文件，每行一条记忆（JSON）
-- ~/.OmniMate/MEMORY.md：索引（自动生成，按主题分组，注入 system prompt 截断 200行/25KB）
+- ~/.OmniMate/MEMORY.md：索引（自动生成，按主题分组，200 行/25KB 截断）
 
 原则：
 - 写入即维护：同主题同 name 的记忆自动更新（不无限堆积）
-- snapshot_for_prompt() 返回截断索引（省 token + 保 prompt cache），retriever 用 full_index_text()
+- 会话内注入走 CCAR10 检索式 ephemeral（memory_injection + memory_retriever，
+  每轮 Top5 进 ephemeral user 消息，不进 system prompt）；snapshot_for_prompt()
+  截断索引仅作无 aux_llm 时的会话级一次性降级，retriever 用 full_index_text()
 - 旧格式（每记忆一个 .md 文件）启动时迁移到 topic jsonl
 - 删除软删除到 .archive/memory-{ts}/
 """
@@ -25,7 +27,7 @@ import yaml
 
 from agent.atomic_io import atomic_write_text
 
-# 记忆索引注入 system prompt 的上限（对齐 Claude Code：200 行 / 25KB，先到者）
+# 记忆索引快照的截断上限（对齐 Claude Code：200 行 / 25KB，先到者）
 _INDEX_MAX_LINES = 200
 _INDEX_MAX_BYTES = 25000
 
@@ -493,7 +495,8 @@ class MemoryStore:
         self._index_built_key = self._current_project_key_safe()
 
     def snapshot_for_prompt(self) -> str:
-        """索引注入 system prompt（截断：200 行 / 25KB，先到者，对齐 Claude Code）。"""
+        """截断索引（200 行 / 25KB，先到者）。仅作无 aux_llm 时的会话级一次性降级注入，
+        主路径是 CCAR10 检索式 ephemeral（见 memory_injection.py）。"""
         self._ensure_index_fresh()
         snap = self._cached_snapshot
         lines = snap.splitlines()

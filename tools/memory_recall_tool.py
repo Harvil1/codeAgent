@@ -124,7 +124,9 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
 
 
 # 模块顶部注册（import 即生效）
-# toolset="memory"：和 memory_save / memory_update 等同族，不在 core
+# toolset="memory"：记忆族元数据；LLM 可见性由 toolsets._CORE_TOOLS 决定
+# （发现 ≠ 可见：曾因 toolset="memory" 不在任何 TOOLSETS 定义而对 LLM 不可见，
+# 现已列入 _CORE_TOOLS，对齐 Claude Code LocalMemoryRecallTool 的 core 定位）
 # is_async=True：handler 是 async def，对齐 registry 语义（虽然 dispatch 用 inspect 自动识别）
 registry.register(
     name="memory_recall",

@@ -266,6 +266,28 @@ def test_inbox_with_message(tmp_path, capsys):
 # /mailbox
 # ---------------------------------------------------------------------------
 
+def test_mailbox_tools_in_core_tools():
+    """mailbox_* 三工具必须进 _CORE_TOOLS 才对 LLM 可见（发现 ≠ 可见）。
+
+    历史 bug：注册 toolset="team" 但 TOOLSETS["team"]["tools"] 未列，
+    导致只有 CLI /mailbox 可用，LLM 调不到（silent-dead-code）。
+    """
+    from toolsets import _CORE_TOOLS
+    for name in ("mailbox_send", "mailbox_check", "mailbox_clear"):
+        assert name in _CORE_TOOLS, f"{name} 不在 _CORE_TOOLS，LLM 不可见"
+
+
+def test_mailbox_send_async_disallowed():
+    """mailbox_send 对 async 子代理禁用（与 team_send 同理：影响其他 agent）。
+
+    mailbox_check/clear 只动自己的邮箱，不进黑名单。
+    """
+    from toolsets import ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "mailbox_send" in ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "mailbox_check" not in ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "mailbox_clear" not in ASYNC_AGENT_DISALLOWED_TOOLS
+
+
 def test_mailbox_send_cli(tmp_path, capsys):
     """/mailbox send <to> <content> 通过 CLI 发邮件。"""
     from cli import _handle_command

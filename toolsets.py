@@ -23,6 +23,8 @@ _CORE_TOOLS = [
     "load_skill",  # P1：LLM 主动加载技能正文
     # 记忆（04 实现）
     "memory",
+    # LLM 主动召回历史记忆（CCAR8：与会话开场的 ephemeral 注入正交，按需深查）
+    "memory_recall",
     # 会话搜索（07 实现）
     "session_search",
     # 委托（09 实现）
@@ -56,6 +58,8 @@ _CORE_TOOLS = [
     # Team 多 agent 协作（Phase 4a）
     "team_send", "team_inbox", "team_members",
     "team_spawn", "team_shutdown", "idle",
+    # teammate 异步邮箱（CCAR8：fire-and-forget 通信，与 team bus 的同步 request-response 分工）
+    "mailbox_send", "mailbox_check", "mailbox_clear",
     # Cron 定时任务（CCAR12 Task 3：LLM 自主创建/列出/删除，包装 CronScheduler）
     "cron_create", "cron_list", "cron_delete",
     # Goal 驱动（CCAR12 Task 4：LLM 自主启动/管理 goal，与 CLI /goal 同源）
@@ -152,6 +156,9 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     "bg_start", "bg_stop",
     # Team 多 agent 协作（影响其他 agent 进程）
     "team_spawn", "team_shutdown", "team_send",
+    # 异步邮箱投递（与 team_send 同理：后台线程影响其他 agent；
+    # mailbox_check/clear 只动自己的邮箱，留给子代理自救）
+    "mailbox_send",
     # 任务状态机推进（async 子代理不应修改全局任务图）
     "task_complete",
     # 子代理嵌套（防止递归派生）

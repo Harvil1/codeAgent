@@ -239,7 +239,7 @@ class ToolRegistry:
 
         改造说明（Task C1）：
         - async handler（如 MCP / delegate 等）：直接 await（不走 to_thread）
-        - sync handler（39 个内置工具）：用 anyio.to_thread.run_sync 包装，
+        - sync handler（全部内置 sync 工具）：用 anyio.to_thread.run_sync 包装，
           丢线程池跑，不阻塞事件循环。handler 内部代码零改动。
 
         handler 返回值仍走 _normalize_result（JSON 字符串契约不变）。
