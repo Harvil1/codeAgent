@@ -36,7 +36,8 @@ async def build_relevant_memories_message(
         return _last_result
 
     try:
-        index_text = memory_store.full_index_text()
+        # T4：带年龄标注（[age: Nd] + prompt 新记忆优先规则，防召回过期记忆）
+        index_text = memory_store.full_index_text_with_age()
         if not index_text or not index_text.strip():
             _last_query, _last_result = query, None
             return None

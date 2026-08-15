@@ -513,6 +513,37 @@ class MemoryStore:
         self._ensure_index_fresh()
         return self._cached_snapshot
 
+    def full_index_text_with_age(self) -> str:
+        """带年龄标注的检索索引（T4 防召回过期记忆）。
+
+        在 full_index_text 基础上给每行附 `[age: Nd]`（updated_at 距今天数），
+        喂给 aux_llm 检索时配合 prompt 的"新记忆优先"规则做年龄衰减。
+        纯派生文本：MEMORY.md 落盘格式不变，存储不变。fail-open。
+        """
+        base = self.full_index_text()
+        if not base:
+            return ""
+        now = datetime.now(timezone.utc)
+        link_age: dict = {}
+        for e in self._scan_all_entries():
+            if e.state == "archived":
+                continue
+            try:
+                updated = e.updated_at
+                # naive 时间戳（历史数据）补 UTC 再比，避免 aware/naive 相减炸
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                days = max(0, (now - updated).days)
+            except Exception:
+                days = None
+            link_age[self._entry_link(e)] = days
+        try:
+            from agent.memory_retriever import annotate_index_with_age
+            return annotate_index_with_age(base, link_age)
+        except Exception as e:
+            logger.warning("索引年龄标注失败（fail-open 返回原索引）: %s", e)
+            return base
+
     def _mark_index_dirty(self) -> None:
         """写路径调用：标记索引待重建（不立即 rebuild，防批量写 O(n²)）。"""
         self._index_dirty = True

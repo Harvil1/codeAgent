@@ -28,7 +28,33 @@ RETRIEVAL_PROMPT_TEMPLATE = """你是记忆检索助手。当前用户消息：
 返回最多 {max_results} 条与当前 query 最相关的记忆 ID（从索引行的 `.memory/{{topic}}.jsonl#{{uid}}` 路径中提取 `{{topic}}#{{uid}}` 部分）。
 格式：JSON 数组，元素是 ID 字符串。例如：["general#1720870000000a1b2c3", "debugging#1720870000000d4e5f6"]
 只返回 JSON 数组，不要其他文本。若无相关的，返回 []。
+
+年龄标注说明：每条索引行末尾的 [age: Nd] 表示该记忆最后更新距今天数（[age: unknown] 表示未知）。
+排序规则：相关性同等的两条记忆，优先返回更新的那条（N 更小）；新旧记忆内容冲突时，
+新记忆优先，旧记忆只作历史背景（例如"用户在用 React 16"是旧信息，"已升到 React 19"是新信息，应返回后者）。
 """
+
+
+def annotate_index_with_age(index_text: str, link_age_days: dict) -> str:
+    """给索引行末尾附年龄标注 `[age: Nd]`（T4，防召回过期记忆）。
+
+    Args:
+        index_text: 完整索引文本（MEMORY.md 正文同构）
+        link_age_days: markdown 链接路径 → 年龄天数（None/查不到 = unknown）
+
+    纯 prompt 层改造：不改存储格式、不改 Top5 语义。
+    无链接的行（标题等）原样返回；fail-open——任何解析问题只是不标注。
+    """
+    out_lines = []
+    for line in index_text.splitlines():
+        match = re.search(r"\(([^()]+\.jsonl#[^()]+)\)", line)
+        if not match:
+            out_lines.append(line)
+            continue
+        days = link_age_days.get(match.group(1))
+        age = f"{days}d" if isinstance(days, int) and days >= 0 else "unknown"
+        out_lines.append(f"{line} [age: {age}]")
+    return "\n".join(out_lines)
 
 
 async def retrieve_relevant(

@@ -87,8 +87,9 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
     top_k = max(1, min(20, args.get("top_k", 5)))
 
     try:
-        # full_index_text 是实时生成的（_cached_snapshot 直接返回，无截断）
-        index_text = memory_store.full_index_text()
+        # full_index_text 是实时生成的（_cached_snapshot 直接返回，无截断）；
+        # T4：用带年龄标注的版本（[age: Nd] + prompt 新记忆优先规则）
+        index_text = memory_store.full_index_text_with_age()
         memory_ids = await retrieve_relevant(
             query=query,
             index_text=index_text,
