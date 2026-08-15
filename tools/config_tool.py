@@ -1,4 +1,4 @@
-"""config 工具（CCAR12 Task 7）：LLM 安全改配置（白名单 7 键精确匹配）。
+"""config 工具（CCAR12 Task 7）：LLM 安全改配置（白名单 9 键精确匹配）。
 
 为什么需要白名单：配置里混着敏感键（llm.auth_token、security.* 等），
 LLM 直接改配置一旦被 prompt 注入就是灾难。白名单 frozenset 精确匹配
@@ -37,6 +37,11 @@ _CONFIG_WHITELIST = frozenset({
     "trace.enabled",
     "context.reactive_compact_cooldown_seconds",
     "context.reactive_compact_max_per_session",
+    # CCAR15 Task 4：skill_learning 开关 + 观察后端（读取点在
+    # agent/__init__.py:_maybe_skill_learning，start/stop 也可走 CLI
+    # /skill-learning，这里给 LLM 一条持久化通道）
+    "skill_learning.enabled",
+    "skill_learning.observer",
 })
 
 # 这些键在 cli initialize 一次性装配（如 TraceSink），会话中改 config 不会重接线
@@ -49,13 +54,15 @@ _NEXT_SESSION_KEYS = frozenset({
 CONFIG_GET_SCHEMA = {
     "name": "config_get",
     "description": (
-        "读配置项的当前值（只限白名单内的 7 个安全键："
+        "读配置项的当前值（只限白名单内的 9 个安全键："
         "notifications.enabled / statusline.enabled / memory.curator.enabled / "
         "memory.curator.interval_hours / trace.enabled / "
         "context.reactive_compact_cooldown_seconds"
         "（仅在 features.reactive_compact.enabled 开启时生效） / "
         "context.reactive_compact_max_per_session"
-        "（仅在 features.reactive_compact.enabled 开启时生效））。"
+        "（仅在 features.reactive_compact.enabled 开启时生效） / "
+        "skill_learning.enabled / skill_learning.observer"
+        "（heuristic|llm，llm 失败自动回退启发式））。"
         "优先返回运行时实际生效值。"
     ),
     "parameters": {
@@ -74,7 +81,7 @@ CONFIG_GET_SCHEMA = {
 CONFIG_SET_SCHEMA = {
     "name": "config_set",
     "description": (
-        "修改配置项（只限白名单内的 7 个安全键，其余拒绝）。"
+        "修改配置项（只限白名单内的 9 个安全键，其余拒绝）。"
         "写入 settings.json 持久化 + 当前会话立即生效 + 触发 CONFIG_CHANGE hook。"
         "value 类型按现有值强转（bool/int）。"
         "个别键（trace.enabled）在启动时一次性装配，runtime_applied='next_session'"
@@ -83,6 +90,8 @@ CONFIG_SET_SCHEMA = {
         "（仅在 features.reactive_compact.enabled 开启时生效）/ "
         "context.reactive_compact_max_per_session"
         "（仅在 features.reactive_compact.enabled 开启时生效）。"
+        "skill_learning.enabled（默认 False）/"
+        "skill_learning.observer（heuristic|llm）。"
     ),
     "parameters": {
         "type": "object",

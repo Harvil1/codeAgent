@@ -1627,6 +1627,10 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/paste":
         return _handle_paste_command(args, rt)
 
+    # === CCAR15 Task 4: /skill-learning instinct 学习链路管理 ===
+    if name == "/skill-learning":
+        return _handle_skill_learning_command(args, rt)
+
     return False
 
 
@@ -2051,6 +2055,95 @@ def _handle_poor_command(args: str, rt) -> bool:
         )
         return True
     console.print("[yellow]用法: /poor on|off|status[/yellow]")
+    return True
+
+
+def _handle_skill_learning_command(args: str, rt) -> bool:
+    """/skill-learning status|start|stop|evolve|prune（CCAR15 Task 4）。
+
+    status：enabled/observer + instinct 总数 / global 簇数 / 已进化技能数
+    start/stop：翻 runtime config 的 skill_learning.enabled（重启失效；
+                提示走 config_set skill_learning.enabled 持久化）
+    evolve：手动触发簇达标演化（global scope，门槛读 config）
+    prune：清过期低置信 instinct（store.prune）
+    """
+    from agent.skill_learning.store import InstinctStore
+
+    sub = (args or "status").strip().lower() or "status"
+    home = Path(rt.home)
+    cfg = rt.config if isinstance(rt.config, dict) else {}
+    sl_cfg = cfg.setdefault("skill_learning", {})
+
+    if sub in ("start", "stop"):
+        enabled = (sub == "start")
+        sl_cfg["enabled"] = enabled
+        # rt 与 agent 通常共享同一 config dict（cli initialize 传入）；
+        # 若 agent 持有独立 dict（测试/自定义装配）也同步一份
+        agent_cfg = getattr(getattr(rt, "agent", None), "config", None)
+        if isinstance(agent_cfg, dict) and agent_cfg is not cfg:
+            agent_cfg.setdefault("skill_learning", {})["enabled"] = enabled
+        console.print(
+            f"[green]skill_learning 已{'开启' if enabled else '关闭'}（runtime）[/green] "
+            f"[dim]（重启失效；持久化用 config_set skill_learning.enabled "
+            f"{'true' if enabled else 'false'}）[/dim]"
+        )
+        return True
+
+    if sub == "status":
+        try:
+            store = InstinctStore(home / ".skill-learning")
+            instincts = store.list_all()
+            clusters = store.cluster("global")
+            skills_dir = home / "skills"
+            learned = (list(skills_dir.glob("learned-*"))
+                       if skills_dir.is_dir() else [])
+            console.print(
+                f"[cyan]enabled:[/cyan] {sl_cfg.get('enabled', False)}  "
+                f"[cyan]observer:[/cyan] {sl_cfg.get('observer', 'heuristic')}"
+            )
+            console.print(
+                f"[cyan]instinct 总数:[/cyan] {len(instincts)}  "
+                f"[cyan]global 簇数:[/cyan] {len(clusters)}  "
+                f"[cyan]已进化技能:[/cyan] {len(learned)}"
+            )
+        except Exception as e:
+            console.print(f"[red]读取 skill_learning 状态失败：[/red]{e}")
+        return True
+
+    if sub == "evolve":
+        try:
+            from agent.skill_learning import maybe_evolve
+            store = InstinctStore(home / ".skill-learning")
+            generated = maybe_evolve(
+                store, "global", home / "skills",
+                min_avg_confidence=sl_cfg.get("evolve_threshold", 0.75),
+                min_members=sl_cfg.get("evolve_min_cluster", 3),
+            )
+            if generated:
+                names = ", ".join(p.parent.name for p in generated)
+                console.print(
+                    f"[green]本次演化生成 {len(generated)} 个技能：[/green]{names}"
+                )
+            else:
+                console.print("[yellow]没有达标的簇（无新技能生成）[/yellow]")
+        except Exception as e:
+            console.print(f"[red]evolve 失败：[/red]{e}")
+        return True
+
+    if sub == "prune":
+        try:
+            store = InstinctStore(home / ".skill-learning")
+            removed = store.prune()
+            console.print(
+                f"[green]prune 完成：清理 {removed} 条过期低置信 instinct[/green]"
+            )
+        except Exception as e:
+            console.print(f"[red]prune 失败：[/red]{e}")
+        return True
+
+    console.print(
+        "[yellow]用法: /skill-learning status|start|stop|evolve|prune[/yellow]"
+    )
     return True
 
 

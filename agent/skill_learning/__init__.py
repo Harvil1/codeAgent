@@ -7,5 +7,12 @@
 from agent.skill_learning.store import Instinct, InstinctStore
 from agent.skill_learning.observer import observe_turn
 from agent.skill_learning.evolver import maybe_evolve
+from agent.skill_learning.llm_observer import (
+    observe_turn_llm,
+    reset_llm_observer_state,
+)
 
-__all__ = ["Instinct", "InstinctStore", "observe_turn", "maybe_evolve"]
+__all__ = [
+    "Instinct", "InstinctStore", "observe_turn", "maybe_evolve",
+    "observe_turn_llm", "reset_llm_observer_state",
+]

@@ -309,6 +309,12 @@ class AIAgent:
         reset_offload_decisions()
         # 改造点 ②：新会话重置摘要熔断器（避免跨会话污染失败计数）
         reset_compact_circuit_breaker()
+        # CCAR15 Task 4：新会话重置 LLM 观察器熔断/调用计数（避免跨会话污染）
+        try:
+            from agent.skill_learning.llm_observer import reset_llm_observer_state
+            reset_llm_observer_state()
+        except Exception as e:
+            logger.debug("reset_llm_observer_state 失败（fail-open）: %s", e)
         # 改造点 ③：新会话重置 cache 监控状态（避免跨会话污染 baseline）
         try:
             from agent.cache_monitor import reset_cache_monitor
@@ -1142,12 +1148,12 @@ class AIAgent:
 
             # === CCAR15 Task 3：轮末 skill_learning 观察 + 簇达标演化 ===
             # fail-open：学习链路任何异常只 debug log，绝不影响主对话返回
-            self._maybe_skill_learning(user_message)
+            await self._maybe_skill_learning(user_message)
             return final_content
 
         # ---------- 循环结束（预算耗尽或中断）----------
         # 预算耗尽/中断的轨迹同样有价值（失败恢复信号常出现在这里）
-        self._maybe_skill_learning(user_message)
+        await self._maybe_skill_learning(user_message)
         return self._handle_loop_exit(turn_exit_reason, user_message)
 
     # ------------------------------------------------------------------
@@ -2174,41 +2180,65 @@ class AIAgent:
             logger.warning("_extract_partial_result 异常（fail-open）: %s", e)
             return ""
 
-    def _maybe_skill_learning(self, user_message: str) -> None:
-        """CCAR15 Task 3：轮末 instinct 观察 + 簇达标演化（fail-open）。
+    async def _maybe_skill_learning(self, user_message: str) -> None:
+        """CCAR15 Task 3/4：轮末 instinct 观察 + 簇达标演化（fail-open）。
 
         门槛：仅主代理（spawn_depth==0）+ config["skill_learning"]["enabled"]
         显式开启（默认关）+ memory_store 存在（对齐记忆注入的门槛约定）。
+
+        Task 4：观察后端按 config["skill_learning"]["observer"] 选择——
+        "llm" 走 observe_turn_llm（aux_llm 提取，内部熔断/限流/失败均
+        回退启发式），其余走启发式 observe_turn；演化门槛从 config 传入
+        （evolve_threshold / evolve_min_cluster，不再硬编码）。
         任何异常只 debug log——学习是旁路，绝不影响主对话。
         """
+        sl_cfg = self.config.get("skill_learning", {}) or {}
         if (self.spawn_depth != 0
-                or not self.config.get("skill_learning", {}).get("enabled")
+                or not sl_cfg.get("enabled")
                 or self.memory_store is None):
             return
         try:
             from pathlib import Path
 
-            from agent.skill_learning import maybe_evolve, observe_turn
+            from agent.skill_learning import (
+                maybe_evolve, observe_turn, observe_turn_llm,
+            )
             from agent.skill_learning.store import InstinctStore
 
             store = InstinctStore(Path(self.omnimate_home) / ".skill-learning")
             calls, results = self._collect_turn_tool_trace(
                 getattr(self, "_sl_turn_start", 0))
-            # scope="global"：纠错/恢复/序列类信号全局；
-            # 项目约定类信号由观察器内部按信号类型定 project scope
-            observe_turn(
-                user_text=user_message or "",
-                tool_calls=calls,
-                tool_results=results,
-                store=store,
-                scope="global",
-            )
+            if sl_cfg.get("observer") == "llm":
+                # LLM 后端：熔断（3 次失败）/冷却（30s）/会话上限（20 次）
+                # 都在 observe_turn_llm 内部处理，失败自动回退启发式
+                await observe_turn_llm(
+                    user_text=user_message or "",
+                    tool_calls=calls,
+                    tool_results=results,
+                    aux_llm_router=getattr(self, "aux_llm_router", None),
+                    store=store,
+                    scope="global",
+                )
+            else:
+                # scope="global"：纠错/恢复/序列类信号全局；
+                # 项目约定类信号由观察器内部按信号类型定 project scope
+                observe_turn(
+                    user_text=user_message or "",
+                    tool_calls=calls,
+                    tool_results=results,
+                    store=store,
+                    scope="global",
+                )
             skills_dir = Path(self.omnimate_home) / "skills"
             # 只演化 global scope（plan 规格）：项目约定类 instinct 落 project
             # scope 仅存储，不参与自动演化——生成到全局 skills 目录会跨项目
             # 泄漏（CCAR9 隔离失效）且约定簇 trigger 恒为"项目约定"会撞 slug。
             # 项目约定的演化留 follow-up（需项目级技能目录或 frontmatter paths 门控）。
-            maybe_evolve(store, "global", skills_dir)
+            maybe_evolve(
+                store, "global", skills_dir,
+                min_avg_confidence=sl_cfg.get("evolve_threshold", 0.75),
+                min_members=sl_cfg.get("evolve_min_cluster", 3),
+            )
         except Exception as e:
             logger.debug("skill_learning fail-open: %s", e)
 

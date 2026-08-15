@@ -381,6 +381,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "notifications": {
         "enabled": True,  # False 时所有 notify() 短路返回 False（不调 PowerShell）
     },
+
+    # CCAR15 Task 4 NEW: skill_learning（instinct 行为学习，默认关）
+    # enabled 总开关控制轮末观察 + 簇达标演化（agent/__init__.py:_maybe_skill_learning）
+    "skill_learning": {
+        "enabled": False,           # 默认关：学习链路显式开启才跑
+        "observer": "heuristic",    # 观察后端："heuristic"（正则）|"llm"（aux_llm，失败回退启发式）
+        "evolve_threshold": 0.75,   # 簇平均 confidence 达标线（maybe_evolve 消费）
+        "evolve_min_cluster": 3,    # 簇最小成员数（maybe_evolve 消费）
+    },
 }
 
 

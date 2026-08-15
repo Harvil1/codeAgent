@@ -563,3 +563,393 @@ class TestFailOpen:
         # tool_calls/tool_results 元素缺 name / arguments 也不炸
         assert _obs(store, tool_calls=[{"arguments": None}], tool_results=[{}]) == 0
         assert store.calls == []
+
+
+# ======================================================================
+# Task 4：LLM 观察后端 + config 白名单 + /skill-learning CLI
+# ======================================================================
+from agent.skill_learning import llm_observer
+from agent.skill_learning.llm_observer import (
+    observe_turn_llm,
+    reset_llm_observer_state,
+)
+
+
+@pytest.fixture
+def clean_llm_state():
+    """LLM 观察器模块级状态（熔断/计数）隔离：每个用例前后重置。"""
+    reset_llm_observer_state()
+    yield
+    reset_llm_observer_state()
+
+
+def _router(content=None, side_effect=None):
+    """假 aux_llm_router：chat_completions 返回 content（或抛 side_effect）。
+
+    router 是"有 async chat_completions 的对象"（对齐 goal.py 的用法），
+    不是 AsyncMock 本身——断言调用次数用 router.chat_completions.await_count。
+    """
+    msg = SimpleNamespace(content=content)
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+    if side_effect is not None:
+        call = AsyncMock(side_effect=side_effect)
+    else:
+        call = AsyncMock(return_value=resp)
+    return SimpleNamespace(chat_completions=call)
+
+
+class TestObserveTurnLLMParse:
+    async def test_parses_json_array_to_instincts(self, tmp_path, clean_llm_state):
+        store = InstinctStore(tmp_path)
+        router = _router(content=json.dumps([{
+            "trigger": "用户要求跑测试", "action": "先跑 pytest 再汇报",
+            "confidence": 0.8,
+        }], ensure_ascii=False))
+        got = await observe_turn_llm(
+            user_text="跑一下测试", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 1
+        assert got[0].trigger == "用户要求跑测试"
+        assert got[0].action == "先跑 pytest 再汇报"
+        assert got[0].confidence == pytest.approx(0.8)
+        assert got[0].scope == "global"
+        assert got[0].evidence  # 证据非空
+        # 已入库
+        assert len(store.list_all(scope="global")) == 1
+
+    async def test_code_fence_tolerated(self, tmp_path, clean_llm_state):
+        store = InstinctStore(tmp_path)
+        router = _router(
+            content='```json\n[{"trigger":"t","action":"a","confidence":0.5}]\n```')
+        got = await observe_turn_llm(
+            user_text="x", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 1 and got[0].trigger == "t"
+
+    async def test_max_three_items(self, tmp_path, clean_llm_state):
+        store = InstinctStore(tmp_path)
+        items = [{"trigger": f"t{i}", "action": f"a{i}", "confidence": 0.5}
+                 for i in range(5)]
+        router = _router(content=json.dumps(items))
+        got = await observe_turn_llm(
+            user_text="x", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 3  # 上限 3 条（prompt 已声明）
+
+    async def test_empty_array_is_success_not_failure(self, tmp_path, clean_llm_state):
+        """[] 是合法成功：返回空列表，且重置熔断计数（不算失败）。"""
+        store = InstinctStore(tmp_path)
+        router = _router(content="[]")
+        got = await observe_turn_llm(
+            user_text="闲聊", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert got == []
+        assert llm_observer._consecutive_failures == 0
+
+    async def test_garbage_falls_back_to_heuristic(self, tmp_path, clean_llm_state):
+        """LLM 返回垃圾 → 回退启发式（返回启发式写入的条目）。"""
+        store = InstinctStore(tmp_path)
+        router = _router(content="这不是 JSON，抱歉")
+        got = await observe_turn_llm(
+            user_text="不要用grep，用ripgrep 搜索", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 1
+        assert got[0].trigger == "使用 grep"  # 启发式信号 1 的产物
+        assert llm_observer._consecutive_failures == 1
+
+    async def test_router_none_falls_back(self, tmp_path, clean_llm_state):
+        store = InstinctStore(tmp_path)
+        got = await observe_turn_llm(
+            user_text="不要用grep，用ripgrep 搜索", tool_calls=[], tool_results=[],
+            aux_llm_router=None, store=store,
+        )
+        assert len(got) == 1 and got[0].trigger == "使用 grep"
+
+    async def test_llm_exception_falls_back(self, tmp_path, clean_llm_state):
+        store = InstinctStore(tmp_path)
+        router = _router(side_effect=RuntimeError("api down"))
+        got = await observe_turn_llm(
+            user_text="不要用grep，用ripgrep 搜索", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 1  # 回退启发式，永不抛
+
+
+class TestObserverCircuitBreaker:
+    async def test_three_failures_open_circuit(self, tmp_path, clean_llm_state, monkeypatch):
+        """连续 3 次失败开闸；第 4 次不再调 LLM 直接回退启发式。"""
+        clock = {"t": 0.0}
+        monkeypatch.setattr(llm_observer, "_now", lambda: clock["t"])
+        store = InstinctStore(tmp_path)
+        router = _router(content="garbage")
+        for _ in range(3):
+            await observe_turn_llm(
+                user_text="不要用grep，用ripgrep", tool_calls=[], tool_results=[],
+                aux_llm_router=router, store=store,
+            )
+        assert llm_observer._circuit_open is True
+        assert router.chat_completions.await_count == 3
+
+        # 第 4 次：熔断开闸 → 不调 LLM，直接启发式
+        got = await observe_turn_llm(
+            user_text="不要用grep，用ripgrep", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert router.chat_completions.await_count == 3  # 没有第 4 次调用
+        assert len(got) == 1 and got[0].trigger == "使用 grep"  # 启发式兜底
+
+    async def test_cooldown_recovery(self, tmp_path, clean_llm_state, monkeypatch):
+        """开闸 30s 冷却期满 → 合闸重试（LLM 被再次调用）。"""
+        clock = {"t": 0.0}
+        monkeypatch.setattr(llm_observer, "_now", lambda: clock["t"])
+        store = InstinctStore(tmp_path)
+        router = _router(content="garbage")
+        for _ in range(3):
+            await observe_turn_llm(
+                user_text="x", tool_calls=[], tool_results=[],
+                aux_llm_router=router, store=store,
+            )
+        assert llm_observer._circuit_open is True
+
+        clock["t"] = 31.0  # 冷却期满
+        await observe_turn_llm(
+            user_text="x", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert router.chat_completions.await_count == 4  # 冷却后恢复调用
+        # 合闸时清零计数，本次失败计数=1（需再失败 2 次才重新开闸）
+        assert llm_observer._consecutive_failures == 1
+
+    async def test_session_cap_20(self, tmp_path, clean_llm_state):
+        """每会话 LLM 调用上限 20 次；第 21 次直接回退启发式不再调。"""
+        store = InstinctStore(tmp_path)
+        router = _router(content="[]")
+        for _ in range(20):
+            await observe_turn_llm(
+                user_text="x", tool_calls=[], tool_results=[],
+                aux_llm_router=router, store=store,
+            )
+        assert router.chat_completions.await_count == 20
+
+        got = await observe_turn_llm(
+            user_text="不要用grep，用ripgrep", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert router.chat_completions.await_count == 20  # 上限后不再调 LLM
+        assert len(got) == 1 and got[0].trigger == "使用 grep"  # 启发式兜底
+
+    def test_reset_state(self):
+        reset_llm_observer_state()
+        llm_observer._consecutive_failures = 2
+        llm_observer._circuit_open = True
+        llm_observer._session_call_count = 10
+        reset_llm_observer_state()
+        assert llm_observer._consecutive_failures == 0
+        assert llm_observer._circuit_open is False
+        assert llm_observer._session_call_count == 0
+
+
+class TestEvolveParams:
+    def test_custom_lower_threshold_generates(self, tmp_path):
+        """默认门槛 0.75 不达标，但传入更低 evolve_threshold 后达标。"""
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [("a", 0.6), ("b", 0.6), ("c", 0.6)])
+        assert maybe_evolve(store, "global", tmp_path / "skills") == []
+        assert len(maybe_evolve(
+            store, "global", tmp_path / "skills", min_avg_confidence=0.5)) == 1
+
+    def test_custom_min_members(self, tmp_path):
+        """默认 3 成员不达标，传入 min_members=2 后达标。"""
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [("a", 0.9), ("b", 0.9)])
+        assert maybe_evolve(store, "global", tmp_path / "skills") == []
+        assert len(maybe_evolve(
+            store, "global", tmp_path / "skills", min_members=2)) == 1
+
+    def test_default_thresholds_unchanged(self, tmp_path):
+        """不传参时默认行为与 T3 完全一致（0.75 / 3）。"""
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [("a", 0.9), ("b", 0.9), ("c", 0.9)])
+        assert len(maybe_evolve(store, "global", tmp_path / "skills")) == 1
+
+
+class TestWiringObserverConfig:
+    """主循环接线：observer 配置选后端 + 演化门槛从 config 传入。"""
+
+    def _make_agent(self, tmp_path, config=None):
+        agent = AIAgent(
+            api_key="fake",
+            model="test",
+            enabled_toolsets=[],
+            omnimate_home=tmp_path,
+            memory_store=MemoryStore(omnimate_home=tmp_path),
+            config=config if config is not None else {},
+        )
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+        agent.llm_client = SimpleNamespace(
+            chat_completions=AsyncMock(return_value=resp))
+        return agent
+
+    async def test_llm_backend_selected(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        llm_calls = []
+        heur_calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn_llm",
+            AsyncMock(side_effect=lambda **kw: llm_calls.append(kw) or []))
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: heur_calls.append(kw) or 0)
+
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {
+                "enabled": True, "observer": "llm"}})
+        agent.aux_llm_router = object()
+        resp = await agent.chat("hello")
+
+        assert resp == "ok"
+        assert len(llm_calls) == 1
+        assert llm_calls[0]["aux_llm_router"] is agent.aux_llm_router
+        assert heur_calls == []  # llm 后端不直接走启发式入口
+
+    async def test_heuristic_backend_default(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        heur_calls = []
+        llm_calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: heur_calls.append(kw) or 0)
+        monkeypatch.setattr(
+            sl, "observe_turn_llm",
+            AsyncMock(side_effect=lambda **kw: llm_calls.append(kw) or []))
+
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {"enabled": True}})
+        await agent.chat("hello")
+        assert len(heur_calls) == 1
+        assert llm_calls == []  # 默认后端是启发式，不调 LLM 入口
+
+    async def test_evolve_thresholds_passed_from_config(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        evolve_calls = []
+        monkeypatch.setattr(sl, "observe_turn", lambda **kw: 0)
+        monkeypatch.setattr(
+            sl, "maybe_evolve",
+            lambda *a, **kw: evolve_calls.append((a, kw)) or [])
+
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {
+                "enabled": True, "evolve_threshold": 0.5,
+                "evolve_min_cluster": 2}})
+        await agent.chat("hello")
+
+        assert len(evolve_calls) == 1
+        _args, kwargs = evolve_calls[0]
+        assert kwargs["min_avg_confidence"] == 0.5
+        assert kwargs["min_members"] == 2
+
+    async def test_llm_backend_fail_open(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+
+        async def boom(**kw):
+            raise RuntimeError("llm observer broken")
+
+        monkeypatch.setattr(sl, "observe_turn_llm", boom)
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {
+                "enabled": True, "observer": "llm"}})
+        resp = await agent.chat("hello")
+        assert resp == "ok"  # LLM 后端炸了不影响主对话
+
+
+# ---------------------------------------------------------------------------
+# /skill-learning CLI
+# ---------------------------------------------------------------------------
+
+class _FakeSkillLearningRT:
+    """/skill-learning 命令测试用最小 RT（对齐 test_cli_commands 的 FakeRT 模式）。"""
+
+    def __init__(self, tmp_path):
+        self.home = tmp_path
+        self.config = {}
+        self.agent = SimpleNamespace(config={})
+
+
+class TestSkillLearningCLI:
+    def test_status_shows_counts(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+        # 种子：2 条同 trigger instinct（1 个 global 簇）+ 1 个 learned- 技能
+        store = InstinctStore(tmp_path / ".skill-learning")
+        store.upsert(_mk(trigger="run tests", action="a"))
+        store.upsert(_mk(trigger="run tests", action="b"))
+        skills = tmp_path / "skills" / "learned-foo"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text(
+            "---\nname: learned-foo\n---\n", encoding="utf-8")
+
+        assert _handle_command("/skill-learning status", rt) is True
+        out = capsys.readouterr().out
+        assert "instinct 总数" in out and "2" in out
+        assert "global 簇数" in out and "1" in out
+        assert "已进化技能" in out and "1" in out
+
+    def test_start_stop_flips_runtime_config(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+
+        assert _handle_command("/skill-learning start", rt) is True
+        assert rt.config["skill_learning"]["enabled"] is True
+        out = capsys.readouterr().out
+        assert "config_set" in out  # 提示持久化通道
+
+        assert _handle_command("/skill-learning stop", rt) is True
+        assert rt.config["skill_learning"]["enabled"] is False
+
+    def test_prune_removes_stale(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+        store = InstinctStore(tmp_path / ".skill-learning")
+        old = _iso(datetime.now(timezone.utc) - timedelta(days=40))
+        store.upsert(_mk(trigger="stale", confidence=0.2, updated_at=old))
+
+        assert _handle_command("/skill-learning prune", rt) is True
+        out = capsys.readouterr().out
+        assert "清理 1" in out
+        assert store.list_all() == []
+
+    def test_evolve_manual_trigger(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+        store = InstinctStore(tmp_path / ".skill-learning")
+        _seed(store, "run tests", [
+            ("先跑 pytest", 0.95), ("再报结果", 0.9), ("先看失败详情", 0.8)])
+
+        assert _handle_command("/skill-learning evolve", rt) is True
+        out = capsys.readouterr().out
+        assert "1 个技能" in out
+        assert (tmp_path / "skills" / "learned-run-tests" / "SKILL.md").exists()
+
+    def test_evolve_config_threshold_respected(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+        rt.config["skill_learning"] = {
+            "evolve_threshold": 0.5, "evolve_min_cluster": 2}
+        store = InstinctStore(tmp_path / ".skill-learning")
+        _seed(store, "run tests", [("a", 0.6), ("b", 0.6)])
+
+        assert _handle_command("/skill-learning evolve", rt) is True
+        out = capsys.readouterr().out
+        assert "1 个技能" in out  # 放宽后的门槛达标
+
+    def test_unknown_subcommand_shows_usage(self, tmp_path, capsys):
+        from cli import _handle_command
+        rt = _FakeSkillLearningRT(tmp_path)
+        assert _handle_command("/skill-learning bogus", rt) is True
+        assert "用法" in capsys.readouterr().out

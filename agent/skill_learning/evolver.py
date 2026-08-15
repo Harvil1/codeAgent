@@ -109,13 +109,19 @@ def _skill_md(trigger: str, insts) -> str:
     return "\n".join(lines)
 
 
-def maybe_evolve(store, scope: str, skills_dir) -> list:
+def maybe_evolve(store, scope: str, skills_dir, *,
+                 min_members: int = _MIN_MEMBERS,
+                 min_avg_confidence: float = _MIN_AVG_CONFIDENCE) -> list:
     """检查指定 scope 下的 instinct 簇，达标的生成 SKILL.md。
 
     Args:
         store: InstinctStore（用它的 cluster(scope) 拿归一化分簇）。
         scope: "global" 或 "project:<key>"（只演化该 scope 的簇）。
         skills_dir: 技能根目录（生成 <skills_dir>/learned-<slug>/SKILL.md）。
+        min_members: 簇最小成员数门槛（CCAR15 Task 4 起可从
+            config["skill_learning"]["evolve_min_cluster"] 传入，默认 3）。
+        min_avg_confidence: 簇平均置信度门槛（config 键
+            evolve_threshold，默认 0.75）。
 
     Returns:
         本次生成的 SKILL.md 路径列表（Path）；已存在/不达标的簇不在其中。
@@ -127,10 +133,10 @@ def maybe_evolve(store, scope: str, skills_dir) -> list:
     clusters = store.cluster(scope)
     for _norm, insts in clusters.items():
         try:
-            if len(insts) < _MIN_MEMBERS:
+            if len(insts) < min_members:
                 continue
             avg_conf = sum(i.confidence for i in insts) / len(insts)
-            if avg_conf < _MIN_AVG_CONFIDENCE:
+            if avg_conf < min_avg_confidence:
                 continue
 
             # trigger 用簇内首条原文（归一化 key 是小写压空白版，原文更可读）

@@ -44,10 +44,10 @@ def _make_agent_ref(config=None):
 # ---------------------------------------------------------------------------
 
 class TestWhitelist:
-    def test_whitelist_exact_seven_keys(self):
-        """白名单恰好 7 键（brief 指定），frozenset。"""
+    def test_whitelist_exact_nine_keys(self):
+        """白名单恰好 9 键（CCAR12 brief 7 键 + CCAR15 Task 4 加 2 键），frozenset。"""
         assert isinstance(_CONFIG_WHITELIST, frozenset)
-        assert len(_CONFIG_WHITELIST) == 7
+        assert len(_CONFIG_WHITELIST) == 9
 
     def test_whitelist_contains_replacement_keys(self):
         """换入的 2 键必须有真实读取点（agent/__init__.py reactive_compact 分支）。"""
@@ -68,7 +68,7 @@ class TestWhitelist:
         assert "llm.base_url" not in _CONFIG_WHITELIST  # 敏感键必须拒
 
     def test_whitelist_all_keys_have_read_points(self):
-        """CCAR13 A4 逐键核对：7 键全有真实读取点（无一 dead key，无需换键）。
+        """CCAR13 A4 逐键核对 + CCAR15 T4 扩展：9 键全有真实读取点（无 dead key）。
 
         读取点清单（file:line 为核对时快照）：
           memory.curator.enabled              → agent/memory_curator.py:191
@@ -78,6 +78,8 @@ class TestWhitelist:
           statusline.enabled                  → cli.py:3859（_render_statusline）
           context.reactive_compact_cooldown_seconds → agent/__init__.py:1660
           context.reactive_compact_max_per_session  → agent/__init__.py:1662
+          skill_learning.enabled              → agent/__init__.py:_maybe_skill_learning（sl_cfg.get("enabled")）
+          skill_learning.observer             → agent/__init__.py:_maybe_skill_learning（sl_cfg.get("observer")）
         """
         assert _CONFIG_WHITELIST == frozenset({
             "memory.curator.enabled",
@@ -87,6 +89,8 @@ class TestWhitelist:
             "statusline.enabled",
             "context.reactive_compact_cooldown_seconds",
             "context.reactive_compact_max_per_session",
+            "skill_learning.enabled",
+            "skill_learning.observer",
         })
 
 
@@ -328,6 +332,23 @@ class TestConfigSet:
         result = _handle_config_set({"value": True}, agent_ref=_make_agent_ref())
         data = json.loads(result)
         assert data["error_type"] == "invalid_args"
+
+    def test_set_skill_learning_keys(self, settings_home):
+        """CCAR15 Task 4：skill_learning 两键在白名单内可设（runtime + 落盘）。"""
+        ref = _make_agent_ref({"skill_learning": {
+            "enabled": False, "observer": "heuristic"}})
+        result = _handle_config_set(
+            {"key": "skill_learning.enabled", "value": True}, agent_ref=ref)
+        data = json.loads(result)
+        assert data["value"] is True
+        assert data["runtime_applied"] is True
+        assert ref.config["skill_learning"]["enabled"] is True
+
+        result = _handle_config_set(
+            {"key": "skill_learning.observer", "value": "llm"}, agent_ref=ref)
+        data = json.loads(result)
+        assert data["value"] == "llm"  # 字符串值原样存（不强转）
+        assert ref.config["skill_learning"]["observer"] == "llm"
 
 
 # ---------------------------------------------------------------------------
