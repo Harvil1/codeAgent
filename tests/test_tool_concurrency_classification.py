@@ -46,6 +46,8 @@ SAFE_TOOLS = {
     "mailbox_check",    # CCAR8 Task 8: 读自己 mailbox 的邮件
     # Goal（只读）
     "goal_status",      # CCAR12 Task 4: 查 goal 状态（objective/status/预算）
+    # Config（只读）
+    "config_get",       # CCAR12 Task 7: 读白名单配置键的当前值
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -117,6 +119,8 @@ UNSAFE_TOOLS = {
     # Worktree（CCAR12 Task 6：改会话级全局 cwd + 建/删 worktree）
     "worktree_enter",
     "worktree_exit",
+    # Config（CCAR12 Task 7：写 settings.json + 改 runtime config + hook）
+    "config_set",
 }
 
 
@@ -171,7 +175,7 @@ def test_safe_subset_consistent_with_plan():
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 16  # CCAR12 Task 4: goal_status 加入（只读查状态）
+    expected_safe_count = 17  # CCAR12 Task 7: config_get 加入（只读查配置）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"

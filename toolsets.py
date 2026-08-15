@@ -62,6 +62,8 @@ _CORE_TOOLS = [
     "goal_start", "goal_status", "goal_pause", "goal_resume", "goal_clear",
     # 会话级 worktree 进出（CCAR12 Task 6，对齐 CCB EnterWorktree/ExitWorktree）
     "worktree_enter", "worktree_exit",
+    # 配置读写（CCAR12 Task 7：白名单 7 键精确匹配，set 落盘 + runtime 生效）
+    "config_get", "config_set",
 ]
 
 TOOLSETS: Dict[str, dict] = {
