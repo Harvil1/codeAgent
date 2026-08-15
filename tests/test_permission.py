@@ -1327,3 +1327,130 @@ def test_check_path_approval_triggers_hook_and_notify(tmp_path, monkeypatch):
     mock_notify.assert_called_once()
     assert mock_notify.call_args[0][0] == "需要审批"
 
+
+
+# ---------------------------------------------------------------------------
+# T5（核心机制对齐第 5 项）：写路径审批"总是允许"档（持久化到 settings.json）
+# ---------------------------------------------------------------------------
+
+def test_check_path_always_allow_persists(tmp_path, monkeypatch):
+    """callback 返回 "always" → 父目录进会话缓存 + 运行时白名单 + settings.json 持久化。"""
+    import json as _json
+
+    from agent.permission import clear_extra_allowed_roots
+    clear_extra_allowed_roots()  # 模块级状态，防跨测试泄漏
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("OMNIMATE_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    c = PermissionChecker(approval_callback=lambda item: "always")
+    r = c.check_path(str(outside / "a.txt"), write=True)
+    assert r.allowed is True
+    # 会话缓存命中（第二次不问）
+    r2 = c.check_path(str(outside / "b.txt"), write=True)
+    assert r2.allowed is True
+    # 运行时白名单生效：全新 checker（无 callback）也放行
+    c2 = PermissionChecker()
+    r3 = c2.check_path(str(outside / "c.txt"), write=True)
+    assert r3.allowed is True
+    # settings.json 持久化（与 /add-dir 同一通道）
+    settings_file = home / "settings.json"
+    assert settings_file.exists()
+    data = _json.loads(settings_file.read_text(encoding="utf-8"))
+    roots = data.get("security", {}).get("extra_allowed_roots", [])
+    assert str(outside) in roots
+
+
+def test_check_path_always_allow_survives_restart(tmp_path, monkeypatch):
+    """模拟重启：清空运行时白名单后从 settings.json 重新加载 → 新 checker 放行。"""
+    import json as _json
+
+    from agent.permission import clear_extra_allowed_roots
+    clear_extra_allowed_roots()  # 模块级状态，防跨测试泄漏
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("OMNIMATE_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    c = PermissionChecker(approval_callback=lambda item: "always")
+    assert c.check_path(str(outside / "a.txt"), write=True).allowed is True
+
+    # 模拟重启：进程级白名单清空，只从 settings.json 恢复（_load_persisted_extra_roots 同款逻辑）
+    from agent.permission import clear_extra_allowed_roots, add_extra_allowed_root
+    clear_extra_allowed_roots()
+    data = _json.loads((home / "settings.json").read_text(encoding="utf-8"))
+    for root in data.get("security", {}).get("extra_allowed_roots", []):
+        add_extra_allowed_root(root)
+
+    c2 = PermissionChecker()
+    assert c2.check_path(str(outside / "deep" / "x.txt"), write=True).allowed is True
+
+
+def test_check_path_true_remains_session_only(tmp_path, monkeypatch):
+    """callback 返回 True（向后兼容）→ 仅会话缓存，不写 settings.json。"""
+    import json as _json
+
+    from agent.permission import clear_extra_allowed_roots
+    clear_extra_allowed_roots()  # 模块级状态，防跨测试泄漏
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("OMNIMATE_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    calls = []
+
+    def cb(item):
+        calls.append(item)
+        return True
+
+    c = PermissionChecker(approval_callback=cb)
+    assert c.check_path(str(outside / "a.txt"), write=True).allowed is True
+    assert c.check_path(str(outside / "b.txt"), write=True).allowed is True
+    assert len(calls) == 1  # 会话缓存生效
+    # 不持久化：settings.json 没有多出 root
+    settings_file = home / "settings.json"
+    if settings_file.exists():
+        data = _json.loads(settings_file.read_text(encoding="utf-8"))
+        assert str(outside) not in data.get("security", {}).get("extra_allowed_roots", [])
+
+
+def test_check_path_always_allow_persist_failure_fail_open(tmp_path, monkeypatch):
+    """持久化失败（settings 通道炸）→ 仍放行（会话内有效），不抛异常。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    import agent.settings as _settings
+
+    def boom(root):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(_settings, "persist_extra_allowed_root", boom)
+    c = PermissionChecker(approval_callback=lambda item: "always")
+    r = c.check_path(str(outside / "a.txt"), write=True)
+    assert r.allowed is True  # 会话内仍批准
+
+
+def test_check_path_always_allow_gates_hard_before(tmp_path, monkeypatch):
+    """受保护路径（~/.ssh）即使 callback 返回 always 也拒（闸门 1 硬底线在前）。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    c = PermissionChecker(approval_callback=lambda item: "always")
+    r = c.check_path(str(Path.home() / ".ssh" / "evil_key"), write=True)
+    assert r.allowed is False

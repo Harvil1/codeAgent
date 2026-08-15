@@ -380,6 +380,18 @@ def clear_extra_allowed_roots() -> None:
     _EXTRA_ALLOWED_ROOTS.clear()
 
 
+def remove_extra_allowed_root(root) -> bool:
+    """运行时移除一条额外白名单（T5 /approved remove-root 用）。
+
+    返回 True 表示移除成功，False 表示不在白名单中。
+    """
+    resolved = Path(root).expanduser().resolve()
+    if resolved in _EXTRA_ALLOWED_ROOTS:
+        _EXTRA_ALLOWED_ROOTS.remove(resolved)
+        return True
+    return False
+
+
 def default_allowed_roots() -> List[Path]:
     """默认允许写入的根目录：cwd + ~/.OmniMate + /add-dir 追加的额外白名单。
 
@@ -1062,14 +1074,39 @@ class PermissionChecker:
 
             try:
                 from agent.notifier import notify as _notify
-                _notify("需要审批", "agent 请求写入白名单外路径")
+                _notify("需要审批", "agent 请求写入白名单外路径（可选总是允许）")
             except Exception:
                 pass
 
             try:
-                approved = bool(self.approval_callback(f"文件写入审批: {resolved}"))
+                decision = self.approval_callback(f"文件写入审批: {resolved}")
             except Exception:
-                approved = False  # fail-open：callback 异常按拒绝处理（不崩）
+                decision = False  # fail-open：callback 异常按拒绝处理（不崩）
+
+            # T5（核心机制对齐第 5 项）："总是允许"档——持久化到 settings.json。
+            # 协议向后兼容：返回 True 视为"本次允许"（仅会话缓存，现状语义）。
+            if decision == "always":
+                parent = resolved.parent
+                # 会话缓存 + 运行时白名单（本进程内立即生效，含其他 checker 实例）
+                self._approved_write_roots.add(parent)
+                try:
+                    add_extra_allowed_root(parent)
+                except Exception:
+                    pass
+                # 持久化：settings.json security.extra_allowed_roots（与 /add-dir 同通道）
+                persisted = False
+                try:
+                    from agent.settings import persist_extra_allowed_root
+                    persisted = persist_extra_allowed_root(str(parent))
+                except Exception as e:
+                    logger.warning("写入根目录持久化失败（会话内仍有效）: %s", e)
+                reason = (
+                    "已批准（总是允许，已持久化）" if persisted
+                    else "已批准（总是允许，持久化失败仅会话内有效）"
+                )
+                return PermissionResult(True, reason, "approval")
+
+            approved = bool(decision)
             if approved:
                 # 批准：父目录进会话缓存，同目录后续写入不再询问
                 self._approved_write_roots.add(resolved.parent)

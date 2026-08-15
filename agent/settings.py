@@ -142,6 +142,69 @@ def save_settings(settings: Dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(settings, ensure_ascii=False, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# T5（核心机制对齐第 5 项）：写路径"总是允许"持久化（与 /add-dir 同一通道）
+# ---------------------------------------------------------------------------
+
+def persist_extra_allowed_root(root: str) -> bool:
+    """把写入根目录持久化到 settings.json 的 security.extra_allowed_roots。
+
+    读-改-写：load_settings() 已有内容（深合并默认值）→ append（去重）→
+    save_settings() 原子写回。
+    返回 True 表示新写入，False 表示已存在（幂等）。
+    """
+    from pathlib import Path as _Path
+
+    data = load_settings()
+    sec = data.get("security")
+    if not isinstance(sec, dict):
+        sec = {}
+        data["security"] = sec
+    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
+    target = str(_Path(root).expanduser().resolve())
+    if target in roots or root in roots:
+        return False
+    roots.append(target)
+    sec["extra_allowed_roots"] = roots
+    save_settings(data)
+    return True
+
+
+def remove_extra_allowed_root(root: str) -> bool:
+    """从 settings.json 的 security.extra_allowed_roots 移除一条写入根目录。
+
+    字符串精确匹配或 resolve 后相等都算命中。返回是否找到并移除。
+    """
+    from pathlib import Path as _Path
+
+    data = load_settings()
+    sec = data.get("security")
+    if not isinstance(sec, dict):
+        return False
+    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
+    if not roots:
+        return False
+    try:
+        target = str(_Path(root).expanduser().resolve())
+    except (OSError, ValueError):
+        target = root
+    new_roots = [r for r in roots if not (r == root or _same_path(r, target))]
+    if len(new_roots) == len(roots):
+        return False
+    sec["extra_allowed_roots"] = new_roots
+    save_settings(data)
+    return True
+
+
+def _same_path(a: str, b: str) -> bool:
+    """两条 root 字符串是否指向同一目录（resolve 后比较，失败退字符串比较）。"""
+    from pathlib import Path as _Path
+    try:
+        return _Path(a).expanduser().resolve() == _Path(b).expanduser().resolve()
+    except (OSError, ValueError):
+        return a == b
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并（override 覆盖 base）。"""
     if not isinstance(override, dict):

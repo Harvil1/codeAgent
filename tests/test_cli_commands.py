@@ -1025,3 +1025,66 @@ def test_help_contains_paste(tmp_path, capsys):
     _handle_command("/help", rt)
     out = capsys.readouterr().out
     assert "/paste" in out
+
+
+# ---------------------------------------------------------------------------
+# T5（核心机制对齐第 5 项）：审批"总是允许"档 + /approved remove-root
+# ---------------------------------------------------------------------------
+
+def test_approval_callback_path_always(tmp_path, monkeypatch, capsys):
+    """CLI 审批回调：路径分支输入 a → 返回 "always"（持久化由 checker 统一处理）。"""
+    import cli as cli_mod
+
+    monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    cb = cli_mod._make_approval_callback()
+
+    monkeypatch.setattr(
+        cli_mod.console, "input", lambda *a, **kw: "a",
+    )
+    result = cb(f"文件写入审批: {outside / 'x.txt'}")
+    assert result == "always"
+
+    # y 仍是"本次允许"（True）
+    monkeypatch.setattr(cli_mod.console, "input", lambda *a, **kw: "y")
+    assert cb(f"文件写入审批: {outside / 'y.txt'}") is True
+    # 其他输入拒绝
+    monkeypatch.setattr(cli_mod.console, "input", lambda *a, **kw: "")
+    assert cb(f"文件写入审批: {outside / 'n.txt'}") is False
+
+
+def test_manage_whitelist_lists_and_removes_roots(tmp_path, monkeypatch, capsys):
+    """/approved 列出持久化写入根目录；/approved remove-root <n> 移除（settings + 运行时）。"""
+    from agent.settings import load_settings, save_settings
+    from agent.permission import add_extra_allowed_root, clear_extra_allowed_roots
+    import cli as cli_mod
+
+    monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path))
+    root_a = tmp_path / "dirA"
+    root_a.mkdir()
+    root_b = tmp_path / "dirB"
+    root_b.mkdir()
+
+    data = load_settings()
+    data.setdefault("security", {})["extra_allowed_roots"] = [str(root_a), str(root_b)]
+    save_settings(data)
+    clear_extra_allowed_roots()
+    add_extra_allowed_root(root_a)
+    add_extra_allowed_root(root_b)
+
+    rt = _FakeRT(tmp_path)
+    # 列出（含写入根目录节）
+    cli_mod._manage_whitelist(rt, "")
+    out = capsys.readouterr().out
+    assert "dirA" in out and "dirB" in out
+
+    # remove-root 0 → 移除 root_a（settings.json + 运行时）
+    cli_mod._manage_whitelist(rt, "remove-root 0")
+    data2 = load_settings()
+    roots = data2.get("security", {}).get("extra_allowed_roots", [])
+    assert str(root_a) not in roots
+    assert str(root_b) in roots
+    from agent.permission import list_extra_allowed_roots
+    assert root_a not in list_extra_allowed_roots()
+    assert root_b in list_extra_allowed_roots()

@@ -923,10 +923,11 @@ def _make_approval_callback():
     callback 接收字符串,根据内容自动判断是命令还是路径,显示不同 prompt。
     审批结果的作用域(如实说明,勿夸大):
     - 命令 → 同意后加入 ~/.OmniMate/approved_commands.json,跨会话不再询问相同命令
-    - 路径 → 仅会话内有效(父目录进 PermissionChecker._approved_write_roots
-      会话缓存,同目录后续写入不再问);跨会话需用 /add-dir 加白名单
+    - 路径 → 三档(T5):y=本次允许(父目录进会话缓存,同目录后续写入不再问);
+      a=总是允许(父目录持久化到 settings.json security.extra_allowed_roots,
+      跨会话生效,与 /add-dir 同通道);N=拒绝
     """
-    def callback(item: str) -> bool:
+    def callback(item: str):
         # 启发式判断:含路径分隔符或 ~ 开头 → 路径,否则 → 命令
         is_path = (
             "/" in item or "\\" in item or item.startswith("~")
@@ -937,11 +938,14 @@ def _make_approval_callback():
             console.print(f"[bold]{item}[/bold]")
             try:
                 answer = console.input(
-                    "[bold]允许？(y/N):[/bold] [dim]（同意后整个父目录不再询问）[/dim] ",
+                    "[bold]允许？(y=本次 / a=总是允许并记住 / N=拒绝):[/bold] ",
                 ).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return False
+            if answer in ("a", "always"):
+                # 返回哨兵值,由 PermissionChecker.check_path 统一做持久化
+                return "always"
             return answer in ("y", "yes")
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
@@ -3020,23 +3024,10 @@ def _persist_extra_root(root: str) -> bool:
     返回 True 表示新写入，False 表示已存在（幂等，不重复写）。
     fail-open：读/写失败抛异常给调用方（命令层捕获提示，不影响运行时白名单）。
     """
-    from agent.settings import load_settings, save_settings
+    from agent.settings import persist_extra_allowed_root
 
-    # load_settings 深合并 DEFAULT_SETTINGS，用户已有字段全部保留
-    data = load_settings()
-
-    sec = data.get("security")
-    if not isinstance(sec, dict):
-        sec = {}
-        data["security"] = sec
-    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
-    if root in roots:
-        return False  # 幂等：已存在
-    roots.append(root)
-    sec["extra_allowed_roots"] = roots
-
-    save_settings(data)  # 原子写（ensure_ascii=False + indent=2）
-    return True
+    # T5：逻辑下沉到 agent/settings.py（与写路径审批"总是允许"档共用同一通道）
+    return persist_extra_allowed_root(root)
 
 
 def _load_persisted_extra_roots(config: dict) -> int:
@@ -3600,29 +3591,62 @@ def _search_sessions(rt: RuntimeContext, query: str):
 def _manage_whitelist(rt: RuntimeContext, args: str):
     """管理审批白名单（/approved）。
 
-    /approved             列出所有已批准命令
-    /approved remove <n>  按序号移除
-    /approved remove <命令前缀>  按命令移除
+    /approved                    列出已批准命令 + 持久化写入根目录
+    /approved remove <n|命令>    按序号/命令移除已批准命令
+    /approved remove-root <n|路径>  移除持久化写入根目录（T5，settings.json
+                                   security.extra_allowed_roots + 运行时白名单）
     """
-    from agent.permission import get_default_checker
+    from agent.permission import get_default_checker, list_extra_allowed_roots
     checker = get_default_checker()
     whitelist = checker.list_whitelist()
 
     if not args.strip():
         if not whitelist:
-            console.print("[yellow]白名单为空（破坏性命令每次都会询问）[/yellow]")
+            console.print("[yellow]命令白名单为空（破坏性命令每次都会询问）[/yellow]")
         else:
             console.print(f"[bold]已批准命令（{len(whitelist)} 条，不再询问）：[/bold]")
             for i, cmd in enumerate(whitelist):
                 # 截断长命令
                 display = cmd if len(cmd) <= 80 else cmd[:77] + "..."
                 console.print(f"  [{i}] {display}")
-        console.print("\n用法：[cyan]/approved remove <序号或命令>[/cyan]")
+        # T5：持久化写入根目录（"总是允许"档落盘的条目）
+        extra_roots = list_extra_allowed_roots()
+        console.print(f"\n[bold]写入根目录白名单（{len(extra_roots)} 条，来自 /add-dir 与审批「总是允许」）：[/bold]")
+        if not extra_roots:
+            console.print("  [dim]（无）[/dim]")
+        for i, root in enumerate(extra_roots):
+            console.print(f"  [{i}] {root}")
+        console.print(
+            "\n用法：[cyan]/approved remove <序号或命令>[/cyan] | "
+            "[cyan]/approved remove-root <序号或路径>[/cyan]"
+        )
         return
 
     parts = args.split(None, 1)
     action = parts[0].lower()
     target = parts[1].strip() if len(parts) > 1 else ""
+
+    if action == "remove-root":
+        extra_roots = list_extra_allowed_roots()
+        if not target:
+            console.print("[yellow]用法：/approved remove-root <序号或路径>[/yellow]")
+            return
+        if target.isdigit():
+            idx = int(target)
+            if 0 <= idx < len(extra_roots):
+                target = str(extra_roots[idx])
+            else:
+                console.print(f"[red]序号超出范围（0-{len(extra_roots) - 1}）[/red]")
+                return
+        from agent.settings import remove_extra_allowed_root as _remove_setting_root
+        from agent.permission import remove_extra_allowed_root as _remove_runtime_root
+        removed_setting = _remove_setting_root(target)
+        removed_runtime = _remove_runtime_root(target)
+        if removed_setting or removed_runtime:
+            console.print(f"[green]已移除写入根目录白名单: {target[:80]}[/green]")
+        else:
+            console.print(f"[red]写入根目录白名单中未找到: {target[:80]}[/red]")
+        return
 
     if action == "remove" and target:
         if target.isdigit():
@@ -3637,7 +3661,7 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
         else:
             console.print(f"[red]白名单中未找到: {target[:80]}[/red]")
     else:
-        console.print(f"[yellow]用法：/approved remove <序号或命令>[/yellow]")
+        console.print(f"[yellow]用法：/approved remove <序号或命令> | /approved remove-root <序号或路径>[/yellow]")
 
 
 def _switch_model(rt: RuntimeContext, args: str):
