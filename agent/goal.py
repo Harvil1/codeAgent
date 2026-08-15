@@ -127,6 +127,80 @@ class GoalState:
 
 
 # =============================================================================
+# CCAR12 Task 4 NEW: 共享启动函数（CLI /goal 与 LLM goal_start 工具同源）
+# =============================================================================
+
+
+def goal_persist_path(agent) -> Path:
+    """解析 agent 的 goal 持久化路径（~/.OmniMate/.goal/current.json）。
+
+    优先级：
+    1. agent._goal_state_path()（AIAgent 实例方法，最准）
+    2. agent.omnimate_home（AIAgent 字段，fallback）
+    3. get_omnimate_home()（全局默认，测试可用 OMNIMATE_HOME 覆盖）
+    """
+    fn = getattr(agent, "_goal_state_path", None)
+    if callable(fn):
+        try:
+            return Path(fn())
+        except Exception:
+            pass
+    home = getattr(agent, "omnimate_home", None)
+    if home:
+        return Path(home) / ".goal" / "current.json"
+    from constants import get_omnimate_home
+    return get_omnimate_home() / ".goal" / "current.json"
+
+
+def start_goal_agent(
+    agent,
+    objective: str,
+    token_budget: int = 200_000,
+    persist_path=None,
+) -> GoalState:
+    """启动新 goal（CLI /goal 和 LLM goal_start 工具共用的核心）。
+
+    步骤（从 cli.py _start_new_goal 原样迁移，console 输出留在 CLI 层）：
+    1. 旧 active goal 先 pause（superseded_by_new_goal）+ 落盘
+    2. 建新 GoalState + 落盘 + 挂 agent._goal_state
+
+    ⚠️ 本函数不碰 conversation_history——CLI 在会话循环外追加
+    `[goal_start]` user 消息是安全的；但工具路径在 assistant(tool_calls)
+    之后、tool result 回填之前追加 user 消息会破坏消息历史严格交替
+    （API 400）。工具路径由主循环的 goal-continue 分支自然驱动
+    （goal active 即自动多轮推进）。
+
+    Args:
+        agent: AIAgent（或测试 mock，需 _goal_state / set_goal_state / 路径解析）
+        objective: 目标文本
+        token_budget: token 预算上限（默认 20 万）
+        persist_path: 显式持久化路径（CLI 传 rt.home 下的路径；None=自动解析）
+
+    Returns:
+        新建的 GoalState（已挂到 agent）
+    """
+    if persist_path is None:
+        persist_path = goal_persist_path(agent)
+    persist_path = Path(persist_path)
+
+    # 1. 旧 active goal 先 pause（已 paused/completed 的不动）
+    old_gs = getattr(agent, "_goal_state", None)
+    if old_gs is not None and old_gs.status == "active":
+        old_gs.pause(reason="superseded_by_new_goal")
+        old_gs.save(persist_path)
+
+    # 2. 建新 GoalState + 落盘 + 挂 agent
+    gs = GoalState(objective=objective, token_budget_limit=token_budget)
+    gs.save(persist_path)
+    setter = getattr(agent, "set_goal_state", None)
+    if callable(setter):
+        setter(gs)
+    else:
+        agent._goal_state = gs
+    return gs
+
+
+# =============================================================================
 # CCAR8 Task 12 NEW: TaskStore 集成（decompose + check_done）
 # =============================================================================
 

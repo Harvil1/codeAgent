@@ -1,53 +1,60 @@
-# CCAR11 Task 4 Report: /add-dir 运行时白名单 + 持久化
+# CCAR12 Task 4 Report: Goal 工具化（含共享函数抽取）
 
-> 注：本文件路径之前承载过 CCAR8 TraceSink / CCAR9 /init / CCAR10 subagent_resume 等报告，本份覆盖为 CCAR11 Task 4。
+> 注：本文件路径之前承载过 CCAR8/9/10/11 各轮报告，本份覆盖为 CCAR12 Task 4。
 
-**Commit:** `955776d6`
 **Branch:** cli-dev
-**Date:** 2026-08-14
+**Date:** 2026-08-15
 **Status:** 完成
 
 ## 任务范围
 
-`/add-dir <path>` 命令：运行时追加 safe_path 写白名单 + 持久化到用户 config（`security.extra_allowed_roots`），下次启动自动加载。
+1. `agent/goal.py` 新增共享函数 `start_goal_agent(agent, objective, token_budget, persist_path=None)` + 路径解析辅助 `goal_persist_path(agent)`——把 cli.py `_start_new_goal` 的核心三步（旧 goal pause / GoalState 构造挂 agent / 持久化）抽来，CLI `/goal` 与 LLM `goal_start` 工具同源。
+2. `cli.py:_start_new_goal` 改调共享函数（行为不变，cli 层测试未动仍绿）。
+3. `tools/goal_tool.py` 五工具：`goal_start` / `goal_status` / `goal_pause` / `goal_resume` / `goal_clear`（schema 全 "parameters" 键）。
+4. 分类：UNSAFE +4（start/pause/resume/clear）、`goal_status` SAFE（expected_safe_count 15→16）；`_CORE_TOOLS` +5。
+5. `tests/test_goal_tool.py` 30 个新测试。
 
 ## 实施步骤
 
-### Step 1：读现状（brief 点名要先查的三件事）
+### Step 1：读现状（brief 点名先 Read `_start_new_goal`）
 
-1. **allowed_roots 的真实存取方式**：`safe_path` 的 `allowed_roots` 是**函数参数**（不是 PermissionChecker 实例字段），缺省时 fallback 到 `default_allowed_roots()`（workspace cwd + `~/.OmniMate`）。`PermissionChecker.check_path`（write_file 实际走的路径）根本不做白名单检查（闸门 3 全通过）。→ 结论：运行时追加要生效，必须挂在 `default_allowed_roots()` 上，做成 permission.py 模块级注册表。
-2. **config 文件定位**：`constants.config_path()` → `~/.OmniMate/config.yaml`（`OMNIMATE_HOME` env 可覆盖）。注意 `load_config()` 默认优先读 settings.json（新 JSON 配置），config.yaml 是旧路径但仍是用户可手编的文件——持久化按 brief 走 yaml 读-改-写。
-3. **cli 命令接入模式**：`_handle_command` 的 `if name == "/xxx"` 链 + Task 3 的 `_handle_status_cli` 系列 + help Panel + `tests/test_cli_commands.py` 的 `_FakeRT` 模式。
+- cli.py `_start_new_goal`（原 1873 行起）四步：① pause 旧 active goal + save ② 建新 GoalState + save + `set_goal_state` ③ aux_llm 拆解（asyncio.run + loop-running guard，fail-open）④ `[goal_start]` user 消息塞 `conversation_history` 末尾。全程穿插 console.print。
+- AIAgent 已有 `_goal_state_path()`（`omnimate_home/.goal/current.json`）和 `set_goal_state`——共享函数直接复用。
+- CCAR8 mailbox 模式：handler 从 `dispatch_kwargs["agent_ref"]` 拿 agent。
 
-### Step 2：TDD——先写 7 个失败测试
+### Step 2：关键设计决策——共享函数**不碰 conversation_history**
 
-追加到 `tests/test_cli_commands.py`：列白名单 / 拒绝不存在的目录 / **添加后 safe_path 放行 + config 出现该路径**（核心断言）/ 幂等 / 持久化不破坏其他字段 / 启动加载 / help 含 /add-dir。首跑 7 failed 确认红。
+原 cli 第 ④ 步不能进共享函数：CLI 在会话循环外追加 user 消息是安全的，但**工具路径**在 `_dispatch_tool_calls` 里 `assistant(tool_calls)` 已 append（行 1822）、tool result 由 `_merge_results_in_order` 事后回填——中间插 user 消息会破坏消息历史严格交替（API 400，CCAR5-6 修过的同款 bug）。工具路径也不需要它：goal 激活后主循环 goal-continue 分支（`run_conversation` 行 1126）自动多轮驱动。专门写了回归测试 `test_does_not_touch_conversation_history`。
 
-### Step 3：实现
+### Step 3：共享函数（agent/goal.py）
 
-1. **`agent/permission.py`**：`_EXTRA_ALLOWED_ROOTS` 模块级注册表 + `add_extra_allowed_root`（resolve + 去重幂等，返回是否新增）/ `list_extra_allowed_roots`（拷贝）/ `clear_extra_allowed_roots`（测试用）；`default_allowed_roots()` 末尾 `roots.extend(_EXTRA_ALLOWED_ROOTS)`。
-2. **`cli.py`**：
-   - `_persist_extra_root(root, config_file=None)`：yaml.safe_load 已有 config → `security.extra_allowed_roots` append（去重）→ `yaml.safe_dump(allow_unicode=True, sort_keys=False)` 写回；**代码注释注明注释会丢**；读失败按空配置处理（fail-open），返回是否新写入。
-   - `_load_persisted_extra_roots(config)`：启动把 config 里的列表灌进运行时注册表（单条失败跳过）。
-   - `_handle_add_dir_cli(args, rt)`：无参数列白名单（默认根 + 标注 /add-dir 追加项）；带参数 resolve + is_dir 校验 → 运行时追加 → 持久化（持久化失败仅黄字警告，运行时仍生效）→ 按新增/已存在分别提示。
-   - `RuntimeContext.__init__` 开头调 `_load_persisted_extra_roots`（try/except 包裹）。
-   - `_handle_command` 加 `/add-dir` 路由 + `_show_help` 加一行。
-3. **`config.py`**：`DEFAULT_CONFIG["security"]` 加 `"extra_allowed_roots": []`（可发现性）。
+- `start_goal_agent`：persist_path 显式参数优先（CLI 传 `_goal_state_path(rt)`，保证测试 FakeRT 的 tmp_path 隔离）→ `agent._goal_state_path()` → `agent.omnimate_home` → `get_omnimate_home()`（`goal_persist_path` 三级 fallback）。旧 goal 仅 active 才 pause（已 paused 的不覆盖 reason、不追加 notes）。`set_goal_state` 缺失时直接赋 `_goal_state` 属性（mock 兼容）。
+- 签名比 brief 多了 `persist_path=None` 可选参数——默认三参调用即 brief 契约；加它是为了 CLI 路径的 `rt.home`（测试 tmp_path）不被 fallback 写到真实 `~/.OmniMate`。
 
-### Step 4：修一处测试措辞
+### Step 4：cli.py 重构
 
-`test_add_dir_idempotent` 断言文案与实现输出对齐（"已在白名单"）。
+`_start_new_goal` = 共享函数（核心三步）+ CLI-only 三件事：① 打印"已自动 pause 旧 goal"（调共享函数前先记 `will_pause_old`）② aux_llm 拆解（原样保留，含 loop-running guard）③ `[goal_start]` history 注入（原样保留，注释说明为何只能 CLI 做）。`tests/test_cli_commands.py` 的 6 个 /goal 测试**未改一行**仍绿。
 
-## 测试结果
+### Step 5：tools/goal_tool.py（对齐 cron_tool 模式）
 
-- 新增 7 个测试全过；`tests/test_cli_commands.py` 42 passed
-- 全套 `uv run pytest tests/`：**2248 passed, 1 skipped**
-- `uv run python scripts/verify.py`：**22/22 ALL PASS**
+- 5 handler 全 `(args, **dispatch_kwargs)` 契约，返回 JSON 字符串，`ensure_ascii=False`。
+- 错误分支：无 agent_ref → `not_configured`；缺 objective / 非法 budget → `invalid_args`；pause/resume/clear 无 goal → `no_active_goal`；异常兜底 `{"error", "error_type": type(e).__name__}`。
+- `goal_start` 校验 token_budget 为正整数；`goal_status` 无 goal 返回 `{"status": "none"}`（含 task_count）；`goal_clear` = cancel + save + 摘挂 + unlink 持久化文件（对齐 CLI `/goal clear`）。
+- 注册 5 个（toolset="core"，emoji 🎯）：`goal_status` isConcurrencySafe=True，其余 4 个 False。
 
-## 关键设计点 / concerns
+### Step 6：分类 + 可见性
 
-1. **白名单不能绕过硬底线**：`safe_path` 里受保护路径（~/.ssh / /etc / C:\Windows）和项目代码写保护**先于**白名单检查，`/add-dir` 加任意目录都绕不过（代码注释已写明）。
-2. **`check_path` 不查白名单**：`write_file` 走的是 `PermissionChecker.check_path`（闸门 3 全通过），所以 `/add-dir` 的运行时效果只作用于 `safe_path` 默认路径的调用方（offload/transcript 等显式传 allowed_roots 的不受影响）。与 brief 要求一致（测试核心断言就是 `safe_path(target/"x.txt", write=True)` 通过），但语义上 /add-dir 对 write_file 工具没有收紧或放宽效果——留 follow-up 如需让 write_file 也感知。
-3. **yaml 注释会丢**：`yaml.safe_dump` 重写整个文件，用户 config.yaml 里手写的注释无法保留（yaml 格式限制），函数 docstring + 代码注释均注明。
-4. **settings.json vs config.yaml 双轨**：`load_config()` 默认读 settings.json，`/add-dir` 持久化写的是 config.yaml——两轨并存时用户在 settings.json 手写的 `security.extra_allowed_roots` 也会被启动加载（`_load_persisted_extra_roots` 读的是 load_config 合并结果），但 `/add-dir` 只写 yaml 侧。
-5. **注册表是进程级全局**：`_EXTRA_ALLOWED_ROOTS` 所有线程共享（与 default_allowed_roots 语义一致）；`list_extra_allowed_roots` 返回拷贝防外部篡改。
+- `toolsets.py:_CORE_TOOLS` +5（发现 ≠ 可见）。
+- `tests/test_tool_concurrency_classification.py`：SAFE_TOOLS + `goal_status`（expected_safe_count 15→16）、UNSAFE_TOOLS + 4 个写操作；注释同步。
+
+## 验证
+
+- 新测试：`uv run pytest tests/test_goal_tool.py -q` → 30 passed（TDD：先写测试确认 import 失败 red，再实现转 green）
+- 定向回归：`test_goal_tool + test_tool_concurrency_classification + test_cli_commands + test_goal` → 114 passed
+- 全套：`uv run pytest tests/ -q` → **2329 passed / 1 skipped / 0 failed**（Task 3 后 baseline 2299 passed + 1 skipped，净 +30）
+
+## Concerns / Follow-up
+
+1. **goal 工具未进 ASYNC_AGENT_DISALLOWED_TOOLS**：后台 async 子代理调 `goal_start` 会激活自己实例的 goal 循环（默认 200K budget），在 daemon 线程里持续烧 token。当前按 brief 未加（brief/plan 只点名分类两处同步）；若 reviewer 认同风险，可把 `goal_start`/`goal_clear` 加进 disallow 集合（对齐 cron_create/cron_delete 先例）。
+2. **工具路径与 CLI 启动行为的两处差异**：① `goal_start` 工具不做 aux_llm 拆解（decompose 的 asyncio.run + loop guard 是 CLI sync 路径特有的；LLM 需要子任务可用 `task_create` 自建）；② 工具路径不注入 `[goal_start]` user 消息（见 Step 2），驱动完全靠 goal-continue 分支。无 task_ids → `evaluate_after_turn(all_tasks_done)` 恒 False，goal 不会自动 complete（budget 耗尽 pause 或 LLM 主动 `goal_clear`）。
+3. **`persist_path` 可选参数是 brief 之外的扩展**（默认调用仍满足 brief 三参契约），reason 见 Step 3。

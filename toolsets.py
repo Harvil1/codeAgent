@@ -58,6 +58,8 @@ _CORE_TOOLS = [
     "team_spawn", "team_shutdown", "idle",
     # Cron 定时任务（CCAR12 Task 3：LLM 自主创建/列出/删除，包装 CronScheduler）
     "cron_create", "cron_list", "cron_delete",
+    # Goal 驱动（CCAR12 Task 4：LLM 自主启动/管理 goal，与 CLI /goal 同源）
+    "goal_start", "goal_status", "goal_pause", "goal_resume", "goal_clear",
 ]
 
 TOOLSETS: Dict[str, dict] = {

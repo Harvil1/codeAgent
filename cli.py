@@ -1871,25 +1871,28 @@ def _goal_status_output(rt, capsys_safe: bool = True) -> None:
 
 
 def _start_new_goal(rt, objective: str) -> None:
-    """启动新 goal：pause 旧 goal（如有）+ 建新 GoalState + 持久化 + 注入 agent。"""
-    from agent.goal import GoalState
+    """启动新 goal。
 
-    # 1. 先 pause 旧 goal（如有）
+    核心三步（pause 旧 goal / 建新 GoalState / 持久化 + 挂 agent）走
+    agent/goal.start_goal_agent 共享函数（CCAR12 Task 4，与 LLM goal_start
+    工具同源）；CLI 层只保留 console 输出 / aux_llm 拆解 / history 注入。
+    """
+    from agent.goal import start_goal_agent
+
+    # 0. 先记旧 goal（共享函数会 pause 它，这里只为打印）
     old_gs = getattr(rt.agent, "_goal_state", None)
-    if old_gs is not None and old_gs.status == "active":
-        old_gs.pause(reason="superseded_by_new_goal")
-        old_gs.save(_goal_state_path(rt))
-        console.print(f"[dim]已自动 pause 旧 goal: {old_gs.objective}[/dim]")
+    will_pause_old = old_gs is not None and old_gs.status == "active"
 
-    # 2. 建新 GoalState
+    # 1-2. 核心三步：pause 旧 goal + 建新 GoalState + 持久化 + 挂 agent
     goal_cfg = rt.config.get("goal", {}) if rt.config else {}
     budget_limit = goal_cfg.get("default_token_budget", 200_000)
-    gs = GoalState(
-        objective=objective,
-        token_budget_limit=budget_limit,
+    gs = start_goal_agent(
+        rt.agent, objective, token_budget=budget_limit,
+        persist_path=_goal_state_path(rt),
     )
-    gs.save(_goal_state_path(rt))
-    rt.agent.set_goal_state(gs)
+
+    if will_pause_old:
+        console.print(f"[dim]已自动 pause 旧 goal: {old_gs.objective}[/dim]")
 
     # 3. 尝试用 aux_llm 拆解为子 task（fail-open，无 aux 跳过）
     # CCAR8 final fix: 直接走 agent.aux_llm_router（不再走 RuntimeContext.aux_llm_client 死字段，
@@ -1919,7 +1922,9 @@ def _start_new_goal(rt, objective: str) -> None:
             logger.warning("goal decompose 失败（fail-open）: %s", e)
 
     # 4. 把 objective 作为下一轮 user 输入（让 agent 开始追目标）
-    # 设计：直接塞 conversation_history 末尾，主循环下次跑就看到
+    # 设计：直接塞 conversation_history 末尾，主循环下次跑就看到。
+    # ⚠️ 只能在 CLI 层做（会话循环外）；工具路径（goal_start tool）在
+    # assistant(tool_calls) 与 tool result 之间插 user 消息会破坏严格交替。
     if hasattr(rt.agent, "conversation_history"):
         rt.agent.conversation_history.append({
             "role": "user",

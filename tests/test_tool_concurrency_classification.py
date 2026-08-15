@@ -44,6 +44,8 @@ SAFE_TOOLS = {
     "brief",            # CCAR8 Task 2: 纯 echo 输出格式约定，无副作用
     # mailbox（只读）
     "mailbox_check",    # CCAR8 Task 8: 读自己 mailbox 的邮件
+    # Goal（只读）
+    "goal_status",      # CCAR12 Task 4: 查 goal 状态（objective/status/预算）
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -107,6 +109,11 @@ UNSAFE_TOOLS = {
     "cron_create",
     "cron_list",        # 按 brief 归 UNSAFE（与 create/delete 同组管理）
     "cron_delete",
+    # Goal（CCAR12 Task 4：改 goal 状态机 + 写/删持久化文件）
+    "goal_start",
+    "goal_pause",
+    "goal_resume",
+    "goal_clear",
 }
 
 
@@ -157,11 +164,11 @@ def test_no_overlap_between_safe_and_unsafe():
 
 
 def test_safe_subset_consistent_with_plan():
-    """Sanity check：SAFE 工具数量符合预期（12 个，纯读类）。
+    """Sanity check：SAFE 工具数量符合预期（纯读类）。
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 15  # CCAR11 Task 1: glob 加入（只读文件名匹配）
+    expected_safe_count = 16  # CCAR12 Task 4: goal_status 加入（只读查状态）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
