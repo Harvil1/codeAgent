@@ -127,3 +127,73 @@ def test_legit_write_still_works(tmp_path):
     r = checker.check_path(str(tmp_path / "normal_file.py"), write=True,
                            allowed_roots=[tmp_path])
     assert r.allowed
+
+
+# ---------------------------------------------------------------------------
+# R16 #5：双路径检查（词法 + realpath 都过保护表）
+# ---------------------------------------------------------------------------
+
+import agent.permission as perm_mod
+
+
+def test_protected_path_direct_regression():
+    """回归：直接路径形式仍命中保护表。"""
+    assert is_protected_path("~/.ssh/id_rsa") is not None
+    assert is_protected_path("~/.aws/credentials") is not None
+
+
+def test_dual_path_symlink_escape(tmp_path, monkeypatch):
+    """软链指向保护目录：realpath 形式命中保护表。"""
+    protected_dir = tmp_path / "fake_protected"
+    protected_dir.mkdir()
+    (protected_dir / "secret.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        perm_mod, "_PROTECTED_PATHS_RESOLVED",
+        [(protected_dir.resolve(), "fake_protected")],
+    )
+
+    link_dir = tmp_path / "innocent_link"
+    try:
+        link_dir.symlink_to(protected_dir)
+    except (OSError, NotImplementedError):
+        pytest.skip("本环境无法创建符号链接")
+
+    # 词法形式在 tmp 下（无害），realpath 形式落进保护目录 → 必须命中
+    assert is_protected_path(link_dir / "secret.txt") is not None
+
+    # check_path 闸门 1 也拒（写通道端到端）
+    checker = PermissionChecker()
+    r = checker.check_path(link_dir / "secret.txt", write=True,
+                           allowed_roots=[tmp_path])
+    assert not r.allowed
+    assert r.gate == "protected"
+
+
+def test_dual_path_write_protected_symlink(tmp_path, monkeypatch):
+    """写保护表（项目代码）同样过双形式检查。"""
+    fake_root = tmp_path / "fake_project"
+    fake_root.mkdir()
+    monkeypatch.setattr(
+        perm_mod, "_WRITE_PROTECTED_PATHS",
+        [(fake_root.resolve(), "fake_project")],
+    )
+    link_file = tmp_path / "entry.py"
+    target = fake_root / "real.py"
+    target.write_text("x", encoding="utf-8")
+    try:
+        link_file.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("本环境无法创建符号链接")
+    assert is_write_protected_path(link_file) is not None
+
+
+def test_dual_path_lexical_form_still_checked(tmp_path, monkeypatch):
+    """词法形式仍在保护下时命中（realpath 断轨不放宽判定）。"""
+    protected_dir = tmp_path / "pdir"
+    protected_dir.mkdir()
+    monkeypatch.setattr(
+        perm_mod, "_PROTECTED_PATHS_RESOLVED",
+        [(protected_dir, "pdir")],  # 故意不 resolve：词法形式即保护
+    )
+    # 不存在的深层路径：realpath 可能失败/保留词法——词法形式兜底命中
+    assert is_protected_path(protected_dir / "a" / "b.txt") is not None

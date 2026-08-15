@@ -295,25 +295,56 @@ for _p in _PROTECTED_PATHS:
         continue
 
 
+def _path_forms_for_check(path) -> List[Path]:
+    """R16 #5 双路径检查：返回要过安全检查的路径形式列表。
+
+    对齐 CCB getPathsForPermissionCheck 的语义——同一输入产生
+    「原始词法形式（expanduser + normpath，不解析软链）」和
+    「解析形式（realpath，软链全展开）」两个候选：
+
+    - 防软链指向 ~/.ssh 等保护目标（词法形式无害、解析形式才暴露）
+    - 反向防"解析后脱离保护表、词法仍在保护下"的形态
+    - 词法形式还覆盖 realpath 失败（如不存在的目标）时保护判定不断轨
+
+    解析整体失败返回空列表（与旧 fail-open 语义一致，safe_path 写路径
+    仍会因白名单解析失败而 fail-closed）。
+    """
+    forms: List[Path] = []
+    try:
+        p = Path(path).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        return forms
+    try:
+        lexical = Path(os.path.normpath(str(p)))
+    except (OSError, ValueError):
+        lexical = p
+    forms.append(lexical)
+    try:
+        resolved = Path(os.path.realpath(str(p)))
+        if resolved != lexical:
+            forms.append(resolved)
+    except (OSError, ValueError):
+        pass
+    return forms
+
+
 def is_protected_path(path) -> Optional[str]:
     """检查路径是否在受保护列表（读写都拒绝）。
 
+    R16 #5：词法 + realpath 双形式都过保护表（防软链绕过）。
+
     返回匹配的保护项（拒绝原因），未命中返回 None。
     """
-    try:
-        resolved = Path(path).expanduser().resolve()
-    except (OSError, ValueError):
-        return None
-
-    for prot, orig in _PROTECTED_PATHS_RESOLVED:
-        if resolved == prot:
-            return orig
-        # path 在 protected 下
-        try:
-            resolved.relative_to(prot)
-            return orig
-        except ValueError:
-            continue
+    for form in _path_forms_for_check(path):
+        for prot, orig in _PROTECTED_PATHS_RESOLVED:
+            if form == prot:
+                return orig
+            # path 在 protected 下
+            try:
+                form.relative_to(prot)
+                return orig
+            except ValueError:
+                continue
     return None
 
 
@@ -333,20 +364,17 @@ def is_write_protected_path(path) -> Optional[str]:
     """检查路径是否在写保护列表(只禁写,不禁读)。
 
     用于防止 agent 修改项目自身的代码。
+    R16 #5：词法 + realpath 双形式都过保护表（防软链绕过）。
     """
-    try:
-        resolved = Path(path).expanduser().resolve()
-    except (OSError, ValueError):
-        return None
-
-    for prot, orig in _WRITE_PROTECTED_PATHS:
-        if resolved == prot:
-            return orig
-        try:
-            resolved.relative_to(prot)
-            return orig
-        except ValueError:
-            continue
+    for form in _path_forms_for_check(path):
+        for prot, orig in _WRITE_PROTECTED_PATHS:
+            if form == prot:
+                return orig
+            try:
+                form.relative_to(prot)
+                return orig
+            except ValueError:
+                continue
     return None
 
 
