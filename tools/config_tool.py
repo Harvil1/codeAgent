@@ -52,8 +52,11 @@ CONFIG_GET_SCHEMA = {
         "读配置项的当前值（只限白名单内的 7 个安全键："
         "notifications.enabled / statusline.enabled / memory.curator.enabled / "
         "memory.curator.interval_hours / trace.enabled / "
-        "context.reactive_compact_cooldown_seconds / "
-        "context.reactive_compact_max_per_session）。优先返回运行时实际生效值。"
+        "context.reactive_compact_cooldown_seconds"
+        "（仅在 features.reactive_compact.enabled 开启时生效） / "
+        "context.reactive_compact_max_per_session"
+        "（仅在 features.reactive_compact.enabled 开启时生效））。"
+        "优先返回运行时实际生效值。"
     ),
     "parameters": {
         "type": "object",
@@ -76,6 +79,10 @@ CONFIG_SET_SCHEMA = {
         "value 类型按现有值强转（bool/int）。"
         "个别键（trace.enabled）在启动时一次性装配，runtime_applied='next_session'"
         "表示下次会话才生效。"
+        "context.reactive_compact_cooldown_seconds"
+        "（仅在 features.reactive_compact.enabled 开启时生效）/ "
+        "context.reactive_compact_max_per_session"
+        "（仅在 features.reactive_compact.enabled 开启时生效）。"
     ),
     "parameters": {
         "type": "object",

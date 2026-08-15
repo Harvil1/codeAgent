@@ -280,6 +280,22 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 )
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # CCAR13 A2：job=None（attach 失败 fail-open）时没有
+                # KILL_ON_JOB_CLOSE 兜底，超时进程会变孤儿继续跑——
+                # 必须补杀 + communicate 收尸（对齐 subprocess.run 内部语义）。
+                # job 非 None 时 finally 的 job.close() 已带 KILL_ON_JOB_CLOSE
+                # 清整棵子进程树，不重复杀。
+                if job is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass  # 进程已退出的竞态：kill 返错不掩盖超时语义
+                    try:
+                        proc.communicate(timeout=5)
+                    except Exception:
+                        pass  # 收尸失败不影响超时错误上报
+                raise
             finally:
                 # job 句柄必须保活到进程结束后再关：
                 #   - 正常结束 → close() 幂等清理句柄

@@ -100,6 +100,28 @@ class TestSessionWorkspaceCwd:
 
 class TestWorktreeEnter:
 
+    async def test_enter_denied_for_subagent(self):
+        """spawn_depth>0 的子代理不能切主对话的会话 worktree（CCAR13 A1，
+        CCAR12 final review follow-up：ContextVar 进程级共享，子代理 enter
+        会劫持主对话 cwd）。"""
+        agent = MagicMock()
+        agent.spawn_depth = 1
+        result = await _handle_worktree_enter({}, agent_ref=agent)
+        data = json.loads(result)
+        assert data["error_type"] == "permission_denied"
+
+    async def test_enter_allowed_for_main_agent_mock(self, tmp_path):
+        """agent_ref 是 MagicMock 但 spawn_depth 为真实 int 0 → 放行（isinstance
+        守卫不误伤无 spawn_depth 属性的 mock/对象）。"""
+        agent = MagicMock()
+        agent.spawn_depth = 0
+        repo = _init_git_repo(tmp_path)
+        for d in _cd(repo):
+            result = await _handle_worktree_enter({"name": "main-ok"}, agent_ref=agent)
+            data = json.loads(result)
+            assert "error" not in data, data
+            await _handle_worktree_exit({"keep": False})
+
     async def test_enter_creates_worktree_and_switches_cwd(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):

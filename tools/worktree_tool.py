@@ -207,6 +207,21 @@ async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
     git 命令），async 里直接跑即可。
     """
     global _session_worktree
+
+    # CCAR13 A1（CCAR12 final review follow-up）：子代理（spawn_depth>0）不得
+    # 切换会话级 worktree——ContextVar 是进程级共享，子代理 enter 会劫持
+    # 主对话的 cwd，且 exit 在子代理结束时未必发生（会话级语义被滥用）。
+    # isinstance 守卫：agent_ref 可能是 MagicMock（无 spawn_depth 属性时
+    # getattr 返回 auto-attribute，不是 int——按 0 处理不误伤）。
+    agent_ref = dispatch_kwargs.get("agent_ref")
+    spawn_depth = getattr(agent_ref, "spawn_depth", 0)
+    if isinstance(spawn_depth, int) and spawn_depth > 0:
+        return _err(
+            "worktree_enter",
+            "子代理（spawn_depth>0）不能切换会话级 worktree，请由主代理调用",
+            "permission_denied",
+        )
+
     if _session_worktree is not None:
         return _err(
             "worktree_enter",

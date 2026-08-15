@@ -526,6 +526,9 @@ class _FakePopen:
         self._events.append("communicate")
         return ("hi", "")
 
+    def kill(self):
+        self._events.append("kill")
+
 
 def _win_job_env(monkeypatch, tt, sr, job, events):
     """公共脚手架：mock Windows Job Object 沙箱环境。"""
@@ -630,6 +633,72 @@ def test_terminal_sandbox_windows_timeout_closes_job(monkeypatch):
     parsed = json.loads(result)
     assert "超时" in parsed.get("error", "")
     # close 在 communicate 之后仍被调用（finally 保活语义）
+    assert events == ["popen", "communicate", "close"]
+
+
+def test_terminal_sandbox_windows_timeout_kills_process_without_job(monkeypatch):
+    """超时 + attach 失败（job=None）→ proc.kill() 必须被调（CCAR13 A2）。
+
+    job=None 时没有 KILL_ON_JOB_CLOSE 兜底，不杀就变孤儿进程继续跑；
+    杀完还要 communicate 收尸（回收管道/句柄，对齐 subprocess.run 内部语义）。
+    """
+    import json
+    import subprocess as sp
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+
+    class TimeoutNoJobPopen(_FakePopen):
+        def communicate(self, timeout=None):
+            self._events.append("communicate")
+            raise sp.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+
+    _win_job_env(monkeypatch, tt, sr, None, events)  # job=None 模拟 attach 失败
+    monkeypatch.setattr(
+        tt.subprocess, "Popen", lambda cmd, **kw: TimeoutNoJobPopen(cmd, events, **kw)
+    )
+
+    result = tt._handle_terminal(
+        {"command": "ping -n 100 localhost", "timeout": 1},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    parsed = json.loads(result)
+    assert "超时" in parsed.get("error", "")
+    # kill 被调 + 收尸 communicate；无 job → 无 close 事件
+    assert events == ["popen", "communicate", "kill", "communicate"]
+
+
+def test_terminal_sandbox_windows_timeout_with_job_does_not_kill(monkeypatch):
+    """超时 + job 非 None → 不调 proc.kill()（finally 的 job.close 带
+    KILL_ON_JOB_CLOSE 清整棵树，重复杀是多余动作——CCAR13 A2 约束）。"""
+    import json
+    import subprocess as sp
+    import tools.terminal_tool as tt
+    import agent.sandbox_runner as sr
+
+    events = []
+
+    class TimeoutJobPopen(_FakePopen):
+        def communicate(self, timeout=None):
+            self._events.append("communicate")
+            raise sp.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+
+    job = _FakeJob(events)
+    _win_job_env(monkeypatch, tt, sr, job, events)
+    monkeypatch.setattr(
+        tt.subprocess, "Popen", lambda cmd, **kw: TimeoutJobPopen(cmd, events, **kw)
+    )
+
+    result = tt._handle_terminal(
+        {"command": "ping -n 100 localhost", "timeout": 1},
+        sandbox_mode="on",
+        omnimate_home="/tmp/fake_home",
+    )
+    parsed = json.loads(result)
+    assert "超时" in parsed.get("error", "")
+    # 有 job：close 清树，kill 不出现
     assert events == ["popen", "communicate", "close"]
 
 

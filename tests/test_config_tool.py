@@ -67,6 +67,48 @@ class TestWhitelist:
         assert "security.command_approval" not in _CONFIG_WHITELIST  # 白名单外
         assert "llm.base_url" not in _CONFIG_WHITELIST  # 敏感键必须拒
 
+    def test_whitelist_all_keys_have_read_points(self):
+        """CCAR13 A4 逐键核对：7 键全有真实读取点（无一 dead key，无需换键）。
+
+        读取点清单（file:line 为核对时快照）：
+          memory.curator.enabled              → agent/memory_curator.py:191
+          memory.curator.interval_hours       → agent/memory_curator.py:194
+          trace.enabled                       → cli.py:436（initialize TraceSink 装配）
+          notifications.enabled               → agent/notifier.py:35
+          statusline.enabled                  → cli.py:3859（_render_statusline）
+          context.reactive_compact_cooldown_seconds → agent/__init__.py:1660
+          context.reactive_compact_max_per_session  → agent/__init__.py:1662
+        """
+        assert _CONFIG_WHITELIST == frozenset({
+            "memory.curator.enabled",
+            "memory.curator.interval_hours",
+            "trace.enabled",
+            "notifications.enabled",
+            "statusline.enabled",
+            "context.reactive_compact_cooldown_seconds",
+            "context.reactive_compact_max_per_session",
+        })
+
+
+# ---------------------------------------------------------------------------
+# 1.5 reactive 键 schema 提示（CCAR13 A3）
+# ---------------------------------------------------------------------------
+
+class TestReactiveKeyHint:
+    def test_get_schema_reactive_keys_hint_feature_flag(self):
+        """config_get description 里两 reactive 键标注 feature flag 前置条件。"""
+        desc = CONFIG_GET_SCHEMA["description"]
+        assert "reactive_compact_cooldown_seconds" in desc
+        assert "reactive_compact_max_per_session" in desc
+        assert desc.count("仅在 features.reactive_compact.enabled 开启时生效") == 2
+
+    def test_set_schema_reactive_keys_hint_feature_flag(self):
+        """config_set description 里两 reactive 键标注 feature flag 前置条件。"""
+        desc = CONFIG_SET_SCHEMA["description"]
+        assert "reactive_compact_cooldown_seconds" in desc
+        assert "reactive_compact_max_per_session" in desc
+        assert desc.count("仅在 features.reactive_compact.enabled 开启时生效") == 2
+
 
 # ---------------------------------------------------------------------------
 # 2. config_get
