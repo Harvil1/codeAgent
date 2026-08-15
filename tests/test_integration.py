@@ -1801,6 +1801,7 @@ async def test_tool_call_persisted_to_session(tmp_path):
 async def test_checkpoint_tracked_on_write_file(tmp_path):
     """write_file 成功后 checkpoint 追踪该文件（对齐 Claude Code）。"""
     from agent.checkpoint import CheckpointManager
+    from agent.permission import add_extra_allowed_root, clear_extra_allowed_roots
     ckpt_mgr = CheckpointManager(tmp_path / ".checkpoints", "sess", max_snapshots=10)
 
     call_count = [0]
@@ -1832,7 +1833,14 @@ async def test_checkpoint_tracked_on_write_file(tmp_path):
     )
     agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
 
-    await agent.chat("写文件")
+    # CCAR13 Task 4: check_path 闸门 3 恢复白名单语义——AIAgent 的 omnimate_home
+    # 参数不改 constants.get_omnimate_home()，tmp_path 需注册 extra root 才放行
+    # （finally clear 防注册表泄漏污染其他测试）。
+    add_extra_allowed_root(str(tmp_path))
+    try:
+        await agent.chat("写文件")
+    finally:
+        clear_extra_allowed_roots()
 
     tracked_names = [Path(p).name for p in ckpt_mgr.tracked_files()]
     assert "out.txt" in tracked_names, f"write_file 应触发 checkpoint track，实际: {tracked_names}"

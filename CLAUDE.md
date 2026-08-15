@@ -229,7 +229,7 @@ uv sync                                 # 同步已声明依赖
 | system prompt 构建（记忆/技能索引/GUIDANCE） | `agent/prompt_builder.py:build_system_prompt` |
 | 上下文压缩（唯一可改 system prompt 的场景） | `agent/context_pipeline.py:compress_if_needed` + 主循环 `agent/__init__.py` 压缩后注入 `<post_compress_brief>` |
 | 命令权限闸门 | `agent/permission.py:PermissionChecker.check` |
-| 路径白名单 | `agent/permission.py:safe_path` |
+| 路径白名单 | `agent/permission.py:safe_path`（直接调用方）+ `PermissionChecker.check_path` 闸门 3（write_file/str_replace，CCAR13 Task 4 起同源白名单） |
 | LLM 重试/备用模型/退避抖动/529 早切 | `agent/llm_retry.py:call_with_retry` + `_compute_backoff`（抖动）+ 连续 529 计数 |
 | max_tokens 升级（finish_reason=length 自动重试） | `agent/llm_retry.py:MaxTokensEscalator` + `detect_length_finish`；入口 `agent/__init__.py:_call_llm_streaming`（流式）和 `run_conversation` 非流式分支 |
 | 工具注册模式（添加新工具看这个） | `tools/terminal_tool.py`（含权限集成） |
@@ -282,6 +282,7 @@ uv sync                                 # 同步已声明依赖
 | PTL tokenGap 精确算法 | `agent/context_compressor.py:_compute_ptl_drop_count` + `_get_model_max_tokens`（三格式正则 DeepSeek/Anthropic/OpenAI + 三层 fallback 到 20% 旧算法）|
 | post-compact 主动恢复（最近文件 + invoked skills） | `agent/post_compact_recovery.py:build_post_compact_brief`（compact 末尾注入；走 safe_path 白名单 + fail-open）；追踪在 `_dispatch_tool_calls`（safe + unsafe 两路都调 `_record_recent`）；config `post_compact_recovery_enabled/max_files/max_skills` |
 | 子代理 sidechain transcript 持久化（CCAR5-I） | `agent/subagent_persistence.py`（generate_agent_id / write_metadata / append_message / load_transcript / list_resumable / mark_completed / cleanup_old / cleanup_stale_subagents）；接入 `tools/delegate_tool.py:_run_child`（CCAR13 Task 3：user 指令开头 append + 独立 HookRegistry 的 POST_LLM_CALL 程序式 hook 每轮 append assistant 文本，on_response 最终响应 append 已删 + try/finally 标记 status）；cli.py 启动时清理 stale running + 过期 retention；config 开关 `delegation.subagent_persistence_enabled`（默认 True）+ `subagent_persistence_retention_days`（默认 7） |
+| check_path 白名单语义（CCAR13 Task 4） | `agent/permission.py:PermissionChecker.check_path` 闸门 3 恢复白名单判定（write：workspace cwd / `~/.OmniMate` / `/add-dir` extra roots 之内放行、之外拒；白名单经 `default_allowed_roots()` 与 safe_path 同源）；顺序铁律：闸门 1 受保护路径 / 闸门 2 项目代码写保护在前（加 home 根也写不了 `~/.ssh`）；bypassPermissions 跳白名单不跳闸门 1/2；write_file + str_replace 共用此判定 |
 | async 子代理默认拒审批（CCAR6-J） | `agent/permission.py:PermissionChecker`（permission_mode="autoDeny" 第 4 模式，闸门 2 短路 + 保留 fatal/safe-fs 底线）；`_delegate_async` 注入；config `async_auto_deny_permission`（默认 True）；`_run_child` 优先级链 custom_def > 注入 > default；`_common.py` mode 白名单含 autoDeny（关键：singleton checker 走 mode_override 不走 self.mode） |
 | 子代理中断完整化（CCAR6-K） | `tools/delegate_tool.py:_delegate_sync`（threading.Event 替代 timeout+abandon）+ `_delegate_async`（cancel_event + `_async_tasks` 注册表）+ `_delegate_batch`（KeyboardInterrupt 传播）；`agent/__init__.py:run_conversation(cancel_event=)` 每轮检查 + `_extract_partial_result`（[PARTIAL] 前缀保留最后 assistant 消息）；`subagent_kill` 工具（core toolset）；config `sync_cancel_timeout_seconds` + `async_kill_enabled` |
 | Goal 驱动系统（CCAR8，同步阻塞） | `agent/goal.py:GoalState`（状态机 + evaluate_after_turn + 原子持久化 `~/.OmniMate/.goal/current.json`）+ `agent/__init__.py`（goal continue 分支 + `_pending_ephemeral_messages` 暂存 + 网络 pause）；CLI `cli.py:/goal`（status/pause/resume/continue/clear/tasks）；config `goal.default_token_budget`（200K 必设防无限跑）+ `reflection_interval` |
@@ -332,6 +333,7 @@ uv sync                                 # 同步已声明依赖
 - **检索式记忆注入每轮一次（CCAR10）** —— 主代理 only（spawn_depth==0）；检索结果走 ephemeral（不进 history/system prompt）；无 aux_llm_router 降级 snapshot（会话只注入一次）；memory_recall 工具仍可主动深查（含 L2 全文）。
 - **subagent_resume 的轨迹语义（CCAR13 Task 3 改）** —— transcript = user 指令 + 每轮 assistant 文本（POST_LLM_CALL 每轮 append）；tool_calls / tool result 不落盘（无配对 result 会造孤儿消息 → API 400），resume 的 initial_messages 是纯 user/assistant 文本流；轮级记录受 `config["hooks"]["enabled"]` 门控（默认 True，关 hooks 只留 user 指令一条）。
 - **/add-dir 持久化走 settings.json（CCAR11）** —— load_config 默认只读 settings.json（config.yaml 首启被迁走）；白名单写 config.yaml 会导致灌回 0 条。
+- **check_path 闸门 3 恢复白名单语义（CCAR13 Task 4，收回 dcec556b 的放开）** —— write_file/str_replace 写 workspace cwd / `~/.OmniMate` / extra roots 之外现在会拒（之前"除项目代码外其他都可写"）；要放开走 `/add-dir` 或 bypassPermissions（后者仍守受保护路径 + 项目代码写保护底线）；受保护路径检查永远先于白名单。
 - **/paste 只保存不分析（CCAR11）** —— PowerShell 读剪贴板存 `.paste/img_<ts>.png`，用户在消息中引用路径让 LLM 调 image_analyze。
 - **notifier 仅 Windows（CCAR11）** —— 零依赖 PowerShell toast；非 Windows no-op；bg title 统一"后台任务"（30s 节流防刷屏）。
 - **Windows 沙箱 = 进程管控（CCAR12）** —— Job Object 管子进程树（不逃逸+全树清理），不隔离文件系统；文件防线仍是 safe_path/白名单层。job 句柄必须保活到 Popen.wait 后（早关=子进程失去清理保证）。

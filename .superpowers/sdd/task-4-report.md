@@ -1,60 +1,62 @@
-# CCAR12 Task 4 Report: Goal 工具化（含共享函数抽取）
+# CCAR13 Task 4 报告：check_path 感知 extra_allowed_roots（C8）
 
-> 注：本文件路径之前承载过 CCAR8/9/10/11 各轮报告，本份覆盖为 CCAR12 Task 4。
+> 注：本文件路径之前承载过 CCAR8-12 各轮报告，本份覆盖为 CCAR13 Task 4。
 
 **Branch:** cli-dev
 **Date:** 2026-08-15
 **Status:** 完成
 
-## 任务范围
+## 改动落点：permission 层（`agent/permission.py:PermissionChecker.check_path`），不是 file_operations
 
-1. `agent/goal.py` 新增共享函数 `start_goal_agent(agent, objective, token_budget, persist_path=None)` + 路径解析辅助 `goal_persist_path(agent)`——把 cli.py `_start_new_goal` 的核心三步（旧 goal pause / GoalState 构造挂 agent / 持久化）抽来，CLI `/goal` 与 LLM `goal_start` 工具同源。
-2. `cli.py:_start_new_goal` 改调共享函数（行为不变，cli 层测试未动仍绿）。
-3. `tools/goal_tool.py` 五工具：`goal_start` / `goal_status` / `goal_pause` / `goal_resume` / `goal_clear`（schema 全 "parameters" 键）。
-4. 分类：UNSAFE +4（start/pause/resume/clear）、`goal_status` SAFE（expected_safe_count 15→16）；`_CORE_TOOLS` +5。
-5. `tests/test_goal_tool.py` 30 个新测试。
+**理由**：
+1. grep 确认全仓 `check_path` 调用方只有 `tools/file_operations.py` 两处（write_file L227 + str_replace L499）——判定收敛 permission 层一处，两个工具同时受益，未来新调用方自动继承；
+2. 白名单源 `default_allowed_roots()`（workspace cwd + `~/.OmniMate` + `_EXTRA_ALLOWED_ROOTS`）本来就住在 permission.py——check_path 直接复用，与 safe_path **同源**，不会两层白名单漂移；
+3. `tools/file_operations.py` 零代码改动（它的调用姿势已正确，缺的是被调方语义）。
 
-## 实施步骤
+## 现状判定（实现前，brief 第一步的结论）
 
-### Step 1：读现状（brief 点名先 Read `_start_new_goal`）
+`check_path` 闸门 3 在 default 模式下是"**其他全通过**"（dcec556b "放开路径限制" 遗留）——write_file 其实能写任何非受保护路径，/add-dir 的白名单对它毫无意义。spec C8 目标态明确要求"未 add 拒"，因此本任务实为**恢复白名单语义（收紧）**，不只是"感知 extra roots"。
 
-- cli.py `_start_new_goal`（原 1873 行起）四步：① pause 旧 active goal + save ② 建新 GoalState + save + `set_goal_state` ③ aux_llm 拆解（asyncio.run + loop-running guard，fail-open）④ `[goal_start]` user 消息塞 `conversation_history` 末尾。全程穿插 console.print。
-- AIAgent 已有 `_goal_state_path()`（`omnimate_home/.goal/current.json`）和 `set_goal_state`——共享函数直接复用。
-- CCAR8 mailbox 模式：handler 从 `dispatch_kwargs["agent_ref"]` 拿 agent。
+## 实现（`agent/permission.py`）
 
-### Step 2：关键设计决策——共享函数**不碰 conversation_history**
+`check_path` write 分支最终闸门改为：
 
-原 cli 第 ④ 步不能进共享函数：CLI 在会话循环外追加 user 消息是安全的，但**工具路径**在 `_dispatch_tool_calls` 里 `assistant(tool_calls)` 已 append（行 1822）、tool result 由 `_merge_results_in_order` 事后回填——中间插 user 消息会破坏消息历史严格交替（API 400，CCAR5-6 修过的同款 bug）。工具路径也不需要它：goal 激活后主循环 goal-continue 分支（`run_conversation` 行 1126）自动多轮驱动。专门写了回归测试 `test_does_not_touch_conversation_history`。
+```
+闸门 1: is_protected_path → 硬拒（顺序铁律：先于白名单，加 home 根也写不了 ~/.ssh）
+读:     此处放行（不受影响）
+acceptEdits: cwd 内自动批（原逻辑保留）
+闸门 2: is_write_protected_path（项目代码）→ 硬拒
+闸门 3 (新): bypassPermissions → 直接放行（闸门 1/2 已守住，对齐既有 bypass 测试语义）
+        其余模式（default/acceptEdits/autoDeny）→ default_allowed_roots() 白名单
+        之内放行，之外 self._deny("写入路径不在白名单: ...", "protected")
+```
 
-### Step 3：共享函数（agent/goal.py）
+- `allowed_roots` 参数恢复生效（显式传入覆盖默认白名单，此前是死参数）
+- 拒绝统一走 `self._deny` → PERMISSION_DENIED 审计 hook 不遗漏
 
-- `start_goal_agent`：persist_path 显式参数优先（CLI 传 `_goal_state_path(rt)`，保证测试 FakeRT 的 tmp_path 隔离）→ `agent._goal_state_path()` → `agent.omnimate_home` → `get_omnimate_home()`（`goal_persist_path` 三级 fallback）。旧 goal 仅 active 才 pause（已 paused 的不覆盖 reason、不追加 notes）。`set_goal_state` 缺失时直接赋 `_goal_state` 属性（mock 兼容）。
-- 签名比 brief 多了 `persist_path=None` 可选参数——默认三参调用即 brief 契约；加它是为了 CLI 路径的 `rt.home`（测试 tmp_path）不被 fallback 写到真实 `~/.OmniMate`。
+## 测试（tests/test_permission.py 追加 5 个，TDD 先红后绿；真实 permission 注册表 + finally clear）
 
-### Step 4：cli.py 重构
+| 测试 | 覆盖 |
+|---|---|
+| `test_write_file_respects_extra_allowed_roots` | add-dir 后 write_file 到该目录通过且真写盘；未 add 的兄弟目录拒（不落盘） |
+| `test_write_file_protected_path_still_denied_after_adding_home_root` | 白名单加 home 根：home 普通文件放行、`~/.ssh/evil` 仍拒（保护先于白名单） |
+| `test_str_replace_respects_extra_allowed_roots` | str_replace 同判定 |
+| `test_write_file_denied_after_extra_root_removed` | clear 后同路径恢复拒 |
+| `test_check_path_cwd_and_bypass_semantics` | cwd 内放行 + bypassPermissions 跳白名单 |
 
-`_start_new_goal` = 共享函数（核心三步）+ CLI-only 三件事：① 打印"已自动 pause 旧 goal"（调共享函数前先记 `will_pause_old`）② aux_llm 拆解（原样保留，含 loop-running guard）③ `[goal_start]` history 注入（原样保留，注释说明为何只能 CLI 做）。`tests/test_cli_commands.py` 的 6 个 /goal 测试**未改一行**仍绿。
+## 连带修正（4 个旧测试写 tmp_path 白名单外，新闸门下被拒）
 
-### Step 5：tools/goal_tool.py（对齐 cron_tool 模式）
-
-- 5 handler 全 `(args, **dispatch_kwargs)` 契约，返回 JSON 字符串，`ensure_ascii=False`。
-- 错误分支：无 agent_ref → `not_configured`；缺 objective / 非法 budget → `invalid_args`；pause/resume/clear 无 goal → `no_active_goal`；异常兜底 `{"error", "error_type": type(e).__name__}`。
-- `goal_start` 校验 token_budget 为正整数；`goal_status` 无 goal 返回 `{"status": "none"}`（含 task_count）；`goal_clear` = cancel + save + 摘挂 + unlink 持久化文件（对齐 CLI `/goal clear`）。
-- 注册 5 个（toolset="core"，emoji 🎯）：`goal_status` isConcurrencySafe=True，其余 4 个 False。
-
-### Step 6：分类 + 可见性
-
-- `toolsets.py:_CORE_TOOLS` +5（发现 ≠ 可见）。
-- `tests/test_tool_concurrency_classification.py`：SAFE_TOOLS + `goal_status`（expected_safe_count 15→16）、UNSAFE_TOOLS + 4 个写操作；注释同步。
+- `tests/test_agent_def_extensions.py`：`test_file_changed_hook_fires_on_write_file` / `_on_str_replace` / `test_file_changed_no_hook_no_crash` → 补 `add_extra_allowed_root(tmp_path)` + finally clear
+- `tests/test_integration.py`：`test_checkpoint_tracked_on_write_file` → 同上（`AIAgent(omnimate_home=tmp_path)` 不改 `constants.get_omnimate_home()`，白名单不含 tmp_path，只能靠 extra root 桥接）
 
 ## 验证
 
-- 新测试：`uv run pytest tests/test_goal_tool.py -q` → 30 passed（TDD：先写测试确认 import 失败 red，再实现转 green）
-- 定向回归：`test_goal_tool + test_tool_concurrency_classification + test_cli_commands + test_goal` → 114 passed
-- 全套：`uv run pytest tests/ -q` → **2329 passed / 1 skipped / 0 failed**（Task 3 后 baseline 2299 passed + 1 skipped，净 +30）
+- `uv run pytest tests/` → **2438 passed / 0 failed**（Task 3 基线 2432 + 净 6：5 新增 + 1 个旧 skip-分支转真断言）
+- `uv run python scripts/verify.py` → 22/22 PASS
 
-## Concerns / Follow-up
+## Concerns（给 reviewer）
 
-1. **goal 工具未进 ASYNC_AGENT_DISALLOWED_TOOLS**：后台 async 子代理调 `goal_start` 会激活自己实例的 goal 循环（默认 200K budget），在 daemon 线程里持续烧 token。当前按 brief 未加（brief/plan 只点名分类两处同步）；若 reviewer 认同风险，可把 `goal_start`/`goal_clear` 加进 disallow 集合（对齐 cron_create/cron_delete 先例）。
-2. **工具路径与 CLI 启动行为的两处差异**：① `goal_start` 工具不做 aux_llm 拆解（decompose 的 asyncio.run + loop guard 是 CLI sync 路径特有的；LLM 需要子任务可用 `task_create` 自建）；② 工具路径不注入 `[goal_start]` user 消息（见 Step 2），驱动完全靠 goal-continue 分支。无 task_ids → `evaluate_after_turn(all_tasks_done)` 恒 False，goal 不会自动 complete（budget 耗尽 pause 或 LLM 主动 `goal_clear`）。
-3. **`persist_path` 可选参数是 brief 之外的扩展**（默认调用仍满足 brief 三参契约），reason 见 Step 3。
+1. **行为收紧，非纯增量**：收回 dcec556b 的"除项目代码外其他都可写"授权——write_file/str_replace 现在写 workspace cwd / `~/.OmniMate` / extra roots 之外会拒。这是 spec C8"未 add 拒"的直接推论，也与 CLAUDE.md 一直宣称的"write_file 默认走路径白名单"重新对齐；但要"到处可写"现在只能 bypassPermissions（仍守硬底线）或逐目录 /add-dir。**建议 reviewer 确认语义回摆符合预期**。
+2. **check_path 无审批通道**：白名单外直接拒（不问 approval_callback），对齐 safe_path 无 callback 行为；将来要"白名单外写询问用户"需加 callback 通路（follow-up）。
+3. **acceptEdits 分支仍先于闸门 2**（既有行为未动）：cwd 在项目 repo 内时 acceptEdits 可写项目代码（绕过写保护）。非本任务引入，收紧后该早期分支更显眼，建议单独议题。
+4. **`AIAgent(omnimate_home=...)` 与 `constants.get_omnimate_home()` 不同源**：白名单用后者，构造参数不影响它（测试靠 extra root 桥接）——既有割裂，未动。

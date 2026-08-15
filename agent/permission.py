@@ -939,12 +939,19 @@ class PermissionChecker:
     ) -> PermissionResult:
         """检查文件路径是否可访问。
 
-        规则(用户授权:除了项目代码,其他都可以改):
+        规则:
         - 读:受保护路径(~/.ssh 等)拒,其他允许
         - 写:
           闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线)
           闸门 2:写保护路径(项目代码目录)→ 硬拒(防入侵)
-          闸门 3:其他全通过(用户已授权)
+          闸门 3:写白名单(workspace cwd / ~/.OmniMate / /add-dir 追加的
+                 extra roots)之内放行,之外拒。
+
+        CCAR13 Task 4: 恢复闸门 3 的白名单语义（dcec556b 曾放开为"其他全通过"，
+        导致 /add-dir 加的额外白名单对 write_file/str_replace 不生效——它们走
+        check_path 而非 safe_path）。白名单经 default_allowed_roots() 统一取：
+        workspace cwd + ~/.OmniMate + _EXTRA_ALLOWED_ROOTS，与 safe_path 同源。
+        顺序铁律：闸门 1/2 在前——白名单加 home 根也写不了 ~/.ssh。
 
         参数：
             mode_override: 可选的 mode 覆盖。bypassPermissions 时跳过写保护（项目代码）
@@ -979,10 +986,35 @@ class PermissionChecker:
         if wprot:
             return self._deny(str(path), f"写保护(项目代码): {wprot}", "protected")
 
-        # 闸门 3:其他全通过(用户授权)。
-        # bypassPermissions 模式下同样全通过（写白名单约束在 safe_path 中已弱化为"其他全通过"，
-        # check_path 本就不再做白名单检查）。
-        return PermissionResult(True, "ok", "ok")
+        # 闸门 3（CCAR13 Task 4）:写白名单。
+        # bypassPermissions 跳过白名单（闸门 1/2 硬底线已在上面守住，
+        # 对齐 test_write_file_respects_agent_ref_bypass_mode 的既有语义）。
+        if effective_mode == "bypassPermissions":
+            return PermissionResult(True, "ok", "ok")
+
+        # 白名单与 safe_path 同源：workspace cwd + ~/.OmniMate + extra roots。
+        # 调用方显式传 allowed_roots 时以其为准（覆盖默认）。
+        if allowed_roots is None:
+            allowed_roots = default_allowed_roots()
+        roots = [Path(p).expanduser().resolve() for p in allowed_roots]
+
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, ValueError) as e:
+            return self._deny(str(path), f"路径解析失败: {e}", "protected")
+
+        for root in roots:
+            try:
+                resolved.relative_to(root)
+                return PermissionResult(True, "白名单内", "ok")
+            except (OSError, ValueError):
+                continue
+
+        return self._deny(
+            str(path),
+            f"写入路径不在白名单: {resolved}（允许: {[str(r) for r in roots]}）",
+            "protected",
+        )
 
     def add_to_whitelist(self, command: str):
         """手动加入持久化白名单。"""

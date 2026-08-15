@@ -1031,3 +1031,128 @@ def test_gate4_bypass_mode_skipped():
     assert result.allowed is True
     assert result.gate == "bypass"
     assert aux.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# CCAR13 Task 4: check_path 感知 extra_allowed_roots（/add-dir 后 write_file 生效）
+#
+# 历史包袱：dcec556b 曾把 check_path 闸门 3 放开为"其他全通过"（用户授权
+# 除项目代码外都可写），导致白名单语义在 check_path 层失效——/add-dir 加的
+# 额外白名单对 write_file/str_replace 毫无意义。Task 4 恢复闸门 3 的白名单
+# 语义：workspace cwd / ~/.OmniMate / extra roots 之内放行，之外拒。
+# 顺序铁律：闸门 1（受保护路径）/ 闸门 2（项目代码写保护）在前——
+# 白名单加 home 根也写不了 ~/.ssh（白名单绕不过硬底线）。
+# ---------------------------------------------------------------------------
+
+async def test_write_file_respects_extra_allowed_roots(tmp_path):
+    """add-dir 后 write_file 到该目录通过；未 add 的兄弟目录拒。"""
+    from agent.permission import (
+        add_extra_allowed_root, clear_extra_allowed_roots,
+    )
+
+    target_dir = tmp_path / "extra"
+    target_dir.mkdir()
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    try:
+        assert add_extra_allowed_root(str(target_dir)) is True
+
+        # add-dir 的目录 → 放行 + 真写盘
+        result = await registry.dispatch(
+            "write_file",
+            {"path": str(target_dir / "x.txt"), "content": "hello"},
+        )
+        data = json.loads(result)
+        assert "bytes" in data, f"add-dir 后写入该目录应放行, got: {data}"
+        assert (target_dir / "x.txt").read_text(encoding="utf-8") == "hello"
+
+        # 未 add 的兄弟目录 → 拒（不落盘）
+        result2 = await registry.dispatch(
+            "write_file",
+            {"path": str(other_dir / "x.txt"), "content": "hello"},
+        )
+        data2 = json.loads(result2)
+        assert data2.get("error_type") == "permission_denied", \
+            f"未 add 的兄弟目录应拒, got: {data2}"
+        assert not (other_dir / "x.txt").exists()
+    finally:
+        clear_extra_allowed_roots()  # 防注册表泄漏污染其他测试
+
+
+def test_write_file_protected_path_still_denied_after_adding_home_root():
+    """白名单加了 home 根也写不了 ~/.ssh（保护先于白名单）。"""
+    from agent.permission import (
+        add_extra_allowed_root, clear_extra_allowed_roots,
+    )
+
+    checker = PermissionChecker()
+    try:
+        add_extra_allowed_root(Path.home())
+        # home 根本身在白名单内（普通文件放行）……
+        assert checker.check_path(
+            str(Path.home() / "omnimate_test_ok.txt"), write=True
+        ).allowed is True
+        # ……但 ~/.ssh 在闸门 1 就被拒（白名单绕不过硬底线）
+        result = checker.check_path(str(Path.home() / ".ssh" / "evil"), write=True)
+        assert result.allowed is False
+        assert "受保护路径" in result.reason
+    finally:
+        clear_extra_allowed_roots()
+
+
+def test_str_replace_respects_extra_allowed_roots(tmp_path):
+    """str_replace 与 write_file 同判定（add-dir 后生效）。"""
+    from agent.permission import (
+        add_extra_allowed_root, clear_extra_allowed_roots,
+    )
+    from tools.file_operations import _handle_str_replace
+
+    target = tmp_path / "extra" / "edit.txt"
+    target.parent.mkdir()
+    target.write_text("alpha beta\n", encoding="utf-8")
+    try:
+        add_extra_allowed_root(str(target.parent))
+        result = _handle_str_replace(
+            {"path": str(target), "old_str": "alpha", "new_str": "gamma"}
+        )
+        data = json.loads(result)
+        assert data.get("replaced") == 1, f"add-dir 后 str_replace 应放行, got: {data}"
+        assert target.read_text(encoding="utf-8") == "gamma beta\n"
+    finally:
+        clear_extra_allowed_roots()
+
+
+def test_write_file_denied_after_extra_root_removed(tmp_path):
+    """clear extra root 后恢复拒。"""
+    from agent.permission import (
+        add_extra_allowed_root, clear_extra_allowed_roots,
+    )
+
+    target = tmp_path / "gone" / "a.txt"
+    target.parent.mkdir()
+    checker = PermissionChecker()
+    try:
+        add_extra_allowed_root(str(target.parent))
+        assert checker.check_path(str(target), write=True).allowed is True
+    finally:
+        clear_extra_allowed_roots()
+    # 清掉后同一路径恢复拒
+    result = checker.check_path(str(target), write=True)
+    assert result.allowed is False
+    assert "白名单" in result.reason
+
+
+def test_check_path_cwd_and_bypass_semantics(tmp_path, monkeypatch):
+    """闸门 3 白名单语义：cwd 内放行；bypassPermissions 跳白名单。"""
+    monkeypatch.chdir(tmp_path)
+    from agent.workspace_context import get_workspace_cwd
+    checker = PermissionChecker()
+    # cwd 内（workspace_cwd 未设时回落 os.getcwd）
+    assert checker.check_path(
+        str(Path(get_workspace_cwd()) / "note.txt"), write=True
+    ).allowed is True
+    # bypassPermissions：白名单外放行（硬底线闸门 1/2 已在上面守住）
+    bypass = PermissionChecker(mode="bypassPermissions")
+    assert bypass.check_path(
+        str(tmp_path.parent / "omnimate_bypass_probe.txt"), write=True
+    ).allowed is True
