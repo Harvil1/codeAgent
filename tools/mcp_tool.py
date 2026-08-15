@@ -16,6 +16,18 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 
+def _make_server_check(mgr: MCPManager, sname: str):
+    """构造 per-server 连接门控 check_fn（闭包捕获 manager + server 名）。
+
+    对应 server 的 client 存在且 connected 时才暴露工具（server 断开自动隐藏）。
+    """
+    def check():
+        with mgr._lock:
+            client = mgr._clients.get(sname)
+        return client is not None and client.connected
+    return check
+
+
 def register_mcp_tools(manager: MCPManager = None) -> int:
     """把所有 MCP server 的工具注册到 registry。
 
@@ -52,20 +64,13 @@ def register_mcp_tools(manager: MCPManager = None) -> int:
             return handler
 
         # check_fn：对应 server 连接时才暴露
-        def make_check(mgr, sname):
-            def check():
-                with mgr._lock:
-                    client = mgr._clients.get(sname)
-                return client is not None and client.connected
-            return check
-
         try:
             registry.register(
                 name=full_name,
                 toolset="mcp",
                 schema=schema,
                 handler=make_handler(manager, full_name),
-                check_fn=make_check(manager, server_name),
+                check_fn=_make_server_check(manager, server_name),
                 emoji="🔌",
                 # MCP 工具保守标 False：不知道具体副作用（可能是写文件/发请求），
                 # 安全默认 > 事后补救，让它们走串行路径
@@ -146,13 +151,6 @@ def _register_resource_tools(manager: MCPManager) -> int:
             return handler
 
         # check_fn 复用现有 per-server 门控
-        def make_check(mgr, sname):
-            def check():
-                with mgr._lock:
-                    client = mgr._clients.get(sname)
-                return client is not None and client.connected
-            return check
-
         for name, schema, handler in (
             (list_schema["name"], list_schema, make_list_handler(manager, server_name)),
             (read_schema["name"], read_schema, make_read_handler(manager, server_name)),
@@ -163,7 +161,7 @@ def _register_resource_tools(manager: MCPManager) -> int:
                     toolset="mcp",
                     schema=schema,
                     handler=handler,
-                    check_fn=make_check(manager, server_name),
+                    check_fn=_make_server_check(manager, server_name),
                     emoji="🔌",
                     # resources 读取理论上只读，但走外部进程/网络，
                     # 与其他 MCP 工具一致保守标 False（串行）
