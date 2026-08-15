@@ -23,3 +23,5 @@ Branch: cli-dev
 - Task 3: complete (commits c13fd037..b1a01b84, review Approved) — subagent 完整轨迹（独立 HookRegistry + POST_LLM_CALL 每轮 append + user 指令补记 + on_response 删防双写 + **轨迹永不带 tool_calls** 从源头防 API 400 孤儿）；8 新测试 + 2432 全绿；spec ✅ + 质量 Approved。CCAR5-I Phase 2 闭环：真正中断的子代理有轨迹可 resume。
 - Task 3 (Minor): 轨迹不含工具调用概要（resume 知道"说过什么"不知道"做过什么"——未来增强）；连续 assistant 消息 resume 兼容（OpenAI 端验证过，止血点 _run_resume 合并）
 - Task 3 (Minor): hooks.enabled 关闭时轨迹只剩 user 一条（文档化，on_turn 退化方案留 follow-up）
+- Task 4: complete (commits b1a01b84..a0c841d3, review Approved) — check_path 闸门 3 恢复白名单语义（**行为回摆 reviewer 裁决正确**：dcec556b 只放 check_path 未放 safe_path 造成双入口漂移，恢复与铁律 #6/文档一致；escape 通道 /add-dir + bypass 完备）；5 新测试 + 4 旧测试补 root + 2438 全绿。改 permission 层一处，file_operations 零改动。
+- Task 4 (Minor): commit 夹带 545 行 CCAR7 旧测试文件（磁盘遗留入库，合法全绿但语义混）；check_path 无审批通道（follow-up）；acceptEdits 分支先于闸门 2（既有问题）
