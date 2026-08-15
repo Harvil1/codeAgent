@@ -471,7 +471,11 @@ def test_new_hooks_isolated_per_registry():
 # ============ F1: handler_type 多类型（http/mcp_tool/prompt/agent）============
 
 def test_http_hook_posts_and_parses(monkeypatch):
-    """http 类型 hook：POST JSON，解析响应。"""
+    """http 类型 hook：POST JSON，解析响应。
+
+    R16 #4 起 run_http_hook 有 SSRF 预检（真实 getaddrinfo）——测试用
+    环回地址保持 hermetic（假域名会被本机 DNS 劫持成私网地址而误拦）。
+    """
     import agent.hook_exec as he
     captured = {}
     class FakeResp:
@@ -479,16 +483,16 @@ def test_http_hook_posts_and_parses(monkeypatch):
         text = ""
         def json(self):
             return {"permissionDecision": "allow"}
-    def fake_post(url, json=None, headers=None, timeout=None):
+    def fake_post(url, json=None, headers=None, timeout=None, **kw):
         captured["url"] = url
         captured["payload"] = json
         return FakeResp()
     monkeypatch.setattr(he.requests, "post", fake_post)
     from agent.hooks import HookScriptConfig, Hook, HookEvent
-    cfg = HookScriptConfig(handler_type="http", url="https://h.x/hook", timeout=5)
+    cfg = HookScriptConfig(handler_type="http", url="http://127.0.0.1:9911/hook", timeout=5)
     hook = Hook(name="h", event=HookEvent.PRE_TOOL_USE, kind="declarative", script=cfg)
     out = he.dispatch_hook(hook, {"event": "pre_tool_use", "tool": "terminal"})
-    assert captured["url"] == "https://h.x/hook"
+    assert captured["url"] == "http://127.0.0.1:9911/hook"
     assert out == {"permissionDecision": "allow"}
 
 

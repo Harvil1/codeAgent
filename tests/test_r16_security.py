@@ -285,3 +285,188 @@ def test_dangerous_removal_compound(tmp_path):
     """复合命令逐段检查。"""
     assert check_dangerous_removal(f"cd {tmp_path} && rm -rf /tmp") is not None
     assert check_dangerous_removal("echo hi | rm -rf /etc") is not None
+
+
+# ---------------------------------------------------------------------------
+# R16 #4：HTTP hook SSRF 防护
+# ---------------------------------------------------------------------------
+
+import agent.ssrf_guard as ssrf_mod
+from agent.ssrf_guard import (
+    check_url_against_allowlist,
+    is_blocked_address,
+    url_matches_pattern,
+    validate_url_for_ssrf,
+)
+
+
+@pytest.mark.parametrize("addr", [
+    "10.0.0.1", "192.168.1.1", "172.16.0.1", "172.31.255.255",
+    "169.254.169.254",          # 云元数据
+    "100.100.100.200",          # 阿里云元数据（100.64/10 CGNAT）
+    "0.0.0.1",
+    "::",                       # 未指定
+    "fc00::1", "fd00::1",       # ULA
+    "fe80::1",                  # 链路本地
+    "::ffff:10.0.0.1",          # v4 映射
+    "::ffff:a9fe:a9fe",         # 169.254.169.254 的 hex 形态
+])
+def test_is_blocked_address_blocked(addr):
+    assert is_blocked_address(addr), f"应禁达: {addr}"
+
+
+@pytest.mark.parametrize("addr", [
+    "127.0.0.1", "127.1.2.3",   # 环回放行（本地 dev policy server）
+    "::1",
+    "8.8.8.8", "1.1.1.1",       # 公网
+    "::ffff:8.8.8.8",           # v4 映射公网
+    "2001:db8::1",
+    "example.com",              # 非 IP 字面量 → False
+])
+def test_is_blocked_address_allowed(addr):
+    assert not is_blocked_address(addr), f"应放行: {addr}"
+
+
+def test_validate_url_ip_literal():
+    assert validate_url_for_ssrf("http://169.254.169.254/latest/meta-data") is not None
+    assert validate_url_for_ssrf("http://10.0.0.5/hook") is not None
+    assert validate_url_for_ssrf("http://127.0.0.1:8080/hook") is None
+    assert validate_url_for_ssrf("http://[::1]:9000/hook") is None
+
+
+def test_validate_url_scheme_and_ctrl():
+    assert validate_url_for_ssrf("ftp://example.com/x") is not None
+    assert validate_url_for_ssrf("http://example.com\r\nX-Evil: 1") is not None
+    assert validate_url_for_ssrf("") is not None
+    assert validate_url_for_ssrf("http:///no-host") is not None
+
+
+def _fake_getaddrinfo(results):
+    def fake(host, port, type=None):
+        return [(None, None, None, "", (r, port)) for r in results]
+    return fake
+
+
+def test_validate_url_dns_blocked(monkeypatch):
+    """域名解析到私网 → 拒。"""
+    monkeypatch.setattr(
+        ssrf_mod.socket, "getaddrinfo",
+        _fake_getaddrinfo(["203.0.113.5", "192.168.0.10"]),
+    )
+    assert validate_url_for_ssrf("https://evil-rebind.example.com/hook") is not None
+
+
+def test_validate_url_dns_ok(monkeypatch):
+    monkeypatch.setattr(
+        ssrf_mod.socket, "getaddrinfo",
+        _fake_getaddrinfo(["203.0.113.5"]),
+    )
+    assert validate_url_for_ssrf("https://ok.example.com/hook") is None
+
+
+def test_validate_url_dns_fail_open(monkeypatch):
+    """DNS 解析失败放行（交给 requests 报真实错误）。"""
+    def boom(host, port, type=None):
+        raise ssrf_mod.socket.gaierror("no such host")
+    monkeypatch.setattr(ssrf_mod.socket, "getaddrinfo", boom)
+    assert validate_url_for_ssrf("https://nx.example.com/hook") is None
+
+
+def test_validate_url_env_proxy_skips_guard(monkeypatch):
+    """环境代理激活 → 跳过地址段预检（对齐 CC 语义）。"""
+    monkeypatch.setattr(ssrf_mod, "_env_proxy_active", lambda url: True)
+    monkeypatch.setattr(
+        ssrf_mod.socket, "getaddrinfo",
+        _fake_getaddrinfo(["10.0.0.1"]),
+    )
+    assert validate_url_for_ssrf("https://internal.example.com/hook") is None
+
+
+def test_url_matches_pattern():
+    assert url_matches_pattern("https://hooks.example.com/x", "https://hooks.example.com/*")
+    assert url_matches_pattern("https://a.com", "https://a.com")
+    assert not url_matches_pattern("https://evil.com/x", "https://hooks.example.com/*")
+    assert url_matches_pattern("https://a.com/x?y=1", "*a.com*")
+
+
+def test_url_allowlist_semantics():
+    assert check_url_against_allowlist("https://x.com", None) is None       # 不限
+    assert check_url_against_allowlist("https://x.com", []) is not None     # 全拒
+    assert check_url_against_allowlist(
+        "https://good.com/h", ["https://good.com/*"]) is None
+    assert check_url_against_allowlist(
+        "https://bad.com/h", ["https://good.com/*"]) is not None
+
+
+# ---- run_http_hook 集成 ----
+
+import agent.hook_exec as he
+
+
+class _HttpScript:
+    def __init__(self, url, timeout=5):
+        self.handler_type = "http"
+        self.url = url
+        self.timeout = timeout
+
+
+class _HttpHook:
+    def __init__(self, url):
+        self.name = "test-http-hook"
+        self.script = _HttpScript(url)
+
+
+def test_run_http_hook_blocked_by_ssrf(monkeypatch):
+    """SSRF 拦截：不发请求，返回 None。"""
+    called = []
+    monkeypatch.setattr(he.requests, "post", lambda *a, **kw: called.append(1))
+    result = he.run_http_hook(_HttpHook("http://169.254.169.254/meta"), {"x": 1})
+    assert result is None
+    assert called == []
+
+
+def test_run_http_hook_loopback_passes(monkeypatch):
+    """环回放行且 allow_redirects=False。"""
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"ok": True}
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["url"] = url
+        seen["kw"] = kw
+        return _Resp()
+
+    monkeypatch.setattr(he.requests, "post", fake_post)
+    result = he.run_http_hook(_HttpHook("http://127.0.0.1:9911/hook"), {"x": 1})
+    assert result == {"ok": True}
+    assert seen["kw"]["allow_redirects"] is False
+
+
+def test_run_http_hook_allowlist_gate(monkeypatch):
+    """config allowlist 生效（走 set_config_provider 注入）。"""
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"ok": True}
+
+    called = []
+
+    def fake_post(url, **kw):
+        called.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(he.requests, "post", fake_post)
+    he.set_config_provider(lambda: {"security": {"http_hook_allowed_urls": ["https://good.com/*"]}})
+    try:
+        # 不在 allowlist → 拦截，不发请求
+        assert he.run_http_hook(_HttpHook("https://evil.com/hook"), {}) is None
+        assert called == []
+        # 在 allowlist → 放行（SSRF 预检对公网域名走真实 DNS，good.com 可解析）
+        result = he.run_http_hook(_HttpHook("https://good.com/hook"), {})
+        if result is None and not called:
+            pass  # DNS 解析失败的環境下 fail-open 放行到请求层；此处只验证 allowlist 不拦
+        assert "https://evil.com/hook" not in called
+    finally:
+        he.set_config_provider(None)

@@ -327,16 +327,46 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
 def run_http_hook(hook, payload: dict) -> Optional[dict]:
     """POST JSON payload 到 hook.script.url，解析响应 JSON dict。
 
+    R16 #4 SSRF 防护（agent/ssrf_guard.py）：
+    - URL allowlist（config security.http_hook_allowed_urls：None 不限/[] 全拒/
+      非空必须匹配，* 通配）
+    - DNS 预检：解析 IP 落私网/链路本地/云元数据段即拒；环回放行；
+      环境代理激活时跳过预检
+    - 禁重定向（重定向可绕过预检弹内网）
+    - URL 含 CR/LF/NUL 拒
+    命中防护 → 不外呼，返回 None（与 hook fail-open 语义一致：hook 没跑）。
+
     非 200 / 响应非 dict / JSON 解析失败 → None（fail-open）。
     """
     if not hook.script.url:
         logger.warning("http hook %s 缺 url", hook.name)
         return None
+    url = hook.script.url.strip()
+
+    from agent.ssrf_guard import check_url_against_allowlist, validate_url_for_ssrf
+
+    # URL allowlist
+    allowed = None
+    config = _get_config()
+    if config is not None:
+        allowed = (config.get("security") or {}).get("http_hook_allowed_urls")
+    block = check_url_against_allowlist(url, allowed)
+    if block:
+        logger.warning("http hook %s 被 URL allowlist 拦截: %s", hook.name, block)
+        return None
+
+    # SSRF 地址段预检
+    err = validate_url_for_ssrf(url)
+    if err:
+        logger.warning("http hook %s SSRF 防护拦截: %s", hook.name, err)
+        return None
+
     resp = requests.post(
-        hook.script.url,
+        url,
         json=payload,
         headers={"Content-Type": "application/json"},
         timeout=hook.script.timeout,
+        allow_redirects=False,  # R16 #4: 重定向可绕过预检
     )
     if resp.status_code != 200:
         logger.warning("http hook %s 返回 %d", hook.name, resp.status_code)

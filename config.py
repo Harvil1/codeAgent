@@ -280,6 +280,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # CCAR15 Task 5: Windows 防休眠（goal 循环 / bg 运行中
         # SetThreadExecutionState 保持系统唤醒；非 Windows no-op）
         "prevent_sleep": True,
+        # R16 #4: http hook URL allowlist（None=不限 / []=全拒 /
+        # 非空=必须匹配其一，* 通配；SSRF 地址段校验始终开启）
+        "http_hook_allowed_urls": None,
     },
 
     # 显示
