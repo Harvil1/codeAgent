@@ -303,6 +303,10 @@ uv sync                                 # 同步已声明依赖
 | 缺口命令（CCAR11） | `cli.py:/compact`（确认 + 强制 L4 + 降级 snip）+ `/context`（token 分布表）+ `/status`（model/goal/MCP/项目）+ `/doctor`（6 项自诊断）+ `/diff`（checkpoint tracked_files）+ `/add-dir`（safe_path 白名单 + settings.json 持久化）+ `/paste`（PowerShell 剪贴板图片） |
 | 桌面通知（CCAR11） | `agent/notifier.py:notify(title, msg)`（Windows toast 零依赖 + 30s 节流 + fail-open + config `notifications.enabled`）+ 3 触发点（bg 完成/权限审批/goal network pause） |
 | 工具 schema OpenAI 格式契约（CCAR11 教训） | registry.get_definitions 直接 `{"type":"function","function":schema}` 塞 LLM——schema 键必须是 **"parameters"**（OpenAI）不是 "inputSchema"（Anthropic 风格）。契约测试 `test_all_builtin_schemas_use_openai_parameters_key` 遍历防回归（CCAR8-10 的 brief/mailbox×3/memory_recall/subagent_resume 曾用 inputSchema → 参数定义对 LLM 不可见） |
+| Windows Job Objects 沙箱（CCAR12） | `agent/win_job_object.py:WinJobObject`（ctypes 零依赖：KILL_ON_JOB_CLOSE+禁逃逸+进程上限；**restype 必须显式 HANDLE** 防 x64 句柄问题）+ `sandbox_runner.attach_job` + `terminal_tool` Windows 分支（Popen 后挂 job，finally 保活 close）；诚实定位：进程管控非文件隔离，文件防线=safe_path 层 |
+| cron/goal/config/worktree 工具化（CCAR12） | `tools/cron_tool.py`（CronScheduler 补 add/remove/list_jobs CRUD）+ `tools/goal_tool.py`（`agent/goal.py:start_goal_agent` 与 CLI 同源；共享函数不碰 conversation_history——goal-continue 分支自然驱动）+ `tools/config_tool.py`（白名单 7 键精确匹配 + next_session 语义键）+ `tools/worktree_tool.py`（会话级 `set_session_workspace_cwd`）|
+| MCP Resources（CCAR12） | `agent/mcp_client.py` transport 基类 `list_resources/read_resource`（fail-open）+ Manager 透传 + `mcp__<server>__list_resources/read_resource` 动态注册（静态名在 mcp__ 前缀发现机制下不可见）|
+| async 工具 context 契约（CCAR12 教训） | sync handler 经 `asyncio.to_thread` **拷贝 context**——handler 内 contextvar set 不回透主循环。需要跨 context 生效的工具（如切会话 cwd）必须 `async def`（dispatch 直接 await 同 task 同 context）。端到端测试必须在 dispatch 外断言（`test_enter_exit_via_registry_dispatch` 防回归）|
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -330,6 +334,9 @@ uv sync                                 # 同步已声明依赖
 - **/add-dir 持久化走 settings.json（CCAR11）** —— load_config 默认只读 settings.json（config.yaml 首启被迁走）；白名单写 config.yaml 会导致灌回 0 条。
 - **/paste 只保存不分析（CCAR11）** —— PowerShell 读剪贴板存 `.paste/img_<ts>.png`，用户在消息中引用路径让 LLM 调 image_analyze。
 - **notifier 仅 Windows（CCAR11）** —— 零依赖 PowerShell toast；非 Windows no-op；bg title 统一"后台任务"（30s 节流防刷屏）。
+- **Windows 沙箱 = 进程管控（CCAR12）** —— Job Object 管子进程树（不逃逸+全树清理），不隔离文件系统；文件防线仍是 safe_path/白名单层。job 句柄必须保活到 Popen.wait 后（早关=子进程失去清理保证）。
+- **goal_start/goal_resume/worktree_enter/cron_create/cron_delete 禁用于 async 子代理**（CCAR12）——goal-continue 无 spawn_depth 守卫、worktree 切换污染模块级状态；止损类（pause/clear/exit）保留自救。
+- **config_set 白名单键必须有真实读取点**（CCAR12 教训）——dead key 写进黑洞还假报 runtime_applied=True 是最危险的静默失败；换键前 grep 消费方。
 
 ## 测试策略
 
