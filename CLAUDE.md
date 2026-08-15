@@ -321,6 +321,12 @@ uv sync                                 # 同步已声明依赖
 | 工具可见性规则（核心对齐 T6） | `agent/tool_permissions.py`（settings.json `permissions.allow/deny`：精确名/`mcp__server__*`/整服务器；allow 豁免 deny；mtime+size 双因子缓存）；应用点 `model_tools.get_tool_definitions` + `registry.dispatch`（permission_denied） |
 | 只读命令快速通道（核心对齐 T7） | `agent/permission.py:_is_readonly_command`（30+ 只读前缀表，复合命令逐段判定，重定向/`$()`/反引号即非只读；git branch/tag/remote 只收只读子形态，env 不进表）+ `check()` 闸门 1 后快速通道 + `_dispatch_tool_calls` 对只读 terminal 动态进并发组；config `security.readonly_fastpath_enabled=True` |
 | plan 清上下文执行（核心对齐 T9） | `agent/__init__.py:_apply_post_plan_clear`（history 截断为 `<post_plan_brief>` + invalidate_system_prompt 重建 context 层；transcripts 落盘不动）+ 回调三元组协议 `(approved, feedback, clear_context)`（二元组向后兼容）+ CLI c 选项 |
+| Windows 路径绕过检测（R16 #2） | `agent/permission.py:check_suspicious_path`（NTFS ADS 冒号（仅 win32）/8.3 短名/长路径前缀/尾点尾空格（只看最后段，豁免裸 . ..）/DOS 设备名/三连点段/UNC/波浪变体 ~user ~+ ~N/写路径禁 glob 元字符；全平台检测）+ `safe_path`/`check_path` 前置（gate=suspicious，任何模式先于保护表/白名单） |
+| 双路径检查（R16 #5） | `agent/permission.py:_path_forms_for_check`（词法 normpath + realpath 双形式）+ `is_protected_path`/`is_write_protected_path` 双形式过保护表（防软链指向 ~/.ssh 等） |
+| 危险删除路径判定（R16 #6） | `agent/permission.py:is_dangerous_removal_path` + `check_dangerous_removal`（rm/rmdir/del/erase/rd 目标为 裸 \*/\//家/根直接子目录/盘根(直接子目录) → 拒；接入点 bypass 之后、acceptEdits 之前；不算 fatal，不可审批解锁） |
+| HTTP hook SSRF 防护（R16 #4） | `agent/ssrf_guard.py`（禁达段判定 + DNS 预检 + URL allowlist）+ `agent/hook_exec.py:run_http_hook`（环回放行/IP 直连校验/allow_redirects=False/环境代理跳过预检）；config `security.http_hook_allowed_urls`（None 不限/[] 全拒/非空 \* 通配） |
+| Bash 注入面检查（R16 #1） | `agent/bash_injection.py:check_injection_surface`（$()/${}/$[]/反引号/进程替换 <() >() =(/zsh =cmd/IFS//proc/environ//dev/tcp/jq system()+危险 flag/zsh 危险 builtin+fc -e/控制字符/Unicode 空白/CR/换行分命令/反斜杠转义空白与操作符/词中 #/注释引号失步/花括号展开/flag 引号混淆；三引号视图 raw+with_dq+fully+keepq；quoted heredoc 体剥除）+ `check()` 闸门 1 后只读通道前命中升审批（gate=injection）+ `_approval_gate` 统一审批流（destructive 共用）+ `_SHELL_OPS` 追加 `${ <( >( =(（acceptEdits 不自动批）） |
+| 内容级权限规则（R16 #3） | `agent/tool_permissions.py:check_command_rules`（`Bash(...)`/`Terminal(...)` 三形态：精确/x:\* 旧前缀词边界/x \* 通配（\\* 字面量、尾部单独 " \*" 匹配裸命令）；deny>ask>allow）+ `detect_shadowed_command_rules`（整级 deny/ask 遮蔽内容级 allow → 加载告警）+ `permission.py:check` 接入（闸门 0 后：deny 任何模式拒、ask 强制审批 bypass 不豁免、allow 闸门 1 后放行跳过注入面/破坏性审批，硬底线不受影响）；settings.json permissions 段新增 ask 列表 |
 
 ## 已知约束（设计如此，不是 bug）
 
@@ -364,6 +370,11 @@ uv sync                                 # 同步已声明依赖
 - **只读表保守优先（核心对齐 T7）** —— 识别不了的形态一律不算只读（走原闸门）；`env` 不进表（`env VAR=x cmd` 可执行任意命令）、git branch/tag/remote 只收只读子形态、find 的 -delete/-exec 写形态 token 拦截。
 - **plan 清上下文只清 LLM 上下文（核心对齐 T9）** —— 会话库是 append-only，恢复会话时调研消息仍在（可查可恢复，对齐"完全可逆"）；stable prompt 段保留（invalidate_system_prompt 只重建 context 层）。
 - **技能附件不进 MEMORY/索引（核心对齐 T3）** —— files: 附件只在触发时注入（execute_skill / load_skill），skill_view（用户视角）与技能索引不含附件内容。
+- **注入面命中是升审批不是拒（R16 #1）** —— 对齐 CC ask 语义：这些形态让"所见非所执行"但不一定是攻击，用户看到原文批准即可；与 CC 差异（无 shell-quote/tree-sitter 跳过 token 流检查、不拦普通重定向、heredoc 剥离简化、引号链状态机未全量）记录在 `agent/bash_injection.py` 模块头。
+- **危险删除不算 fatal（R16 #6）** —— rm -rf /usr 这类在 default/acceptEdits/autoDeny 都拒且不可审批解锁，但 bypassPermissions 仍放行（区别于 rm -rf / 的 fatal 硬底线）。
+- **SSRF 预检存在 DNS rebinding 窗口（R16 #4）** —— requests 无自定义 DNS lookup，校验（getaddrinfo）与连接之间理论上可被 rebinding 绕过（CC 用 axios lookup 把校验 IP 钉到 socket 消除了该窗口）；预检已挡配置型 hook 指向元数据/内网的绝大多数场景。环回 127/8 与 ::1 放行（本地 dev policy server 是 http hook 主流用法）。
+- **内容级规则 bypass 边界（R16 #3）** —— deny 任何模式都拒（用户显式 deny 是最高意图）、ask 强制审批 bypass 不豁免；但 allow 只跳过审批类闸门，fatal/黑名单/危险删除硬底线不受影响。前缀匹配是词边界（`build:*` 不匹配 `build/`，对齐 CC）。
+- **路径 suspicious 检查在任何模式都拒（R16 #2）** —— NTFS ADS/短名/尾点等形态即使 bypassPermissions 也拒（安全底线，对齐受保护路径语义）；裸 `.`/`..` 目录引用豁免尾点检查（glob 默认 path=. 不误伤）。
 
 ## 测试策略
 
