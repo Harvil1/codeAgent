@@ -329,6 +329,220 @@ class TestProjectConvention:
         assert store.calls == []
 
 
+# ======================================================================
+# Task 3：SkillEvolver（簇达标 → 生成 SKILL.md）+ 主循环接线
+# ======================================================================
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from agent import AIAgent
+from agent.memory_store import MemoryStore
+from agent.skill_learning.evolver import maybe_evolve, _skill_md
+
+
+def _seed(store, trigger, actions_conf, scope="global"):
+    """往 store 里塞一个簇：同 trigger 多个 action（不同 action = 不同成员）。"""
+    for action, conf in actions_conf:
+        store.upsert(Instinct(
+            trigger=trigger, action=action, confidence=conf,
+            evidence=[f"ev-{action}"], scope=scope,
+            updated_at=_iso(datetime.now(timezone.utc)),
+        ))
+
+
+class TestEvolveThreshold:
+    def test_below_member_threshold_no_skill(self, tmp_path):
+        # 簇成员只有 2（<3），即使平均 confidence 高也不生成
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [("a", 0.9), ("b", 0.9)])
+        generated = maybe_evolve(store, "global", tmp_path / "skills")
+        assert generated == []
+        assert not (tmp_path / "skills").exists() or \
+            not list((tmp_path / "skills").glob("learned-*"))
+
+    def test_below_confidence_threshold_no_skill(self, tmp_path):
+        # 成员 3 但平均 confidence 0.5 < 0.75，不生成
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [("a", 0.5), ("b", 0.5), ("c", 0.5)])
+        assert maybe_evolve(store, "global", tmp_path / "skills") == []
+
+    def test_empty_store_returns_empty(self, tmp_path):
+        store = InstinctStore(tmp_path / "sl")
+        assert maybe_evolve(store, "global", tmp_path / "skills") == []
+
+    def test_scope_isolated_evolution(self, tmp_path):
+        # project scope 的簇不参与 global 的演化判定
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "项目约定", [("a", 0.9), ("b", 0.9), ("c", 0.9)],
+              scope="project:foo")
+        assert maybe_evolve(store, "global", tmp_path / "skills") == []
+        assert len(maybe_evolve(store, "project:foo", tmp_path / "skills")) == 1
+
+
+class TestEvolveGenerates:
+    def _mature_store(self, tmp_path):
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "run tests", [
+            ("先跑 pytest", 0.95), ("再报结果", 0.9), ("先看失败详情", 0.8),
+        ])
+        return store
+
+    def test_generates_skill_md_file(self, tmp_path):
+        store = self._mature_store(tmp_path)
+        generated = maybe_evolve(store, "global", tmp_path / "skills")
+        assert len(generated) == 1
+        skill_md = Path(tmp_path) / "skills" / "learned-run-tests" / "SKILL.md"
+        assert skill_md.exists()
+        assert generated[0] == skill_md
+
+    def test_skill_md_content_frontmatter_and_body(self, tmp_path):
+        store = self._mature_store(tmp_path)
+        maybe_evolve(store, "global", tmp_path / "skills")
+        content = (Path(tmp_path) / "skills" / "learned-run-tests" / "SKILL.md") \
+            .read_text(encoding="utf-8")
+        # frontmatter
+        assert content.startswith("---")
+        assert "name: learned-run-tests" in content
+        assert "description: " in content  # description = trigger 一句话
+        # 正文：action + 证据
+        assert "先跑 pytest" in content
+        assert "ev-先跑 pytest" in content
+        # 证据最多 3 条
+        assert content.count("ev-") <= 3
+
+    def test_idempotent_existing_skill_not_regenerated(self, tmp_path):
+        store = self._mature_store(tmp_path)
+        skills_dir = tmp_path / "skills"
+        assert len(maybe_evolve(store, "global", skills_dir)) == 1
+        # 第二次调用：技能已存在，不重复生成（后续维护交 curator）
+        assert maybe_evolve(store, "global", skills_dir) == []
+        assert len(list(skills_dir.glob("learned-*/SKILL.md"))) == 1
+
+
+class TestSkillMdSlugFallback:
+    def test_pure_chinese_trigger_fallback_slug(self, tmp_path):
+        # 纯中文 trigger 提取不到 ascii 词 → habit-<成员数>-<hash> 保底
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "项目约定发布", [("a", 0.9), ("b", 0.9), ("c", 0.9)])
+        generated = maybe_evolve(store, "global", tmp_path / "skills")
+        assert len(generated) == 1
+        # 目录名形如 learned-habit-3-xxxxxxxx
+        name = generated[0].parent.name
+        assert name.startswith("learned-habit-3-")
+        assert len(name.split("learned-habit-3-")[1]) == 8  # 短 hash 8 位
+
+    def test_mixed_chinese_ascii_trigger_uses_ascii_word(self, tmp_path):
+        # "使用 grep" → 提取 ascii 词 "grep"（store 原始 slug 会变 "--grep"）
+        store = InstinctStore(tmp_path / "sl")
+        _seed(store, "使用 grep", [("a", 0.9), ("b", 0.9), ("c", 0.9)])
+        generated = maybe_evolve(store, "global", tmp_path / "skills")
+        assert generated[0].parent.name == "learned-grep"
+
+    def test_skill_md_direct_format(self):
+        # _skill_md 纯函数：frontmatter + trigger/action/证据三段
+        insts = [
+            Instinct(trigger="run tests", action="先跑 pytest", confidence=0.9,
+                     evidence=["用户说要跑测试"], scope="global",
+                     updated_at="2026-01-01T00:00:00+00:00"),
+            Instinct(trigger="run tests", action="再报结果", confidence=0.8,
+                     evidence=["第二次观察"], scope="global",
+                     updated_at="2026-01-01T00:00:00+00:00"),
+        ]
+        md = _skill_md("run tests", insts)
+        assert "name: learned-run-tests" in md
+        assert "run tests" in md  # trigger
+        assert "先跑 pytest" in md and "再报结果" in md  # action
+        assert "用户说要跑测试" in md  # 证据
+
+
+class TestRunConversationWiring:
+    """主循环接线：enabled 时轮末 observe；disabled / 子代理不跑；fail-open。"""
+
+    def _make_agent(self, tmp_path, config=None, spawn_depth=0):
+        agent = AIAgent(
+            api_key="fake",
+            model="test",
+            enabled_toolsets=[],
+            omnimate_home=tmp_path,
+            memory_store=MemoryStore(omnimate_home=tmp_path),
+            config=config if config is not None else {},
+            spawn_depth=spawn_depth,
+        )
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+        agent.llm_client = SimpleNamespace(
+            chat_completions=AsyncMock(return_value=resp))
+        return agent
+
+    async def test_observe_called_when_enabled(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: calls.append(kw) or 0)
+        monkeypatch.setattr(sl, "maybe_evolve", lambda *a, **k: [])
+
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {"enabled": True}})
+        resp = await agent.chat("不要用grep，用ripgrep")
+
+        assert resp == "ok"
+        assert len(calls) == 1
+        assert calls[0]["user_text"] == "不要用grep，用ripgrep"
+        assert calls[0]["scope"] == "global"
+        assert calls[0]["store"] is not None
+
+    async def test_not_called_when_disabled(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: calls.append(kw) or 0)
+
+        agent = self._make_agent(tmp_path, config={})  # 默认关
+        await agent.chat("hello")
+
+        assert calls == []
+
+    async def test_not_called_for_subagent(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: calls.append(kw) or 0)
+
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {"enabled": True}},
+            spawn_depth=1)
+        await agent.chat("hello")
+
+        assert calls == []  # 仅主代理 spawn_depth==0
+
+    async def test_observer_raising_fail_open(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+
+        def boom(**kw):
+            raise RuntimeError("observer broken")
+
+        monkeypatch.setattr(sl, "observe_turn", boom)
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {"enabled": True}})
+        resp = await agent.chat("hello")
+        assert resp == "ok"  # 学习链路炸了不影响主对话
+
+    async def test_no_memory_store_skipped(self, tmp_path, monkeypatch):
+        import agent.skill_learning as sl
+        calls = []
+        monkeypatch.setattr(
+            sl, "observe_turn",
+            lambda **kw: calls.append(kw) or 0)
+        agent = self._make_agent(
+            tmp_path, config={"skill_learning": {"enabled": True}})
+        agent.memory_store = None
+        await agent.chat("hello")
+        assert calls == []
+
+
 class TestFailOpen:
     def test_upsert_raising_never_propagates(self):
         class BoomStore:

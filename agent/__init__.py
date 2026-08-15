@@ -936,6 +936,8 @@ class AIAgent:
         # S8 配套：每条用户消息独立 grace 机会（_grace_triggered 防同一消息内循环）
         self._grace_triggered = False
         self._budget_grace_call = False
+        # CCAR15 Task 3：记录本轮 history 起点（轮末 skill_learning 只观察本轮轨迹）
+        self._sl_turn_start = len(self.conversation_history)
 
         # ---------- 循环前准备 ----------
         user_message = self._run_prompt_submit_hook(user_message)
@@ -1138,9 +1140,14 @@ class AIAgent:
                     decision, self._goal_state.pause_reason,
                 )
 
+            # === CCAR15 Task 3：轮末 skill_learning 观察 + 簇达标演化 ===
+            # fail-open：学习链路任何异常只 debug log，绝不影响主对话返回
+            self._maybe_skill_learning(user_message)
             return final_content
 
         # ---------- 循环结束（预算耗尽或中断）----------
+        # 预算耗尽/中断的轨迹同样有价值（失败恢复信号常出现在这里）
+        self._maybe_skill_learning(user_message)
         return self._handle_loop_exit(turn_exit_reason, user_message)
 
     # ------------------------------------------------------------------
@@ -2166,6 +2173,81 @@ class AIAgent:
         except Exception as e:
             logger.warning("_extract_partial_result 异常（fail-open）: %s", e)
             return ""
+
+    def _maybe_skill_learning(self, user_message: str) -> None:
+        """CCAR15 Task 3：轮末 instinct 观察 + 簇达标演化（fail-open）。
+
+        门槛：仅主代理（spawn_depth==0）+ config["skill_learning"]["enabled"]
+        显式开启（默认关）+ memory_store 存在（对齐记忆注入的门槛约定）。
+        任何异常只 debug log——学习是旁路，绝不影响主对话。
+        """
+        if (self.spawn_depth != 0
+                or not self.config.get("skill_learning", {}).get("enabled")
+                or self.memory_store is None):
+            return
+        try:
+            from pathlib import Path
+
+            from agent.skill_learning import maybe_evolve, observe_turn
+            from agent.skill_learning.store import InstinctStore
+
+            store = InstinctStore(Path(self.omnimate_home) / ".skill-learning")
+            calls, results = self._collect_turn_tool_trace(
+                getattr(self, "_sl_turn_start", 0))
+            # scope="global"：纠错/恢复/序列类信号全局；
+            # 项目约定类信号由观察器内部按信号类型定 project scope
+            observe_turn(
+                user_text=user_message or "",
+                tool_calls=calls,
+                tool_results=results,
+                store=store,
+                scope="global",
+            )
+            skills_dir = Path(self.omnimate_home) / "skills"
+            # 只演化 global scope（plan 规格）：项目约定类 instinct 落 project
+            # scope 仅存储，不参与自动演化——生成到全局 skills 目录会跨项目
+            # 泄漏（CCAR9 隔离失效）且约定簇 trigger 恒为"项目约定"会撞 slug。
+            # 项目约定的演化留 follow-up（需项目级技能目录或 frontmatter paths 门控）。
+            maybe_evolve(store, "global", skills_dir)
+        except Exception as e:
+            logger.debug("skill_learning fail-open: %s", e)
+
+    def _collect_turn_tool_trace(self, start_idx: int):
+        """从本轮 history 片段提取观察器要的 tool_calls/tool_results。
+
+        history 里 assistant.tool_calls 的 arguments 是 JSON 字符串、
+        tool 消息的 content 也是 JSON 字符串——这里解析成 observer
+        期望的形状（[{"name","arguments"}] / [{"name","error","content"}]）。
+        dispatch 按原 tool_call 顺序回填结果，两列表下标天然对齐；
+        解析失败的条目跳过，不让观察器吃坏数据。
+        """
+        calls, results = [], []
+        for msg in self.conversation_history[start_idx:]:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    fn = (tc or {}).get("function") or {}
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args) if args.strip() else {}
+                        except json.JSONDecodeError:
+                            args = {"_raw": args}
+                    calls.append({"name": fn.get("name"), "arguments": args})
+            elif msg.get("role") == "tool":
+                content = msg.get("content")
+                err = None
+                try:
+                    rd = json.loads(content) if isinstance(content, str) else {}
+                    if isinstance(rd, dict) and rd.get("error"):
+                        err = str(rd["error"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                results.append({
+                    "name": msg.get("name"), "content": content, "error": err,
+                })
+        return calls, results
 
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
         """循环结束（预算耗尽或中断）的兜底响应。"""

@@ -6,5 +6,6 @@
 """
 from agent.skill_learning.store import Instinct, InstinctStore
 from agent.skill_learning.observer import observe_turn
+from agent.skill_learning.evolver import maybe_evolve
 
-__all__ = ["Instinct", "InstinctStore", "observe_turn"]
+__all__ = ["Instinct", "InstinctStore", "observe_turn", "maybe_evolve"]
