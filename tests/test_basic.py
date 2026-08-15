@@ -24,7 +24,14 @@ def _isolate_global_registry():
     会看到这些测试工具，误判为"未分类工具"而 fail。
 
     本 fixture 在每个测试前 snapshot registry._tools，测试后恢复。
+
+    修复（跨文件污染）：snapshot 前先确保 builtin discovery 完成——
+    test_discover_builtin_tools 在测试内触发首次 discovery（组合跑且
+    test_basic 是首文件时 snapshot 是空态），旧恢复逻辑会把 discovery
+    注册的工具一并清掉 → 后续文件的 core 工具全缺（9 failed）。
+    完整套件绿只因字母序更早的文件已在模块级触发 discovery。
     """
+    discover_builtin_tools()  # 确保 snapshot 是满态（幂等，二次调用 no-op）
     snapshot = dict(registry._tools)
     yield
     registry._tools.clear()
