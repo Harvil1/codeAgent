@@ -20,11 +20,18 @@ def build_forked_messages(
     parent_system_prompt: str,
     child_directive: str,
     max_parent_turns: int = 3,
+    full_history: bool = False,
+    full_history_max_turns: int = 50,
 ) -> List[dict]:
     """构造 fork 子代理的初始 messages。
 
-    结构：
+    结构（full_history=False，默认，现状语义）：
     [父最近 N 个 assistant turn + placeholder tool_result] + [child_directive]
+
+    结构（full_history=True，T10）：
+    [父完整 user/assistant 流（tool result 换 placeholder）] + [child_directive]
+    —— 复杂任务需要完整上下文时用（subagent fork: "full"），
+    assistant turn 截到 full_history_max_turns（防失控），截断从 user 边界起。
 
     保证 cache-identical：父前缀字节完全一致。
 
@@ -33,6 +40,8 @@ def build_forked_messages(
         parent_system_prompt: 父的 system prompt（保留参数用于日志，实际不影响 messages）
         child_directive: 子代理的任务说明
         max_parent_turns: 继承父最近 N 个 assistant turn（默认 3）
+        full_history: True = 全量模式（subagent fork: "full"）
+        full_history_max_turns: 全量模式的 assistant turn 上限（默认 50）
 
     返回：
         forked messages list（不含 system prompt，system 走 system_prompt_override）
@@ -43,6 +52,17 @@ def build_forked_messages(
         # 父历史为空，forked 只有 directive
         forked.append(_make_directive(child_directive))
         return forked
+
+    # === T10：全量模式 ===
+    if full_history:
+        try:
+            return _build_full_history_fork(
+                parent_messages, child_directive, full_history_max_turns,
+            )
+        except Exception as e:
+            logger.warning(
+                "build_forked_messages 全量构造失败（fallback 最近 N turn）: %s", e,
+            )
 
     # 提取父 assistant turn（有 content 的）
     try:
@@ -76,6 +96,48 @@ def build_forked_messages(
     forked.append(_make_directive(child_directive))
 
     return forked
+
+
+def _build_full_history_fork(
+    parent_messages: list,
+    child_directive: str,
+    max_turns: int,
+) -> List[dict]:
+    """全量 fork（T10）：完整 user/assistant 流，tool result 换 placeholder。
+
+    - 只保留 user / assistant / tool 三类消息（其他 role 跳过）
+    - tool 消息（真实结果）替换为 fork placeholder（fork 语义：真实结果不可见）
+    - assistant 消息数超过 max_turns 时截到最近 max_turns 个，
+      截断起点回退到最近的 user 边界（不造 assistant 孤儿开头）
+    """
+    stream = []
+    for m in parent_messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "user":
+            stream.append(m)
+        elif role == "assistant":
+            stream.append(m)
+        elif role == "tool":
+            stream.append({
+                "role": "tool",
+                "tool_call_id": m.get("tool_call_id", ""),
+                "content": "[fork placeholder — 父代理的实际结果子代理看不到]",
+            })
+
+    asst_idx = [i for i, m in enumerate(stream) if m.get("role") == "assistant"]
+    if len(asst_idx) > max_turns > 0:
+        cut = asst_idx[-max_turns]
+        start = 0
+        for i in range(cut, -1, -1):
+            if stream[i].get("role") == "user":
+                start = i
+                break
+        stream = stream[start:]
+
+    stream.append(_make_directive(child_directive))
+    return stream
 
 
 def _make_directive(child_directive: str) -> dict:

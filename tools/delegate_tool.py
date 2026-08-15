@@ -161,12 +161,16 @@ DELEGATE_TASK_SCHEMA = {
                 "default": False,
             },
             "fork": {
-                "type": "boolean",
+                "type": ["boolean", "string"],
+                "enum": [True, False, "full"],
                 "description": (
-                    "（高级）fork 模式：继承父 system prompt 字节 + 父对话前缀（最近 N 个 assistant turn），"
+                    "（高级）fork 模式：继承父 system prompt 字节 + 父对话前缀，"
                     "构造 cache-identical 前缀，prompt cache 命中省 token 50%+。"
-                    "仅适合 read-only 探索/分析类任务（子代理看不到父 tool_result 真实内容，只有占位符）。"
-                    "destructive 操作（写文件/删文件/持久化任务）请用 fork=False。默认 False。"
+                    "true=最近 N 个 assistant turn（默认，轻量）；"
+                    "\"full\"=完整对话历史（user/assistant 流，适合复杂任务，截到 50 turn 上限）。"
+                    "两种模式子代理都看不到父 tool_result 真实内容（只有占位符），"
+                    "仅适合 read-only 探索/分析类任务。"
+                    "destructive 操作（写文件/删文件/持久化任务）请用 fork=false。默认 false。"
                 ),
                 "default": False,
             },
@@ -211,6 +215,8 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
     # 透传 isolated_workspace（LLM 传的 args 字段，_run_child 从 kwargs 读）
     # 之前漏搬导致 isolated_workspace=True 永远进不去 worktree 创建逻辑
     kwargs["isolated_workspace"] = args.get("isolated_workspace", False)
+    # T10：透传 fork（此前 schema 有字段但从未接线——LLM 传 fork:true 是死参数）
+    kwargs["fork"] = args.get("fork", False)
 
     if background:
         return _delegate_async(goal, args.get("context", ""), role, **kwargs)
@@ -876,11 +882,19 @@ def _run_child(
                             f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
                         )
                     # 构造初始 messages（父前缀 + directive）
+                    # T10：fork="full" 走全量模式（完整 user/assistant 流，
+                    # 截到 delegation.fork_full_history_max_turns）
+                    _fork_full = fork_mode == "full"
+                    _full_max = int(
+                        (_delegation_cfg or {}).get("fork_full_history_max_turns", 50)
+                    )
                     child_initial_messages = build_forked_messages(
                         parent_messages=parent_messages,
                         parent_system_prompt=parent_sysprompt,
                         child_directive=f"{goal}\n上下文: {context}" if context else goal,
                         max_parent_turns=_max_turns,
+                        full_history=_fork_full,
+                        full_history_max_turns=_full_max,
                     )
                     logger.info(
                         "Task H: fork 子代理启用，继承 %d 条 messages",

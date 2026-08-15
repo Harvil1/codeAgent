@@ -425,10 +425,11 @@ def test_run_child_fork_config_disabled(monkeypatch):
 
 
 def test_subagent_schema_has_fork_param():
-    """subagent schema 包含 fork 参数。"""
+    """subagent schema 包含 fork 参数（T10 起支持 true | false | "full"）。"""
     from tools.delegate_tool import DELEGATE_TASK_SCHEMA
     params = DELEGATE_TASK_SCHEMA["parameters"]
     props = params["properties"]
     assert "fork" in props
-    assert props["fork"]["type"] == "boolean"
+    assert "boolean" in props["fork"]["type"]
+    assert "full" in props["fork"].get("enum", [])
     assert props["fork"].get("default", False) is False

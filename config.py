@@ -237,6 +237,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fork_subagent_enabled": True,
         # 继承父最近 N 个 assistant turn（cache 命中范围 vs context 污染权衡）
         "fork_max_parent_turns": 3,
+        # T10（核心机制对齐第 10 项）：fork="full" 全量模式的 assistant turn 上限（防失控）
+        "fork_full_history_max_turns": 50,
         # Task I: 子代理 sidechain transcript 持久化
         # True 时子代理对话历史落盘到 ~/.OmniMate/.agent-sessions/
         "subagent_persistence_enabled": True,
