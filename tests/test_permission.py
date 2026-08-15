@@ -911,20 +911,28 @@ def test_gate4_default_off_skipped():
 
 
 def test_gate4_no_provider_skipped():
-    """P4.1: 未注入 provider → 闸门 4 跳过（向后兼容）。"""
+    """P4.1: 未注入 provider → 闸门 4 跳过（向后兼容）。
+
+    T7 后用非只读命令（只读命令会被快速通道截住，走不到闸门 4）。
+    """
     checker = PermissionChecker()  # 没调 set_*_provider
-    result = checker.check("ls -la")
+    result = checker.check("python build_script.py")
     assert result.allowed is True
     assert result.gate == "ok"
 
 
 def test_gate4_whitelist_no_llm_call():
-    """P4.1: 白名单命令 → 直接放行，0 LLM 调用。"""
+    """P4.1: 白名单命令 → 直接放行，0 LLM 调用。
+
+    T7 后白名单用非只读命令（只读命令会被快速通道截住）。
+    """
     checker = PermissionChecker()
     aux = _MockAuxLLM()
     checker.set_aux_llm_provider(lambda: aux)
-    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
-    result = checker.check("git status")
+    checker.set_config_provider(lambda: _make_feature_config(
+        enabled=True, whitelist=["buildtool"],
+    ))
+    result = checker.check("buildtool info")
     assert result.allowed is True
     assert "白名单" in result.reason
     assert aux.calls == 0

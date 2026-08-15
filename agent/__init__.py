@@ -1839,6 +1839,17 @@ class AIAgent:
         for tc in tool_calls:
             entry = registry.get(tc.function.name)
             is_safe = bool(entry.isConcurrencySafe) if entry else False
+            # T7（核心机制对齐第 7 项）：terminal 工具整体标 unsafe（串行保守），
+            # 但单条调用按命令动态判定——只读命令（git status/ls/cat 等）进并发组。
+            # 工具级 isConcurrencySafe 不动，只在此处分组时放宽。
+            if not is_safe and tc.function.name == "terminal":
+                try:
+                    _t_args = json.loads(tc.function.arguments or "{}")
+                    from agent.permission import is_readonly_command
+                    if is_readonly_command(str(_t_args.get("command", ""))):
+                        is_safe = True
+                except Exception:
+                    pass
             if is_safe:
                 safe_calls.append(tc)
             else:

@@ -274,6 +274,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # CCAR11 Task 4: /add-dir 持久化的 safe_path 写白名单
         #（运行时 /add-dir 追加 + 写回；启动时 RuntimeContext 加载）
         "extra_allowed_roots": [],
+        # T7（核心机制对齐第 7 项）：只读命令快速通道
+        # git status/ls/cat 等只读命令自动批 + 同轮并发执行（默认 True）
+        "readonly_fastpath_enabled": True,
         # CCAR15 Task 5: Windows 防休眠（goal 循环 / bg 运行中
         # SetThreadExecutionState 保持系统唤醒；非 Windows no-op）
         "prevent_sleep": True,

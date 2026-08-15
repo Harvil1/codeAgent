@@ -470,6 +470,89 @@ def safe_path(
 
 
 # ---------------------------------------------------------------------------
+# T7（核心机制对齐第 7 项）：只读命令识别 → 快速通道 + concurrency-safe
+# ---------------------------------------------------------------------------
+
+# 只读前缀表（对齐 CCB 只读命令识别；前缀 + 空白匹配，参数任意）
+# 注意：只收"无副作用"形态——git branch/tag/remote 等只列只读子形态
+_READONLY_PREFIXES = frozenset({
+    # 文件/目录查看
+    "ls", "dir", "tree", "pwd", "cat", "head", "tail", "wc", "file", "stat",
+    "du", "df", "which", "where", "whereis", "type",
+    # 搜索（find 的 -delete/-exec 等写形态由 _READONLY_FORBIDDEN_TOKENS 拦）
+    "find", "grep", "rg", "ag", "findstr",
+    # git 只读子命令（写形态 push/commit/checkout 等不在表里；
+    # branch/tag/remote 只收只读子形态——带名字参数的 "git branch x" 是写）
+    "git status", "git log", "git diff", "git show", "git blame",
+    "git shortlog", "git describe", "git rev-parse", "git ls-files",
+    "git ls-remote", "git remote -v",
+    "git branch -a", "git branch -v", "git branch -r",
+    "git branch --list", "git branch --all", "git branch --show-current",
+    "git tag -l", "git tag --list",
+    "git stash list", "git config --get", "git worktree list",
+    # 包管理只读
+    "pip list", "pip show", "pip freeze", "uv pip list",
+    "npm list", "npm ls",
+    # 版本/环境信息
+    "git --version", "python --version", "python3 --version",
+    "node --version", "java -version", "go version",
+    "rustc --version", "cargo --version", "uv --version", "pytest --version",
+    # 系统信息（env 不进表：env VAR=x cmd 可执行任意命令）
+    "whoami", "hostname", "uname", "date", "printenv", "echo",
+    "id", "systeminfo", "tasklist",
+})
+
+# 只读段里禁止出现的 token（find 的写形态等）
+_READONLY_FORBIDDEN_TOKENS = (
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprintf", "-fls", "-fprint0",
+)
+
+# 复合命令切分（&& || ; |）+ 子命令替换（$() 反引号）+ 重定向（> >>）
+_COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+_SUBSHELL_RE = re.compile(r"\$\(|`")
+_REDIRECT_RE = re.compile(r"(?:^|\s|\d)>{1,2}(?:&\d+)?")
+
+
+def _is_readonly_segment(seg: str) -> bool:
+    """单个命令段是否只读（前缀表匹配 + 写形态 token 拦截）。"""
+    seg = seg.strip()
+    if not seg:
+        return True  # 空段（尾随 ; 等）忽略
+    if _SUBSHELL_RE.search(seg) or _REDIRECT_RE.search(seg):
+        return False
+    lowered = seg.lower()
+    for token in _READONLY_FORBIDDEN_TOKENS:
+        if token in lowered:
+            return False
+    for prefix in _READONLY_PREFIXES:
+        if lowered == prefix or lowered.startswith(prefix + " "):
+            return True
+    return False
+
+
+def _is_readonly_command(command: str) -> bool:
+    """命令是否整体只读（T7）。
+
+    复合命令（含 && / || / ; / | / $() / 反引号）必须**每段**都是只读才算只读；
+    出现重定向（> >>）直接判非只读。保守优先：识别不了的形态一律不算只读。
+    """
+    if not command or not command.strip():
+        return False
+    if _SUBSHELL_RE.search(command) or _REDIRECT_RE.search(command):
+        return False
+    for seg in _COMPOUND_SPLIT_RE.split(command):
+        if not _is_readonly_segment(seg):
+            return False
+    return True
+
+
+def is_readonly_command(command: str) -> bool:
+    """公开入口：terminal 并发分组用（与审批快速通道同一张表）。"""
+    return _is_readonly_command(command)
+
+
+# ---------------------------------------------------------------------------
 # 闸门 4：aux_llm 分类器（feature flag 门控，默认 OFF）
 # ---------------------------------------------------------------------------
 #
@@ -676,6 +759,17 @@ class PermissionChecker:
         """
         self._config_provider = provider
 
+    def _readonly_fastpath_enabled(self) -> bool:
+        """T7：只读快速通道开关（config security.readonly_fastpath_enabled，默认 True）。"""
+        if self._config_provider is None:
+            return True
+        try:
+            config = self._config_provider() or {}
+            sec = config.get("security") or {}
+            return bool(sec.get("readonly_fastpath_enabled", True))
+        except Exception:
+            return True  # fail-open：读不到配置默认开
+
     def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
         """round3 D2 NEW: 统一 deny helper。
 
@@ -793,6 +887,14 @@ class PermissionChecker:
         deny = check_command_deny(command)
         if deny:
             return self._deny(command, f"硬拒绝: {deny}", "deny")
+
+        # === T7：只读快速通道（自动批，在破坏性审批与 LLM 分类器之前）===
+        # git status/ls/cat 等只读命令零打扰放行（也跳过闸门 4 的 LLM 调用）。
+        # 顺序在闸门 1 之后：黑名单永远先于快速通道（fatal 底线更早在闸门 0）。
+        # config security.readonly_fastpath_enabled=False 可关（默认 True）。
+        if self._readonly_fastpath_enabled():
+            if _is_readonly_command(command):
+                return PermissionResult(True, "只读快速通道（readonly fastpath）", "auto")
 
         # 闸门 2：破坏性命令（需要审批）
         destructive = check_destructive(command)
