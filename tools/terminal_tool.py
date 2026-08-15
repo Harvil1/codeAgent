@@ -259,55 +259,17 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             }, ensure_ascii=False)
         elif sandbox_active and win_job_mode:
             # CCAR12: Windows Job Object 模式——命令不包装正常启动，
-            # 启动后 attach job（进程树管控；attach 失败 fail-open 继续执行）
-            from agent.sandbox_runner import attach_job
-            proc = subprocess.Popen(
+            # 启动后 attach job（进程树管控；attach 失败 fail-open 继续执行）。
+            # 公共路径提取到 sandbox_runner.run_with_job_object（超时收尸后
+            # 重抛 TimeoutExpired，由本函数外层 except 转 error JSON）
+            from agent.sandbox_runner import run_with_job_object
+            result = run_with_job_object(
                 command,
                 shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                timeout=timeout,
                 cwd=cwd,
                 env=safe_env,
-                encoding="utf-8",
                 errors="replace",
-            )
-            job = attach_job(proc)
-            if job is None:
-                logger.warning(
-                    "Windows Job Object attach 失败，fail-open 继续执行: %s",
-                    command[:80],
-                )
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # CCAR13 A2：job=None（attach 失败 fail-open）时没有
-                # KILL_ON_JOB_CLOSE 兜底，超时进程会变孤儿继续跑——
-                # 必须补杀 + communicate 收尸（对齐 subprocess.run 内部语义）。
-                # job 非 None 时 finally 的 job.close() 已带 KILL_ON_JOB_CLOSE
-                # 清整棵子进程树，不重复杀。
-                if job is None:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass  # 进程已退出的竞态：kill 返错不掩盖超时语义
-                    try:
-                        proc.communicate(timeout=5)
-                    except Exception:
-                        pass  # 收尸失败不影响超时错误上报
-                raise
-            finally:
-                # job 句柄必须保活到进程结束后再关：
-                #   - 正常结束 → close() 幂等清理句柄
-                #   - 超时 → KILL_ON_JOB_CLOSE 顺带清理整棵子进程树
-                # （早关会在子进程还在跑时触发全树 kill——那是误杀）
-                if job is not None:
-                    job.close()
-            result = subprocess.CompletedProcess(
-                args=command,
-                returncode=proc.returncode,
-                stdout=stdout,
-                stderr=stderr,
             )
         elif sandbox_active and wrapped_argv:
             # OS 沙箱路径：用包装后的 argv，shell=False

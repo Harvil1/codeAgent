@@ -14,10 +14,13 @@
   - wrap_command(command, *, cwd, writable_roots) -> list[str]：包装 argv
   - uses_job_object() -> bool：当前平台是否走 Job Object 模式（Windows）
   - attach_job(popen)：给已启动的 Popen 挂 Job Object（fail-open 返回 None）
+  - run_with_job_object(cmd, ...)：Job Object 模式公共执行路径（Popen→attach→
+    communicate→close；超时收尸后重抛 TimeoutExpired，错误处理语义留在调用方）
   - sandbox_description() -> str：当前平台沙箱机制描述（/sandbox status 文案）
 """
 import logging
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -126,6 +129,87 @@ def attach_job(popen):
     except Exception as e:
         logger.warning("attach_job fail-open: %s", e)
         return None
+
+
+def run_with_job_object(
+    cmd,
+    *,
+    shell: bool = False,
+    timeout=None,
+    env=None,
+    cwd=None,
+    input=None,
+    errors=None,
+) -> subprocess.CompletedProcess:
+    """Windows Job Object 模式公共执行路径（terminal_tool CCAR12 / hook_exec CCAR14 提取）。
+
+    语义（与两处原实现逐字对齐，事件序：popen → attach → communicate → close）：
+      - 命令不包装，正常 Popen 启动（stdout/stderr PIPE + text + utf-8）
+      - attach_job 挂 job（fail-open：返回 None 只警告不阻断）
+      - try communicate(timeout) / finally job.close()（job 句柄保活到进程
+        结束后再关：早关会在子进程还在跑时触发全树 kill——那是误杀）
+      - 超时：job=None（attach 失败 fail-open）时没有 KILL_ON_JOB_CLOSE
+        兜底，超时进程会变孤儿继续跑——必须补杀 + communicate 收尸
+        （对齐 subprocess.run 内部语义 / CCAR13 A2）；job 非 None 时
+        finally 的 job.close() 已带 KILL_ON_JOB_CLOSE 清整棵子进程树，
+        不重复杀。处理完后 **重新抛出 TimeoutExpired**——错误处理语义
+        （terminal 上抛转 error JSON / hook 返回 None）保留在各调用方。
+
+    参数：
+        cmd:    命令（terminal 传 shell=True 的字符串；hook 传 argv list）
+        shell:  透传 Popen
+        timeout: communicate 超时秒数
+        env:    子进程环境变量（None = 继承父进程）
+        cwd:    工作目录（None = 不传）
+        input:  stdin 输入（None = 不开 stdin 管道）
+        errors: 解码错误策略（None = Popen 默认 strict）
+
+    返回 CompletedProcess(args=cmd, returncode, stdout, stderr)。
+    """
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "shell": shell,
+        "env": env,
+    }
+    if input is not None:
+        popen_kwargs["stdin"] = subprocess.PIPE
+    if cwd is not None:
+        popen_kwargs["cwd"] = cwd
+    if errors is not None:
+        popen_kwargs["errors"] = errors
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    job = attach_job(proc)
+    if job is None:
+        logger.warning(
+            "Windows Job Object attach 失败，fail-open 继续执行: %s",
+            str(cmd)[:80],
+        )
+    try:
+        if input is not None:
+            stdout, stderr = proc.communicate(input=input, timeout=timeout)
+        else:
+            stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if job is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass  # 进程已退出的竞态：kill 返错不掩盖超时语义
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass  # 收尸失败不影响超时错误上报
+        raise
+    finally:
+        if job is not None:
+            job.close()
+    return subprocess.CompletedProcess(
+        args=cmd, returncode=proc.returncode, stdout=stdout, stderr=stderr,
+    )
 
 
 def sandbox_description() -> str:

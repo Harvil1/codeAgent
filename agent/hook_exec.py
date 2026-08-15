@@ -246,57 +246,30 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
 
     if win_job_mode:
         # ============================================================
-        # CCAR14 Task 2: Windows Job Object 分支（照 terminal_tool 模式）
-        # 命令不包装正常 Popen 启动 → attach_job（进程树管控）→
-        # try communicate / finally job.close()（句柄保活到进程结束：
-        # 早关会在子进程还在跑时触发全树 kill——那是误杀）
+        # CCAR14 Task 2: Windows Job Object 分支
+        # 公共路径提取到 sandbox_runner.run_with_job_object（照 terminal_tool
+        # 模式：命令不包装正常启动 → attach_job → try communicate /
+        # finally job.close()，句柄保活到进程结束：早关会在子进程还在跑时
+        # 触发全树 kill——那是误杀；超时收尸后重抛，错误语义留在本函数）
         # ============================================================
-        from agent.sandbox_runner import attach_job
+        from agent.sandbox_runner import run_with_job_object
         try:
-            proc = subprocess.Popen(
+            result = run_with_job_object(
                 argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
+                shell=False,
+                timeout=hook.script.timeout,
                 env=env,
+                input=payload_json,
             )
         except OSError as e:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
             return None
-
-        job = attach_job(proc)
-        if job is None:
-            logger.warning(
-                "hook %s Windows Job Object attach 失败，fail-open 继续执行",
-                hook.name,
-            )
-        try:
-            stdout, stderr = proc.communicate(
-                input=payload_json, timeout=hook.script.timeout,
-            )
-            returncode = proc.returncode
         except subprocess.TimeoutExpired:
-            # job=None（attach 失败 fail-open）时没有 KILL_ON_JOB_CLOSE
-            # 兜底，超时进程会变孤儿继续跑——必须补杀 + communicate 收尸
-            # （对齐 CCAR13 A2 / terminal_tool 语义）。
-            # job 非 None 时 finally 的 job.close() 已带 KILL_ON_JOB_CLOSE
-            # 清整棵子进程树，不重复杀。
-            if job is None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass  # 进程已退出的竞态：kill 返错不掩盖超时语义
-                try:
-                    proc.communicate(timeout=5)
-                except Exception:
-                    pass  # 收尸失败不影响超时日志
             logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
             return None
-        finally:
-            if job is not None:
-                job.close()
+        stdout = result.stdout
+        stderr = result.stderr
+        returncode = result.returncode
     else:
         # 原路径：subprocess.run（无沙箱 / Unix wrapper 包装后）
         try:
