@@ -114,6 +114,9 @@ UNSAFE_TOOLS = {
     "goal_pause",
     "goal_resume",
     "goal_clear",
+    # Worktree（CCAR12 Task 6：改会话级全局 cwd + 建/删 worktree）
+    "worktree_enter",
+    "worktree_exit",
 }
 
 

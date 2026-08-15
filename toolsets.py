@@ -60,6 +60,8 @@ _CORE_TOOLS = [
     "cron_create", "cron_list", "cron_delete",
     # Goal 驱动（CCAR12 Task 4：LLM 自主启动/管理 goal，与 CLI /goal 同源）
     "goal_start", "goal_status", "goal_pause", "goal_resume", "goal_clear",
+    # 会话级 worktree 进出（CCAR12 Task 6，对齐 CCB EnterWorktree/ExitWorktree）
+    "worktree_enter", "worktree_exit",
 ]
 
 TOOLSETS: Dict[str, dict] = {

@@ -63,3 +63,40 @@ def workspace_cwd_context(path: Optional[str]):
         yield
     finally:
         _workspace_cwd.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# 会话级切换（CCAR12 Task 6，对齐 CCB EnterWorktree 语义）
+# ---------------------------------------------------------------------------
+# 与 workspace_cwd_context（with 块、token 局部）不同，这是长效 set：
+# 切换后所有 get_workspace_cwd() 调用方跟随，直到 clear 或会话结束。
+#
+# ⚠️ 并发局限（module-level token 的固有边界，文档化而非修复）：
+#   1. token 存在模块级全局变量里，整个进程只有一份——只设计给**主对话
+#      单线程**使用（worktree_enter/exit 工具在主循环串行 dispatch）。
+#   2. set 和 clear 必须在同一个 context 里调用，否则 ContextVar.reset
+#      会抛 "Token was created in a different Context"。
+#   3. 子代理的 workspace_cwd_context with 块不受影响（各自持有自己的
+#      局部 token，退出 with 块即恢复）；但子代理**启动时**会 copy 主
+#      context，即 enter 之后 spawn 的子代理继承会话 cwd（符合
+#      "会话级切换"语义）。
+_session_token: Optional[contextvars.Token] = None
+
+
+def set_session_workspace_cwd(path: Optional[str]) -> None:
+    """会话级切换 cwd（对齐 CCB EnterWorktree 语义）。
+
+    长效 set（非 with 块）：切换后所有 get_workspace_cwd() 调用方跟随，
+    直到 clear_session_workspace_cwd 或会话结束。
+    重复 set 时旧的 token 被丢弃（视为切换到新 cwd；旧的中间值不再恢复）。
+    """
+    global _session_token
+    _session_token = _workspace_cwd.set(path)
+
+
+def clear_session_workspace_cwd() -> None:
+    """恢复到 set 之前的 cwd。幂等（未设置时 no-op）。"""
+    global _session_token
+    if _session_token is not None:
+        _workspace_cwd.reset(_session_token)
+        _session_token = None
