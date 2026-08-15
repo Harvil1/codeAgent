@@ -439,9 +439,13 @@ def _delegate_async(
                               name=f"delegate-async-{delegation_id}")
     thread.start()
     # Task K: 注册到 _async_tasks，让 subagent_kill 工具能定位
+    # T2（核心机制对齐第 2 项）：额外记录 goal/started_at，
+    # post_compact_recovery 压缩后列出 running 子代理（防模型失忆）
     _async_tasks[delegation_id] = {
         "thread": thread,
         "cancel_event": cancel_event,
+        "goal": goal,
+        "started_at": time.time(),
     }
 
     return json.dumps({

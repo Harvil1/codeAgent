@@ -33,8 +33,18 @@ SKILL_PER_BUDGET_CHARS = 5000              # 每 skill budget
 LEGACY_REINJECT_CHAR_LIMIT = 25000
 
 
+def _est_tokens(text: str) -> int:
+    """粗略 token 估算（chars/4，够预算统筹用）。"""
+    return len(text) // 4
+
+
 def build_post_compact_brief(agent: "AIAgent") -> str:
     """compact 后构建 recovery brief（fail-open，异常返回空串不崩）。
+
+    T2（核心机制对齐第 2 项）：统一 token 预算统筹 + plan/async 状态恢复。
+    - 总预算：config context.post_compact_recovery_budget（默认 40000 tokens，chars/4 估算）
+    - 优先级：plan/async 状态 > 最近文件 > 技能正文（超预算按优先级截断——
+      计划和在跑任务丢了最致命，技能丢了可 load_skill 重取）
 
     返回的字符串会被嵌入到 <post_compress_brief> 的 user 消息里。
     如果 agent 无最近文件/技能，或 config 关闭了 recovery，返回空串。
@@ -56,30 +66,112 @@ def build_post_compact_brief(agent: "AIAgent") -> str:
         max_skills = ctx_cfg.get("post_compact_recovery_max_skills", MAX_INVOKED_SKILLS)
         # 向后兼容：旧 config key reinject_char_limit 映射到 skill budget
         skill_budget = ctx_cfg.get("reinject_char_limit", SKILL_BUDGET_CHARS)
+        # T2：总预算（tokens）
+        budget_tokens = ctx_cfg.get("post_compact_recovery_budget", 40000)
 
-        parts = []
+        # 按优先级收集段（高 → 低）
+        sections = []
 
-        # 1. invoked skills 正文（优先——官方确认的核心恢复力）
-        skills_brief = _build_invoked_skills_brief(
-            agent, max_skills, skill_budget,
-        )
-        if skills_brief:
-            parts.append(skills_brief)
+        # 1. plan / async 状态（T2 新增，最高优先——丢了最致命）
+        state_brief = _build_plan_async_state_brief(agent)
+        if state_brief:
+            sections.append(state_brief)
 
         # 2. 最近文件 preview
         files_brief = _build_recent_files_brief(
             agent._recent_read_files, max_files,
         )
         if files_brief:
-            parts.append(files_brief)
+            sections.append(files_brief)
 
-        if not parts:
+        # 3. invoked skills 正文
+        skills_brief = _build_invoked_skills_brief(
+            agent, max_skills, skill_budget,
+        )
+        if skills_brief:
+            sections.append(skills_brief)
+
+        if not sections:
             return ""
 
-        return "\n\n".join(parts)
+        # 统一预算：逐段累加，超预算截断（保留高优先级段）
+        out = _apply_budget(sections, budget_tokens)
+        return "\n\n".join(out)
     except Exception as e:
         logger.debug("build_post_compact_brief fail-open: %s", e)
         return ""
+
+
+# 段被预算截断时至少保留的 token 数（低于此直接丢段，不输出残段）
+_MIN_SECTION_TOKENS = 200
+
+
+def _apply_budget(sections: list, budget_tokens: int) -> list:
+    """按优先级顺序分配预算（T2）。
+
+    每段估算 chars/4；装得下整段就整段放，装不下但剩余预算 >=
+    _MIN_SECTION_TOKENS 就截断放，否则丢段（后续段自然也没预算）。
+    """
+    remaining = budget_tokens
+    out = []
+    for text in sections:
+        t = _est_tokens(text)
+        if t <= remaining:
+            out.append(text)
+            remaining -= t
+            continue
+        if remaining >= _MIN_SECTION_TOKENS:
+            out.append(text[: remaining * 4] + "\n...[recovery 预算截断]")
+            remaining = 0
+        break  # 预算耗尽，后续段全丢（保持优先级语义）
+    return out
+
+
+def _build_plan_async_state_brief(agent: "AIAgent") -> str:
+    """plan / async 执行状态段（T2 新增恢复源，fail-open）。
+
+    - agent.plan_mode=True → 提示在 plan 调研模式
+    - agent._last_approved_plan 非空 → 已批准计划全文（执行中）
+    - delegate_tool._async_tasks 有 running → 列出 id/goal 摘要/已运行时长
+    """
+    lines = []
+    try:
+        if getattr(agent, "plan_mode", False):
+            lines.append(
+                "## 当前状态：plan 调研模式\n"
+                "正在做实施前调研（只读工具集）。完成调研后必须调 "
+                "exit_plan_mode(plan=...) 提交计划等待用户审批。"
+            )
+        plan_text = getattr(agent, "_last_approved_plan", "") or ""
+        if plan_text:
+            lines.append(
+                "## 正在执行的计划（已获用户批准，compact 后重注入）\n"
+                f"{plan_text}"
+            )
+    except Exception as e:
+        logger.debug("plan 状态恢复失败（fail-open）: %s", e)
+
+    try:
+        import time as _time
+        from tools.delegate_tool import _async_tasks
+        running = []
+        for tid, info in list(_async_tasks.items()):
+            thread = info.get("thread")
+            # thread 存在且已死 = 残留条目（finally 清理竞态），跳过
+            if thread is not None and not thread.is_alive():
+                continue
+            started = info.get("started_at") or 0
+            elapsed = int(_time.time() - started) if started else 0
+            goal = str(info.get("goal", ""))[:80]
+            running.append(f"- {tid}（已运行 {elapsed}s）：{goal}")
+        if running:
+            lines.append(
+                "## 在跑的 async 子代理（compact 后仍在后台执行）\n" + "\n".join(running)
+            )
+    except Exception as e:
+        logger.debug("async 状态恢复失败（fail-open）: %s", e)
+
+    return "\n\n".join(lines)
 
 
 def _build_recent_files_brief(paths: list, max_files: int = MAX_RECENT_FILES) -> str:

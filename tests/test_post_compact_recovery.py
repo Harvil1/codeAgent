@@ -17,6 +17,16 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_async_tasks():
+    """清空全局 _async_tasks（T2 起 recovery 会读它列 running 子代理，
+    其他测试残留的 running 条目会污染空状态断言）。"""
+    import tools.delegate_tool as _dt
+    _dt._async_tasks.clear()
+    yield
+    _dt._async_tasks.clear()
+
+
 # ============================================================================
 # Helper：构造最小 AIAgent
 # ============================================================================

@@ -104,6 +104,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # growth_window 轮的最大单轮 token，历史不足回退 growth_default
         "llm_compact_growth_window": 3,
         "llm_compact_growth_default": 8000,
+        # T2（核心机制对齐第 2 项）：post-compact 恢复统一 token 预算
+        # 优先级 plan/async 状态 > 最近文件 > 技能正文，超预算按优先级截断
+        "post_compact_recovery_budget": 40000,
         # Reactive（Task D：多次触发 + 冷却窗口）
         "reactive_keep_recent": 10,
         "reactive_compact_cooldown_seconds": 60,   # 冷却窗口（60s 内最多 1 次）

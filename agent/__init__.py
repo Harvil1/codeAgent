@@ -355,6 +355,9 @@ class AIAgent:
         # None 表示自动批准（测试/库用法）
         self.plan_mode: bool = False
         self.plan_approval_callback = plan_approval_callback
+        # T2（核心机制对齐第 2 项）：最近一次已批准的计划全文（执行中状态），
+        # compact 后 post_compact_recovery 重注入，防模型"失忆"不知道在执行什么
+        self._last_approved_plan: str = ""
         # ask_user 桥接（CLI 渲染问题+读选择 / GUI HTTP）；None = 无桥接（fail-fast）
         self.ask_user_bridge = ask_user_bridge
         # Checkpoint：文件快照/回滚（编辑工具通过 _checkpoint_track 追踪修改文件）
@@ -2013,6 +2016,8 @@ class AIAgent:
 
         if approved:
             self.plan_mode = False
+            # T2：记录已批准计划全文（compact 后恢复用）
+            self._last_approved_plan = plan_text
             return json.dumps({
                 "plan_approved": True,
                 "message": "用户已批准计划。现在可以开始执行：用 task_create 列出步骤，每步完成调 task_complete，依赖关系用 blocked_by。",
