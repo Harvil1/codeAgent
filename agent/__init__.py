@@ -174,7 +174,6 @@ class AIAgent:
         hooks_registry=None,   # === P2-T6 NEW ===
         bg_manager=None,       # === P2b-T5 NEW ===
         cron_scheduler=None,   # === P2c-T4 NEW ===
-        memory_retriever=None,  # === Mem-T5 NEW ===
         team_bus=None,           # === P4a-T6 NEW ===
         team_coordinator=None,   # === P4a-T6 NEW ===
         team_name=None,          # === P4a-T6 NEW ===
@@ -295,8 +294,6 @@ class AIAgent:
         # === P2c-T4 NEW: cron 调度器 ===
         self.cron_scheduler = cron_scheduler
 
-        # === Mem-T5 NEW: memory 检索器 ===
-        self.memory_retriever = memory_retriever
         # 缓存 memory 索引（会话内 frozen，保护 prompt cache）
         self._cached_memory_index = ""
         if self.memory_store:

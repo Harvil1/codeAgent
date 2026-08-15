@@ -394,7 +394,6 @@ class TestRunConversationCancelEvent:
         agent.team_name = None
         agent.config = {}
         agent.memory_manager = None
-        agent.memory_retriever = None
         agent.plan_mode_active = False
         agent._stream_callback = None
         agent.aux_llm_router = None

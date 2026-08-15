@@ -1233,12 +1233,8 @@ async def test_e2e_cron_full_lifecycle(tmp_path):
 
 # ---------------------------------------------------------------------------
 # Mem-T5: AIAgent memory retriever 注入
+# （CCAR10 后旧注入路径已删；memory_retriever 构造参数已随 dead path 移除）
 # ---------------------------------------------------------------------------
-
-def test_aiagent_accepts_memory_retriever_kwarg():
-    agent = _make_test_agent()
-    assert agent.memory_retriever is None
-
 
 async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
     """Task 2.5: 旧 _initial_memory_recall 已删除——记忆注入走 CCAR10 ephemeral。
@@ -1246,27 +1242,22 @@ async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
     验证新行为：
     - conversation_history[0] 不含 <relevant_memories>（旧包裹路径已删）
     - user 消息原样入 history
-    - memory_retriever 参数仍接受（构造兼容），但不再被调用
     """
-    from unittest.mock import AsyncMock
     from agent import AIAgent
     from agent.memory_store import MemoryStore
 
     store = MemoryStore(omnimate_home=tmp_path)
-    mid = store.save(
+    store.save(
         name="pytest 配置",
         description="项目用 pytest",
         type="project",
         body="运行测试用 uv run pytest tests/ -v",
     )
 
-    # mock retriever 返回 [mid]（async 调用）——参数仍兼容但不再被 AIAgent 调用
-    fake_retriever = AsyncMock(return_value=[mid])
-
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
         enabled_toolsets=[], omnimate_home=str(tmp_path),
-        memory_store=store, memory_retriever=fake_retriever,
+        memory_store=store,
     )
     agent.llm_client = _mock_llm_simple_response("ok")
     await agent.run_conversation("怎么跑测试")
@@ -1289,21 +1280,18 @@ async def test_aiagent_no_memory_retriever_backward_compat(tmp_path):
 
 
 async def test_retrieval_failure_does_not_break_main_loop(tmp_path):
-    """retriever 抛异常时主循环不崩。
-
-    Plan 2B: retriever 已 async，用 AsyncMock side_effect。
+    """带 memory_store 的主循环正常跑（旧 retriever 注入路径已删，
+    检索失败容错由 CCAR10 memory_injection 自己的 fail-open 兜底）。
     """
-    from unittest.mock import AsyncMock
     from agent import AIAgent
     from agent.memory_store import MemoryStore
 
     store = MemoryStore(omnimate_home=tmp_path)
-    bad_retriever = AsyncMock(side_effect=RuntimeError("boom"))
 
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
         enabled_toolsets=[], omnimate_home=str(tmp_path),
-        memory_store=store, memory_retriever=bad_retriever,
+        memory_store=store,
     )
     agent.llm_client = _mock_llm_simple_response("ok")
     await agent.run_conversation("hi")
@@ -1323,12 +1311,10 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     - conversation_history[0] 不含 <relevant_memories>（记忆不进 history）
     - user 消息原样入 history
     - 记忆上下文来源只是 CCAR10 ephemeral（不污染持久化）
-    - memory_retriever 参数仍兼容（保留字段），但不再被 AIAgent 调用
 
     Plan 2B: retrieve_relevant 已 async，主 LLM chat_completions 已 async。
     """
     from unittest.mock import MagicMock, AsyncMock
-    from agent.memory_retriever import retrieve_relevant
 
     # === 会话 1：保存记忆 ===
     store1 = MemoryStore(omnimate_home=tmp_path)
@@ -1354,13 +1340,11 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     main_llm = MagicMock()
     main_llm.chat_completions = AsyncMock(side_effect=side_effect)
 
-    # retriever 参数仍接受（构造兼容）——AIAgent 不再调用它
-    retriever_obj = retrieve_relevant
-
+    # retriever 注入路径已删（CCAR10 起走 memory_injection ephemeral）
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
         enabled_toolsets=[], omnimate_home=str(tmp_path),
-        memory_store=store2, memory_retriever=retriever_obj,
+        memory_store=store2,
     )
     agent.llm_client = main_llm
     await agent.run_conversation("怎么跑测试")

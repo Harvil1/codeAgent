@@ -365,14 +365,6 @@ class RuntimeContext:
             # （因为需要和 aux_llm_router 共享）
             self.memory_manager = MemoryManager(self.memory_store)
 
-        # === Mem-T7 NEW: memory retriever 装配（多文件检索） ===
-        self.memory_retriever = None
-        mem_cfg = self.config.get("memory", {})
-        if (mem_cfg.get("enabled", True) and
-                mem_cfg.get("retrieval_enabled", True)):
-            from agent.memory_retriever import retrieve_relevant
-            self.memory_retriever = retrieve_relevant  # 函数引用
-
         # 1c. TaskStore 全局单例（纯文件存储）
         try:
             from agent.task_store import get_task_store
@@ -702,7 +694,6 @@ class RuntimeContext:
             hooks_registry=self.hooks_registry,  # === P2-T8 NEW ===
             bg_manager=self.bg_manager,  # === P2b-T6 NEW ===
             cron_scheduler=self.cron_scheduler,  # === P2c-T5 NEW ===
-            memory_retriever=self.memory_retriever,  # === Mem-T7 NEW ===
             team_bus=self.team_bus,  # === P4a-T7 NEW ===
             team_coordinator=self.team_coordinator,  # === P4a-T7 NEW ===
             team_name="main",  # === P4a-T7 NEW ===
