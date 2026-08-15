@@ -1017,6 +1017,14 @@ class AIAgent:
                 )
                 return self._extract_partial_result()
 
+            # === CCAR15 Task 5: preventSleep —— goal 循环或 bg 运行中保持唤醒 ===
+            # 对齐 CCB "isLoading 时开"：每轮开头评估运行态，状态切换时
+            # acquire/release（fail-open，防休眠失败绝不影响主对话）
+            try:
+                self._update_prevent_sleep()
+            except Exception as e:
+                logger.debug("prevent_sleep fail-open: %s", e)
+
             # 消耗预算（grace call 不消耗）
             if not self._budget_grace_call:
                 if not self.iteration_budget.consume():
@@ -2179,6 +2187,41 @@ class AIAgent:
         except Exception as e:
             logger.warning("_extract_partial_result 异常（fail-open）: %s", e)
             return ""
+
+    def _update_prevent_sleep(self) -> None:
+        """CCAR15 Task 5：评估 goal/bg 运行态，切换防休眠持有（fail-open）。
+
+        每轮 while 开头调：goal active 或任意 bg 任务 running 判为"忙"，
+        忙且 config["security"]["prevent_sleep"] 开启时 acquire("busy")，
+        否则 release("busy")。用实例标志保证只在状态切换（闲→忙/忙→闲）
+        时真正调 acquire/release——每轮重复 acquire 会让引用计数无界增长。
+        任何异常由调用处 try/except 兜底（防休眠失败不影响主对话）。
+        """
+        try:
+            from agent import prevent_sleep
+        except Exception:
+            return  # fail-open：模块加载失败直接放弃（理论上不会发生）
+        try:
+            _busy = bool(
+                (self._goal_state is not None
+                 and self._goal_state.status == "active")
+                or (self.bg_manager is not None and any(
+                    t.status == "running" for t in self.bg_manager.list_tasks()
+                ))
+            )
+            enabled = (self.config or {}).get("security", {}).get(
+                "prevent_sleep", True
+            )
+            if _busy and enabled:
+                if not getattr(self, "_prevent_sleep_held", False):
+                    prevent_sleep.acquire("busy")
+                    self._prevent_sleep_held = True
+            elif getattr(self, "_prevent_sleep_held", False):
+                # release 在非 Windows 返回 False 属正常 no-op，不算错误
+                prevent_sleep.release("busy")
+                self._prevent_sleep_held = False
+        except Exception as e:
+            logger.debug("prevent_sleep 状态切换 fail-open: %s", e)
 
     async def _maybe_skill_learning(self, user_message: str) -> None:
         """CCAR15 Task 3/4：轮末 instinct 观察 + 簇达标演化（fail-open）。
