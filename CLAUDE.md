@@ -339,6 +339,8 @@ uv sync                                 # 同步已声明依赖
 - **Windows 沙箱 = 进程管控（CCAR12）** —— Job Object 管子进程树（不逃逸+全树清理），不隔离文件系统；文件防线仍是 safe_path/白名单层。job 句柄必须保活到 Popen.wait 后（早关=子进程失去清理保证）。
 - **goal_start/goal_resume/worktree_enter/cron_create/cron_delete 禁用于 async 子代理**（CCAR12）——goal-continue 无 spawn_depth 守卫、worktree 切换污染模块级状态；止损类（pause/clear/exit）保留自救。
 - **config_set 白名单键必须有真实读取点**（CCAR12 教训）——dead key 写进黑洞还假报 runtime_applied=True 是最危险的静默失败；换键前 grep 消费方。
+- **check_path 闸门 3 白名单语义（CCAR13 恢复）** —— write_file/str_replace 走 `default_allowed_roots()`（workspace cwd + ~/.OmniMate + /add-dir extra roots，与 safe_path 同源），白名单外拒（消息含允许根可引导 /add-dir）；bypassPermissions 跳白名单不跳硬底线；受保护路径/项目代码写保护先于白名单。
+- **notifier bg title 带 task_id（CCAR13）** —— `后台任务:<id 前 8 位>`，30s 同标题节流不互吞；goal pause 通知集中在 GoalState.pause()（三原因一处接）。
 
 ## 测试策略
 
