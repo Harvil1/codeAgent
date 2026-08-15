@@ -968,8 +968,18 @@ class PermissionChecker:
         if not write:
             return PermissionResult(True, "ok", "ok")
 
+        # 闸门 2:写保护路径(项目代码目录)→ 拒
+        # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
+        # CCAR14 Task 1: 此块从 acceptEdits 分支之后上移到之前——闸门 2 是
+        # 全模式硬底线，acceptEdits 不能绕过（否则 cwd 即 agent repo 时
+        # "cwd 内自动放行" 会连自身源码一起批）。
+        wprot = is_write_protected_path(path)
+        if wprot:
+            return self._deny(str(path), f"写保护(项目代码): {wprot}", "protected")
+
         # acceptEdits: cwd 内写入自动放行
-        # 受保护路径已在闸门 1 拒掉（~/.ssh 等仍拒），此处只处理 cwd 内合法写入。
+        # 受保护路径已在闸门 1 拒掉、写保护已在闸门 2 拒掉，
+        # 此处只处理 cwd 内合法写入。
         if effective_mode == "acceptEdits":
             from agent.workspace_context import get_workspace_cwd
             try:
@@ -978,13 +988,7 @@ class PermissionChecker:
                 resolved.relative_to(cwd_path)
                 return PermissionResult(True, "acceptEdits: write in cwd", "auto")
             except (ValueError, OSError, RuntimeError):
-                pass  # cwd 外 → 继续走下面的写保护/白名单检查
-
-        # 闸门 2:写保护路径(项目代码目录)→ 拒
-        # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
-        wprot = is_write_protected_path(path)
-        if wprot:
-            return self._deny(str(path), f"写保护(项目代码): {wprot}", "protected")
+                pass  # cwd 外 → 继续走下面的白名单检查
 
         # 闸门 3（CCAR13 Task 4）:写白名单。
         # bypassPermissions 跳过白名单（闸门 1/2 硬底线已在上面守住，

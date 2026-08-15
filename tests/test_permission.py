@@ -1156,3 +1156,28 @@ def test_check_path_cwd_and_bypass_semantics(tmp_path, monkeypatch):
     assert bypass.check_path(
         str(tmp_path.parent / "omnimate_bypass_probe.txt"), write=True
     ).allowed is True
+
+
+def test_accept_edits_cannot_write_agent_own_code(tmp_path, monkeypatch):
+    """【CCAR14 Task 1】acceptEdits 不能绕过写保护（agent 自身代码）。
+
+    闸门 2 本该是全模式硬底线（bypass 也保留），但 acceptEdits 分支
+    插在它前面——cwd 是 agent repo 时能自动批改自身源码。
+    """
+    from agent.permission import _WRITE_PROTECTED_PATHS
+    # 取一个真实写保护路径（agent 自身代码目录）
+    assert _WRITE_PROTECTED_PATHS, "写保护列表不应为空"
+    prot_path = _WRITE_PROTECTED_PATHS[0][0] / "evil.py"
+    checker = PermissionChecker(mode="acceptEdits")
+    result = checker.check_path(str(prot_path), write=True)
+    assert result.allowed is False
+    assert "写保护" in result.reason
+
+
+def test_accept_edits_still_allows_cwd_normal_files(tmp_path, monkeypatch):
+    """回归防误伤：acceptEdits 写 cwd 内普通文件仍自动放行。"""
+    from agent.workspace_context import workspace_cwd_context
+    with workspace_cwd_context(str(tmp_path)):
+        checker = PermissionChecker(mode="acceptEdits")
+        result = checker.check_path(str(tmp_path / "normal.txt"), write=True)
+        assert result.allowed is True
