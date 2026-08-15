@@ -89,6 +89,14 @@ def get_tool_definitions(
             dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
             tool_names = [n for n in tool_names if n not in dis_scope]
 
+    # T6（核心机制对齐第 6 项）：settings.json permissions.deny 规则
+    # 在模型看到之前整类移除（精确名 / mcp__server__* / mcp__server 整服务器）
+    try:
+        from agent.tool_permissions import is_tool_denied
+        tool_names = [n for n in tool_names if not is_tool_denied(n)]
+    except Exception:
+        pass  # fail-open：规则加载失败不影响工具可见性
+
     global _last_resolved_tool_names
     _last_resolved_tool_names = tool_names
 

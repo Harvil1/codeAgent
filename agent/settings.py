@@ -44,6 +44,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
     "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
 
+    # T6（核心机制对齐第 6 项）：工具可见性规则（deny 整类移除，allow 豁免 deny）
+    "permissions": {
+        "allow": [],
+        "deny": [],
+    },
+
     "agent": {
         "max_iterations": 200,
         "compression_enabled": True,

@@ -253,6 +253,19 @@ class ToolRegistry:
                 "error_type": "unknown_tool",
             }, ensure_ascii=False)
 
+        # T6（核心机制对齐第 6 项）：permissions.deny 防御纵深——
+        # 可见性过滤（get_tool_definitions）之外，dispatch 也拒（手动构造的
+        # tool_call / schema 缓存滞后都拦得住）。fail-open：规则加载异常放行。
+        try:
+            from agent.tool_permissions import is_tool_denied
+            if is_tool_denied(name):
+                return json.dumps({
+                    "error": f"工具 {name} 被 settings.json permissions.deny 规则拒绝",
+                    "error_type": "permission_denied",
+                }, ensure_ascii=False)
+        except Exception:
+            pass
+
         handler = entry.handler
         try:
             if inspect.iscoroutinefunction(handler):
