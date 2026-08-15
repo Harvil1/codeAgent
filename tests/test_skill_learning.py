@@ -639,6 +639,27 @@ class TestObserveTurnLLMParse:
         )
         assert len(got) == 3  # 上限 3 条（prompt 已声明）
 
+    async def test_nan_and_inf_confidence_fall_to_default(self, tmp_path,
+                                                          clean_llm_state):
+        """NaN/Infinity 不能被 min(1.0, nan) 钳成 1.0（方向反了）。
+
+        Python json.loads 接受 NaN/Infinity 字面量；clamp 对它们失效
+        （nan < 1.0 为 False → min 返回 1.0）——必须落保守默认 0.4。
+        """
+        store = InstinctStore(tmp_path)
+        # json.dumps 也接受这些字面量（allow_nan 默认 True）
+        router = _router(content=json.dumps([
+            {"trigger": "t", "action": "a", "confidence": float("nan")},
+            {"trigger": "u", "action": "b", "confidence": float("inf")},
+        ]))
+        got = await observe_turn_llm(
+            user_text="x", tool_calls=[], tool_results=[],
+            aux_llm_router=router, store=store,
+        )
+        assert len(got) == 2
+        assert got[0].confidence == pytest.approx(0.4)
+        assert got[1].confidence == pytest.approx(0.4)
+
     async def test_empty_array_is_success_not_failure(self, tmp_path, clean_llm_state):
         """[] 是合法成功：返回空列表，且重置熔断计数（不算失败）。"""
         store = InstinctStore(tmp_path)

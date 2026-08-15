@@ -350,6 +350,31 @@ class TestConfigSet:
         assert data["value"] == "llm"  # 字符串值原样存（不强转）
         assert ref.config["skill_learning"]["observer"] == "llm"
 
+    def test_observer_enum_validated(self, settings_home):
+        """CCAR15 T4 review 快修：observer 是枚举键（heuristic|llm）。
+
+        大小写不敏感归一（"LLM" → "llm"，防拼错静默走启发式还假报生效）；
+        非法枚举值拒绝（invalid_args），不落盘。
+        """
+        ref = _make_agent_ref({"skill_learning": {
+            "enabled": False, "observer": "heuristic"}})
+
+        # 大写归一后接受
+        result = _handle_config_set(
+            {"key": "skill_learning.observer", "value": "LLM"}, agent_ref=ref)
+        data = json.loads(result)
+        assert data["value"] == "llm"
+        assert ref.config["skill_learning"]["observer"] == "llm"
+
+        # 非法枚举拒绝，不落盘不改 runtime
+        result = _handle_config_set(
+            {"key": "skill_learning.observer", "value": "deeplearning"},
+            agent_ref=ref)
+        data = json.loads(result)
+        assert data["error_type"] == "invalid_args"
+        assert "heuristic" in data["error"] and "llm" in data["error"]
+        assert ref.config["skill_learning"]["observer"] == "llm"
+
 
 # ---------------------------------------------------------------------------
 # 4. CONFIG_CHANGE hook

@@ -19,6 +19,7 @@
 不算失败——只有调不动 / 解析不出才是失败。
 """
 import json
+import math
 import logging
 import time
 from datetime import datetime, timezone
@@ -159,6 +160,10 @@ def _parse_instincts(raw: str) -> List[dict]:
             continue  # 不猜：缺关键字段的条目直接丢
         try:
             conf = float(it.get("confidence"))
+            # NaN/Infinity 不能进 clamp：min(1.0, nan) 会返回 1.0（nan < 1.0
+            # 为 False），方向反了——落保守默认值（T4 review 快修）
+            if math.isnan(conf) or math.isinf(conf):
+                raise ValueError
         except (TypeError, ValueError):
             conf = _DEFAULT_CONFIDENCE
         items.append({

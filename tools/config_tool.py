@@ -50,6 +50,13 @@ _NEXT_SESSION_KEYS = frozenset({
     "trace.enabled",
 })
 
+# 枚举键：值只允许列出的集合（大小写不敏感归一）。
+# CCAR15 T4 review 快修：observer 设 "LLM"/拼错会静默走启发式还假报
+# runtime_applied=True——"假报生效"教训的值级变体，在校验层拦掉。
+_ENUM_KEYS = {
+    "skill_learning.observer": frozenset({"heuristic", "llm"}),
+}
+
 
 CONFIG_GET_SCHEMA = {
     "name": "config_get",
@@ -241,6 +248,25 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
                 },
                 ensure_ascii=False,
             )
+
+        # 枚举键校验：大小写归一 + 非法值拒绝（不落盘，错误消息列合法值）
+        allowed = _ENUM_KEYS.get(key)
+        if allowed is not None:
+            normalized = str(coerced).strip().lower() if isinstance(
+                coerced, str) else None
+            if normalized not in allowed:
+                return json.dumps(
+                    {
+                        "error": (
+                            f"{key} 只接受 {'/'.join(sorted(allowed))}，"
+                            f"收到: {coerced!r}"
+                        ),
+                        "error_type": "invalid_args",
+                        "key": key,
+                    },
+                    ensure_ascii=False,
+                )
+            coerced = normalized
 
         old_value = current
 
