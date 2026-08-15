@@ -341,6 +341,8 @@ uv sync                                 # 同步已声明依赖
 - **config_set 白名单键必须有真实读取点**（CCAR12 教训）——dead key 写进黑洞还假报 runtime_applied=True 是最危险的静默失败；换键前 grep 消费方。
 - **check_path 闸门 3 白名单语义（CCAR13 恢复）** —— write_file/str_replace 走 `default_allowed_roots()`（workspace cwd + ~/.OmniMate + /add-dir extra roots，与 safe_path 同源），白名单外拒（消息含允许根可引导 /add-dir）；bypassPermissions 跳白名单不跳硬底线；受保护路径/项目代码写保护先于白名单。
 - **notifier bg title 带 task_id（CCAR13）** —— `后台任务:<id 前 8 位>`，30s 同标题节流不互吞；goal pause 通知集中在 GoalState.pause()（三原因一处接）。
+- **check_path 闸门顺序 + 审批通道（CCAR14）** —— 顺序铁律：闸门 1（受保护）→ 闸门 2（agent 自身代码写保护，**acceptEdits 也不绕**）→ acceptEdits cwd 内放行 → bypass 短路 → 闸门 3 白名单；白名单外 default/acceptEdits 走审批 callback（批准→父目录进 `_approved_write_roots` 会话缓存；autoDeny 不问；无 callback 拒），审批前触发 PERMISSION_REQUEST hook + toast；跨会话持久化走 /add-dir。
+- **hook 沙箱 Windows（CCAR14）** —— command 型 hook use_sandbox=True 在 Windows 走 Job Object（terminal 同款：不包装 Popen + attach + finally 保活）；Unix wrapper 保留；approved_paths.json 持久化机制存在但未接线（docstring 已止损）。
 
 ## 测试策略
 
