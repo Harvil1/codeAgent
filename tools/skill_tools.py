@@ -191,6 +191,9 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
     # 去掉 frontmatter，只返回指令正文
     frontmatter, body = parse_frontmatter(content)
 
+    # T3（核心机制对齐第 3 项）：frontmatter files: 参考文件附件
+    attachments = _load_skill_attachments(skill_md.parent, frontmatter.get("files"), kwargs)
+
     bump_view(usage_dir, name)  # 加载也计入 view 计数
 
     # round3: context:fork 技能提示 LLM 用 subagent 跑
@@ -199,6 +202,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
             "name": name,
             "body": body.strip(),
             "path": str(skill_md),
+            "attachments": attachments,
             "fork_required": True,
             "hint": ("该技能声明 context:fork，应在隔离子代理里执行。"
                      "请用 subagent 工具派生子代理，把上述技能正文作为子代理指令运行。"),
@@ -218,7 +222,21 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
         "name": name,
         "body": body.strip(),
         "path": str(skill_md),
+        "attachments": attachments,
     }, ensure_ascii=False)
+
+
+def _load_skill_attachments(skill_dir, files, kwargs: dict) -> list:
+    """读技能附件（T3），max_chars 从 config skills.file_attachment_max_chars 取。"""
+    from agent.skill_commands import read_skill_attachment_files, DEFAULT_ATTACHMENT_MAX_CHARS
+    cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
+    max_chars = (cfg.get("skills") or {}).get(
+        "file_attachment_max_chars", DEFAULT_ATTACHMENT_MAX_CHARS,
+    )
+    try:
+        return read_skill_attachment_files(str(skill_dir), files, max_chars=int(max_chars))
+    except Exception:
+        return []
 
 
 registry.register(

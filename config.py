@@ -198,6 +198,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "skills": {
         "dir": None,                     # 自定义技能目录
         "external_dirs": [],
+        # T3（核心机制对齐第 3 项）：frontmatter files: 附件单文件截断上限
+        "file_attachment_max_chars": 8000,
     },
 
     # Curator

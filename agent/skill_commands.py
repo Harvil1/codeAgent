@@ -66,6 +66,7 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
                     "skill_md_path": str(skill_md),
                     "skill_dir": str(skill_md.parent),
                     "context": frontmatter.get("context"),  # round3: None | "fork"
+                    "files": frontmatter.get("files") or [],  # T3: 附件声明
                 }
             except Exception as e:
                 logger.warning("解析技能失败 %s: %s", skill_md, e)
@@ -100,29 +101,91 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
     return frontmatter, parts[2]
 
 
+# ---------------------------------------------------------------------------
+# T3（核心机制对齐第 3 项）：frontmatter files: 附件
+# ---------------------------------------------------------------------------
+
+MAX_ATTACHMENT_FILES = 5                 # 附件总数上限
+DEFAULT_ATTACHMENT_MAX_CHARS = 8000      # 单附件字符上限（config 可调）
+
+
+def read_skill_attachment_files(
+    skill_dir, files, *, max_chars: int = DEFAULT_ATTACHMENT_MAX_CHARS,
+) -> list:
+    """读 frontmatter files: 声明的参考文件（T3，触发时一并注入）。
+
+    - 路径相对技能目录解析；逃出技能目录（../ traversal）跳过
+    - 单文件截到 max_chars（config skills.file_attachment_max_chars）
+    - 总数上限 MAX_ATTACHMENT_FILES（5）
+    - 缺失文件生成占位条目（提示跳过，fail-open）
+
+    返回 [{"path": 相对路径, "content": 文本}]，无附件返回 []。
+    """
+    if not files:
+        return []
+    if isinstance(files, str):
+        files = [files]
+    base = Path(skill_dir).resolve()
+    items = []
+    for rel in list(files)[:MAX_ATTACHMENT_FILES]:
+        try:
+            rel = str(rel).strip()
+            if not rel:
+                continue
+            p = (base / rel).resolve()
+            if base not in p.parents and p != base:
+                continue  # 逃出技能目录，跳过
+            if not p.exists() or not p.is_file():
+                items.append({"path": rel, "content": "(文件缺失，已跳过)"})
+                continue
+            content = p.read_text(encoding="utf-8", errors="replace")
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n...[附件截断]"
+            items.append({"path": rel, "content": content})
+        except Exception as e:
+            logger.debug("技能附件读取失败 %s: %s", rel, e)
+    return items
+
+
+def format_skill_attachments(items: list) -> str:
+    """附件列表格式化为文本段（slash 注入用）。"""
+    if not items:
+        return ""
+    blocks = []
+    for it in items:
+        blocks.append(f"### {it['path']}\n```\n{it['content']}\n```")
+    return (
+        "[技能附件：frontmatter files: 声明的参考文件，触发时一并注入]\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
 def execute_skill(
     skill_md_path: str,
     user_message: str,
 ) -> str:
     """加载技能内容，作为 user 消息返回。
 
-    技能正文 + 用户的原始消息组合成新的 user 消息。
-    这保证了不修改 system prompt（保护 prompt cache）。
+    技能正文 + 附件（T3：frontmatter files:）+ 用户的原始消息组合成新的
+    user 消息。这保证了不修改 system prompt（保护 prompt cache）。
     """
     path = Path(skill_md_path)
     if not path.exists():
         return user_message
 
     content = path.read_text(encoding="utf-8")
-    _, body = parse_frontmatter(content)
+    frontmatter, body = parse_frontmatter(content)
 
-    # 把技能指令 + 用户消息组合
-    return (
-        f"[技能已加载]\n\n"
-        f"{body.strip()}\n\n"
-        f"---\n"
-        f"用户消息: {user_message}"
+    attach = format_skill_attachments(
+        read_skill_attachment_files(path.parent, frontmatter.get("files"))
     )
+
+    # 把技能指令 + 附件 + 用户消息组合
+    parts = [f"[技能已加载]\n\n{body.strip()}"]
+    if attach:
+        parts.append(attach)
+    parts.append(f"---\n用户消息: {user_message}")
+    return "\n\n".join(parts)
 
 
 def scan_bundle_commands(skills_dir: Path) -> Dict[str, dict]:
