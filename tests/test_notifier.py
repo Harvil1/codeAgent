@@ -163,3 +163,53 @@ def test_trigger_goal_network_pause_notifies():
     assert called, "goal pause 应触发 notify"
     assert called[0][0] == "Goal 已暂停"
     assert "network" in called[0][1]
+
+
+# ============================================================================
+# CCAR13 Task 2 B6：bg title 带 task_id（不同任务不互吞节流）
+# ============================================================================
+
+def test_bg_title_with_task_id_no_throttle_conflict():
+    """两个不同 task_id 的 bg 通知 30s 内都发出（title 带区分）。"""
+    _reset_throttle_for_test()
+    with patch("agent.notifier.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        assert notify("后台任务:bg_00123456", "完成") is True
+        assert notify("后台任务:bg_00999888", "完成") is True  # 不同任务不互吞
+
+
+def test_bg_drain_title_contains_task_id(tmp_path):
+    """真实接线：_drain_injected_messages 的 bg 通知 title 带 task_id 前 8 位。
+
+    task_id 不足 8 位时用全量（切片语义自然覆盖）。
+    """
+    _reset_throttle_for_test()
+    called = []
+
+    def fake_notify(title, message):
+        called.append((title, message))
+        return True
+
+    from agent import AIAgent
+
+    fake_bg = MagicMock()
+    fake_bg.drain_notifications.return_value = [
+        {"task_id": "bg_001234567890", "status": "completed", "exit_code": 0},
+        {"task_id": "short1", "status": "failed", "exit_code": 1},  # <8 位全量
+        {"task_id": "bg-running", "status": "running"},  # 不触发
+    ]
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=tmp_path,
+        bg_manager=fake_bg,
+    )
+    with patch("agent.notifier.notify", fake_notify):
+        agent._drain_injected_messages()
+
+    assert len(called) == 2
+    # title = "后台任务:<task_id 前 8 位>"
+    assert called[0][0] == "后台任务:bg_00123"
+    assert "bg_001234567890" in called[0][1] and "completed" in called[0][1]
+    # 不足 8 位用全量
+    assert called[1][0] == "后台任务:short1"
+    assert "failed" in called[1][1]

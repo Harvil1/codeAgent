@@ -14,7 +14,8 @@
 触发点（CCAR11 Task 6 接线）：
 1. bg 完成：agent/__init__.py:_drain_injected_messages drain 后过滤 status
 2. 权限审批：agent/permission.py 审批 callback 调用前
-3. goal pause：agent/__init__.py network 异常 pause 分支
+3. goal pause：agent/goal.py:GoalState.pause() 集中接（CCAR13 B5，
+   network/budget/manual 全原因一处，agent/__init__.py 的散接已删）
 """
 import logging
 import subprocess

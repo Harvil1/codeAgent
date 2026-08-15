@@ -45,6 +45,14 @@ class GoalState:
         self.status = "paused"
         self.pause_reason = reason
         self.notes.append(f"paused: reason={reason}, iteration={self.iteration_count}")
+        # CCAR13 B5：pause 通知集中到状态机（network/budget/manual 全原因一处接）
+        # fail-open：notify 失败/依赖缺失绝不炸状态机（goal.py 被大量单测直接调）
+        # lazy import：对齐项目惯例，goal 模块 import 时不拉 notifier/config
+        try:
+            from agent.notifier import notify
+            notify("Goal 已暂停", f"原因: {reason}")
+        except Exception as e:
+            logger.debug("pause notify fail-open: %s", e)
 
     def resume(self) -> None:
         """恢复（清除 pause_reason）。"""

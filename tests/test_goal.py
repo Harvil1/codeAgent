@@ -431,3 +431,35 @@ async def test_goal_not_paused_on_non_network_error(tmp_path):
 
     # 非网络异常不 pause goal
     assert g.status == "active"
+
+
+# ============================================================================
+# CCAR13 Task 2 B5：pause() 集中通知
+# ============================================================================
+
+def test_pause_notifies_for_all_reasons():
+    """pause() 集中通知（CCAR13 B5：network/budget/manual 三原因一处接）。
+
+    lazy import 下 patch agent.notifier.notify（函数内 import 每次调用时
+    从 agent.notifier 模块取名字，patch 模块属性即可命中）。
+    """
+    from unittest.mock import patch
+    g = GoalState(objective="x")
+    with patch("agent.notifier.notify") as mock_notify:
+        g.pause(reason="network")
+        g.pause(reason="budget_exceeded")  # resume 后再 pause
+        g.resume()
+        g.pause(reason="manual")
+    assert mock_notify.call_count == 3
+
+
+def test_pause_notify_failure_does_not_break_state_machine():
+    """notify 抛异常绝不炸状态机（fail-open，goal.py 被大量单测直接调）。"""
+    from unittest.mock import patch
+    g = GoalState(objective="x")
+    with patch("agent.notifier.notify", side_effect=RuntimeError("boom")):
+        g.pause(reason="network")
+    # 状态机语义完整保留
+    assert g.status == "paused"
+    assert g.pause_reason == "network"
+    assert "paused: reason=network" in g.notes[-1]

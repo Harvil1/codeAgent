@@ -1184,15 +1184,18 @@ class AIAgent:
             try:
                 bg_notifications = self.bg_manager.drain_notifications()
                 # CCAR11 Task 6 NEW: bg 完成/失败时桌面通知（用户切走也能感知）
+                # CCAR13 B6：title 带 task_id 前 8 位——不同任务 title 不同，
+                # 30s 同标题节流不会互吞（批量完成时每个任务都能通知到）
                 # fail-open：notify 异常不影响主循环
                 try:
                     from agent.notifier import notify as _bg_notify
                     for n in bg_notifications:
                         status = n.get("status")
                         if status in ("completed", "failed"):
+                            _tid = str(n.get("task_id") or "?")
                             _bg_notify(
-                                "后台任务",
-                                f"{n.get('task_id', '?')} {status}",
+                                f"后台任务:{_tid[:8]}",  # 不足 8 位切片即全量
+                                f"{_tid} {status}",
                             )
                 except Exception as notify_err:
                     logger.debug("bg notify fail-open: %s", notify_err)
@@ -1692,16 +1695,7 @@ class AIAgent:
                         logger.warning(
                             "goal 自动 pause（网络异常）: %s", self._goal_state.pause_reason,
                         )
-                        # CCAR11 Task 6 NEW: goal pause 桌面通知
-                        # fail-open：notify 异常不影响 pause 已完成的语义
-                        try:
-                            from agent.notifier import notify as _goal_notify
-                            _goal_notify(
-                                "Goal 已暂停",
-                                f"原因: {self._goal_state.pause_reason or 'network'}",
-                            )
-                        except Exception as notify_err:
-                            logger.debug("goal pause notify fail-open: %s", notify_err)
+                        # CCAR13 B5：pause 通知已集中到 GoalState.pause()，此处不再散接（防双发）
                     except Exception as pause_err:
                         logger.warning("goal pause 失败（fail-open）: %s", pause_err)
 
