@@ -9,6 +9,7 @@
 import json
 import logging
 import threading
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -189,6 +190,71 @@ class CronScheduler:
             self._last_fired = {}
             self._notifications.clear()
         return self._load_jobs(path)
+
+    # ---- CRUD（CCAR12 Task 3：tools/cron_tool.py 包装，LLM 可自主管理定时任务）----
+    def add_job(
+        self,
+        cron: str,
+        message: str,
+        *,
+        catch_up: bool = False,
+        job_id: Optional[str] = None,
+    ) -> CronJob:
+        """新增 job（自动生成 id + 持久化）。
+
+        先用 cron_match 校验表达式（非法抛 ValueError——工具层捕获转
+        invalid_cron_expr 错误，不走 try/except 吞掉）。
+        job_id 显式传入且已存在时抛 ValueError（防覆盖）。
+        """
+        # 校验表达式：cron_match 对非法 expr 抛 ValueError
+        cron_match(cron, datetime.now())
+
+        new_id = job_id or f"job_{uuid.uuid4().hex[:8]}"
+        created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        job = CronJob(
+            id=new_id,
+            cron=cron,
+            message=message,
+            catch_up=catch_up,
+            created_at=created_at,
+        )
+        with self._lock:
+            if any(j.id == new_id for j in self._jobs):
+                raise ValueError(f"cron job id 已存在: {new_id}")
+            self._jobs.append(job)
+            self._persist_jobs_unlocked()
+        logger.info("cron 新增 job %s (%s)", new_id, cron)
+        return job
+
+    def remove_job(self, job_id: str) -> bool:
+        """删除 job（持久化）。不存在返回 False。"""
+        with self._lock:
+            before = len(self._jobs)
+            self._jobs = [j for j in self._jobs if j.id != job_id]
+            removed = len(self._jobs) < before
+            if removed:
+                self._last_fired.pop(job_id, None)
+                self._persist_jobs_unlocked()
+        if removed:
+            logger.info("cron 删除 job %s", job_id)
+        return removed
+
+    def list_jobs(self) -> list:
+        """列出所有 job（快照，dict 形式）。"""
+        with self._lock:
+            jobs_snapshot = list(self._jobs)
+        return [
+            {
+                "id": j.id,
+                "cron": j.cron,
+                "message": j.message,
+                "enabled": j.enabled,
+                "catch_up": j.catch_up,
+                "recurring": j.recurring,
+                "created_at": j.created_at,
+            }
+            for j in jobs_snapshot
+        ]
 
     # ---- 内部 ----
     def _load_jobs(self, jobs_path: Path) -> int:

@@ -47,7 +47,7 @@ SAFE_TOOLS = {
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
-# 31 个，覆盖写入、执行、外部 API、子进程、消息总线等。
+# 34 个，覆盖写入、执行、外部 API、子进程、消息总线等。
 UNSAFE_TOOLS = {
     # 文件类（写入）
     "write_file",       # 写文件
@@ -103,6 +103,10 @@ UNSAFE_TOOLS = {
     "web_search",       # Tavily 搜索
     # 记忆召回（外部 LLM）
     "memory_recall",    # CCAR8 Task 3: 调 aux_llm（retrieve_relevant），消耗配额
+    # Cron 定时任务（CCAR12 Task 3：写 jobs.json + 影响调度行为）
+    "cron_create",
+    "cron_list",        # 按 brief 归 UNSAFE（与 create/delete 同组管理）
+    "cron_delete",
 }
 
 

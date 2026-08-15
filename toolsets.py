@@ -56,6 +56,8 @@ _CORE_TOOLS = [
     # Team 多 agent 协作（Phase 4a）
     "team_send", "team_inbox", "team_members",
     "team_spawn", "team_shutdown", "idle",
+    # Cron 定时任务（CCAR12 Task 3：LLM 自主创建/列出/删除，包装 CronScheduler）
+    "cron_create", "cron_list", "cron_delete",
 ]
 
 TOOLSETS: Dict[str, dict] = {
@@ -148,7 +150,8 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     "task_complete",
     # 子代理嵌套（防止递归派生）
     "subagent",
-    # cron 调度（后台子代理不应注册定时任务）
+    # cron 调度（后台子代理不应注册/删除定时任务）
+    "cron_create", "cron_delete",
     # idle 挂起（后台子代理不应进 IDLE 状态影响 team 协调）
     "idle",
 })
