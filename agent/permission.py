@@ -16,7 +16,9 @@ LLM 调用（ls/cat/git status 等明显安全）。fail-open：AI 调用失败�
 import asyncio
 import json
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -349,6 +351,81 @@ def is_write_protected_path(path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# R16 #2：可疑路径形态检测（Windows 绕过手法，全平台检测）
+# ---------------------------------------------------------------------------
+
+# 8.3 短名（GIT~1 / SETTIN~1.JSON / BASHRC~1）
+_SHORT_NAME_RE = re.compile(r"~\d")
+# 长路径前缀（\\?\ / \\.\ 及正斜杠变体 //?/ //./）
+_LONG_PATH_PREFIXES = ("\\\\?\\", "\\\\.\\", "//?/", "//./")
+# 尾点/尾空格（Windows 解析时剥离 → ".git." 绕过 ".git" 字符串匹配）
+_TRAILING_DOT_SPACE_RE = re.compile(r"[.\s]+$")
+# DOS 设备名作扩展名（.git.CON / settings.json.PRN / .bashrc.AUX）
+_DOS_DEVICE_EXT_RE = re.compile(
+    r"\.(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE
+)
+# 三连点及以上作为独立路径段（.../file.txt 或 path/.../file；
+# 只拦"前后都是分隔符或端点"的段形态，放行 [...] 这类合法命名）
+_TRIPLE_DOT_SEGMENT_RE = re.compile(r"(?:^|[/\\])\.{3,}(?:[/\\]|$)")
+# 波浪变体（~user / ~+ / ~- / ~N——非 "~" 与 "~/" 起头的形态；
+# shell 展开目标（~root → /var/root）与校验目标（当相对路径）不一致）
+_TILDE_VARIANT_RE = re.compile(r"^~(?![/\\]|$)")
+# glob 元字符（写路径禁止：写工具按字面使用路径，通配符只会绕过校验）
+_GLOB_META_RE = re.compile(r"[*?\[\]{}]")
+
+
+def check_suspicious_path(path, *, write: bool = False) -> Optional[str]:
+    """R16 #2：检测可用于绕过安全检查的可疑路径形态（命中即拒）。
+
+    对齐 CCB hasSuspiciousWindowsPathPattern + pathValidation 的波浪变体 /
+    写路径 glob 禁令，且按 CC 同样理由**全平台检测**（NTFS 可挂载于任意 OS，
+    短名/长前缀等绕过手法在 ntfs-3g 挂载的 Linux/macOS 上同样生效）：
+
+    - NTFS ADS 冒号（file.txt:stream，仅 win32——POSIX 冒号是合法文件名字符）
+    - 8.3 短名（GIT~1）
+    - 长路径前缀（\\\\?\\ / \\\\.\\）
+    - 尾点/尾空格（Windows 解析时剥离）
+    - DOS 设备名扩展（CON/PRN/AUX/NUL/COM1-9/LPT1-9）
+    - 三连点路径段（.../file）
+    - UNC 路径（\\\\server\\share——远程资源访问 + 凭证泄露 + 绕过工作目录限制）
+    - 波浪变体（~user / ~+ / ~N）
+    - glob 元字符（仅写路径；读路径的 glob 由 glob 工具自己展开）
+
+    返回拒绝原因（中文说明），未命中返回 None。
+    """
+    try:
+        s = str(path)
+    except Exception:
+        return None
+    if not s:
+        return None
+
+    # 长路径前缀先于 ADS 冒号检查（\\?\C:\ 里的冒号是盘符不是 ADS）
+    if s.startswith(_LONG_PATH_PREFIXES):
+        return "长路径前缀（\\\\?\\ / \\\\.\\）"
+    # NTFS ADS 冒号：跳过盘符冒号（C:\ 在位置 1），从位置 2 起找
+    if sys.platform == "win32" and s.find(":", 2) != -1:
+        return "NTFS ADS 冒号形态（file:stream）"
+    if _SHORT_NAME_RE.search(s):
+        return "8.3 短名形态（NAME~1）"
+    # 尾点/尾空格：只看最后一个路径段（裸 "."/".." 是目录引用，放行）
+    _last_seg = re.split(r"[/\\]", s)[-1]
+    if _last_seg and _last_seg not in (".", "..") and _TRAILING_DOT_SPACE_RE.search(_last_seg):
+        return "尾点/尾空格（Windows 解析时剥离，可绕过路径匹配）"
+    if _DOS_DEVICE_EXT_RE.search(s):
+        return "DOS 设备名扩展（CON/PRN/AUX/NUL/COM/LPT）"
+    if _TRIPLE_DOT_SEGMENT_RE.search(s):
+        return "三连点路径段（...）"
+    if s.startswith("\\\\") or s.startswith("//"):
+        return "UNC 路径（网络资源访问）"
+    if _TILDE_VARIANT_RE.match(s):
+        return "波浪变体（~user / ~+ / ~N，shell 展开目标与校验目标不一致）"
+    if write and _GLOB_META_RE.search(s):
+        return "写路径含 glob 元字符（写工具按字面使用路径）"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 路径白名单（写操作检查）
 # ---------------------------------------------------------------------------
 
@@ -424,6 +501,11 @@ def safe_path(
 
     返回 PermissionResult。
     """
+    # R16 #2：可疑路径形态前置检查（读写都查，命中即拒）
+    susp = check_suspicious_path(path, write=write)
+    if susp:
+        return PermissionResult(False, f"可疑路径形态: {susp}", "suspicious")
+
     # 先检查受保护路径（读写都拒）
     prot = is_protected_path(path)
     if prot:
@@ -1078,6 +1160,12 @@ class PermissionChecker:
         """
         # 决定本次 check_path 使用的 effective mode
         effective_mode = mode_override or self.mode
+
+        # R16 #2:可疑路径形态前置检查（读写都查、任何模式都拒——安全底线，
+        # 防止 NTFS ADS / 8.3 短名 / 尾点等形态绕过下面的保护表与白名单）
+        susp = check_suspicious_path(path, write=write)
+        if susp:
+            return self._deny(str(path), f"可疑路径形态: {susp}", "suspicious")
 
         # 闸门 1:受保护路径硬拒（任何模式下都拒——安全底线）
         prot = is_protected_path(path)
