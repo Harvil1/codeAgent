@@ -1,73 +1,51 @@
-# CCAR13 Task 3 报告：subagent transcript 每轮 append（完整轨迹）
+# CCAR14 Task 3 报告：check_path 闸门 3 白名单外接审批通道
 
-**Status**: DONE
-**Date**: 2026-08-15
+**状态**：完成
+**日期**：2026-08-15
 
-## 机制选择（第一步 grep 结论 + 理由）
+## 第一步：Read callback 现状（结论）
 
-| grep 项 | 结论 |
+| 项 | 实际形态 |
 |---|---|
-| `on_response` 触发点 | `agent/__init__.py:2112`，仅 `run_conversation` 末尾一次，只拿 `final_content` |
-| `POST_LLM_CALL` payload | `agent/__init__.py:1083`（`_run_post_llm_call_hook`），主循环**每次 LLM 调用后**触发（流式/非流式汇合点之后），hook 收到完整 response 对象（`response.choices[0].message`） |
-| `_run_child` 的 `hooks_registry` | **未传** → 子代理拿 `None`。**不共享主 agent**（无污染风险） |
-| `mark_completed` 是否依赖 on_response | **不依赖**——`_run_child` try/finally 直接调（成功 `completed` / 异常 `failed`），删 on_response append 不破 completed 语义 |
+| callback 属性名 | `PermissionChecker.approval_callback`（构造参数 `approval_callback`，非 `_approval_callback`） |
+| 签名 | `Callable[[str], bool]` —— 单字符串参数，返回 bool。**不支持类型区分参数** |
+| 接入方式 | `cli.py:_make_approval_callback()` 注入；内部按内容启发式分路径/命令分支（含 `/` 或 `\` 或 `~` 开头 → 路径分支，已有"即将写入路径(白名单外)"提示 + "同意后整个父目录不再询问"文案） |
+| terminal 会话缓存 | `self._approved: set`（存完整命令字符串，`cmd_key in self._approved` 成员查询；批准后 `_approved.add(cmd_key)` + 持久化白名单 `_save_whitelist()`） |
 
-**选择：POST_LLM_CALL 方案（brief 首选）**。理由：
+类型区分：因签名只有一个 str 参数，按 brief 在消息文本里区分 —— callback 收到 `文件写入审批: <resolved path>`。cli.py 的启发式（含路径分隔符）会正确落入路径分支，前缀只影响显示文本。
 
-1. grep 确认子代理 hooks_registry 不共享主 agent → brief 决策树允许注册；
-2. `HookRegistry()` 构造是纯内存的（声明式 hook 由 cli.py 的 hook_loader 加载，registry 本身不自动扫盘）→ 新建空实例零副作用；
-3. 不改 AIAgent 签名，复用既有扩展点（对齐"核心是窄腰"）。
+## 实现（`agent/permission.py`）
 
-**已知耦合（写进 CLAUDE.md 已知约束）**：走 `AIAgent._run_post_llm_call_hook`，受 `config["hooks"]["enabled"]` 门控（默认 True）。用户显式关 hooks 时轮级记录停摆（transcript 只剩开头 user 指令一条）。评估：hooks.enabled=False 本义是关 hook 系统，可接受；如未来要解耦，退化方案是 AIAgent 加 `on_turn` 参数（本次未做，避免不必要的核心改动）。
+1. `__init__` 加 `self._approved_write_roots: set = set()`（会话级，与 `_approved` 同区）
+2. `check_path` 闸门 3 白名单循环后、最终 deny 前，四步：
+   - **3.1 会话缓存命中**：`resolved.relative_to(approved_root)` 命中（含相等）→ 放行，gate="approval"
+   - **3.2 autoDeny 短路**：不问直接拒（fail-closed，对齐 terminal 闸门 3 的 Task J 语义，用 `effective_mode` 判断支持 `mode_override`）
+   - **3.3 default / acceptEdits（cwd 外落到此）+ callback 存在**：调 `approval_callback(f"文件写入审批: {resolved}")`；批准 → `resolved.parent` 进 `_approved_write_roots` + 放行；拒绝/异常 → 拒（fail-open 按拒绝）
+   - **3.4 无 callback** → 拒（现状，消息含允许根）
+3. `reset_cache()` 一并清空 `_approved_write_roots`（同为会话级缓存）
+4. 闸门 1/2 未动：受保护路径 / 写保护路径仍在其前硬拒，不进审批通道
+5. docstring 更新（闸门 3 描述补审批通道）
 
-## 实现
+## 测试（`tests/test_permission.py` 追加 4 个）
 
-### `tools/delegate_tool.py`（_run_child）
-
-1. **user 指令开头 append（新增）**：transcript 初始化（write_metadata）后立刻 append `{"role":"user","content": goal 或 goal+"\n上下文: "+context}`。注：brief 说"既有"，实际 grep 发现旧版**没有** user append（transcript 只有一条最终 assistant 响应）——本轮补上，resume 才有对话起点。
-2. **轮级 hook（替换 on_response）**：构造子代理前新建 `HookRegistry()` + 注册程序式 `POST_LLM_CALL` hook `_on_llm_turn`：
-   - `_extract_turn_text`：None 安全提取 assistant 文本；Anthropic 风格 content blocks（list）只拼 `type=="text"` 块
-   - 有文本才 append `{"role":"assistant","content":text,"_ts":...}`，fail-open（异常吞掉），返回 `None` 不修改 response
-3. **子代理构造**：`on_response=_on_response_cb` → `hooks_registry=_child_hooks`（独立空实例）
-4. **删除** `_on_response_cb`（每轮已记最终轮，避免双写）
-
-### 关键语义决策：轨迹永不带 tool_calls
-
-POST_LLM_CALL 拿得到 LLM 响应但拿不到 tool result。若轨迹记录带 tool_calls 的 assistant 消息，resume 时 `initial_messages` 会出现孤儿 tool_calls（无配对 tool result）→ API 400（项目史上踩过）。因此轮级记录**只存文本 content**，resume 的 initial_messages 是纯 user/assistant 文本流，配对天然完整。`subagent_resume_tool._run_resume` 的 clean 字段过滤（含 tool_calls）天然兼容——轨迹里根本没有该键。
-
-### 文档同步
-
-- `agent/subagent_persistence.py` 模块 docstring：删"⚠️ 只落盘最终响应 / Phase 2 计划"，改写每轮语义
-- `CLAUDE.md`：更新 CCAR5-I 关键代码位置行 + CCAR10"轨迹边界"约束行（已过时的"中断代理无轨迹"改为新语义）
-
-## 测试（tests/test_subagent_persistence.py，TDD 先红后绿）
-
-新增 `TestPerTurnTranscript`（8 个）+ 公共 helper `_spawn_mock_child` / `_llm_resp`：
-
-| 测试 | 断言 |
+| 测试 | 覆盖 |
 |---|---|
-| test_transcript_records_multiple_turns | 2 轮 LLM 响应 → transcript ≥3 条（user + 2 assistant），顺序/内容正确 |
-| test_user_directive_with_context | 带 context 时 user 指令含上下文 |
-| test_tool_calls_only_turn_not_appended | content=None/"" 的纯 tool_calls 轮不 append；全轨迹无 tool_calls 键 |
-| test_anthropic_list_content_blocks | content blocks 只拼 text 块 |
-| test_hook_fail_open_on_append_error | append 抛异常 → hook 不崩、response 原样返回 |
-| test_malformed_response_fail_open | choices 空/None/怪对象安全跳过 |
-| test_final_response_no_double_write | on_response 已删；最终轮文本只出现 1 次 |
-| test_hooks_registry_not_shared_with_parent | 独立 HookRegistry 实例，仅 1 个 POST_LLM_CALL hook |
+| `test_check_path_approval_grant_caches_parent` | 批准后父目录进缓存；第二次同目录 callback 不再被调 + 放行；消息含"文件写入审批"前缀 |
+| `test_check_path_approval_deny_not_cached` | 拒绝不缓存（每次重新问）；无 callback 保持拒（消息含"允许"）；callback 抛异常按拒绝 |
+| `test_check_path_autoden_never_asks` | autoDeny 不调 callback 直接拒 |
+| `test_check_path_gates_1_2_still_hard_before_approval` | ~/.ssh（闸门 1）+ 项目代码目录（闸门 2）均硬拒且 callback 一次不调 |
 
-改写 2 个既有测试：
-
-- `test_transcript_persisted_on_success`：断言 on_response → 改为 hooks_registry 非 None + on_response 为空
-- `test_on_response_appends_transcript`：改写为轮级版（拿 ctor kwargs 的 hooks_registry 模拟 2 轮 → 3 条）
+**测试修正说明**：brief 的 sketch `outside = tmp_path/"outside"` + monkeypatch cwd 到 tmp_path 会让 outside 落在白名单根（workspace cwd = tmp_path）内，直接"白名单内"放行、审批通道根本不触发（TDD 红灯暴露）。已改为 chdir 到 `tmp_path/"ws"`、目标目录用兄弟目录 `tmp_path/"outside"`，保证真正白名单外。
 
 ## 验证
 
-- `tests/test_subagent_persistence.py` + `tests/test_subagent_resume.py`：51 passed（resume 闭环：完整轨迹作 initial_messages 跑绿，completed 标记语义不破）
-- 定向：delegation + hooks + persistence + resume = 132 passed
-- **全套：2432 passed, 1 skipped（207s）**
+- `uv run pytest tests/test_permission.py`：161 passed（原 157 + 新 4）
+- `uv run pytest tests/`：**2450 passed, 0 failed**（3m34s）
+- `uv run python scripts/verify.py`：22/22 ALL PASS
 
 ## Concerns
 
-1. **hooks.enabled 耦合**（上述，已写进 CLAUDE.md 约束；如需彻底解耦留 AIAgent.on_turn 退化方案）
-2. **给子代理传 registry 的表面变化**：子代理从此 hooks_registry 非 None——空 registry 对其余 26 种事件全是 no-op；`auto_heartbeat` 会注册但其 OMNIMATE_KANBAN_TASK env 门控不满足时 no-op；trace/声明式 hook 均不加载。全套测试无回归佐证。
-3. **多轮连续 assistant 消息**：resume 时 initial_messages 可能出现连续 assistant（中间轮无 user/tool 间隔），OpenAI 兼容 API 允许；Anthropic 格式也未报错（resume 测试全绿）。如未来 API 挑剔，可在 _run_resume 里合并相邻 assistant。
+1. **callback 签名**：单 `str -> bool`，无类型参数。路径/命令区分靠 cli.py 的启发式（含分隔符 → 路径）。本次前缀 `文件写入审批: ` 不影响该启发式（路径仍含分隔符），但若未来前缀改成纯中文无路径形式会误判成命令分支。
+2. **持久化未做**（按 brief 范围）：`_approved_write_roots` 仅会话级。构造参数里已有 `paths_whitelist_file` / `_approved_paths` 持久化机制（cli.py 已传 `approved_paths.json`），但 check_path 目前**不查询也不写入**它——留作 follow-up：批准时可同步 `_approved_paths.add(parent)` + `_save_paths_whitelist()`，实现跨会话不重复问（cli callback docstring 已宣称此语义但实际未接线）。
+3. **hook / 桌面通知未接**：terminal 审批前有 PERMISSION_REQUEST hook + toast 通知；check_path 审批通道未加（brief 未要求）。用户不盯屏时文件写入审批可能被错过——建议 follow-up 同款 fail-open 接入。
+4. **缓存粒度**：批准的是 `resolved.parent`（父目录级），与 cli 提示文案"同意后整个父目录不再询问"一致。若目标本身是目录（如 mkdir 深层路径），缓存的是其父目录——语义上"该目录所在处已批"，合理。

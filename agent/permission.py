@@ -619,6 +619,9 @@ class PermissionChecker:
         """
         self.approval_callback = approval_callback
         self._approved = set()  # 会话内缓存（命令）
+        # CCAR14 Task 3: 会话级写入根目录审批缓存（check_path 闸门 3 白名单外，
+        # 用户批准一次后父目录进缓存，同目录后续写入不再询问）
+        self._approved_write_roots: set = set()
         self._whitelist_file = whitelist_file
         self._persistent_whitelist = set()
         if whitelist_file:
@@ -945,7 +948,9 @@ class PermissionChecker:
           闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线)
           闸门 2:写保护路径(项目代码目录)→ 硬拒(防入侵)
           闸门 3:写白名单(workspace cwd / ~/.OmniMate / /add-dir 追加的
-                 extra roots)之内放行,之外拒。
+                 extra roots)之内放行;之外走审批通道(CCAR14 Task 3):
+                 会话缓存命中放行 → autoDeny 直接拒 → approval_callback
+                 审批(批准后父目录进会话缓存) → 无 callback 拒。
 
         CCAR13 Task 4: 恢复闸门 3 的白名单语义（dcec556b 曾放开为"其他全通过"，
         导致 /add-dir 加的额外白名单对 write_file/str_replace 不生效——它们走
@@ -1014,6 +1019,45 @@ class PermissionChecker:
             except (OSError, ValueError):
                 continue
 
+        # === CCAR14 Task 3: 闸门 3 审批通道（白名单外、最终 deny 之前）===
+        # 与 terminal 命令审批同构：会话缓存 → autoDeny 短路 → callback 审批。
+        # 注意：闸门 1/2（受保护/写保护）在上面已硬拒，不会进这里——
+        # 追加白名单/审批缓存都不能绕过硬底线（安全默认 > 事后补救）。
+
+        # 3.1 会话缓存命中：目标路径在已批准的写入根目录下 → 放行
+        # （relative_to 对相等路径也成立，目录本身命中同样放行）
+        for approved_root in self._approved_write_roots:
+            try:
+                resolved.relative_to(approved_root)
+                return PermissionResult(True, "已批准（写入根目录）", "approval")
+            except (OSError, ValueError):
+                continue
+
+        # 3.2 autoDeny：async 子代理（用户不在场）不能弹审批 UI → 直接拒
+        # （对齐 terminal 闸门 3 的 autoDeny 短路语义，fail-closed）
+        if effective_mode == "autoDeny":
+            return self._deny(
+                str(path),
+                f"auto-denied: async 子代理不能弹审批 UI（白名单外写入: {resolved}）",
+                "auto_deny",
+            )
+
+        # 3.3 default / acceptEdits（cwd 外落到这里）：有 callback → 问用户
+        # callback 签名 fn(item: str) -> bool（与 terminal 共用同一接口），
+        # 类型区分靠消息文本前缀"文件写入审批"（cli.py 的 callback 按内容
+        # 含路径分隔符启发式识别路径分支）。
+        if self.approval_callback is not None:
+            try:
+                approved = bool(self.approval_callback(f"文件写入审批: {resolved}"))
+            except Exception:
+                approved = False  # fail-open：callback 异常按拒绝处理（不崩）
+            if approved:
+                # 批准：父目录进会话缓存，同目录后续写入不再询问
+                self._approved_write_roots.add(resolved.parent)
+                return PermissionResult(True, "已批准（写入根目录）", "approval")
+            return self._deny(str(path), "用户拒绝", "approval")
+
+        # 3.4 无 callback → 拒（现状，消息含允许根）
         return self._deny(
             str(path),
             f"写入路径不在白名单: {resolved}（允许: {[str(r) for r in roots]}）",
@@ -1041,6 +1085,8 @@ class PermissionChecker:
     def reset_cache(self):
         """清空会话内缓存（不影响持久化白名单）。"""
         self._approved.clear()
+        # CCAR14 Task 3: 写入根目录审批缓存同样是会话级，一并清空
+        self._approved_write_roots.clear()
 
     def set_sandbox_mode(self, mode: str) -> None:
         """切换 OS 沙箱模式（/sandbox 命令调）。

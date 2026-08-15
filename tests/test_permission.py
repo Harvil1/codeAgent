@@ -1181,3 +1181,115 @@ def test_accept_edits_still_allows_cwd_normal_files(tmp_path, monkeypatch):
         checker = PermissionChecker(mode="acceptEdits")
         result = checker.check_path(str(tmp_path / "normal.txt"), write=True)
         assert result.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# CCAR14 Task 3: check_path 闸门 3 白名单外审批通道
+# （default / acceptEdits cwd 外可"批一次"，批准后父目录进会话缓存）
+# ---------------------------------------------------------------------------
+
+def test_check_path_approval_grant_caches_parent(tmp_path, monkeypatch):
+    """批准后父目录进会话缓存，第二次不再问。"""
+    # 注意：workspace cwd = chdir 后的目录是白名单根，
+    # 必须把 cwd 和目标目录分开（outside 不能在 cwd 下，否则白名单内直接放行）
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calls = []
+
+    def cb(item: str) -> bool:
+        calls.append(item)
+        return True
+
+    c = PermissionChecker(approval_callback=cb)
+    # 第一次：白名单外 → 调 callback + 批准放行
+    r1 = c.check_path(str(outside / "a.txt"), write=True)
+    assert r1.allowed is True
+    assert len(calls) == 1
+    assert "文件写入审批" in calls[0]  # 与 terminal 命令审批在文本上区分
+    # 第二次：同父目录 → 缓存命中，不再问
+    r2 = c.check_path(str(outside / "b.txt"), write=True)
+    assert r2.allowed is True
+    assert len(calls) == 1  # callback 未被再次调用
+
+
+def test_check_path_approval_deny_not_cached(tmp_path, monkeypatch):
+    """拒绝不缓存；无 callback 保持拒（消息含允许根）。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calls = []
+
+    def cb(item: str) -> bool:
+        calls.append(item)
+        return False
+
+    c = PermissionChecker(approval_callback=cb)
+    # 用户拒绝 → 拒，且不进缓存
+    r1 = c.check_path(str(outside / "a.txt"), write=True)
+    assert r1.allowed is False
+    r2 = c.check_path(str(outside / "b.txt"), write=True)
+    assert r2.allowed is False
+    assert len(calls) == 2  # 每次都重新问了（未缓存）
+
+    # 无 callback → 保持现状拒（消息含允许根）
+    c2 = PermissionChecker()
+    r3 = c2.check_path(str(outside / "c.txt"), write=True)
+    assert r3.allowed is False
+    assert "允许" in r3.reason
+
+    # callback 抛异常 → fail-open 按拒绝
+    def boom(item: str) -> bool:
+        raise RuntimeError("UI 崩了")
+
+    c3 = PermissionChecker(approval_callback=boom)
+    r4 = c3.check_path(str(outside / "d.txt"), write=True)
+    assert r4.allowed is False
+
+
+def test_check_path_autoden_never_asks(tmp_path, monkeypatch):
+    """autoDeny 不调 callback 直接拒。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calls = []
+
+    def cb(item: str) -> bool:
+        calls.append(item)
+        return True
+
+    c = PermissionChecker(approval_callback=cb, mode="autoDeny")
+    r = c.check_path(str(outside / "a.txt"), write=True)
+    assert r.allowed is False
+    assert len(calls) == 0
+
+
+def test_check_path_gates_1_2_still_hard_before_approval(tmp_path, monkeypatch):
+    """受保护/写保护路径不进审批通道（闸门 1/2 硬拒，callback 不被调）。"""
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def cb(item: str) -> bool:
+        calls.append(item)
+        return True
+
+    c = PermissionChecker(approval_callback=cb)
+    # 闸门 1：受保护路径（~/.ssh）
+    r1 = c.check_path(str(Path.home() / ".ssh" / "evil_key"), write=True)
+    assert r1.allowed is False
+    assert "受保护" in r1.reason
+    # 闸门 2：写保护路径（项目代码目录）
+    from agent.permission import _WRITE_PROTECTED_PATHS
+    assert _WRITE_PROTECTED_PATHS, "写保护列表不应为空"
+    prot_path = _WRITE_PROTECTED_PATHS[0][0] / "evil.py"
+    r2 = c.check_path(str(prot_path), write=True)
+    assert r2.allowed is False
+    assert "写保护" in r2.reason
+    # 两道闸门都在审批之前：callback 一次都没被调
+    assert len(calls) == 0
