@@ -23,6 +23,9 @@ __pycache__/
 # superpowers 插件数据
 .superpowers/
 
+# 会话级 worktree（CCAR12 Task 6：worktree_enter 建在 repo_root/.worktrees/）
+.worktrees/
+
 # 桌面 GUI 分支(master)残留:cli-dev 不用 frontend/backend,
 # 切分支时 node_modules / __pycache__(gitignored)会残留在磁盘,
 # 这里屏蔽让 git status 干净。磁盘保留 node_modules 省得切回 master 重装。

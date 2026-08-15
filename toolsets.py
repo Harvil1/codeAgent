@@ -162,6 +162,10 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     # 守卫，async 子代理在 daemon 线程激活 goal 会不可中断地烧 token；
     # pause/clear 是止损工具保留给子代理自救）
     "goal_start", "goal_resume",
+    # 会话级 worktree 进入（CCAR12 Task 6 fix：async 子代理 enter 会置位
+    # 模块级 _session_worktree——主对话再 enter 被 already_in_worktree 卡死；
+    # worktree_exit 留给子代理自救，对齐 goal_pause/goal_clear 处置）
+    "worktree_enter",
 })
 
 

@@ -212,3 +212,15 @@ def test_async_disallow_contains_goal_activation():
     from toolsets import ASYNC_AGENT_DISALLOWED_TOOLS
     assert "goal_start" in ASYNC_AGENT_DISALLOWED_TOOLS
     assert "goal_resume" in ASYNC_AGENT_DISALLOWED_TOOLS
+
+
+def test_async_disallow_contains_worktree_enter():
+    """【CCAR12 Task 6 fix】worktree_enter 必须禁用于 async 子代理。
+
+    async 子代理 enter 会置位模块级 _session_worktree——主对话再 enter
+    被 already_in_worktree 卡死（会话级全局状态污染）。worktree_exit
+    留给子代理自救（对齐 goal_pause/goal_clear 处置）。
+    """
+    from toolsets import ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "worktree_enter" in ASYNC_AGENT_DISALLOWED_TOOLS
+    assert "worktree_exit" not in ASYNC_AGENT_DISALLOWED_TOOLS

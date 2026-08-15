@@ -20,6 +20,9 @@ get_workspace_cwd() 都指向 worktree，直到 worktree_exit。
     - session_id：透传给 hook payload
 
 两工具 isConcurrencySafe=False（改会话级全局 cwd + 建/删 worktree，串行）。
+两 handler 是 async def（is_async=True）——会话 cwd 的 ContextVar set/reset
+必须在主循环 context 里执行（dispatch 直接 await），走 to_thread 的
+context 拷贝会导致 enter 静默失效 + exit reset 跨 context 抛 ValueError。
 """
 import json
 import logging
@@ -55,11 +58,15 @@ class _SessionWorktree:
     """当前会话进入的 worktree 记录（enter 时写入，exit 时消费）。"""
 
     def __init__(self, path: Path, branch: Optional[str],
-                 workspace_type: str, reused: bool):
+                 workspace_type: str, reused: bool,
+                 repo_root: Optional[Path] = None):
         self.path = Path(path)
         self.branch = branch        # git 模式新建时记录；复用/降级时 None（不删分支）
         self.workspace_type = workspace_type  # "git" | "temp"
         self.reused = reused
+        # enter 时记 repo root（exit 删分支用它——exit 前 cwd 已恢复，
+        # 不能依赖恢复后的进程 cwd 反查 repo）
+        self.repo_root = Path(repo_root) if repo_root else None
 
 
 # 当前会话的 worktree（None = 不在 worktree 中）
@@ -161,7 +168,8 @@ def _create_session_worktree(name: str):
             wt_dir = repo_root / ".worktrees" / name
             if wt_dir.exists():
                 # 复用：目录已存在（上次会话留下）。分支未知 → exit 时不删分支。
-                return _SessionWorktree(wt_dir, None, "git", reused=True)
+                return _SessionWorktree(wt_dir, None, "git", reused=True,
+                                        repo_root=repo_root)
 
             short_id = uuid.uuid4().hex[:8]
             branch = f"omnimate/{name}/{short_id}"
@@ -175,7 +183,8 @@ def _create_session_worktree(name: str):
             if result.returncode != 0:
                 raise RuntimeError(f"git worktree add 失败: {result.stderr.strip()}")
             logger.info("已创建会话 worktree: %s（分支 %s）", wt_dir, branch)
-            return _SessionWorktree(wt_dir, branch, "git", reused=False)
+            return _SessionWorktree(wt_dir, branch, "git", reused=False,
+                                    repo_root=repo_root)
         except Exception as e:
             logger.warning("git worktree 创建失败，降级到临时目录: %s", e)
 
@@ -184,8 +193,19 @@ def _create_session_worktree(name: str):
     return _SessionWorktree(tmp, None, "temp", reused=False)
 
 
-def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
-    """进入会话级 worktree：建/复用目录 + set_session_workspace_cwd + CWD_CHANGED hook。"""
+async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
+    """进入会话级 worktree：建/复用目录 + set_session_workspace_cwd + CWD_CHANGED hook。
+
+    为什么 async def（CCAR12 Task 6 fix，review Critical）：
+    registry.dispatch 对 sync handler 走 asyncio.to_thread——会把当前
+    context **拷贝**到 worker 线程，`set_session_workspace_cwd` 的 ContextVar
+    set 只改拷贝，不回透主循环（enter 静默失效）；exit 的
+    clear_session_workspace_cwd 在拷贝 context 里 reset 主 context 的
+    token → ValueError → 永远 tool_exception（状态机死锁）。
+    async handler dispatch 直接 await——同 task 同 context，set 生效 +
+    token 同 context 可 reset。内部逻辑同步 IO（worktree 创建是本地
+    git 命令），async 里直接跑即可。
+    """
     global _session_worktree
     if _session_worktree is not None:
         return _err(
@@ -224,8 +244,12 @@ def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
     )
 
 
-def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
-    """退出会话级 worktree：clear_session_workspace_cwd + keep=False 时智能清理。"""
+async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
+    """退出会话级 worktree：clear_session_workspace_cwd + keep=False 时智能清理。
+
+    async def 理由同 _handle_worktree_enter：clear 的 ContextVar reset
+    必须和 set 同 context（to_thread 拷贝 context 里 reset 必炸）。
+    """
     global _session_worktree
     if _session_worktree is None:
         return _err("worktree_exit", "当前不在 worktree 中", "not_in_worktree")
@@ -261,9 +285,11 @@ def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
 
     cleaned = cleanup_worktree_smart(wt.path)
     # git 模式新建的分支一并删（cleanup_worktree_smart 不删分支——CCAR5-G 分工：
-    # 分支删除由有 branch 上下文的调用方负责，这里就是）
+    # 分支删除由有 branch 上下文的调用方负责，这里就是）。
+    # repo 用 enter 时记的 wt.repo_root——此刻 cwd 已恢复到 worktree 之前的
+    # 位置，不能依赖恢复后的进程 cwd 反查（Minor 2）
     if wt.branch and wt.workspace_type == "git":
-        repo_root = get_repo_root(Path.cwd())
+        repo_root = wt.repo_root or get_repo_root(Path.cwd())
         if repo_root is not None:
             try:
                 subprocess.run(
@@ -282,12 +308,16 @@ def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
 
 
 # 模块级注册（import 时自动执行）
+# is_async=True：handler 是 async def——dispatch 直接 await（同 task 同 context），
+# 不走 to_thread 的 context 拷贝（set_session_workspace_cwd 的 set/reset 必须在
+# 主循环 context 里执行，否则 enter 静默失效 + exit reset 跨 context 炸 ValueError）
 registry.register(
     name="worktree_enter",
     toolset="core",
     schema=WORKTREE_ENTER_SCHEMA,
     handler=_handle_worktree_enter,
     emoji="🌳",
+    is_async=True,
     isConcurrencySafe=False,  # 改会话级全局 cwd + 建 worktree，必须串行
 )
 registry.register(
@@ -296,5 +326,6 @@ registry.register(
     schema=WORKTREE_EXIT_SCHEMA,
     handler=_handle_worktree_exit,
     emoji="🌳",
+    is_async=True,
     isConcurrencySafe=False,  # 清 cwd 状态 + 可能删 worktree，必须串行
 )

@@ -100,10 +100,10 @@ class TestSessionWorkspaceCwd:
 
 class TestWorktreeEnter:
 
-    def test_enter_creates_worktree_and_switches_cwd(self, tmp_path):
+    async def test_enter_creates_worktree_and_switches_cwd(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            result = _handle_worktree_enter({"name": "feature-x"}, agent_ref=None)
+            result = await _handle_worktree_enter({"name": "feature-x"}, agent_ref=None)
             data = json.loads(result)
             assert "error" not in data, data
             wt = repo / ".worktrees" / "feature-x"
@@ -115,77 +115,77 @@ class TestWorktreeEnter:
             # 会话 cwd 已切换到 worktree
             assert get_workspace_cwd() == str(wt)
             # 退出恢复 + 清理（测试收尾）
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_default_name_when_missing(self, tmp_path):
+    async def test_enter_default_name_when_missing(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            result = _handle_worktree_enter({}, agent_ref=None)
+            result = await _handle_worktree_enter({}, agent_ref=None)
             data = json.loads(result)
             assert "error" not in data, data
             wt = Path(data["path"])
             assert wt.parent == repo / ".worktrees"
             assert wt.name.startswith("wt-")
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_reuses_existing_worktree(self, tmp_path):
+    async def test_enter_reuses_existing_worktree(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
             # 第一次进入 + 退出（keep=True 保留目录）
-            first = json.loads(_handle_worktree_enter({"name": "reuse-me"}, agent_ref=None))
+            first = json.loads(await _handle_worktree_enter({"name": "reuse-me"}, agent_ref=None))
             assert first["reused"] is False
-            _handle_worktree_exit({"keep": True})
+            await _handle_worktree_exit({"keep": True})
 
             # 第二次进入同名 → 复用（reused=True，同一路径）
-            second = json.loads(_handle_worktree_enter({"name": "reuse-me"}, agent_ref=None))
+            second = json.loads(await _handle_worktree_enter({"name": "reuse-me"}, agent_ref=None))
             assert second["reused"] is True
             assert second["path"] == first["path"]
             assert get_workspace_cwd() == first["path"]
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_rejects_when_already_in_worktree(self, tmp_path):
+    async def test_enter_rejects_when_already_in_worktree(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            _handle_worktree_enter({"name": "a"}, agent_ref=None)
-            result = _handle_worktree_enter({"name": "b"}, agent_ref=None)
+            await _handle_worktree_enter({"name": "a"}, agent_ref=None)
+            result = await _handle_worktree_enter({"name": "b"}, agent_ref=None)
             data = json.loads(result)
             assert data["error_type"] == "already_in_worktree"
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_sanitizes_bad_name(self, tmp_path):
+    async def test_enter_sanitizes_bad_name(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            result = _handle_worktree_enter({"name": "..\\evil ..name"}, agent_ref=None)
+            result = await _handle_worktree_enter({"name": "..\\evil ..name"}, agent_ref=None)
             data = json.loads(result)
             assert "error" not in data, data
             name = Path(data["path"]).name
             assert ".." not in name and "\\" not in name and " " not in name
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_fires_cwd_changed_hook(self, tmp_path):
+    async def test_enter_fires_cwd_changed_hook(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
             hooks = MagicMock()
-            _handle_worktree_enter({"name": "hooked"}, agent_ref=_make_agent_ref(hooks))
+            await _handle_worktree_enter({"name": "hooked"}, agent_ref=_make_agent_ref(hooks))
             assert hooks.run_cwd_changed.call_count == 1
             payload = hooks.run_cwd_changed.call_args[0][0]
             assert payload["new"] == str(repo / ".worktrees" / "hooked")
             assert "old" in payload
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_agent_ref_none_skips_hook(self, tmp_path):
+    async def test_enter_agent_ref_none_skips_hook(self, tmp_path):
         """agent_ref=None（hooks 也拿不到）→ 跳过 hook 不抛。"""
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            result = _handle_worktree_enter({"name": "no-hook"}, agent_ref=None)
+            result = await _handle_worktree_enter({"name": "no-hook"}, agent_ref=None)
             assert "error" not in json.loads(result)
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
-    def test_enter_not_git_degrades_to_temp_dir(self, tmp_path):
+    async def test_enter_not_git_degrades_to_temp_dir(self, tmp_path):
         plain = tmp_path / "plain"
         plain.mkdir()
         for d in _cd(plain):
-            result = _handle_worktree_enter({"name": "nofail"}, agent_ref=None)
+            result = await _handle_worktree_enter({"name": "nofail"}, agent_ref=None)
             data = json.loads(result)
             assert "error" not in data, data
             assert data["workspace_type"] == "temp"
@@ -193,43 +193,43 @@ class TestWorktreeEnter:
             # 临时目录不在 repo 内（系统 temp）
             assert not Path(data["path"]).is_relative_to(plain)
             assert get_workspace_cwd() == data["path"]
-            _handle_worktree_exit({"keep": False})
+            await _handle_worktree_exit({"keep": False})
 
 
 class TestWorktreeExit:
 
-    def test_exit_restores_cwd(self, tmp_path):
+    async def test_exit_restores_cwd(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
             before = get_workspace_cwd()
-            _handle_worktree_enter({"name": "inout"}, agent_ref=None)
+            await _handle_worktree_enter({"name": "inout"}, agent_ref=None)
             assert get_workspace_cwd() != before
-            result = _handle_worktree_exit({"keep": True})
+            result = await _handle_worktree_exit({"keep": True})
             assert "error" not in json.loads(result)
             assert get_workspace_cwd() == before
 
-    def test_exit_keep_true_preserves_worktree(self, tmp_path):
+    async def test_exit_keep_true_preserves_worktree(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            enter = json.loads(_handle_worktree_enter({"name": "keepme"}, agent_ref=None))
-            result = json.loads(_handle_worktree_exit({"keep": True}))
+            enter = json.loads(await _handle_worktree_enter({"name": "keepme"}, agent_ref=None))
+            result = json.loads(await _handle_worktree_exit({"keep": True}))
             assert result["kept"] is True and result["cleaned"] is False
             assert Path(enter["path"]).exists()
 
-    def test_exit_keep_default_true(self, tmp_path):
+    async def test_exit_keep_default_true(self, tmp_path):
         """keep 缺省 = True（保守默认，不删用户目录）。"""
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            enter = json.loads(_handle_worktree_enter({"name": "default"}, agent_ref=None))
-            result = json.loads(_handle_worktree_exit({}))
+            enter = json.loads(await _handle_worktree_enter({"name": "default"}, agent_ref=None))
+            result = json.loads(await _handle_worktree_exit({}))
             assert result["kept"] is True
             assert Path(enter["path"]).exists()
 
-    def test_exit_keep_false_clean_when_no_changes(self, tmp_path):
+    async def test_exit_keep_false_clean_when_no_changes(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            enter = json.loads(_handle_worktree_enter({"name": "clean"}, agent_ref=None))
-            result = json.loads(_handle_worktree_exit({"keep": False}))
+            enter = json.loads(await _handle_worktree_enter({"name": "clean"}, agent_ref=None))
+            result = json.loads(await _handle_worktree_exit({"keep": False}))
             assert result["cleaned"] is True and result["kept"] is False
             assert not Path(enter["path"]).exists()
             # 分支一并删除
@@ -239,29 +239,29 @@ class TestWorktreeExit:
             ).stdout.strip()
             assert branches == ""
 
-    def test_exit_keep_false_keeps_when_has_changes(self, tmp_path):
+    async def test_exit_keep_false_keeps_when_has_changes(self, tmp_path):
         repo = _init_git_repo(tmp_path)
         for d in _cd(repo):
-            enter = json.loads(_handle_worktree_enter({"name": "dirty"}, agent_ref=None))
+            enter = json.loads(await _handle_worktree_enter({"name": "dirty"}, agent_ref=None))
             # 在 worktree 里写个未跟踪文件 → git status --porcelain 非空
             (Path(enter["path"]) / "new.txt").write_text("x", encoding="utf-8")
-            result = json.loads(_handle_worktree_exit({"keep": False}))
+            result = json.loads(await _handle_worktree_exit({"keep": False}))
             assert result["kept"] is True and result["cleaned"] is False
             assert result["reason"] == "has_changes"
             assert Path(enter["path"]).exists()
 
-    def test_exit_not_in_worktree(self):
-        result = json.loads(_handle_worktree_exit({}))
+    async def test_exit_not_in_worktree(self):
+        result = json.loads(await _handle_worktree_exit({}))
         assert result["error_type"] == "not_in_worktree"
 
-    def test_exit_temp_workspace_clean_when_no_changes(self, tmp_path):
+    async def test_exit_temp_workspace_clean_when_no_changes(self, tmp_path):
         """非 git 降级路径：空 temp 目录 keep=False → 清理（listdir 检测）。"""
         plain = tmp_path / "plain2"
         plain.mkdir()
         for d in _cd(plain):
-            enter = json.loads(_handle_worktree_enter({"name": "tmp"}, agent_ref=None))
+            enter = json.loads(await _handle_worktree_enter({"name": "tmp"}, agent_ref=None))
             assert enter["workspace_type"] == "temp"
-            result = json.loads(_handle_worktree_exit({"keep": False}))
+            result = json.loads(await _handle_worktree_exit({"keep": False}))
             assert result["cleaned"] is True
             assert not Path(enter["path"]).exists()
 
@@ -315,3 +315,87 @@ def test_worktree_tools_in_core_toolset_visible():
     core = set(resolve_toolset("core"))
     assert "worktree_enter" in core
     assert "worktree_exit" in core
+
+
+def test_handlers_are_async_not_threaded():
+    """【Task 6 fix Critical】handler 必须是 async def（is_async=True）。
+
+    sync handler 经 dispatch 的 asyncio.to_thread 跑在 context 拷贝里——
+    会话 cwd set 不回透主循环 + exit 的 token reset 跨 context 必炸。
+    本测试防"改回 sync"回归（配合下面的 dispatch 端到端测试）。
+    """
+    for name in ("worktree_enter", "worktree_exit"):
+        entry = registry.get(name)
+        assert entry.is_async is True, f"{name} 必须注册 is_async=True"
+        assert inspect.iscoroutinefunction(entry.handler), (
+            f"{name} handler 必须是 async def（to_thread context 拷贝会让"
+            "会话级 cwd 切换静默失效）"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. dispatch 端到端（Task 6 fix Critical 回归——单元直调绕过 to_thread，
+#    这就是漏检原因；必须经 registry.dispatch 验证 context 回透）
+# ---------------------------------------------------------------------------
+
+async def test_enter_exit_via_registry_dispatch(tmp_path):
+    """经 registry.dispatch 端到端：enter 真切 cwd，exit 真恢复（防 to_thread context 拷贝回归）。
+
+    复现路径：sync handler → asyncio.to_thread（context 拷贝到 worker 线程）
+    → set_session_workspace_cwd 只改拷贝（enter 静默失效）+ exit 在拷贝
+    context 里 reset 主 token → ValueError → tool_exception（状态机死锁）。
+    断言全部在 dispatch 外做——主 context 视角。
+    """
+    repo = _init_git_repo(tmp_path)
+    for d in _cd(repo):
+        before = get_workspace_cwd()
+
+        enter = json.loads(
+            await registry.dispatch("worktree_enter", {"name": "e2e"}, agent_ref=None)
+        )
+        assert "error" not in enter, enter
+        assert Path(enter["path"]) == repo / ".worktrees" / "e2e"
+        # dispatch 外、主 context 视角：cwd 必须真的切过去
+        # （to_thread context 拷贝回归恰好死在这——handler 自报成功但主循环没切）
+        assert get_workspace_cwd() == enter["path"]
+        assert get_workspace_cwd() != before
+
+        exit_result = json.loads(
+            await registry.dispatch("worktree_exit", {"keep": True}, agent_ref=None)
+        )
+        assert "error" not in exit_result, exit_result
+        assert exit_result["kept"] is True
+        # 主 context 视角：cwd 恢复 + 无 tool_exception（跨 context reset 回归点）
+        assert get_workspace_cwd() == before
+
+
+async def test_reenter_via_registry_dispatch_not_deadlocked(tmp_path):
+    """exit 后再 enter 不被 already_in_worktree 卡死（Critical 第 2 症状）。
+
+    to_thread 回归形态：_session_worktree 是模块级全局（线程间共享，
+    enter 会回写置位），但 exit 的 clear_session_workspace_cwd 在拷贝
+    context 里 reset 主 token → ValueError → dispatch 捕获成
+    tool_exception 且 _session_worktree 已置 None 也不清理干净 →
+    主对话被卡在 already_in_worktree。端到端验证完整生命周期可循环。
+    """
+    repo = _init_git_repo(tmp_path)
+    for d in _cd(repo):
+        first = json.loads(
+            await registry.dispatch("worktree_enter", {"name": "cycle"}, agent_ref=None)
+        )
+        assert "error" not in first
+        out1 = json.loads(
+            await registry.dispatch("worktree_exit", {"keep": False}, agent_ref=None)
+        )
+        assert "error" not in out1, out1
+        assert out1["cleaned"] is True
+
+        # 再进一次：不被 already_in_worktree 卡死
+        second = json.loads(
+            await registry.dispatch("worktree_enter", {"name": "cycle"}, agent_ref=None)
+        )
+        assert "error" not in second, second
+        out2 = json.loads(
+            await registry.dispatch("worktree_exit", {"keep": False}, agent_ref=None)
+        )
+        assert "error" not in out2, out2
