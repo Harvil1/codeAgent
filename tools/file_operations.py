@@ -612,3 +612,164 @@ registry.register(
     emoji="🔄",
     isConcurrencySafe=False,  # 写入：改文件内容，必须串行
 )
+
+
+# ---------------------------------------------------------------------------
+# NotebookEdit（R20 #35，对齐 CC NotebookEdit：Jupyter 单元格编辑）
+# ---------------------------------------------------------------------------
+
+NOTEBOOK_EDIT_SCHEMA = {
+    "name": "notebook_edit",
+    "description": (
+        "编辑 Jupyter notebook（.ipynb）的单个单元格。"
+        "edit_mode: replace（替换内容）/ insert（插入新格）/ delete（删除）。"
+        "cell_id 匹配 cell 的 id 字段；也接受纯数字（按索引）。"
+        "insert 不给 cell_id 时追加到末尾。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "notebook_path": {"type": "string", "description": "notebook 文件路径（.ipynb）"},
+            "cell_id": {
+                "type": "string",
+                "description": "目标单元格 id 或数字索引（replace/delete 必需；insert 可选=末尾）",
+            },
+            "new_source": {"type": "string", "description": "新内容（replace/insert）"},
+            "cell_type": {
+                "type": "string",
+                "enum": ["code", "markdown", "raw"],
+                "description": "insert 时的单元格类型",
+            },
+            "edit_mode": {
+                "type": "string",
+                "enum": ["replace", "insert", "delete"],
+                "description": "编辑模式（默认 replace）",
+            },
+        },
+        "required": ["notebook_path"],
+    },
+}
+
+
+def _find_cell_index(cells: list, cell_id: str) -> int:
+    """按 cell id 字段或数字索引找 cell 下标；找不到返回 -1。"""
+    for i, cell in enumerate(cells):
+        if str(cell.get("id", "")) == cell_id:
+            return i
+    try:
+        idx = int(cell_id)
+        if 0 <= idx < len(cells):
+            return idx
+    except ValueError:
+        pass
+    return -1
+
+
+def _handle_notebook_edit(args: dict, **kwargs) -> str:
+    path_str = args.get("notebook_path", "")
+    cell_id = str(args.get("cell_id", "") or "")
+    new_source = args.get("new_source", "")
+    cell_type = args.get("cell_type", "code")
+    edit_mode = args.get("edit_mode", "replace")
+
+    # 权限：与 write_file 同款（check_path write 白名单）
+    from agent.permission import get_default_checker
+    checker = kwargs.get("permission_checker") or get_default_checker()
+    mode_override = get_mode_override_from_kwargs(kwargs)
+    perm = checker.check_path(path_str, write=True, mode_override=mode_override)
+    if not perm.allowed:
+        return json.dumps(
+            {"error": f"路径拒绝: {perm.reason}", "error_type": "permission_denied"},
+            ensure_ascii=False,
+        )
+
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
+    if path.suffix.lower() != ".ipynb":
+        return json.dumps({
+            "error": f"不是 notebook 文件（.ipynb）: {path}", "error_type": "invalid_args",
+        }, ensure_ascii=False)
+
+    try:
+        nb = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return json.dumps({"error": f"notebook 解析失败: {e}"}, ensure_ascii=False)
+
+    cells = nb.get("cells")
+    if not isinstance(cells, list):
+        return json.dumps({"error": "notebook 缺 cells 数组（结构异常）"}, ensure_ascii=False)
+
+    # 无 id 的旧文件补齐 id（nbformat 4.5+ 标准；用 cell_<n> 避免与既有 id 冲突）
+    for i, cell in enumerate(cells):
+        if isinstance(cell, dict) and not cell.get("id"):
+            cell["id"] = f"cell_{i}"
+
+    if edit_mode == "insert":
+        if cell_type not in ("code", "markdown", "raw"):
+            return json.dumps({
+                "error": f"insert 需要合法 cell_type（code/markdown/raw）: {cell_type}",
+                "error_type": "invalid_args",
+            }, ensure_ascii=False)
+        new_cell = {
+            "cell_type": cell_type,
+            "metadata": {},
+            "source": str(new_source),
+        }
+        if cell_type == "code":
+            new_cell["outputs"] = []
+            new_cell["execution_count"] = None
+        else:
+            new_cell["id"] = f"cell_new_{len(cells)}"
+        # code cell 也统一补 id（上面循环只处理已有 cell）
+        if "id" not in new_cell:
+            new_cell["id"] = f"cell_new_{len(cells)}"
+        if cell_id:
+            idx = _find_cell_index(cells, cell_id)
+            insert_at = idx if idx >= 0 else len(cells)
+        else:
+            insert_at = len(cells)
+        cells.insert(insert_at, new_cell)
+        action_desc = f"insert {cell_type} @ {insert_at} (id={new_cell['id']})"
+    else:
+        if not cell_id:
+            return json.dumps({
+                "error": f"{edit_mode} 需要 cell_id", "error_type": "invalid_args",
+            }, ensure_ascii=False)
+        idx = _find_cell_index(cells, cell_id)
+        if idx < 0:
+            return json.dumps({
+                "error": f"未找到 cell: {cell_id}", "error_type": "cell_not_found",
+            }, ensure_ascii=False)
+        if edit_mode == "delete":
+            removed = cells.pop(idx)
+            action_desc = f"delete @ {idx} (id={removed.get('id', '?')})"
+        else:  # replace
+            cells[idx]["source"] = str(new_source)
+            action_desc = f"replace @ {idx} (id={cells[idx].get('id', '?')})"
+
+    # 原子写回（nbformat 惯例 indent=1；末尾换行）
+    from agent.atomic_io import atomic_write_text
+    try:
+        atomic_write_text(path, json.dumps(nb, ensure_ascii=False, indent=1) + "\n")
+    except Exception as e:
+        return json.dumps({"error": f"写回失败: {e}"}, ensure_ascii=False)
+
+    _track_checkpoint(path, kwargs)
+    _trigger_file_changed(path, "edit", kwargs)
+
+    return json.dumps({
+        "path": str(path),
+        "action": action_desc,
+        "total_cells": len(cells),
+    }, ensure_ascii=False)
+
+
+registry.register(
+    name="notebook_edit",
+    toolset="core",
+    schema=NOTEBOOK_EDIT_SCHEMA,
+    handler=_handle_notebook_edit,
+    emoji="📓",
+    isConcurrencySafe=False,  # 写入：改文件内容，必须串行
+)

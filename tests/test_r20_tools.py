@@ -195,3 +195,123 @@ async def test_web_fetch_no_prompt_no_aux(monkeypatch):
     r = json.loads(await wf._handle_web_fetch({"url": "https://example.com/y"}))
     assert r["refined"] is False
     assert r["content"] == "raw body"
+
+
+# ---------------------------------------------------------------------------
+# R20 #35：NotebookEdit
+# ---------------------------------------------------------------------------
+
+def _mk_nb(tmp_path):
+    nb = {
+        "cells": [
+            {"cell_type": "code", "metadata": {}, "source": "print(1)",
+             "outputs": [], "execution_count": None, "id": "c1"},
+            {"cell_type": "markdown", "metadata": {}, "source": "# 标题", "id": "c2"},
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    p = tmp_path / "nb.ipynb"
+    p.write_text(json.dumps(nb, ensure_ascii=False, indent=1), encoding="utf-8")
+    return p
+
+
+class _AllowChecker:
+    """测试用放行 checker（tmp_path 不在生产白名单）。"""
+    def check_path(self, path, write=False, mode_override=None, **kw):
+        return SimpleNamespace(allowed=True, reason="ok", gate="ok")
+
+
+@pytest.mark.asyncio
+async def test_notebook_replace(tmp_path):
+    p = _mk_nb(tmp_path)
+    r = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "cell_id": "c1",
+        "new_source": "print(42)", "edit_mode": "replace",
+    }))
+    assert "action" in r and r["total_cells"] == 2
+    nb = json.loads(p.read_text(encoding="utf-8"))
+    assert nb["cells"][0]["source"] == "print(42)"
+
+
+@pytest.mark.asyncio
+async def test_notebook_replace_by_index(tmp_path):
+    """纯数字 cell_id 按索引匹配（旧文件无 id 的兼容路径）。"""
+    p = _mk_nb(tmp_path)
+    r = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "cell_id": "1",
+        "new_source": "# 新标题", "edit_mode": "replace",
+    }))
+    assert "action" in r
+    nb = json.loads(p.read_text(encoding="utf-8"))
+    assert nb["cells"][1]["source"] == "# 新标题"
+
+
+@pytest.mark.asyncio
+async def test_notebook_insert_and_delete(tmp_path):
+    p = _mk_nb(tmp_path)
+    # 末尾插入 markdown
+    r = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "edit_mode": "insert",
+        "cell_type": "markdown", "new_source": "## 尾注",
+    }))
+    assert r["total_cells"] == 3
+    nb = json.loads(p.read_text(encoding="utf-8"))
+    assert nb["cells"][2]["cell_type"] == "markdown"
+
+    # 在 c1 前插入 code
+    r2 = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "edit_mode": "insert", "cell_id": "c1",
+        "cell_type": "code", "new_source": "import os",
+    }))
+    assert r2["total_cells"] == 4
+    nb = json.loads(p.read_text(encoding="utf-8"))
+    assert nb["cells"][0]["source"] == "import os"
+
+    # 删除
+    r3 = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "cell_id": "c1", "edit_mode": "delete",
+    }))
+    assert r3["total_cells"] == 3
+    nb = json.loads(p.read_text(encoding="utf-8"))
+    assert all(c.get("id") != "c1" for c in nb["cells"])
+
+
+@pytest.mark.asyncio
+async def test_notebook_errors(tmp_path):
+    """缺 cell_id / 找不到 / 非 ipynb / 索引越界。"""
+    p = _mk_nb(tmp_path)
+    r1 = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "edit_mode": "delete",
+    }))
+    assert "error" in r1  # 缺 cell_id
+
+    r2 = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "cell_id": "nope", "edit_mode": "delete",
+    }))
+    assert r2.get("error_type") == "cell_not_found"
+
+    txt = tmp_path / "plain.txt"
+    txt.write_text("hi", encoding="utf-8")
+    r3 = json.loads(await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(txt), "cell_id": "0", "edit_mode": "delete",
+    }))
+    assert r3.get("error_type") == "invalid_args"
+
+
+@pytest.mark.asyncio
+async def test_notebook_backfills_ids(tmp_path):
+    """无 id 的旧 notebook 补齐 cell_<n> id（nbformat 4.5+ 标准）。"""
+    nb = {"cells": [
+        {"cell_type": "code", "metadata": {}, "source": "x", "outputs": [], "execution_count": None},
+    ], "metadata": {}, "nbformat": 4, "nbformat_minor": 4}
+    p = tmp_path / "old.ipynb"
+    p.write_text(json.dumps(nb), encoding="utf-8")
+    await registry.dispatch("notebook_edit", permission_checker=_AllowChecker(), args={
+        "notebook_path": str(p), "cell_id": "0",
+        "new_source": "y", "edit_mode": "replace",
+    })
+    nb2 = json.loads(p.read_text(encoding="utf-8"))
+    assert nb2["cells"][0].get("id") == "cell_0"
+    assert nb2["cells"][0]["source"] == "y"
