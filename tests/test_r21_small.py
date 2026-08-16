@@ -16,6 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from model_tools import ensure_tools_discovered
+from tools.registry import registry
+
+ensure_tools_discovered()
+
 from agent.permission import (
     LLM_DENIAL_MAX_CONSECUTIVE,
     LLM_DENIAL_MAX_TOTAL,
@@ -119,3 +124,67 @@ def test_denial_total_fallback():
     n_before = calls["n"]
     checker.check("cmd")
     assert calls["n"] == n_before
+
+
+# ---------------------------------------------------------------------------
+# R21 #48：任务全清 + verification nudge
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_task_all_done_cleanup_and_nudge(tmp_path):
+    """全 completed → 自动软删清空；≥3 活跃无验证字样 → reminder。"""
+    from agent.task_store import get_task_store
+
+    class _FakeAgent:
+        hooks_registry = None
+    home = str(tmp_path)
+    store = get_task_store(home)
+    t1 = store.create(subject="做 A", description="实现 A")["id"]
+    t2 = store.create(subject="做 B", description="实现 B")["id"]
+    t3 = store.create(subject="做 C", description="实现 C")["id"]
+
+    # 完成 2 个（剩 1 个活跃 → 无 nudge 无清空）
+    r1 = json.loads(await registry.dispatch("task_complete", {"id": t1},
+                                            omnimate_home=home, agent_ref=_FakeAgent()))
+    assert "all_tasks_cleared" not in r1
+    assert "reminder" not in r1
+
+    # 完成第 3 个 → 全 completed → 清空
+    await registry.dispatch("task_complete", {"id": t2},
+                            omnimate_home=home, agent_ref=_FakeAgent())
+    r3 = json.loads(await registry.dispatch("task_complete", {"id": t3},
+                                            omnimate_home=home, agent_ref=_FakeAgent()))
+    assert r3.get("all_tasks_cleared") is True
+    assert r3.get("cleared_count") == 3
+    # 软删（可恢复）：全部 status=deleted，活跃列表为空
+    statuses = {t["status"] for t in store.list_all()}
+    assert statuses == {"deleted"}
+    assert store.list_all(status="pending") == []
+
+
+@pytest.mark.asyncio
+async def test_task_verification_nudge(tmp_path):
+    """≥3 活跃且无验证字样 → reminder；描述含验证则不提醒。"""
+    from agent.task_store import get_task_store
+
+    class _FakeAgent:
+        hooks_registry = None
+    home = str(tmp_path)
+    store = get_task_store(home)
+    done = store.create(subject="D", description="已完成项")["id"]
+    for i in range(3):
+        store.create(subject=f"任务{i}", description=f"实现功能{i}")
+    # 完成 done（剩 3 条活跃无验证字样）→ reminder 出现
+    r = json.loads(await registry.dispatch("task_complete", {"id": done},
+                                           omnimate_home=home, agent_ref=_FakeAgent()))
+    assert "reminder" in r and "验证" in r["reminder"]
+
+    # 描述含"测试"的活跃任务集 → 不提醒
+    home2 = str(tmp_path / "s2")
+    store2 = get_task_store(home2)
+    d2 = store2.create(subject="D", description="x")["id"]
+    for i in range(3):
+        store2.create(subject=f"任务{i}", description=f"实现并测试功能{i}")
+    r2 = json.loads(await registry.dispatch("task_complete", {"id": d2},
+                                            omnimate_home=home2, agent_ref=_FakeAgent()))
+    assert "reminder" not in r2

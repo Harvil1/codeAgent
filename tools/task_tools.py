@@ -449,11 +449,76 @@ def _handle_task_complete(args: dict, task, **kwargs) -> str:
         except Exception:
             pass  # fail-open
 
+    # === R21 #48：任务全清 + verification nudge（对齐 CC TodoWrite allDone/nudge）===
+    extra = _all_done_cleanup(store)
+    nudge = _verification_nudge(store)
+    if nudge:
+        extra["reminder"] = nudge
+
     return json.dumps({
         "success": True,
         "task": completed,
         "unblocked": ready,
+        **extra,
     }, ensure_ascii=False)
+
+
+# 验证关键词（任务描述命中则不提醒——用户已规划了验证步骤）
+_VERIF_KEYWORDS = ("verif", "验证", "test", "测试", "检查")
+
+
+def _all_done_cleanup(store) -> dict:
+    """R21 #48：全部任务 completed → 自动清空列表（软删 status=deleted，可恢复）。
+
+    对齐 CC allDone→[]：列表清空让下个任务集从干净状态开始；
+    软删保留文件（完全可逆铁律）。
+    """
+    try:
+        all_tasks = store.list_all()
+        active = [
+            t for t in all_tasks
+            if t.get("status") not in ("completed", "deleted")
+        ]
+        if all_tasks and not active:
+            cleared = 0
+            for t in all_tasks:
+                if t.get("status") == "completed":
+                    try:
+                        store.update(t["id"], status="deleted")
+                        cleared += 1
+                    except Exception:
+                        pass
+            if cleared:
+                return {"all_tasks_cleared": True, "cleared_count": cleared}
+        return {}
+    except Exception:
+        return {}
+
+
+def _verification_nudge(store) -> "str | None":
+    """R21 #48：≥3 条活跃任务且描述无验证字样 → 返回提醒文本（附在 complete 结果里）。
+
+    提醒走 tool result（零主循环改动，LLM 直接看到）。
+    """
+    try:
+        active = [
+            t for t in store.list_all()
+            if t.get("status") in ("pending", "in_progress")
+        ]
+        if len(active) < 3:
+            return None
+        desc_text = " ".join(
+            f"{t.get('subject', '')} {t.get('description', '')}"
+            for t in active
+        ).lower()
+        if any(k in desc_text for k in _VERIF_KEYWORDS):
+            return None
+        return (
+            f"提醒：当前有 {len(active)} 条活跃任务，描述中都没有验证步骤——"
+            f"完成前别忘了验证（跑测试 / 复核结果）。"
+        )
+    except Exception:
+        return None
 
 
 def _handle_task_list(args: dict, **kwargs) -> str:
