@@ -632,13 +632,15 @@ class AIAgent:
         仅主代理（spawn_depth==0）——子代理无用户交互面。
         多条输入合并为一条 ephemeral（同轮消化）；队列空 no-op。
         """
-        if self._input_queue is None or self.spawn_depth != 0:
+        # getattr 防御：测试用 __new__ 构造的轻量 agent 无该属性
+        input_queue = getattr(self, "_input_queue", None)
+        if input_queue is None or getattr(self, "spawn_depth", 0) != 0:
             return
         try:
             lines = []
             while True:
                 try:
-                    lines.append(self._input_queue.get_nowait())
+                    lines.append(input_queue.get_nowait())
                 except Exception:
                     break
             if not lines:
