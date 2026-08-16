@@ -59,6 +59,12 @@ class TraceSink:
                 "event": event,
                 "agent_id": fields.pop("agent_id", self._current_agent_id),
             }
+            # R19 #24：fields 值级秘密 redact（fail-open——redact 失败原样记录）
+            try:
+                from agent.secret_scanner import redact_fields
+                fields = redact_fields(fields)
+            except Exception:
+                pass
             record.update(fields)
             date_str = datetime.now().strftime("%Y-%m-%d")
             path = self._trace_dir / f"{date_str}.jsonl"

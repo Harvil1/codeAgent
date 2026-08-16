@@ -642,6 +642,13 @@ class MemoryStore:
             raise ValueError("name 和 description 必需")
         if type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一，实际: {type}")
+        # R19 #24：秘密扫描（命中拒绝写入——秘密不该进记忆库；只报规则 ID）
+        from agent.secret_scanner import find_secrets_in
+        secret_hits = find_secrets_in(name, description, summary, body)
+        if secret_hits:
+            raise ValueError(
+                f"记忆内容疑似含密钥（规则: {secret_hits[0]['rule']}），拒绝写入"
+            )
         # 注意：save 内联查重/更新，避免嵌套持锁（threading.Lock 不可重入）
         with self._lock:
             # CCAR9 Task 2：按 type 路由到对应区
@@ -702,6 +709,13 @@ class MemoryStore:
         """
         if type is not None and type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
+        # R19 #24：秘密扫描（只查传入的新值；命中拒绝更新）
+        from agent.secret_scanner import find_secrets_in
+        secret_hits = find_secrets_in(name, description, summary, body)
+        if secret_hits:
+            raise ValueError(
+                f"更新内容疑似含密钥（规则: {secret_hits[0]['rule']}），拒绝写入"
+            )
         with self._lock:
             topic, uid = _split_entry_id(memory_id)
             located = self._locate_entry(topic, uid)

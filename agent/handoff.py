@@ -151,42 +151,31 @@ def _compute_checksum(transcript: List[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 密钥扫描（Task 3）
+# 密钥扫描（Task 3 / R19 #24 迁移公共扫描器）
 # ---------------------------------------------------------------------------
 
-# 合并为单个正则 + 命名捕获组：一次扫描即可覆盖全部 5 类密钥模式，
-# 性能从 5×N 次降到 N 次（N = 消息数 × 内容长度）。
-# 命名组同时让错误信息更可读（"命中：<openai>" 而不是裸正则）。
-SECRET_PATTERN = re.compile(
-    r"(?P<openai>sk-[A-Za-z0-9_\-]{20,})"
-    r"|(?P<bearer>Bearer\s+[A-Za-z0-9_\-\.]{20,})"
-    r"|(?P<api_key>api_key[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
-    r"|(?P<token>token[\"\s:=]+[\"']?[A-Za-z0-9]{16,})"
-    r"|(?P<pem>-----BEGIN [A-Z ]+PRIVATE KEY-----)"
-)
+# R19 #24：规则族迁移到 agent/secret_scanner（gitleaks 扩展：github-pat/aws/
+# google/slack/jwt/anthropic 等）。这里保留向后兼容别名 + transcript 包装。
+from agent.secret_scanner import SECRET_RULES_RE as SECRET_PATTERN  # noqa: F401
 
 
 def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
     """扫描 transcript 找密钥模式。返回命中列表。
 
-    用合并正则一次扫描；命中后通过命名组反查模式类型。
+    走公共扫描器（R19 #24）；包装为 transcript 语义（message_index/role）。
     """
+    from agent.secret_scanner import scan_text
     matches: List[Dict[str, Any]] = []
     for idx, msg in enumerate(transcript):
         content = msg.get("content")
         if not isinstance(content, str):
             continue
-        for m in SECRET_PATTERN.finditer(content):
-            # 反查命中的命名组（key→value 非空的那组）
-            kind = next(
-                (k for k, v in m.groupdict().items() if v),
-                "unknown",
-            )
+        for hit in scan_text(content):
             matches.append({
                 "message_index": idx,
                 "role": msg.get("role", "?"),
-                "pattern": f"<{kind}>",
-                "snippet": m.group(0)[:50],  # 截断防再次暴露
+                "pattern": f"<{hit['rule']}>",
+                "snippet": hit["snippet"],  # 已截断防再次暴露
             })
     return matches
 

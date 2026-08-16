@@ -228,7 +228,7 @@ def should_run_now_memory(
 # ---------------------------------------------------------------------------
 
 MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同一个分类(type={type_name})下的 {n} 条记忆。
-请逐对检查,识别以下三种关系之一:
+请逐条/逐对检查,识别以下五种情况之一(R19 #22 对齐 CC autoDream 三动作,矛盾解决已有):
 
 1. **重复**: 多条记忆描述实质相同的事实
    操作: 选一条最完整/最新的作为主条目,其余归档
@@ -248,7 +248,23 @@ MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同
        archive: <新条目 id>
        reason: <一句话>
 
-3. **无关**: 只是名字或主题相近,内容不重叠
+3. **被证伪**: 记忆陈述的事实已被后续信息明确推翻(不是偏好变化,是事实错误——
+   如环境已迁移/结论已过时/诊断被更正),保留会误导未来决策
+   操作: 归档该条目
+   YAML 输出:
+     - action: delete_falsified
+       archive: <条目 id>
+       evidence: <被哪条记忆/什么信息证伪,一句话>
+
+4. **相对日期**: body 里有"昨天/上周/最近/目前"等相对时间表述,随时间推移会失真
+   操作: 改写 body,把相对日期替换为绝对日期(按 updated_at 推算,如"昨天"→"YYYY-MM-DD")
+   YAML 输出:
+     - action: normalize_dates
+       update_id: <条目 id>
+       new_body: |
+         <改写后的完整 body(只替换相对日期,其余逐字保留)>
+
+5. **无关**: 只是名字或主题相近,内容不重叠
    不输出任何东西
 
 完整记忆列表(JSON):
@@ -311,7 +327,16 @@ def safe_rewrite_body(store, entry_id: str, new_body: str, archive_root: Path) -
     """改写 body 前备份原文到 .archive/memory-rewrites-{ts}/。
 
     返回备份文件路径。
+    R19 #24：new_body 是 LLM 重写产物——秘密扫描命中则拒绝改写保留原文
+    （返回 None 表示拒绝，调用方无需感知差异）。
     """
+    from agent.secret_scanner import find_secrets_in
+    if find_secrets_in(new_body):
+        logger.warning(
+            "curator 改写产物疑似含密钥（entry %s），拒绝改写保留原文",
+            entry_id,
+        )
+        return None
     entry = store.get(entry_id)
     if entry is None:
         raise KeyError(f"记忆不存在: {entry_id}")
@@ -337,6 +362,8 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
     支持:
       merge_duplicate {keep, archive: [ids]}
       resolve_contradiction {update_id, new_body, archive}
+      delete_falsified {archive, evidence}          R19 #22：删除被证伪事实
+      normalize_dates {update_id, new_body}         R19 #22：相对日期转绝对日期
     未知 action 跳过。
     """
     act_type = action.get("action")
@@ -366,6 +393,25 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
             except Exception as e:
                 logger.warning("resolve_contradiction 归档 %s 失败: %s", archive_id, e)
         return f"resolve_contradiction: updated={update_id}, archived={archive_id}"
+
+    if act_type == "delete_falsified":
+        # R19 #22：被证伪事实——软删除（archive，完全可逆，对齐设计原则 3）
+        archive_id = action.get("archive")
+        evidence = action.get("evidence", "")
+        if archive_id:
+            try:
+                store.delete(archive_id)
+            except Exception as e:
+                logger.warning("delete_falsified 归档 %s 失败: %s", archive_id, e)
+        return f"delete_falsified: archived={archive_id} ({evidence[:60]})"
+
+    if act_type == "normalize_dates":
+        # R19 #22：相对日期转绝对日期（只改 body，原文经 safe_rewrite_body 备份）
+        update_id = action.get("update_id")
+        new_body = action.get("new_body", "")
+        if update_id and new_body:
+            safe_rewrite_body(store, update_id, new_body, archive_root)
+        return f"normalize_dates: updated={update_id}"
 
     logger.warning("未知 curator action: %s", act_type)
     return f"skip: 未知 action {act_type}"
