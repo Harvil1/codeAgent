@@ -287,6 +287,10 @@ uv sync                                 # 同步已声明依赖
 | Monitor 监视器（R22 #32） | `agent/background.py`（BackgroundTask.monitor/output_file；start(monitor=) 豁免 stall 通知 + tee 落盘 `<home>/.task_outputs/monitor/<id>.log` + timeout 默认 24h；_watch_with_stall tee/跳 stall/finally 关文件）+ `bg_start` monitor 字段返回 output_file |
 | compact 边界重链（R22 #40） | 压缩占位入库前加 `[COMPACT_BOUNDARY]` 标记行（`agent/__init__.py`）+ `cli.py:_truncate_at_last_compact_boundary`（resume 从最后边界截断，标记行剥掉保留摘要；无标记保守全量） |
 | 流式并发执行（R23 #7） | `agent/streaming_executor.py:StreamingToolExecutor`（新 index 出现=前 call 完整 + JSON 双重确认；safe create_task 预执行 / unsafe 不预执行 / 流异常 drain 防僵尸）+ `_call_llm_streaming` 接线（index 切换 complete / 流末 collect → `_streaming_preset_results`）+ `_dispatch_tool_calls` 按 tc.id 跳重（preset 补 plan_approval/streak 后处理并入 merge）+ `_run_tool_pre_callbacks` 公共；config `agent.streaming_tool_execution` 默认 False |
+| 动态技能目录发现（R24 #26） | `agent/skill_commands.py:discover_skill_dirs_for_path`（文件父目录向上到 cwd 的 `.omnimate/skills`/`.claude/skills`；深路径优先覆盖同名；node_modules/.git/__pycache__/.venv 投放防护；cwd 外不适用）+ `find_conditional_skill_matches` skills_dirs=None 自动并入 |
+| scratchpad 涂鸦区（R24 #36） | `agent/scratchpad.py`（会话级 `<home>/.scratchpad/<sid>/`；ensure 创建+运行时白名单注入不写 settings；context_block 编排者文案；cleanup 按 mtime 7 天清理）+ `agent/builtin_agents/coordinator.md`（纯编排者内置子代理） |
+| 内联 mcpServers（R24 #38） | `AgentDefinition.inline_mcp_servers`（frontmatter `inlineMcpServers` dict）+ `MCPManager.connect_one/disconnect_one`（幂等/断开移除）+ `_run_child` spawn 临时连接 → `register_mcp_tools(servers=)` 只注册声明 server → filter 并入 → finally 断开 |
+| R24 裁决不补：#29 MCP 技能 / #43 jobs 模板 / #47 主会话后台化 | **#29**：`skill://` URI 生态无 server 供给方，OmniMate 技能本来就是纯 MD 零执行（CC 的"永不执行内联 shell"天然满足）——识别层等生态出现再做；**#43**：模板 ≈ skill_bundle（技能束）+ 每轮分类落盘 ≈ Task System（.tasks/ 持久化）已有等价物；**#47**：与输入线程/流式预执行耦合风险大（Python 单线程 asyncio.run 每轮驱动），bg_task + goal continue 已覆盖长任务场景 |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -434,6 +438,8 @@ uv sync                                 # 同步已声明依赖
 - **monitor 豁免 stall 看门狗（R22 #32）** —— tail -f/watch 安静是常态，常规任务的停滞预警对监视器是误报；tee 落盘不受 result cap（read_file 查增量）；一次性命令不要用 monitor（退出通知即完成）。
 - **边界裁剪只在有标记时生效（R22 #40）** —— 旧会话（无 `[COMPACT_BOUNDARY]`）保守全量（行为同现状）；裁剪取**最后**边界（多次压缩只保留最近摘要之后的流）。
 - **流式预执行只覆盖 safe 且默认关（R23 #7）** —— config `agent.streaming_tool_execution=False` 灰度；完整性是启发式（新 index = 前 call 完整）+ JSON 可解析双确认，坏 JSON 交正常路径；unsafe 不预执行（乱序副作用不可接受）；流异常时 drain 等完成但弃结果（预执行的副作用已发生但结果丢弃——与 CC 同样的权衡）。
+- **scratchpad 是临时区例外（R24 #36）** —— 会话涂鸦区按 mtime 清理是「完全可逆」铁律的显式例外（临时区非知识库，CC 同款语义）；知识沉淀走记忆/技能系统。白名单是运行时的（进程级，不写 settings.json）。
+- **内联 MCP 不残留（R24 #38）** —— 临时连接进共享 MCPManager 但 finally 必断开（server 断开后 check_fn 自动隐藏工具）；与 mcp_servers 过滤互补（过滤全局 vs 定义新临时）；连接失败 fail-open（agent 继续跑，无该 MCP）。
 
 ## 测试策略
 
