@@ -1086,6 +1086,11 @@ class AIAgent:
                 turn_exit_reason = "llm_failed"  # LLM 错误已作为 assistant 消息塞回 history
                 break
 
+            # === R17 #10：升级后仍截断 → 续写恢复（最多 3 次，不进 history）===
+            response = await self._recover_output_truncation(
+                response, messages, tool_schemas,
+            )
+
             api_call_count += 1
             # batch1-T2: 记录 LLM 用量（prompt cache 记账）
             self._record_llm_usage(response)
@@ -1722,6 +1727,120 @@ class AIAgent:
                 "_timestamp": time.time(),
             })
             return None
+
+    async def _recover_output_truncation(self, response, messages, tool_schemas):
+        """R17 #10：升级后仍 finish_reason=length 的续写恢复。
+
+        对齐 CCB max_output_tokens_recovery：把截断的 assistant 内容 +
+        续写 meta 消息（「从中断处直接继续、不道歉不复述」）追加到**局部
+        请求视图**再调 LLM，拼接内容；最多 llm.output_recovery_limit 次
+        （默认 3，对齐 CC MAX_OUTPUT_TOKENS_RECOVERY_LIMIT）。
+
+        设计要点：
+        - 局部 messages 不进 conversation_history——恢复成功后以拼接完成的
+          单条 assistant 消息返回（主循环 _finalize_response 正常入史），
+          不污染会话记录
+        - 只处理纯文本截断；工具调用截断形态（罕见）/无可续内容原样返回
+        - 未升级过的截断不接手（升级路径在 _call_llm_* 内部处理）
+        - fail-open：恢复调用失败返回已拼接内容（仍带 finish_reason=length
+          标记，主循环按最终响应处理）
+        """
+        from agent.llm_retry import (
+            DEFAULT_OUTPUT_RECOVERY_LIMIT,
+            call_with_retry,
+            detect_length_finish,
+        )
+        if not detect_length_finish(response):
+            return response
+        if (self._max_tokens_escalator is not None
+                and not self._max_tokens_escalator.has_escalated):
+            return response
+        msg = response.choices[0].message
+        if getattr(msg, "tool_calls", None):
+            return response
+        accumulated = msg.content or ""
+        if not accumulated.strip():
+            return response
+
+        try:
+            limit = int(
+                (self.config or {}).get("llm", {}).get(
+                    "output_recovery_limit", DEFAULT_OUTPUT_RECOVERY_LIMIT,
+                )
+            )
+        except (TypeError, ValueError):
+            limit = DEFAULT_OUTPUT_RECOVERY_LIMIT
+        limit = max(0, limit)
+
+        recovery_meta = (
+            "你的上一条回复因输出 token 上限被截断。"
+            "从中断处直接继续——不要道歉、不要复述已写内容，"
+            "从被切断的那个位置接着写。把剩余工作拆成小块完成。"
+        )
+        recovery_max_tokens = (
+            self._max_tokens_escalator.get_next_max_tokens()
+            if self._max_tokens_escalator is not None else None
+        )
+        local_messages = list(messages) + [
+            {"role": "assistant", "content": accumulated},
+            {"role": "user", "content": recovery_meta},
+        ]
+        for attempt in range(1, limit + 1):
+            try:
+                resp = await call_with_retry(
+                    self.llm_client,
+                    local_messages,
+                    tools=tool_schemas if tool_schemas else None,
+                    fallback_llm_client=self.fallback_llm_client,
+                    max_tokens=recovery_max_tokens,
+                    config=self.config,
+                )
+            except Exception as e:
+                logger.warning("续写恢复调用失败（返回已拼接内容）: %s", e)
+                break
+            piece = (resp.choices[0].message.content or "")
+            if piece:
+                accumulated += piece
+            if not detect_length_finish(resp):
+                logger.info("续写恢复成功（第 %d 次），拼接 %d 字符", attempt, len(accumulated))
+                return self._merge_continuation_response(
+                    response, resp, accumulated, finished=True,
+                )
+            local_messages = list(local_messages) + [
+                {"role": "assistant", "content": piece},
+                {"role": "user", "content": recovery_meta},
+            ]
+        if limit > 0:
+            logger.warning("续写恢复 %d 次后仍截断，返回已拼接内容", limit)
+        return self._merge_continuation_response(
+            response, None, accumulated, finished=False,
+        )
+
+    @staticmethod
+    def _merge_continuation_response(
+        truncated_response, last_response, content, *, finished: bool,
+    ):
+        """续写恢复的响应合并：拼接内容 + 最后一轮 usage（对齐截断响应结构）。"""
+        from types import SimpleNamespace
+        src_msg = truncated_response.choices[0].message
+        merged = SimpleNamespace(
+            content=content if content else None,
+            tool_calls=None,
+            reasoning_content=getattr(src_msg, "reasoning_content", None),
+            thinking_signature=getattr(src_msg, "thinking_signature", None),
+        )
+        usage = (
+            getattr(last_response, "usage", None)
+            if last_response is not None
+            else getattr(truncated_response, "usage", None)
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=merged,
+                finish_reason="stop" if finished else "length",
+            )],
+            usage=usage,
+        )
 
     def _run_post_llm_call_hook(self, response):
         """POST_LLM_CALL hook 编排（可能修改 response）。"""

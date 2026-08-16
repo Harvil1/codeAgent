@@ -12,23 +12,32 @@
 import asyncio
 import logging
 import random
+import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_INITIAL_BACKOFF = 1.0  # 秒，指数退避起点
 DEFAULT_JITTER_RATIO = 0.25    # 抖动比例：sleep = base + uniform(0, base*ratio)
+DEFAULT_MAX_BACKOFF = 60.0     # 单次退避上限（普通模式；X7）
+UNATTENDED_MAX_BACKOFF = 300.0  # R17 #44：unattended 长跑模式退避帽 5min（对齐 CCB）
 
 # 持久重试（unattended）模式默认值（Task P2.1）
 DEFAULT_UNATTENDED_MAX_HOURS = 24  # 持续重试最长 24 小时
 
-# max_tokens 升级默认值（P0-3）
+# max_tokens 升级默认值（P0-3 / R17 #10）
 # initial=None 表示不显式传 max_tokens，让 provider SDK 用模型默认值
-# escalated=32768 覆盖绝大多数模型的默认上限（DeepSeek 8K、OpenAI 16K、Claude 8K-200K）
+# escalated=64000 对齐 CCB ESCALATED_MAX_TOKENS=64k（原 32768）。
+# 模型输出上限更小的 provider（如 DeepSeek 8K）会报 400 溢出——
+# 由 R17 #13 的 400 溢出自适应（parse_context_overflow）动态下调兜底，
+# 升级调用失败本身也 fail-open 沿用截断响应。
 DEFAULT_INITIAL_MAX_TOKENS: Optional[int] = None
-DEFAULT_ESCALATED_MAX_TOKENS = 32768
+DEFAULT_ESCALATED_MAX_TOKENS = 64000
+
+# R17 #10：升级后仍截断的「续写恢复」上限（对齐 CC MAX_OUTPUT_TOKENS_RECOVERY_LIMIT=3）
+DEFAULT_OUTPUT_RECOVERY_LIMIT = 3
 
 # 529 连续失败阈值（P1-1）
 # Anthropic 过载（status 529）通常持续一段时间，达到阈值立即切 fallback，
@@ -89,6 +98,52 @@ def get_retry_after(error: Exception) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# R17 #13：400 溢出自适应（input + max_tokens > context limit 的数值解析）
+# ---------------------------------------------------------------------------
+
+# CCB 精确格式："input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
+_OVERFLOW_EXACT_RE = re.compile(
+    r"input length and `max_tokens` exceed context limit:\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)"
+)
+# OpenAI 经典格式："This model's maximum context length is 131072 tokens.
+# However, you requested 140000 tokens (120000 input tokens and 20000 max_tokens)"
+_OVERFLOW_LOOSE_RE = re.compile(
+    r"maximum context length is (\d+) tokens?.*?(\d+) input tokens",
+    re.DOTALL,
+)
+
+# 恢复缓冲与下限（对齐 CCB：安全缓冲 1k / 下限 3000）
+_OVERFLOW_SAFETY_BUFFER = 1000
+_OVERFLOW_MIN_MAX_TOKENS = 3000
+
+
+def parse_context_overflow(error: Exception) -> Optional[Tuple[int, int]]:
+    """从 400 溢出报文解析 (input_tokens, context_limit)。
+
+    命中两种格式其一即返回；解析失败返回 None（调用方按普通 400 处理）。
+    """
+    msg = str(error)
+    m = _OVERFLOW_EXACT_RE.search(msg)
+    if m:
+        return int(m.group(1)), int(m.group(3))
+    m2 = _OVERFLOW_LOOSE_RE.search(msg)
+    if m2:
+        return int(m2.group(2)), int(m2.group(1))
+    return None
+
+
+def compute_overflow_max_tokens(input_tokens: int, context_limit: int) -> Optional[int]:
+    """计算恢复用 max_tokens：context_limit - input - 1000，下限 3000。
+
+    返回 None 表示输入本身就太大（剩余空间 < 3000），无恢复价值。
+    """
+    new_max = context_limit - input_tokens - _OVERFLOW_SAFETY_BUFFER
+    if new_max < _OVERFLOW_MIN_MAX_TOKENS:
+        return None
+    return new_max
 
 
 async def call_with_retry(
@@ -189,6 +244,7 @@ async def call_with_retry(
         call_kwargs["max_tokens"] = max_tokens
 
     consecutive_529 = 0  # 连续 529 计数器
+    overflow_adjusts = 0  # R17 #13：400 溢出下调次数（独立计数，不耗正常重试）
 
     # 主 client 重试（while 循环兼容 finite max_retries 和 unattended 无限模式）
     attempt = 0
@@ -206,6 +262,30 @@ async def call_with_retry(
             return await llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
+            # === R17 #13：400 溢出自适应（input + max_tokens > context limit）===
+            # 报文含可解析的溢出数值 → 动态下调 max_tokens 立即重试（最多 2 次，
+            # 不耗正常重试计数）。解析不出 / 输入本身太大 / 已到下限 → 按普通
+            # 400 不可重试抛出（透出给上层 reactive_compact / PTL 恢复路径）。
+            if (
+                _error_status_code(e) == 400
+                and "max_tokens" in call_kwargs
+                and overflow_adjusts < 2
+            ):
+                parsed = parse_context_overflow(e)
+                if parsed is not None:
+                    input_t, limit = parsed
+                    new_max = compute_overflow_max_tokens(input_t, limit)
+                    if new_max is not None and new_max < call_kwargs["max_tokens"]:
+                        logger.warning(
+                            "400 溢出（input %d + max_tokens > %d），下调 max_tokens "
+                            "%d → %d 重试",
+                            input_t, limit,
+                            call_kwargs["max_tokens"], new_max,
+                        )
+                        call_kwargs["max_tokens"] = new_max
+                        overflow_adjusts += 1
+                        await asyncio.sleep(0.5)
+                        continue
             if not is_retryable(e):
                 raise
 
@@ -239,6 +319,12 @@ async def call_with_retry(
                 initial_backoff=initial_backoff,
                 retry_after=get_retry_after(e),
                 jitter_ratio=jitter_ratio,
+                # R17 #44：unattended 模式退避帽放宽到 5min（对齐 CCB）——
+                # 普通模式 60s 帽（防用户等死），长跑模式太频繁反而挤占限流配额
+                max_backoff=(
+                    UNATTENDED_MAX_BACKOFF
+                    if unattended_enabled else DEFAULT_MAX_BACKOFF
+                ),
             )
             if unattended_enabled:
                 logger.warning(
@@ -340,6 +426,7 @@ def _compute_backoff(
     initial_backoff: float,
     retry_after: Optional[float],
     jitter_ratio: float = DEFAULT_JITTER_RATIO,
+    max_backoff: float = None,
 ) -> float:
     """计算退避秒数：base + jitter。
 
@@ -347,12 +434,14 @@ def _compute_backoff(
     - jitter = uniform(0, base * jitter_ratio)
     - 返回 base + jitter
 
-    X7 fix: 加 MAX_BACKOFF=60s 上限，防止大 retry_after 或大 attempt 卡死主循环。
+    X7 fix: 加上限，防止大 retry_after 或大 attempt 卡死主循环。
+    R17 #44：上限参数化——普通模式 60s（防数小时 sleep 让用户以为 agent 挂了），
+    unattended 长跑模式 5min（对齐 CCB；None 时用 DEFAULT_MAX_BACKOFF）。
     jitter_ratio=0 时返回纯 base（向后兼容）。
     """
-    MAX_BACKOFF = 60.0  # 单次退避上限（防数小时 sleep 让用户以为 agent 挂了）
+    cap = DEFAULT_MAX_BACKOFF if max_backoff is None else max_backoff
     base = retry_after if retry_after else initial_backoff * (2 ** attempt)
-    base = min(base, MAX_BACKOFF)  # X7 fix: 上限封顶
+    base = min(base, cap)
     if jitter_ratio <= 0:
         return base
     jitter = random.uniform(0, base * jitter_ratio)
