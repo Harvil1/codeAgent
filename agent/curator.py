@@ -10,12 +10,17 @@
   第 1 阶段：确定性状态转换（纯时间规则，无 LLM）
   第 2 阶段：LLM 合并审查（可选，默认关闭）
 
+第 3 步（R26 #14，可选）：跨会话 transcript 整理 consolidate_transcripts——
+从最近 5 个会话的原始轨迹提炼跨会话共性经验（对齐 CC /dream），与上面
+"整理已有技能/记忆"的动作互补（这里是从原始会话挖**新**知识）。
+
 手动触发：omnimate curator run [--dry-run]
 """
 
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -279,11 +284,17 @@ def run_curator_review(
     *,
     agent_factory=None,
     dry_run: bool = False,
+    session_store=None,
+    memory_store=None,
+    llm=None,
 ) -> Dict:
     """执行一次 curator 审查。
 
     第 1 步：确定性状态转换（总是跑）
     第 2 步：LLM 合并审查（可选）
+    第 3 步：跨会话 transcript 整理（可选，R26 #14）——session_store/memory_store/
+        llm 传入时启用；门控 ≥24h + ≥5 新会话（should_consolidate），
+        状态键 last_consolidate_at / sessions_seen 随本次运行落盘
 
     agent_factory：创建后台 agent 的工厂函数，签名：
         agent_factory(enabled_toolsets=[...], is_background_review=True) -> AIAgent
@@ -341,9 +352,19 @@ def run_curator_review(
     duration = (datetime.now(timezone.utc) - start).total_seconds()
     state = load_state(skills_dir)
     state["last_run_at"] = now.isoformat()
+
+    # R26 #14：跨会话 transcript 整理（可选第 3 步）。门控状态就地写进 state，
+    # 与 last_run_at 一起随下面的 save_state 落盘。
+    consolidated = _maybe_consolidate_transcripts(
+        state,
+        session_store=session_store, memory_store=memory_store, llm=llm,
+        dry_run=dry_run,
+    )
+
     state["last_run_summary"] = (
         f"转换: {counts}; "
         f"合并: {len(consolidation_result.get('consolidations', []))}; "
+        f"沉淀: {consolidated}; "
         f"耗时: {duration:.1f}s"
     )
     save_state(skills_dir, state)
@@ -351,6 +372,7 @@ def run_curator_review(
     return {
         "transitions": counts,
         "consolidations": consolidation_result,
+        "consolidated_memories": consolidated,
         "duration_seconds": duration,
         "dry_run": dry_run,
     }
@@ -391,3 +413,130 @@ def _parse_consolidation_output(output: str) -> dict:
         }
     except Exception:
         return {"consolidations": [], "prunings": [], "raw_yaml": yaml_block}
+
+
+# ---------------------------------------------------------------------------
+# R26 #14：跨会话 transcript 整理（第 3 步，可选）
+# ---------------------------------------------------------------------------
+
+CONSOLIDATE_MIN_HOURS = 24
+CONSOLIDATE_MIN_SESSIONS = 5
+
+CONSOLIDATE_PROMPT = """以下是最近 {n} 个会话的轨迹摘要。请提炼出**跨会话反复出现、
+值得长期记住**的项目经验（现有记忆里没有的）。
+
+要求：
+- 只提炼跨会话共性（单个会话的临时细节不要）
+- type 只能是 project 或 reference
+- 输出 JSON 数组，每条 {{"type": "project", "name": "...", "description": "...", "summary": "...", "body": "..."}}
+- 最多 {max_items} 条；没有值得提炼的输出 []
+
+轨迹：
+{trajectories}
+"""
+
+
+def should_consolidate(state: dict, *, now: float, new_sessions_since: int) -> bool:
+    """R26 #14：三重门（时间 ≥24h + 新会话 ≥5）。对齐 CC autoDream 门控（去跨进程锁——
+    OmniMate curator 本身就是单进程 cron 触发）。"""
+    last = float(state.get("last_consolidate_at") or 0)
+    if (now - last) < CONSOLIDATE_MIN_HOURS * 3600:
+        return False
+    return new_sessions_since >= CONSOLIDATE_MIN_SESSIONS
+
+
+def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
+    """R26 #14：跨会话 transcript 整理——从最近 N 个会话提炼长期记忆。
+
+    对齐 CC /dream：把分散在多个会话的碎片经验沉淀成完整条目。
+    与 curator 其他动作的区别：那些整理**已有记忆**，这里从**原始会话**
+    挖新知识。fail-open 全吞；save 内置秘密扫描（命中拒绝单条）。
+
+    llm 需提供 chat_completions（LLMClient / AuxLLMRouter 均符合；现场均为
+    async 接口，此处用 asyncio.run 驱动——与 reflection.run_reflection 同模式）。
+    """
+    try:
+        from agent.reflection import extract_trajectory
+        sessions = session_store.list_sessions(limit=CONSOLIDATE_MIN_SESSIONS)
+        parts = []
+        for s in sessions:
+            msgs = session_store.get_messages(s["id"], limit=200)
+            traj = extract_trajectory(msgs)
+            if traj.strip():
+                parts.append(f"## 会话：{s.get('title') or s['id'][:8]}\n{traj}")
+        if len(parts) < CONSOLIDATE_MIN_SESSIONS:
+            return 0
+        prompt = CONSOLIDATE_PROMPT.format(
+            n=len(parts), max_items=5,
+            trajectories="\n\n".join(parts)[:60000],
+        )
+        # 现场适配（R26 #14）：现场 client.chat_completions 已是 async（Task D4），
+        # curator 在 daemon thread / CLI sync 上下文跑 → asyncio.run 驱动。
+        import asyncio
+        resp = asyncio.run(llm.chat_completions([{"role": "user", "content": prompt}]))
+        content = resp.choices[0].message.content or ""
+        import json as _json
+        import re as _re
+        try:
+            items = _json.loads(content)
+        except _json.JSONDecodeError:
+            m = _re.search(r"\[.*\]", content, _re.DOTALL)
+            items = _json.loads(m.group(0)) if m else []
+        saved = 0
+        for item in (items or [])[:5]:
+            if not isinstance(item, dict) or item.get("type") not in ("project", "reference"):
+                continue
+            try:
+                memory_store.save(
+                    name=str(item.get("name", ""))[:60],
+                    description=str(item.get("description", ""))[:200],
+                    type=item["type"],
+                    summary=str(item.get("summary", ""))[:200],
+                    body=str(item.get("body", "")),
+                    source_session_id="curator:consolidate",
+                )
+                saved += 1
+            except Exception as e:
+                logger.debug("consolidate 单条保存失败（含秘密拒绝）: %s", e)
+        if saved:
+            logger.info("curator consolidate_transcripts 沉淀 %d 条跨会话记忆", saved)
+        return saved
+    except Exception as e:
+        logger.warning("consolidate_transcripts fail-open: %s", e)
+        return 0
+
+
+def _maybe_consolidate_transcripts(
+    state: dict,
+    *,
+    session_store,
+    memory_store,
+    llm,
+    dry_run: bool,
+) -> int:
+    """R26 #14：consolidate 接线——门控（≥24h + ≥5 新会话）通过才跑。
+
+    门控状态（last_consolidate_at / sessions_seen）就地写进 state dict，
+    由调用方（run_curator_review）统一 save_state。组件缺失 / 门控未过 /
+    dry_run 一律返回 0 且不动门控状态（缺 llm 时留待下次补跑）。
+    """
+    if dry_run:
+        return 0
+    if session_store is None or memory_store is None:
+        logger.debug("consolidate 跳过：session_store/memory_store 未提供")
+        return 0
+    try:
+        total_sessions = len(session_store.list_sessions(limit=1000))
+    except Exception as e:
+        logger.debug("consolidate 会话计数失败（本轮跳过）: %s", e)
+        return 0
+    new_sessions = max(0, total_sessions - int(state.get("sessions_seen") or 0))
+    if not should_consolidate(state, now=time.time(), new_sessions_since=new_sessions):
+        return 0
+    if llm is None:
+        logger.info("curator consolidate 跳过：未提供 llm 句柄")
+        return 0
+    saved = consolidate_transcripts(session_store, memory_store, llm=llm)
+    state["last_consolidate_at"] = time.time()
+    state["sessions_seen"] = total_sessions
+    return saved

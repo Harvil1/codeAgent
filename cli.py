@@ -797,7 +797,22 @@ class RuntimeContext:
             try:
                 if should_run_now(skills_dir()):
                     console.print("[dim]后台 curator 触发：整理技能库...[/dim]")
-                    run_curator_review(skills_dir())
+                    # R26 #14：consolidate 组件现场取——session/memory store 是
+                    # initialize 前段建好的实例（同实例防跨实例 race）；
+                    # llm 优先 aux（便宜模型），fallback 主 client
+                    # （与 reflection 的 llm_for_reflection 同模式）。
+                    # 缺任一组件时 run_curator_review 内部跳过并 log。
+                    _agent = getattr(self, "agent", None)
+                    _llm = (
+                        getattr(_agent, "aux_llm_router", None)
+                        or getattr(_agent, "llm_client", None)
+                    )
+                    run_curator_review(
+                        skills_dir(),
+                        session_store=self.session_store,
+                        memory_store=self.memory_store,
+                        llm=_llm,
+                    )
             except Exception as e:
                 logger.debug("curator 触发失败: %s", e)
 
