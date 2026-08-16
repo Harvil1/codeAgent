@@ -98,6 +98,17 @@ def is_retryable(error: Exception) -> bool:
     except ImportError:
         pass
 
+    # R26 #10：httpx 传输层错误（连接重置/断管/网络错误基类）一律可重试。
+    # openai SDK 会把 httpx 错误包装成 APIConnectionError 再抛（上面已命中），
+    # 但 httpx 错误也可能裸透出（其它 SDK/自定义路径），类名 "transporterror"
+    # 不含 "connection"/"timeout" 关键字，按 isinstance 兜底。
+    try:
+        import httpx
+        if isinstance(error, httpx.TransportError):
+            return True
+    except ImportError:
+        pass
+
     # 兜底：按异常类名判断
     error_type = type(error).__name__.lower()
     if any(kw in error_type for kw in ("timeout", "connection", "temporary")):
@@ -122,6 +133,28 @@ def get_retry_after(error: Exception) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+# R26 #10：连接重置类错误——重试前重建 client（弃用坏死连接池）
+_RESET_NAMES = ("connectionreset", "brokenpipe", "remoteprotocol", "readerror", "writeerror")
+
+
+def _is_connection_reset(error: Exception) -> bool:
+    """是否连接重置/断管类错误（按异常类名与 __cause__ 链判断）。
+
+    对齐 CCB withRetry 的 ECONNRESET/EPIPE 禁 keep-alive 重连：
+    这类错误说明底层连接坏了，在同一连接池上重试大概率复现。
+    """
+    name = type(error).__name__.lower()
+    if any(k in name for k in _RESET_NAMES):
+        return True
+    cause = getattr(error, "__cause__", None)
+    while cause is not None:
+        cname = type(cause).__name__.lower()
+        if any(k in cname for k in _RESET_NAMES):
+            return True
+        cause = getattr(cause, "__cause__", None)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +358,16 @@ async def call_with_retry(
             if background and _error_status_code(e) == 529:
                 logger.warning("后台 LLM 调用遇 529（过载），放弃重试（防放大）")
                 raise
+
+            # R26 #10：连接重置 → 重建 client 再重试（不额外耗重试计数）
+            if _is_connection_reset(e):
+                reset = getattr(llm_client, "reset_client", None)
+                if reset is not None:
+                    try:
+                        reset()
+                        logger.warning("连接重置类错误，已重建 LLM client 重试: %s", e)
+                    except Exception as re:
+                        logger.debug("reset_client 失败（按原样重试）: %s", re)
 
             # P1-1: 529 连续失败精确切换
             # 过载往往持续一段时间，期间可能反复抛 529 / 5xx。把 5xx 都计入过载计数，

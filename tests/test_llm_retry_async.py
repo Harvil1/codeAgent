@@ -17,6 +17,7 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from agent.llm_retry import (
@@ -325,3 +326,60 @@ class TestSleepWithHeartbeat:
             client, [{"role": "user", "content": "x"}],
             max_retries=3, heartbeat_cb=lambda e, t: None,
         )
+
+
+# ===== R26 #10：连接重置 → 重建 client 再重试 =====
+
+class TestConnectionResetRecovery:
+    async def test_is_connection_reset_by_cause(self):
+        from agent.llm_retry import _is_connection_reset
+        err = httpx.TransportError("boom")
+        err.__cause__ = ConnectionResetError("reset by peer")
+        assert _is_connection_reset(err) is True
+
+    def test_is_connection_reset_by_name(self):
+        from agent.llm_retry import _is_connection_reset
+        class RemoteProtocolError(Exception):
+            pass
+        assert _is_connection_reset(RemoteProtocolError()) is True
+
+    def test_not_connection_reset(self):
+        from agent.llm_retry import _is_connection_reset
+        assert _is_connection_reset(ValueError("x")) is False
+
+    async def test_retry_calls_reset_client(self, monkeypatch):
+        """连接重置后重试前调用了 reset_client。"""
+        import asyncio
+        from agent.llm_retry import call_with_retry
+
+        class FlakyConnClient:
+            def __init__(self):
+                self.calls = 0
+                self.resets = 0
+
+            def reset_client(self):
+                self.resets += 1
+
+            async def chat_completions(self, messages, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    err = httpx.TransportError("broken")
+                    err.__cause__ = ConnectionResetError()
+                    raise err
+                class _R:
+                    class choices:
+                        class message:
+                            content = "ok"
+                return _R
+
+        client = FlakyConnClient()
+        async def fake_sleep(s):
+            pass
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await call_with_retry(client, [{"role": "user", "content": "x"}], max_retries=3)
+        assert client.resets == 1
+        assert client.calls == 2
+
+    async def test_base_client_reset_noop(self):
+        from agent.llm_client import LLMClient
+        LLMClient().reset_client()  # 不抛即过

@@ -171,6 +171,12 @@ class LLMClient:
             "usage": usage_dict,
         }
 
+    def reset_client(self) -> None:
+        """R26 #10：重建底层 HTTP client（连接重置后弃用旧连接池）。
+
+        基类 no-op；子类按需重写。调用方保证线程安全（重试路径串行）。
+        """
+
 
 # ---------------------------------------------------------------------------
 # OpenAI 兼容 client（DeepSeek/OpenAI/OpenRouter/本地 Ollama 等）
@@ -190,8 +196,25 @@ class OpenAICompatClient(LLMClient):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
+        # R26 #10：留存认证凭据，reset_client 重建时用（不依赖 SDK 暴露读取）
+        self._api_key = api_key
         # R17 #12：流空闲看门狗（秒；<=0 禁用）
         self.stream_idle_timeout = stream_idle_timeout
+
+    def reset_client(self) -> None:
+        """R26 #10：丢弃可能坏死的连接池，重建 AsyncOpenAI。"""
+        try:
+            # best-effort 关旧 client（已坏也无妨）
+            import asyncio as _aio
+            try:
+                loop = _aio.get_running_loop()
+                if loop is not None:
+                    loop.create_task(self.client.close())  # noqa
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
+        self.client = AsyncOpenAI(base_url=self.base_url, api_key=self._api_key)
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
         """async 直接转发到 AsyncOpenAI SDK。返回原生的 OpenAI 响应对象。"""
@@ -301,8 +324,36 @@ class AnthropicClient(LLMClient):
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
+        # R26 #10：留存认证/端点凭据，reset_client 重建时用（同名重建 AsyncAnthropic）
+        self._api_key = api_key
+        self._auth_token = auth_token
+        self._base_url = base_url
         # R17 #12：流空闲看门狗（秒；<=0 禁用）
         self.stream_idle_timeout = stream_idle_timeout
+
+    def reset_client(self) -> None:
+        """R26 #10：丢弃可能坏死的连接池，重建 AsyncAnthropic（同名重建）。"""
+        try:
+            # best-effort 关旧 client（已坏也无妨）
+            import asyncio as _aio
+            try:
+                loop = _aio.get_running_loop()
+                if loop is not None:
+                    loop.create_task(self.client.close())  # noqa
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
+        from anthropic import AsyncAnthropic
+        kwargs = {}
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        # auth_token 优先(与 __init__ 同序)，兜底 api_key
+        if self._auth_token:
+            kwargs["auth_token"] = self._auth_token
+        elif self._api_key:
+            kwargs["api_key"] = self._api_key
+        self.client = AsyncAnthropic(**kwargs)
 
     # effort_level → 思考参数(DeepSeek 格式)
     # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
