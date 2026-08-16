@@ -56,6 +56,7 @@ UNSAFE_TOOLS = {
     # 文件类（写入）
     "write_file",       # 写文件
     "str_replace",      # 改文件内容
+    "notebook_edit",    # R20 #35: notebook 单元格编辑（写文件）
     # 执行类
     "terminal",         # shell 命令（最强副作用）
     # 交互式
