@@ -688,6 +688,59 @@ _CLASSIFY_PROMPT_TEMPLATE = (
     '{{"safe": true}} 或 {{"safe": false, "reason": "<=40 字中文理由>"}}'
 )
 
+# ---------------------------------------------------------------------------
+# R21 #46：LLM 分类器增强（拒绝回落 + 危险前缀剥离）
+# ---------------------------------------------------------------------------
+
+# 拒绝回落阈值（对齐 CCB DENIAL_LIMITS）：连续 3 次或累计 20 次判 unsafe
+# → 本会话闸门 4 停用（分类器明显与用户意图不合拍，回落人工审批）。
+LLM_DENIAL_MAX_CONSECUTIVE = 3
+LLM_DENIAL_MAX_TOTAL = 20
+
+# 危险前缀（对齐 CCB CROSS_PLATFORM_CODE_EXEC + Bash 扩展）：白名单不得
+# 快通道任意代码执行入口——`Bash(python:*)` 类 allow/白名单条目会让
+# 分类器形同虚设（解释器/runner/eval/env/xargs 都能执行任意代码）。
+# 白名单里的这类条目在闸门 4 内被忽略（不修改 config，只影响快速通道）。
+_DANGEROUS_CLASSIFIER_PREFIXES = frozenset({
+    # 解释器
+    "python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl",
+    "php", "lua",
+    # 包 runner
+    "npx", "bunx", "npm run", "yarn run", "pnpm run", "bun run",
+    # shell（Git Bash/WSL 跨平台可达）
+    "bash", "sh", "zsh", "fish",
+    # 远程任意命令包装
+    "ssh",
+    # 任意代码执行/提权原语
+    "eval", "exec", "env", "xargs", "sudo",
+    # 网络外泄面
+    "curl", "wget",
+})
+
+
+def _is_dangerous_whitelist_entry(entry: str) -> bool:
+    """白名单条目是否命中危险前缀（精确 / x:* / 前缀词 / 组合词形态）。"""
+    if not entry or not entry.strip():
+        return True  # 空/纯空白条目本身就不该进白名单
+    e = entry.strip().lower()
+    if e in _DANGEROUS_CLASSIFIER_PREFIXES:
+        return True
+    # x:* 旧前缀形态 → 取前段判定
+    if e.endswith(":*"):
+        e = e[:-2].strip()
+        if e in _DANGEROUS_CLASSIFIER_PREFIXES:
+            return True
+    words = e.split()
+    if not words:
+        return True
+    # 首词判定（python -c / npx pkg 等）
+    if words[0] in _DANGEROUS_CLASSIFIER_PREFIXES:
+        return True
+    # 组合词判定（npm run build / npm run:*——"npm run" 是独立危险条目）
+    if len(words) >= 2 and f"{words[0]} {words[1]}" in _DANGEROUS_CLASSIFIER_PREFIXES:
+        return True
+    return False
+
 
 def _matches_whitelist(command: str, whitelist: List[str]) -> bool:
     """检查命令是否匹配白名单前缀（快速通道，0 LLM 调用）。
@@ -944,6 +997,9 @@ class PermissionChecker:
         # 默认 None：闸门 4 完全跳过（向后兼容，默认 OFF）。
         self._aux_llm_provider: Optional[Callable[[], Any]] = None
         self._config_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        # R21 #46：闸门 4 拒绝跟踪（连续/累计，达阈值回落人工）
+        self._llm_denial_consecutive = 0
+        self._llm_denial_total = 0
 
     def set_aux_llm_provider(self, provider: Callable[[], Any]) -> None:
         """注入 aux_llm_router provider（cli.py 在创建 aux_llm_router 后调）。
@@ -1251,6 +1307,12 @@ class PermissionChecker:
         if self._config_provider is None or self._aux_llm_provider is None:
             return None
 
+        # R21 #46：拒绝回落——连续 3 次或累计 20 次判 unsafe → 本会话停用闸门 4
+        # （分类器与用户意图不合拍，回落人工审批比反复误拒好）
+        if (self._llm_denial_consecutive >= LLM_DENIAL_MAX_CONSECUTIVE
+                or self._llm_denial_total >= LLM_DENIAL_MAX_TOTAL):
+            return None
+
         # 2) 读 config + feature flag
         try:
             config = self._config_provider() or {}
@@ -1267,8 +1329,15 @@ class PermissionChecker:
             return None  # feature 关闭 → 跳过
 
         # 3) 白名单快速通道（0 LLM 调用）
+        # R21 #46：危险前缀剥离——解释器/runner/eval 类白名单条目会让分类器
+        # 形同虚设（python -c 可执行任意代码），这类条目不进快速通道
+        # （不修改 config，只在闸门 4 内忽略——命令仍走正常分类）。
         cfg = get_feature_config(config, "bash_llm_classifier")
-        whitelist = cfg.get("whitelist", [])
+        raw_whitelist = cfg.get("whitelist", [])
+        whitelist = [
+            w for w in raw_whitelist
+            if not _is_dangerous_whitelist_entry(str(w))
+        ]
         if _matches_whitelist(command, whitelist):
             return PermissionResult(True, "白名单快速通道", "whitelist")
 
@@ -1299,9 +1368,20 @@ class PermissionChecker:
             return None
 
         if verdict.get("safe", True):
+            # R21 #46：safe → 连续拒绝清零（累计不清——反映分类器整体倾向）
+            self._llm_denial_consecutive = 0
             return PermissionResult(True, "aux_llm 判安全", "llm_safe")
 
         # AI 判 unsafe → 拒绝 + 原因
+        # R21 #46：拒绝计数（连续 +1，累计 +1）
+        self._llm_denial_consecutive += 1
+        self._llm_denial_total += 1
+        if (self._llm_denial_consecutive >= LLM_DENIAL_MAX_CONSECUTIVE
+                or self._llm_denial_total >= LLM_DENIAL_MAX_TOTAL):
+            logger.warning(
+                "bash_llm_classifier 拒绝回落（连续 %d/累计 %d 次），本会话停用闸门 4",
+                self._llm_denial_consecutive, self._llm_denial_total,
+            )
         reason = verdict.get("reason", "AI 判定不安全")
         return self._deny(
             command,
