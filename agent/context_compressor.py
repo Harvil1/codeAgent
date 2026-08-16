@@ -39,6 +39,9 @@ SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要�
 
 **铁律**：
 - 文件路径、命令、错误消息、用户原话必须**逐字保留**（不能省略/改写）
+- 第 6 段（All user messages）只能收录 user 角色消息的原文；user 未明说、
+  由 assistant 推测或推断出的内容**不得**写成用户说过的话——如需保留必须
+  明确标注"（assistant 推断）"
 - 用 markdown 格式
 - 每段不超过 200 字（除了 user messages 段保留原文）
 

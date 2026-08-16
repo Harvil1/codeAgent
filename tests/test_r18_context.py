@@ -434,3 +434,13 @@ def test_tool_batch_summary_config_default():
     """config 默认键：context.tool_batch_summary_enabled=False。"""
     from config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["context"]["tool_batch_summary_enabled"] is False
+
+
+# ===== R25 #7：摘要 prompt 防伪造条款（契约测试防回归）=====
+
+class TestSummaryPromptAntiForgery:
+    def test_prompt_contains_anti_forgery_clause(self):
+        from agent.context_compressor import SUMMARIZE_PROMPT_9SECTION
+        # 不得把 assistant 推测写成用户原话
+        assert "assistant 推断" in SUMMARIZE_PROMPT_9SECTION
+        assert "不得" in SUMMARIZE_PROMPT_9SECTION
