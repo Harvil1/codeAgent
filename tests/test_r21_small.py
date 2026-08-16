@@ -611,3 +611,35 @@ def test_monitor_quiet_no_stall_notification(tmp_path):
     assert mgr.status(tid).status == "completed"
     stalls = [n for n in notifications if n.get("stall")]
     assert stalls == []  # monitor 豁免——同场景常规任务必报 stall
+
+
+# ---------------------------------------------------------------------------
+# R22 #40：compact 边界重链
+# ---------------------------------------------------------------------------
+
+def test_truncate_at_last_compact_boundary():
+    """最后边界之前的旧消息裁掉；标记行剥掉保留摘要正文；无标记保守全量。"""
+    from cli import _truncate_at_last_compact_boundary as trunc
+
+    msgs = [
+        {"role": "user", "content": "旧消息 1"},
+        {"role": "assistant", "content": "旧回复"},
+        {"role": "user", "content": "[COMPACT_BOUNDARY]\n[之前的对话已自动总结]\n\n摘要 A\n\n[以下是最近的对话]"},
+        {"role": "user", "content": "新消息 1"},
+        {"role": "assistant", "content": "新回复"},
+        {"role": "user", "content": "[COMPACT_BOUNDARY]\n[之前的对话已自动总结]\n\n摘要 B\n\n[以下是最近的对话]"},
+        {"role": "user", "content": "边界后消息"},
+    ]
+    out = trunc(msgs)
+    # 从最后边界起（前 5 条丢弃：旧消息×2 + 第一边界 + 新消息×2）
+    assert len(out) == 2
+    assert out[0]["content"].startswith("[之前的对话已自动总结]")
+    assert "摘要 B" in out[0]["content"]
+    assert "[COMPACT_BOUNDARY]" not in out[0]["content"]  # 标记行已剥
+    assert out[1]["content"] == "边界后消息"
+    # 入参不被修改（浅拷贝保护）
+    assert msgs[5]["content"].startswith("[COMPACT_BOUNDARY]")
+
+    # 无标记 → 原样（旧会话保守路径）
+    plain = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}]
+    assert trunc(plain) == plain

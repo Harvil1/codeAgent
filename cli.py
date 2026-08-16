@@ -833,6 +833,9 @@ class RuntimeContext:
         msgs = self.session_store.get_messages(session_id)
         # conversation_history 不含 system（system 由 prompt_builder 生成）
         conv = [m for m in msgs if m.get("role") != "system"]
+        # R22 #40：按最后 compact 边界裁剪 pre-compact 旧消息
+        # （session append-only，不裁会载入全量旧历史；旧会话无标记保守全量）
+        conv = _truncate_at_last_compact_boundary(conv)
         # 清理冗余摘要占位（保留最近一个）——压缩频率修复前的会话可能有几十个
         # "[之前的对话已自动总结]" 占位，全注入上下文会撑爆且混乱
         conv = _cleanup_redundant_summaries(conv)
@@ -1713,6 +1716,37 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return _handle_skill_learning_command(args, rt)
 
     return False
+
+
+def _truncate_at_last_compact_boundary(msgs: list) -> list:
+    """R22 #40：从最后一条 [COMPACT_BOUNDARY] 标记起截断（对齐 CC 边界重链）。
+
+    压缩时摘要占位带标记入库（agent 侧）；resume 载入时标记之前的
+    pre-compact 旧消息全部裁掉（它们已被总结进占位，再载入既撑上下文
+    又与摘要重复）。标记行剥掉、摘要正文保留。找不到标记返回原列表
+    （保守——旧会话/未压缩会话行为不变）。
+    """
+    last_idx = -1
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if m.get("role") != "user":
+            continue
+        content = m.get("content", "")
+        if isinstance(content, str) and content.startswith("[COMPACT_BOUNDARY]"):
+            last_idx = i
+            break
+    if last_idx < 0:
+        return msgs
+    kept = [dict(m) for m in msgs[last_idx:]]
+    # 剥首条标记行（保留摘要正文）
+    first = kept[0]
+    content = first.get("content", "")
+    first["content"] = content.replace("[COMPACT_BOUNDARY]\n", "", 1)
+    logger.info(
+        "resume：按 compact 边界裁剪（丢弃 %d 条 pre-compact 消息）",
+        last_idx,
+    )
+    return kept
 
 
 def _cleanup_redundant_summaries(msgs: list) -> list:

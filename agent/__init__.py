@@ -1645,6 +1645,9 @@ class AIAgent:
 
         # 对齐 Claude Code compact_boundary：压缩摘要占位也入库，
         # 恢复时模型能知道"此处之前的旧消息已被总结"（避免困惑/重复总结）
+        # R22 #40：占位前加 [COMPACT_BOUNDARY] 标记行——resume 按最后边界
+        # 裁剪 pre-compact 旧消息（session 是 append-only，不裁会载入全量
+        # 旧历史撑爆上下文）；旧会话无标记走保守全量（对齐 CC 失败放弃修剪）
         if self.conversation_history:
             first_msg = self.conversation_history[0]
             if first_msg.get("role") == "user":
@@ -1652,7 +1655,9 @@ class AIAgent:
                 if first_content.startswith(
                     ("[之前的对话已自动总结]", "[紧急上下文压缩")
                 ):
-                    self._persist_session_message("user", first_content)
+                    self._persist_session_message(
+                        "user", f"[COMPACT_BOUNDARY]\n{first_content}",
+                    )
 
         # PostCompressReanchor：注入"刚醒来"brief
         brief_parts = [
