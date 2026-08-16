@@ -465,6 +465,66 @@ def _delegate_async(
     }, ensure_ascii=False)
 
 
+def _start_progress_ticker(
+    children_state: dict,
+    stop_event,
+    *,
+    aux,
+    session_id: str,
+    interval: float = 30.0,
+) -> "threading.Thread":
+    """R26 #12：并发子代理运行期间每 interval 秒写一条进度摘要。
+
+    ≥2 个子代理并行时用户只能干等——本 ticker 让进度可见：
+    aux 可用 → LLM 摘成 1-2 句；不可用 → 机械拼接状态行。
+    写入 scratchpad 的 progress.md（涂鸦区，7 天自动清理）+ logger.info。
+    fail-open 全吞：进度摘要绝不能影响子代理本身。
+    """
+    import threading
+
+    def _tick():
+        while not stop_event.wait(interval):
+            try:
+                lines = [
+                    f"{name}: {info.get('status', '?')}（{info.get('goal', '')[:40]}）"
+                    for name, info in children_state.items()
+                ]
+                if not lines:
+                    continue
+                text = "\n".join(lines)
+                if aux is not None:
+                    try:
+                        import asyncio
+                        resp = asyncio.run(aux.chat_completions([
+                            {"role": "user", "content":
+                             f"把以下子代理状态摘要成 1-2 句中文进度：\n{text}"},
+                        ]))
+                        summarized = resp.choices[0].message.content or ""
+                        if summarized.strip():
+                            text = summarized.strip()
+                    except Exception:
+                        pass  # 摘要失败用机械拼接
+                from agent.scratchpad import scratchpad_dir
+                d = scratchpad_dir(session_id)
+                d.mkdir(parents=True, exist_ok=True)
+                p = d / "progress.md"
+                # 只保留最近 20 条（防长跑膨胀；涂鸦区非知识库）
+                try:
+                    old = p.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    old = []
+                stamp = time.strftime("%H:%M:%S")
+                new = old[-19:] + [f"[{stamp}] {text}"]
+                p.write_text("\n".join(new) + "\n", encoding="utf-8")
+                logger.info("[子代理进度] %s", text)
+            except Exception as e:
+                logger.debug("progress ticker fail-open: %s", e)
+
+    t = threading.Thread(target=_tick, daemon=True, name="delegate-progress")
+    t.start()
+    return t
+
+
 def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     """批量并行委托。
 
@@ -485,6 +545,10 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     futures = {}
     # Task K: 每任务的 cancel_event（submit 时创建，传给 _run_child）
     batch_cancel_events = []
+    # R26 #12：进度 ticker 的共享状态（tasks 无 name 字段，按序号命名；
+    # 只改 value 不增删 key——ticker 线程遍历时无 dict 变更竞争）
+    children_state = {}
+    _progress_stop = threading.Event()
     try:
         for i, task in enumerate(tasks):
             goal = task.get("goal", "") or task.get("prompt", "")
@@ -499,6 +563,34 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
 
             future = executor.submit(_run_child, goal, context, role, **task_kwargs)
             futures[future] = i
+            name = f"子代理-{i + 1}"
+            children_state[name] = {"status": "running", "goal": goal}
+
+            # R26 #12：child 一完成立即更新 ticker 状态（收集循环按提交序阻塞
+            # 等 result，done_callback 不受其影响——进度实时；fail-open）
+            def _mark_child_done(f, _name=name):
+                try:
+                    if f.cancelled():
+                        children_state[_name]["status"] = "cancelled"
+                    elif f.exception() is None:
+                        children_state[_name]["status"] = "done"
+                        children_state[_name]["summary"] = str(f.result())[:80]
+                    else:
+                        children_state[_name]["status"] = "failed"
+                        children_state[_name]["summary"] = str(f.exception())[:80]
+                except Exception:
+                    pass
+            future.add_done_callback(_mark_child_done)
+
+        # R26 #12：≥2 个子代理并行时用户只能干等——起 30s 进度 ticker
+        # 让进度可见（aux LLM 摘要 / 机械拼接），写 scratchpad progress.md
+        if len(children_state) >= 2:
+            _agent_ref = kwargs.get("agent_ref")
+            _start_progress_ticker(
+                children_state, _progress_stop,
+                aux=getattr(_agent_ref, "aux_llm_router", None),
+                session_id=getattr(_agent_ref, "session_id", "") or "",
+            )
 
         for future in futures:
             idx = futures[future]
@@ -535,6 +627,10 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
             f.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         raise
+    finally:
+        # R26 #12：批量结束（含 Ctrl+C 中断）必停进度 ticker（daemon 兜底，
+        # 但显式 set 让线程立刻退出，不跨测试泄漏等待者）
+        _progress_stop.set()
 
     executor.shutdown(wait=True)
 

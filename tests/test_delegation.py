@@ -603,3 +603,109 @@ def test_run_child_preserves_other_config_keys_with_disabled(monkeypatch):
     assert cfg.get("disabled_tools") == ["bg_start"], "disabled_tools 应注入"
     assert cfg.get("other_key") == "preserved", "其他键应保留"
     assert cfg.get("delegation", {}).get("max_concurrent_children") == 3
+
+
+# ---------------------------------------------------------------------------
+# R26 #12：并发子代理 30s 进度摘要 ticker
+# ---------------------------------------------------------------------------
+
+class TestProgressTicker:
+    """并发子代理运行期间每 interval 秒写一条进度摘要到 scratchpad progress.md。"""
+
+    def test_ticker_writes_progress(self, tmp_path, monkeypatch):
+        """≥2 children + ticker 跑一轮 → scratchpad progress.md 有 aux 摘要内容。"""
+        from tools.delegate_tool import _start_progress_ticker
+        from agent.scratchpad import scratchpad_dir
+        import threading, time
+
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        state = {"a": {"status": "running", "goal": "扫 agent/"},
+                 "b": {"status": "done", "goal": "写方案"}}
+        stop = threading.Event()
+
+        class FakeAux:
+            async def chat_completions(self, messages, **kw):
+                class _Msg:
+                    content = "a 在扫，b 已完成"
+                class _Choice:
+                    message = _Msg()
+                class _Resp:
+                    choices = [_Choice()]
+                return _Resp()
+
+        # 把 sleep 调成 0.05s 加速（ticker 参数 interval 可注入）
+        t = _start_progress_ticker(
+            state, stop, aux=FakeAux(), session_id="s-test", interval=0.05,
+        )
+        time.sleep(0.2)
+        stop.set()
+        t.join(timeout=2)
+        p = scratchpad_dir("s-test") / "progress.md"
+        assert p.exists()
+        assert "a 在扫" in p.read_text(encoding="utf-8")
+
+    def test_no_aux_mechanical_fallback(self, tmp_path, monkeypatch):
+        """无 aux → 机械拼接状态行（不调 LLM）。"""
+        from tools.delegate_tool import _start_progress_ticker
+        from agent.scratchpad import scratchpad_dir
+        import threading, time
+
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        state = {"a": {"status": "running", "goal": "扫 agent/"},
+                 "b": {"status": "done", "goal": "写方案"}}
+        stop = threading.Event()
+
+        t = _start_progress_ticker(
+            state, stop, aux=None, session_id="s-test", interval=0.05,
+        )
+        time.sleep(0.2)
+        stop.set()
+        t.join(timeout=2)
+        p = scratchpad_dir("s-test") / "progress.md"
+        assert p.exists()
+        content = p.read_text(encoding="utf-8")
+        assert "a" in content
+        assert "running" in content
+
+    def test_batch_starts_and_stops_ticker(self, tmp_path, monkeypatch):
+        """_delegate_batch ≥2 任务时启动 ticker；结束时停止 + 状态更新 done。"""
+        import threading
+
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        started = {}
+
+        def fake_ticker(children_state, stop_event, *, aux, session_id,
+                        interval=30.0, **kw):
+            started["state"] = children_state
+            started["stop"] = stop_event
+            started["aux"] = aux
+            started["session_id"] = session_id
+            return threading.Thread(target=lambda: None)
+
+        fake_agent = type(
+            "FakeAgent", (), {"session_id": "sess-x", "aux_llm_router": None})()
+
+        with patch("tools.delegate_tool._start_progress_ticker",
+                   side_effect=fake_ticker):
+            with patch("tools.delegate_tool._run_child", return_value="ok"):
+                _delegate_batch(
+                    [{"goal": "t1"}, {"goal": "t2"}],
+                    background=False, agent_ref=fake_agent,
+                )
+
+        # 启动参数：children ≥2、aux/session_id 来自 agent_ref
+        assert len(started["state"]) == 2
+        assert started["aux"] is None
+        assert started["session_id"] == "sess-x"
+        # finally 停止 ticker + child 完成时状态更新
+        assert started["stop"].is_set()
+        statuses = {v["status"] for v in started["state"].values()}
+        assert statuses == {"done"}
+
+    def test_batch_single_task_no_ticker(self, tmp_path, monkeypatch):
+        """单任务（<2）不起 ticker——没有'并发干等'问题。"""
+        with patch("tools.delegate_tool._start_progress_ticker") as mock_ticker:
+            with patch("tools.delegate_tool._run_child", return_value="ok"):
+                _delegate_batch([{"goal": "only-one"}], background=False)
+
+        mock_ticker.assert_not_called()
