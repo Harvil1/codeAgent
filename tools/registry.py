@@ -234,6 +234,19 @@ class ToolRegistry:
             )
             self._generation += 1
 
+    def unregister(self, name: str) -> bool:
+        """注销工具（R20：测试注册临时工具后的隔离清理用）。
+
+        返回 True 表示找到并移除，False 表示不存在。
+        生产代码不应用（工具注册是启动期行为）。
+        """
+        with self._lock:
+            if name in self._tools:
+                del self._tools[name]
+                self._generation += 1
+                return True
+            return False
+
     async def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """async 分发工具调用，返回 JSON 字符串结果。
 
