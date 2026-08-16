@@ -128,6 +128,8 @@ async def _summarize_conversation(
     session_memory: str = None,
     from_idx: int = 0,
     up_to_idx: int = -1,
+    fork_prefix_messages: list = None,
+    tools: list = None,
 ) -> str:
     """调用 LLM 用 9 段式 prompt 总结对话历史（async：对齐 batch2 async 改造）。
 
@@ -140,6 +142,15 @@ async def _summarize_conversation(
     Task C（partial compact）：
     - **from_idx/up_to_idx**：只压 messages[from_idx:up_to_idx] 段（默认 0/-1 = 全量）
     - 段消息数 < 2 时返回空串（不压）
+
+    R18 #15（fork 前缀复用，对齐 CC streamCompactSummary）：
+    - **fork_prefix_messages**：完整对话（含 system）。有值且未配 summary_model 时
+      摘要请求 = 完整对话前缀 + 追加的摘要指令（tools 同主调用）——前缀命中
+      provider 的 prompt cache（省一次全量 cache write）；不设 max_tokens
+      （对齐 CC：fork 不设 maxOutputTokens，防参数差异破缓存）。
+    - fork 失败/空响应 → 降级独立调用路径（前缀已变 miss 接受）
+    - summary_model 显式配置时不用 fork（专用小模型与主前缀不同缓存空间，
+      用户显式配置优先）
 
     Args:
         messages: 对话历史
@@ -188,6 +199,30 @@ async def _summarize_conversation(
     working_messages = strip_media_blocks(to_summarize)  # 不污染入参（PTL 重试会再切片）
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+
+    # === R18 #15：fork 前缀复用（先于独立调用尝试，失败降级独立路径）===
+    if fork_prefix_messages and not summary_model:
+        fork_messages = strip_media_blocks(fork_prefix_messages) + [
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = await llm_client.chat_completions(
+                fork_messages, tools=tools,
+            )
+            summary = response.choices[0].message.content or ""
+            if summary.strip():
+                # 成功：重置熔断器（与独立路径同款语义）
+                _consecutive_failures = 0
+                _compact_circuit_open = False
+                logger.info(
+                    "fork 摘要成功（前缀 %d 条消息复用主对话缓存）",
+                    len(fork_prefix_messages),
+                )
+                return _strip_analysis_draft(summary)
+            logger.warning("fork 摘要响应为空（降级独立调用）")
+        except Exception as e:
+            # fork 失败不计熔断——独立路径会带 PTL 重试与熔断语义完整处理
+            logger.warning("fork 摘要失败（降级独立调用）: %s", e)
 
     # 5. PTL 重试（最多 MAX_PTL_RETRIES 次）
     # Task E：用 tokenGap 精确算法替旧 20% 粗丢

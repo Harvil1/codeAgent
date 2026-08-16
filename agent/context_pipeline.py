@@ -661,6 +661,7 @@ async def llm_compact(
     session_memory: Optional[str] = None,
     from_idx: int = 0,
     up_to_idx: int = -1,
+    tools: Optional[list] = None,
 ) -> Tuple[list, bool]:
     """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话（async：_summarize_conversation 已改 async）。
 
@@ -700,6 +701,9 @@ async def llm_compact(
             session_memory=session_memory,
             from_idx=from_idx,
             up_to_idx=effective_up_to,
+            # R18 #15：fork 前缀 = 完整 messages（含 system）+ tools 同主调用
+            fork_prefix_messages=messages,
+            tools=tools,
         )
         if not summary:
             return messages, False
@@ -744,6 +748,9 @@ async def llm_compact(
     summary = await _summarize_conversation(
         to_summarize, llm_client, model=model,
         session_memory=session_memory,
+        # R18 #15：fork 前缀 = 完整 messages（含 system）+ tools 同主调用
+        fork_prefix_messages=messages,
+        tools=tools,
     )
     if not summary:
         return messages, False
@@ -943,6 +950,7 @@ async def compress_if_needed(
     agent_home,
     session_id: str,
     hooks_registry=None,
+    tools: Optional[list] = None,
 ) -> Tuple[list, bool]:
     """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
 
@@ -1193,6 +1201,7 @@ async def compress_if_needed(
             # T1：传入 est+growth（提前触发时 est 可能未到 threshold，
             # llm_compact 内部门槛用同一个"下一轮预期水位"判定，避免二次拦截）
             precomputed_tokens=est_tokens + growth,
+            tools=tools,  # R18 #15：fork 前缀复用
         )
         if c4:
             session_state.record_llm_compact()

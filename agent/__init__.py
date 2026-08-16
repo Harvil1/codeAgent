@@ -432,6 +432,10 @@ class AIAgent:
         # === R17 #9 NEW: 最近一次 LLM 错误分类（prompt_too_long/stream_idle/other）===
         # 扣留-恢复失败透出时记录，主循环 #14 用它区分终止原因。
         self._last_llm_error_kind = "other"
+        # === R18 #15 NEW: 最近一次主调用的 tool_schemas（fork 摘要前缀复用）===
+        # 压缩发生在 _prepare_toolset 之前的轮边界，fork 请求用上一轮的
+        # schema 集合保持前缀一致（plan_mode 切换轮会 miss 一次，可接受）。
+        self._last_tool_schemas = None
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1092,6 +1096,8 @@ class AIAgent:
 
             # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
             tool_schemas = await self._prepare_toolset_and_injections(messages)
+            # R18 #15：记录最新 schema 集合，轮边界的 fork 摘要用它保持前缀一致
+            self._last_tool_schemas = tool_schemas
 
             # 防孤儿兜底：发送前修复 tool_call 配对。任何来源的孤儿 tool_result
             # （压缩边界 / 流式断连 / 工具异常）都会让 Anthropic API 报 400：
@@ -1494,6 +1500,7 @@ class AIAgent:
             agent_home=self.omnimate_home,
             session_id=self.session_id,
             hooks_registry=self.hooks_registry,
+            tools=self._last_tool_schemas,  # R18 #15：fork 摘要前缀复用
         )
         if not compressed:
             return messages, system_prompt, False

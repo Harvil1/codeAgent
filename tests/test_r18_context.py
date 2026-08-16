@@ -158,3 +158,138 @@ def test_l4_failure_reset_on_success():
     state.record_llm_compact()  # 模拟成功路径
     # record_llm_compact 本身不清零——清零在 compress_if_needed 的 c4 分支
     assert state.llm_compact_failures == 2
+
+
+# ---------------------------------------------------------------------------
+# R18 #15：压缩调用复用缓存前缀（fork）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fork_summary_reuses_prefix():
+    """fork 模式：请求 = 完整对话前缀 + 追加摘要指令；tools 透传。"""
+    captured = {}
+
+    class _Client:
+        async def chat_completions(self, msgs, **kw):
+            captured["msgs"] = msgs
+            captured["kw"] = kw
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="fork 摘要", tool_calls=None),
+            )])
+
+    prefix = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+    out = await _summarize_conversation(
+        [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}],
+        _Client(),
+        fork_prefix_messages=prefix,
+        tools=[{"type": "function", "function": {"name": "t"}}],
+    )
+    assert out == "fork 摘要"
+    sent = captured["msgs"]
+    # 前缀逐条保留 + 末尾追加 1 条摘要指令
+    assert sent[:3] == prefix
+    assert len(sent) == 4
+    assert sent[3]["role"] == "user"
+    assert "9 段" in sent[3]["content"]
+    # tools 透传（与主调用一致，保前缀缓存）；不传 model/max_tokens
+    assert captured["kw"]["tools"]
+    assert "model" not in captured["kw"]
+    assert "max_tokens" not in captured["kw"]
+
+
+@pytest.mark.asyncio
+async def test_fork_skipped_when_summary_model_set():
+    """配置 summary_model 时不 fork（独立调用形态：system+user 两条）。"""
+    captured = {}
+
+    class _Client:
+        async def chat_completions(self, msgs, **kw):
+            captured["msgs"] = msgs
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="独立摘要", tool_calls=None),
+            )])
+
+    await _summarize_conversation(
+        [{"role": "user", "content": "q"}], _Client(),
+        summary_model="cheap-model",
+        fork_prefix_messages=[{"role": "system", "content": "s"}],
+    )
+    # 独立调用：2 条（摘要 system + user prompt），不是 fork 形态
+    assert len(captured["msgs"]) == 2
+    assert captured["msgs"][0]["content"] == "你是技术对话摘要助手。"
+
+
+@pytest.mark.asyncio
+async def test_fork_failure_falls_back_to_standalone():
+    """fork 失败 → 降级独立调用路径（PTL 重试/熔断语义在独立路径）。"""
+    calls = {"n": 0}
+
+    class _Client:
+        async def chat_completions(self, msgs, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("fork boom")
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="降级后摘要", tool_calls=None),
+            )])
+
+    out = await _summarize_conversation(
+        [{"role": "user", "content": "q"}], _Client(),
+        fork_prefix_messages=[{"role": "system", "content": "s"}],
+    )
+    assert out == "降级后摘要"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fork_empty_response_falls_back():
+    """fork 空响应 → 降级独立调用。"""
+    calls = {"n": 0}
+
+    class _Client:
+        async def chat_completions(self, msgs, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="", tool_calls=None),
+                )])
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="ok 摘要", tool_calls=None),
+            )])
+
+    out = await _summarize_conversation(
+        [{"role": "user", "content": "q"}], _Client(),
+        fork_prefix_messages=[{"role": "system", "content": "s"}],
+    )
+    assert out == "ok 摘要"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_compact_passes_fork_prefix():
+    """llm_compact 自动把完整 messages 作为 fork 基底传给摘要。"""
+    captured = {}
+
+    class _Client:
+        async def chat_completions(self, msgs, **kw):
+            captured["msgs"] = msgs
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="sum", tool_calls=None),
+            )])
+
+    msgs = (
+        [{"role": "system", "content": "s"}]
+        + [{"role": "user", "content": f"q{i} " + "x" * 100} for i in range(60)]
+    )
+    new_msgs, changed = await llm_compact(
+        msgs, llm_client=_Client(), model="m",
+        keep_recent=10, token_threshold=100,
+    )
+    assert changed is True
+    # fork 请求以完整 messages（含 system）为前缀
+    assert captured["msgs"][0] == {"role": "system", "content": "s"}
+    assert len(captured["msgs"]) > 10  # 前缀全量 + 1 指令
