@@ -1974,3 +1974,159 @@ def test_cleanup_redundant_summaries():
     # 普通消息和 assistant 保留
     assert "普通消息1" in [m["content"] for m in out]
     assert len(out) == len(msgs) - 2  # 删掉 2 个旧占位
+
+
+# ---------------------------------------------------------------------------
+# R26 #15：流式中途失败不得把半截 assistant 消息留进 history
+# ---------------------------------------------------------------------------
+
+class TestStreamFailureNoOrphan:
+    """R26 #15：流式中途失败不得把半截 assistant 消息留进 history。
+
+    audit-first 审计结论（R26）：_call_llm_streaming 的流异常 except 分支
+    只把半截增量喂给 stream_callback（UI 层），随后 fallback 到非流式
+    call_with_retry 并返回完整 response；半截累积变量（full_content /
+    tool_call_buffers）是函数局部变量，随作用域自然丢弃，任何路径都不会
+    append 进 conversation_history。本组测试把该契约固化，防未来回归。
+    """
+
+    async def test_history_tail_complete_after_stream_failure(self, tmp_path):
+        """模拟流第 2 个 chunk 抛异常 → fallback 非流式 → history 尾部完整。"""
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("hello", encoding="utf-8")
+        final_text = "这是完整的最终回复"
+        calls = {"stream": 0, "non_stream": 0}
+
+        class _FailingStreamClient:
+            """第 1 轮流式：yield 半截 chunk 后抛异常；非流式 fallback 正常。
+            第 2 轮流式（消化工具结果轮）：正常完整流。"""
+
+            async def chat_completions(self, messages, *, tools=None, **kwargs):
+                calls["non_stream"] += 1
+                # 非流式 fallback 返回完整的 tool_calls 响应
+                tool_call = SimpleNamespace(
+                    id="call_fallback_1",
+                    type="function",
+                    function=SimpleNamespace(
+                        name="read_file",
+                        arguments=json.dumps({"path": str(test_file)}),
+                    ),
+                )
+                msg = SimpleNamespace(content=None, tool_calls=[tool_call])
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        message=msg, finish_reason="tool_calls",
+                    )],
+                    usage=None,
+                )
+
+            async def chat_completions_stream(
+                self, messages, *, tools=None, **kwargs,
+            ):
+                calls["stream"] += 1
+                if calls["stream"] == 1:
+                    # 半截增量后流中途失败
+                    yield {
+                        "content": "半截内容XYZ", "tool_calls": [],
+                        "finish_reason": None, "usage": None,
+                    }
+                    raise RuntimeError("stream broke mid-way")
+                # 第 2 轮：正常完整流
+                yield {
+                    "content": final_text, "tool_calls": [],
+                    "finish_reason": None, "usage": None,
+                }
+                yield {
+                    "content": "", "tool_calls": [], "finish_reason": "stop",
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2,
+                              "cache_read": 0, "cache_creation": 0},
+                }
+
+        agent = AIAgent(
+            api_key="fake",
+            model="test",
+            enabled_toolsets=["core"],
+            omnimate_home=tmp_path,
+            stream_callback=lambda e: None,  # 必须非 None 才走 _call_llm_streaming
+        )
+        agent.llm_client = _FailingStreamClient()
+
+        response = await agent.chat("读这个文件")
+
+        # 流失败 1 次 + 非流式 fallback 1 次 + 第 2 轮流式成功
+        assert calls["stream"] == 2
+        assert calls["non_stream"] == 1
+        assert response == final_text
+
+        # 契约 1：半截增量绝不进 history（只进 UI callback）
+        for m in agent.conversation_history:
+            assert "半截内容XYZ" not in str(m.get("content", "")), \
+                f"半截增量泄漏进 history: {m}"
+
+        # 契约 2：assistant(tool_calls) 条目来自完整 fallback 响应
+        tc_assistants = [
+            m for m in agent.conversation_history
+            if m["role"] == "assistant" and m.get("tool_calls")
+        ]
+        assert len(tc_assistants) == 1
+        tc = tc_assistants[0]["tool_calls"][0]
+        assert tc["id"] == "call_fallback_1"
+        assert tc["function"]["name"] == "read_file"
+
+        # 契约 3：tool 结果与 tool_call 严格配对（无孤儿/失配）
+        tool_msgs = [
+            m for m in agent.conversation_history if m["role"] == "tool"
+        ]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call_fallback_1"]
+        assert "hello" in tool_msgs[0]["content"]
+
+        # 契约 4：最后一条 assistant = 完整最终回复（不含半截拼接）
+        last = agent.conversation_history[-1]
+        assert last["role"] == "assistant"
+        assert last["content"] == final_text
+
+    async def test_streaming_executor_reset_on_failure(self, monkeypatch):
+        """collect 失败 → _streaming_preset_results 清空（已有行为固化）。"""
+        from agent.streaming_executor import StreamingToolExecutor
+
+        async def _boom_collect(self):
+            raise RuntimeError("collect boom")
+
+        monkeypatch.setattr(StreamingToolExecutor, "collect", _boom_collect)
+
+        agent = AIAgent(
+            api_key="fake",
+            model="test",
+            enabled_toolsets=[],
+            stream_callback=lambda e: None,
+            config={"agent": {"streaming_tool_execution": True}},
+        )
+
+        class _OkStreamClient:
+            async def chat_completions_stream(
+                self, messages, *, tools=None, **kwargs,
+            ):
+                yield {"content": "ok", "tool_calls": [],
+                       "finish_reason": "stop", "usage": None}
+
+        agent.llm_client = _OkStreamClient()
+
+        response = await agent._call_llm_streaming(
+            messages=[{"role": "user", "content": "?"}], tools=None,
+        )
+        assert response.choices[0].message.content == "ok"
+        # collect 抛异常 → 预执行暂存必须清空（不残留半截状态）
+        assert agent._streaming_preset_results == {}
+
+    async def test_discard_partial_stream_state_helper(self):
+        """R26 #15 防御 helper 契约：显式清空半截累积暂存（tombstone）。"""
+        agent = AIAgent(
+            api_key="fake",
+            model="test",
+            enabled_toolsets=[],
+            stream_callback=lambda e: None,
+        )
+        # 人为塞入陈旧暂存（模拟未来回归：增量被提前入暂存区）
+        agent._streaming_preset_results = {"stale_call": "半截结果"}
+        agent._discard_partial_stream_state()
+        assert agent._streaming_preset_results == {}

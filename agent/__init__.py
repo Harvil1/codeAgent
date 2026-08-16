@@ -871,6 +871,11 @@ class AIAgent:
             # R23 #7：流异常 → drain 预执行 task（等完成但弃用结果，防僵尸）
             if _executor is not None:
                 await _executor.drain()
+            # R26 #15：显式丢弃半截累积状态（防御性 tombstone，fail-open）
+            try:
+                self._discard_partial_stream_state()
+            except Exception:
+                pass
             from agent.llm_retry import call_with_retry
             response = await call_with_retry(
                 self.llm_client,
@@ -1953,6 +1958,11 @@ class AIAgent:
             from agent.llm_client import LLMStreamIdleTimeout
             if isinstance(e, LLMStreamIdleTimeout):
                 logger.warning("流空闲超时（看门狗），扣留转非流式重试一次")
+                # R26 #15：显式丢弃半截累积状态（防御性 tombstone，fail-open）
+                try:
+                    self._discard_partial_stream_state()
+                except Exception:
+                    pass
                 from agent.llm_retry import call_with_retry as _cwr
                 try:
                     response = await _cwr(
@@ -3025,6 +3035,17 @@ class AIAgent:
         只记 info 日志（进 logs/ 与 trace），不做 toast（30s 一次会刷屏）。
         """
         logger.info("LLM 重试退避中：已等待 %.0fs / 预计共 %.0fs", elapsed, total)
+
+    def _discard_partial_stream_state(self) -> None:
+        """R26 #15：流式失败后显式丢弃半截累积状态（防御性 tombstone）。
+
+        现状审计结论：半截增量只进 UI callback 不进 history（full_content /
+        tool_call_buffers 是 _call_llm_streaming 的函数局部变量，随作用域
+        丢弃），本方法是保险带——未来若有人把增量提前入史/入暂存区，
+        这里负责清理痕迹 + log 提醒，同时复位 streaming preset results。
+        """
+        self._streaming_preset_results = {}
+        logger.debug("流式失败：半截增量已丢弃（不入 history）")
 
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
         """循环结束（预算耗尽或中断）的兜底响应。
