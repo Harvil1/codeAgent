@@ -276,3 +276,25 @@ def test_agent_activate_conditional_skills(tmp_path, monkeypatch):
     # 非匹配文件不通知
     a._activate_conditional_skills("proj/readme.md")
     assert len(a._pending_ephemeral_messages) == 1
+
+
+# ---------------------------------------------------------------------------
+# R19 #28：skillify 内置技能
+# ---------------------------------------------------------------------------
+
+def test_skillify_builtin_skill_discoverable():
+    """内置 skillify 技能存在且能被扫描发现（纯 MD，零 Python）。"""
+    from constants import builtin_skills_dir
+    skill_md = builtin_skills_dir() / "skillify" / "SKILL.md"
+    assert skill_md.exists(), "skills/skillify/SKILL.md 应存在"
+
+    from agent.skill_commands import scan_skill_commands
+    cmds = scan_skill_commands([builtin_skills_dir()])
+    assert "/skillify" in cmds
+    info = cmds["/skillify"]
+    assert "沉淀" in info["description"] or "技能" in info["description"]
+    # 正文含访谈与保存环节
+    body = skill_md.read_text(encoding="utf-8")
+    assert "ask_user" in body
+    assert "skill_manage" in body
+    assert "规则" in body  # 用户纠正沉淀段
