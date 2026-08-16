@@ -1590,8 +1590,8 @@ async def test_idle_requested_reset_between_run_conversation_calls(tmp_path):
 
     # 第一轮：调 idle → 设置 _idle_requested → 循环 break → fallback
     r1 = await agent2.run_conversation("turn 1")
-    # idle 后 break 会走 fallback 分支（"强制停止"）
-    assert "强制停止" in r1
+    # idle 后 break 走 idle_requested 分支（R17 #14 起消息为"已按请求停止本轮"）
+    assert "停止本轮" in r1
     # _idle_requested 此时为 True（idle 工具设置的）
     assert agent2._idle_requested is True
 

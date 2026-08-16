@@ -363,3 +363,186 @@ def test_compute_backoff_caps():
         attempt=0, initial_backoff=1.0, retry_after=9999.0, jitter_ratio=0,
         max_backoff=300.0,
     ) == 300.0
+
+
+# ---------------------------------------------------------------------------
+# R17 #9：扣留-恢复模式 + R17 #14：终止原因枚举
+# ---------------------------------------------------------------------------
+
+from agent import AIAgent, LoopExitReason
+from agent.context_pipeline import CompressionSessionState
+from agent.llm_client import LLMStreamIdleTimeout
+
+
+def _mk_full_agent(**overrides):
+    """构造跳过 __init__ 的 AIAgent（_call_llm_with_escalation / _handle_loop_exit 用）。"""
+    a = AIAgent.__new__(AIAgent)
+    a._stream_callback = None
+    a.config = {}
+    a.llm_client = SimpleNamespace()
+    a.fallback_llm_client = None
+    a.model = "test-model"
+    a.session_id = "test"
+    a._max_tokens_escalator = MaxTokensEscalator()
+    a.conversation_history = []
+    a._compress_session_state = CompressionSessionState()
+    a._goal_state = None
+    a.hooks_registry = None
+    a._trace_sink = None
+    a._last_llm_error_kind = "other"
+    a._reacted = False
+    a._sync_memory = lambda *args, **kw: None
+    a.invalidate_system_prompt = lambda: None
+    for k, v in overrides.items():
+        setattr(a, k, v)
+    return a
+
+
+@pytest.mark.asyncio
+async def test_withheld_stream_idle_recovers(monkeypatch):
+    """流空闲超时 → 扣留 → 转非流式重试成功（错误不透出）。"""
+    agent = _mk_full_agent()
+    agent._stream_callback = lambda ch: None  # 走流式路径
+
+    async def boom(**kw):
+        raise LLMStreamIdleTimeout("90s 无数据")
+
+    agent._call_llm_streaming = boom
+
+    import agent.llm_retry as lr
+    monkeypatch.setattr(lr, "call_with_retry", _async_const(_mk_resp("recovered")))
+
+    out = await agent._call_llm_with_escalation(
+        [{"role": "user", "content": "q"}], [], "sys",
+    )
+    assert out.choices[0].message.content == "recovered"
+    assert agent._last_llm_error_kind == "other"  # 未进错误路径
+
+
+def _async_const(value):
+    async def f(*args, **kwargs):
+        return value
+    return f
+
+
+@pytest.mark.asyncio
+async def test_withheld_stream_idle_recovery_fails(monkeypatch):
+    """流空闲恢复失败 → 透出，kind=stream_idle，错误塞回 history。"""
+    agent = _mk_full_agent()
+    agent._stream_callback = lambda ch: None
+
+    async def boom(**kw):
+        raise LLMStreamIdleTimeout("90s 无数据")
+
+    agent._call_llm_streaming = boom
+
+    async def also_fail(*args, **kwargs):
+        raise RuntimeError("non-stream also down")
+
+    import agent.llm_retry as lr
+    monkeypatch.setattr(lr, "call_with_retry", also_fail)
+
+    out = await agent._call_llm_with_escalation(
+        [{"role": "user", "content": "q"}], [], "sys",
+    )
+    assert out is None
+    assert agent._last_llm_error_kind == "stream_idle"
+    assert any("[API 错误" in (m.get("content") or "")
+               for m in agent.conversation_history)
+
+
+@pytest.mark.asyncio
+async def test_withheld_ptl_recovers_without_flag(monkeypatch):
+    """PTL 错误无视 reactive flag 也尝试压缩恢复（R17 #9 扣留语义）。"""
+    agent = _mk_full_agent()  # config 无 reactive_compact flag（默认关）
+    agent._stream_callback = lambda ch: None  # 走流式路径
+
+    async def boom(**kw):
+        raise RuntimeError("prompt_too_long: context length exceeded")
+
+    agent._call_llm_streaming = boom
+
+    import agent.context_pipeline as cp
+    compacted = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+    ]
+
+    def fake_reactive(msgs, **kw):
+        return compacted, True
+
+    monkeypatch.setattr(cp, "reactive_compact", fake_reactive)
+
+    out = await agent._call_llm_with_escalation(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}],
+        [], "sys",
+    )
+    assert out is AIAgent._REACTIVE_RETRY
+
+
+@pytest.mark.asyncio
+async def test_withheld_ptl_cooldown_gives_up(monkeypatch):
+    """PTL 恢复冷却中（changed=False）→ 透出，kind=prompt_too_long。"""
+    agent = _mk_full_agent()
+    agent._stream_callback = lambda ch: None  # 走流式路径
+
+    async def boom(**kw):
+        raise RuntimeError("prompt_too_long")
+
+    agent._call_llm_streaming = boom
+
+    import agent.context_pipeline as cp
+
+    def fake_reactive(msgs, **kw):
+        return msgs, False  # 冷却中/达上限
+
+    monkeypatch.setattr(cp, "reactive_compact", fake_reactive)
+
+    out = await agent._call_llm_with_escalation(
+        [{"role": "user", "content": "q"}], [], "sys",
+    )
+    assert out is None
+    assert agent._last_llm_error_kind == "prompt_too_long"
+
+
+# ---- R17 #14：LoopExitReason ----
+
+def test_loop_exit_reason_values():
+    """旧值保留（测试兼容）+ 新增细分。"""
+    assert LoopExitReason.INTERRUPTED == "interrupted_by_user"
+    assert LoopExitReason.MODEL_ERROR == "llm_failed"
+    assert LoopExitReason.NORMAL == "normal"
+    for r in (LoopExitReason.COMPLETED, LoopExitReason.MAX_TURNS,
+              LoopExitReason.BUDGET_EXHAUSTED, LoopExitReason.PROMPT_TOO_LONG,
+              LoopExitReason.STREAM_IDLE, LoopExitReason.IDLE_REQUESTED,
+              LoopExitReason.GOAL_PAUSE):
+        assert isinstance(r, str) and r
+
+
+def test_handle_loop_exit_messages():
+    """按枚举 reason 生成兜底消息。"""
+    a = _mk_full_agent()
+    assert "预算耗尽" in a._handle_loop_exit(LoopExitReason.BUDGET_EXHAUSTED, "q")
+    assert "上下文超限" in a._handle_loop_exit(LoopExitReason.PROMPT_TOO_LONG, "q")
+    assert "超时" in a._handle_loop_exit(LoopExitReason.STREAM_IDLE, "q")
+    assert "停止本轮" in a._handle_loop_exit(LoopExitReason.IDLE_REQUESTED, "q")
+    # 旧值行为不变
+    assert a._handle_loop_exit("interrupted_by_user", "q") == "[已被用户中断]"
+    assert "最大迭代次数" in a._handle_loop_exit("normal", "q")
+    assert "LLM 调用失败" in a._handle_loop_exit("llm_failed", "q")
+
+
+def test_loop_exit_trace_emitted():
+    """_handle_loop_exit 记 trace（有 sink 时）；正常返回路径 emit completed。"""
+    events = []
+
+    class _Sink:
+        def emit(self, event, **fields):
+            events.append((event, fields))
+
+    a = _mk_full_agent(_trace_sink=_Sink())
+    a._handle_loop_exit(LoopExitReason.MAX_TURNS, "q")
+    assert events and events[-1][0] == "loop_exit"
+    assert events[-1][1]["reason"] == "max_turns"
+    # 无 sink no-op 不抛
+    _mk_full_agent()._handle_loop_exit("normal", "q")

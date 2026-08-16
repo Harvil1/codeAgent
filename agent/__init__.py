@@ -144,6 +144,30 @@ def _build_mail_injection(mailbox, agent_name: str) -> Optional[dict]:
         return None
 
 
+class LoopExitReason:
+    """主循环终止原因枚举（R17 #14，对齐 CCB query/transitions 的 Terminal）。
+
+    供测试断言与 trace 遥测；Continue 迁移（reactive_retry / output_escalate /
+    output_recovery / stop_hook / goal_continue / grace）在 OmniMate 由
+    continue 语句内联表达，不单独枚举——Terminal 是断言的关键面。
+    旧字符串值（interrupted_by_user / llm_failed / normal）原样保留（兼容）。
+    """
+
+    COMPLETED = "completed"                    # 正常返回最终响应
+    NORMAL = "normal"                          # 兜底（未细分的退出）
+    MAX_TURNS = "max_turns"                    # api_call_count 达 max_iterations
+    BUDGET_EXHAUSTED = "budget_exhausted"      # iteration_budget 耗尽
+    INTERRUPTED = "interrupted_by_user"        # 用户中断（旧值保留）
+    CANCELLED = "cancelled"                    # cancel_event（partial return 路径）
+    MODEL_ERROR = "llm_failed"                 # LLM 错误（旧值保留）
+    PROMPT_TOO_LONG = "prompt_too_long"        # PTL 且压缩恢复失败
+    STREAM_IDLE = "stream_idle_timeout"        # 看门狗超时且非流式恢复失败
+    IDLE_REQUESTED = "idle_requested"          # 工具请求 idle 停止
+    GOAL_PAUSE = "goal_pause"                  # goal 决策 pause
+    GOAL_COMPLETE = "goal_complete"            # goal 决策 complete
+    GOAL_FAIL = "goal_fail"                    # goal 决策 fail
+
+
 class AIAgent:
     """核心 Agent 类。一个实例对应一个会话。"""
 
@@ -405,6 +429,9 @@ class AIAgent:
         # event["type"]: "content" | "tool_call_start" | "done"
         self._stream_callback = stream_callback
 
+        # === R17 #9 NEW: 最近一次 LLM 错误分类（prompt_too_long/stream_idle/other）===
+        # 扣留-恢复失败透出时记录，主循环 #14 用它区分终止原因。
+        self._last_llm_error_kind = "other"
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1003,6 +1030,7 @@ class AIAgent:
         # ---------- 主循环 ----------
         api_call_count = 0
         turn_exit_reason = "normal"
+        goal_decision = None  # R17 #14：本轮 goal 决策（正常返回路径的 trace 用）
 
         while (
             api_call_count < self.max_iterations
@@ -1035,6 +1063,7 @@ class AIAgent:
             # 消耗预算（grace call 不消耗）
             if not self._budget_grace_call:
                 if not self.iteration_budget.consume():
+                    turn_exit_reason = LoopExitReason.BUDGET_EXHAUSTED  # R17 #14
                     break
             else:
                 # S8 fix: grace call 跑完后清标志（防无限循环）
@@ -1083,7 +1112,13 @@ class AIAgent:
                 system_prompt = self._get_system_prompt()
                 continue  # reactive_compact 已修改 history，重试本轮
             if response is None:
-                turn_exit_reason = "llm_failed"  # LLM 错误已作为 assistant 消息塞回 history
+                # R17 #14：按 R17 #9 记录的错误分类细化终止原因
+                if self._last_llm_error_kind == "prompt_too_long":
+                    turn_exit_reason = LoopExitReason.PROMPT_TOO_LONG
+                elif self._last_llm_error_kind == "stream_idle":
+                    turn_exit_reason = LoopExitReason.STREAM_IDLE
+                else:
+                    turn_exit_reason = LoopExitReason.MODEL_ERROR  # LLM 错误已塞回 history
                 break
 
             # === R17 #10：升级后仍截断 → 续写恢复（最多 3 次，不进 history）===
@@ -1110,6 +1145,7 @@ class AIAgent:
                     assistant_msg, handle_function_call,
                 )
                 if not should_continue:
+                    turn_exit_reason = LoopExitReason.IDLE_REQUESTED  # R17 #14
                     break  # P4b-T2: idle 已请求
                 # S8 fix: dispatch 后如果预算耗尽，置 grace 让下轮 LLM 看到工具结果
                 # 之前 _budget_grace_call 是死代码（__init__ 设 False 后永不置 True），
@@ -1160,7 +1196,8 @@ class AIAgent:
                         self._goal_state.token_budget,
                     )
                     continue
-                # pause / complete / fail → break
+                # pause / complete / fail → 正常返回 final_content（不走 loop-exit）
+                goal_decision = decision  # R17 #14：trace 记录用
                 logger.info(
                     "goal %s: reason=%s",
                     decision, self._goal_state.pause_reason,
@@ -1169,10 +1206,26 @@ class AIAgent:
             # === CCAR15 Task 3：轮末 skill_learning 观察 + 簇达标演化 ===
             # fail-open：学习链路任何异常只 debug log，绝不影响主对话返回
             await self._maybe_skill_learning(user_message)
+
+            # R17 #14：正常返回路径记 trace（goal 决策存在时用对应 reason）
+            self._emit_loop_exit_trace(
+                {
+                    "pause": LoopExitReason.GOAL_PAUSE,
+                    "complete": LoopExitReason.GOAL_COMPLETE,
+                    "fail": LoopExitReason.GOAL_FAIL,
+                }.get(goal_decision, LoopExitReason.COMPLETED),
+                api_calls=api_call_count,
+            )
             return final_content
 
         # ---------- 循环结束（预算耗尽或中断）----------
         # 预算耗尽/中断的轨迹同样有价值（失败恢复信号常出现在这里）
+        # R17 #14：while 条件自然退出时细分 max_turns / budget_exhausted
+        if turn_exit_reason == LoopExitReason.NORMAL:
+            if api_call_count >= self.max_iterations:
+                turn_exit_reason = LoopExitReason.MAX_TURNS
+            else:
+                turn_exit_reason = LoopExitReason.BUDGET_EXHAUSTED
         await self._maybe_skill_learning(user_message)
         return self._handle_loop_exit(turn_exit_reason, user_message)
 
@@ -1663,18 +1716,45 @@ class AIAgent:
             # reactive_compact：API 报 prompt_too_long 时紧急压缩并重试
             # Task D：改多次触发（冷却 60s + 上限 5 次/会话），
             # gate 逻辑下沉到 reactive_compact 内部（session_state.reactive_count / reactive_last_at）
-            # Task P1.2：加 feature flag 开关（默认 OFF，避免无意启用）
             err_str = str(e).lower()
+            self._last_llm_error_kind = "other"
+
+            # === R17 #9 扣留-恢复：流空闲超时 → 扣留，转非流式重试一次 ===
+            # （CC withheld 语义：可恢复错误先不透出，恢复路径确认失败才报）
+            from agent.llm_client import LLMStreamIdleTimeout
+            if isinstance(e, LLMStreamIdleTimeout):
+                logger.warning("流空闲超时（看门狗），扣留转非流式重试一次")
+                from agent.llm_retry import call_with_retry as _cwr
+                try:
+                    response = await _cwr(
+                        self.llm_client,
+                        messages,
+                        tools=tool_schemas if tool_schemas else None,
+                        fallback_llm_client=self.fallback_llm_client,
+                        config=self.config,
+                    )
+                    logger.info("流空闲超时恢复成功（非流式路径）")
+                    return response
+                except Exception as recover_err:
+                    # 恢复失败：透出非流式路径的错误（含 400 溢出下调机会）
+                    e = recover_err
+                    err_str = str(e).lower()
+                    self._last_llm_error_kind = "stream_idle"
+                    logger.warning(
+                        "流空闲超时的非流式恢复也失败（透出）: %s", e,
+                    )
+
             is_prompt_too_long = (
                 "prompt_too_long" in err_str
                 or "context_length" in err_str
                 or "maximum context" in err_str
             )
-            from agent.feature_flags import is_feature_enabled
-            reactive_enabled = is_feature_enabled(
-                self.config, "reactive_compact",
-            )
-            if reactive_enabled and is_prompt_too_long:
+            # R17 #9：PTL 一律尝试 reactive_compact 恢复（不再受 feature flag
+            # 门控——对齐 CC 扣留-恢复语义：PTL 是可恢复错误，恢复优先于透出；
+            # 冷却/上限防循环在 reactive_compact 内部生效。Task P1.2 的 flag
+            # 语义废弃：PTL 扣留恢复是韧性基线不是可选功能）
+            if is_prompt_too_long:
+                self._last_llm_error_kind = "prompt_too_long"
                 from agent.context_pipeline import reactive_compact
                 ctx_cfg = self.config.get("context", {})
                 messages, changed = reactive_compact(
@@ -2508,11 +2588,25 @@ class AIAgent:
                 })
         return calls, results
 
+    def _emit_loop_exit_trace(self, reason: str, **extra) -> None:
+        """R17 #14：循环终止原因记 trace sink（fail-open，无 sink 时 no-op）。"""
+        if self._trace_sink is None:
+            return
+        try:
+            self._trace_sink.emit("loop_exit", reason=reason, **extra)
+        except Exception as e:
+            logger.debug("loop_exit trace fail-open: %s", e)
+
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
-        """循环结束（预算耗尽或中断）的兜底响应。"""
-        if turn_exit_reason == "interrupted_by_user":
+        """循环结束（预算耗尽或中断）的兜底响应。
+
+        R17 #14：按 LoopExitReason 枚举生成消息（旧值 interrupted_by_user /
+        llm_failed / normal 行为不变，新增细分原因）。
+        """
+        self._emit_loop_exit_trace(turn_exit_reason)
+        if turn_exit_reason == LoopExitReason.INTERRUPTED:
             fallback = "[已被用户中断]"
-        elif turn_exit_reason == "llm_failed":
+        elif turn_exit_reason == LoopExitReason.MODEL_ERROR:
             fallback = (
                 "[LLM 调用失败，本轮已中断] 重试或检查模型连接。"
                 "详见日志（LLM API 调用失败）。"
@@ -2521,7 +2615,27 @@ class AIAgent:
             self._trigger_stop_failure_hook(
                 error="LLM 调用失败", error_type="LLMError",
             )
+        elif turn_exit_reason == LoopExitReason.PROMPT_TOO_LONG:
+            fallback = (
+                "[上下文超限（自动压缩未成功），本轮已中断] "
+                "可用 /compact 手动压缩后重试。"
+            )
+            self._trigger_stop_failure_hook(
+                error="prompt_too_long", error_type="ContextLengthError",
+            )
+        elif turn_exit_reason == LoopExitReason.STREAM_IDLE:
+            fallback = (
+                "[流式响应超时（自动恢复未成功），本轮已中断] 请重试。"
+            )
+            self._trigger_stop_failure_hook(
+                error="stream_idle_timeout", error_type="StreamIdleTimeout",
+            )
+        elif turn_exit_reason == LoopExitReason.IDLE_REQUESTED:
+            fallback = "[已按请求停止本轮]"
+        elif turn_exit_reason == LoopExitReason.BUDGET_EXHAUSTED:
+            fallback = "[迭代预算耗尽，强制停止]"
         else:
+            # normal / max_turns（旧行为）
             fallback = "[已达最大迭代次数，强制停止]"
 
         self.conversation_history.append({
