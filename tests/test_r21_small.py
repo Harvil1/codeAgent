@@ -230,3 +230,35 @@ def test_memory_store_rejects_bad_dir(tmp_path):
     # 正常自定义目录（home 内）通过
     s = MemoryStore(omnimate_home=tmp_path, memory_dir=tmp_path / "custom_mem")
     assert s._memory_dir.name == "custom_mem"
+
+
+# ---------------------------------------------------------------------------
+# R21 #41：孤儿并行工具结果修复（resume 加载时）
+# ---------------------------------------------------------------------------
+
+def test_fix_tool_call_pairs_repair_semantics():
+    """孤儿修复语义（正向补漏 + 反向删除），resume 复用同一函数。"""
+    from agent.context_compressor import _fix_tool_call_pairs
+
+    msgs = [
+        {"role": "user", "content": "q"},
+        # 正向孤儿：assistant 有 tool_calls 但 result 缺失
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}},
+        ]},
+        # 只有 c1 的 result，c2 悬空（并行批次保存中断）
+        {"role": "tool", "tool_call_id": "c1", "content": '{"ok": 1}'},
+        # 反向孤儿：无对应 tool_calls
+        {"role": "tool", "tool_call_id": "cX", "content": '{"dangling": 1}'},
+        {"role": "assistant", "content": "done"},
+    ]
+    fixed = _fix_tool_call_pairs(msgs)
+    ids = [m.get("tool_call_id") for m in fixed if m.get("role") == "tool"]
+    assert "c1" in ids and "c2" in ids   # c2 被补漏
+    assert "cX" not in ids               # 反向孤儿被删
+    # 补的 result 紧跟在 c1 后（immediately-after 语义）
+    idx_c1 = next(i for i, m in enumerate(fixed) if m.get("tool_call_id") == "c1")
+    assert fixed[idx_c1 + 1].get("tool_call_id") == "c2"

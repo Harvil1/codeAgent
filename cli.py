@@ -833,6 +833,19 @@ class RuntimeContext:
         # 清理冗余摘要占位（保留最近一个）——压缩频率修复前的会话可能有几十个
         # "[之前的对话已自动总结]" 占位，全注入上下文会撑爆且混乱
         conv = _cleanup_redundant_summaries(conv)
+        # R21 #41：孤儿并行工具结果修复（对齐 CC recoverOrphanedParallelToolResults）
+        # 会话保存中断可能留下「部分批次」的悬空 tool_result（assistant 有
+        # tool_calls 但 result 缺失，或 result 无对应 tool_calls）。主循环的
+        # _fix_tool_call_pairs 只在发送前修（不落盘）；这里加载时立即修复并
+        # 回写，让持久化状态和后续轮次都干净。
+        try:
+            from agent.context_compressor import _fix_tool_call_pairs
+            fixed = _fix_tool_call_pairs(conv)
+            if fixed != conv:
+                logger.info("resume: 修复了孤儿 tool_call/result 配对")
+                conv = fixed
+        except Exception as e:
+            logger.warning("resume 孤儿修复失败（忽略，发送前还会兜底）: %s", e)
         self.agent.conversation_history = conv
         self.session_id = session_id
         self.agent.session_id = session_id
