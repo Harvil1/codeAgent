@@ -78,7 +78,7 @@ class TestCronCreateWithTemplate:
         assert data["job_id"] == "job_tpl"
         assert data["cron"] == "0 3 * * *"
         sched.add_job.assert_called_once_with(
-            "0 3 * * *", "每晚跑全量测试并汇总失败", catch_up=True,
+            "0 3 * * *", "每晚跑全量测试并汇总失败", catch_up=True, recurring=True,
         )
 
     def test_explicit_args_override_template(self, tmp_path, monkeypatch):
@@ -110,7 +110,9 @@ class TestCronCreateWithTemplate:
         )
         data = json.loads(result)
         assert data["job_id"] == "job_x"
-        sched.add_job.assert_called_once_with("* * * * *", "显式消息", catch_up=False)
+        sched.add_job.assert_called_once_with(
+            "* * * * *", "显式消息", catch_up=False, recurring=True
+        )
 
     def test_template_not_found(self, tmp_path, monkeypatch):
         """模板不存在 → invalid_template + available 可用列表。"""

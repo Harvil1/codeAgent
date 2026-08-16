@@ -199,6 +199,7 @@ class CronScheduler:
         *,
         catch_up: bool = False,
         job_id: Optional[str] = None,
+        recurring: bool = True,  # R26 #18 review：模板 recurring 透传（False=一次性）
     ) -> CronJob:
         """新增 job（自动生成 id + 持久化）。
 
@@ -216,6 +217,7 @@ class CronScheduler:
             cron=cron,
             message=message,
             catch_up=catch_up,
+            recurring=recurring,
             created_at=created_at,
         )
         with self._lock:

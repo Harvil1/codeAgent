@@ -53,7 +53,7 @@ class TestCronCreate:
         data = json.loads(result)
         assert data["job_id"] == "job_abc"
         sched.add_job.assert_called_once_with(
-            "*/5 * * * *", "提醒喝水", catch_up=True,
+            "*/5 * * * *", "提醒喝水", catch_up=True, recurring=True,
         )
 
     def test_create_invalid_expr(self):
@@ -178,7 +178,7 @@ def test_schemas_use_openai_parameters_key():
 
 def test_create_schema_required_fields():
     props = CRON_CREATE_SCHEMA["parameters"]["properties"]
-    assert set(props) == {"cron", "message", "catch_up", "template"}
+    assert set(props) == {"cron", "message", "catch_up", "recurring", "template"}
     # R26 #18：template 模式下 cron/message 可省略（取模板值），不再硬性 required
     assert not CRON_CREATE_SCHEMA["parameters"].get("required")
     assert props["catch_up"]["default"] is False
@@ -271,3 +271,67 @@ class TestCronSchedulerCrud:
         sched.remove_job(j1.id)
         sched._tick(datetime.now())
         assert sched.drain_due() == []
+
+
+# ---------------------------------------------------------------------------
+# 6. 模板/显式 recurring 透传（R26 #18 review：模板写 recurring: false
+#    此前被 loader 解析但没透传 add_job → 一次性任务实际永久循环）
+# ---------------------------------------------------------------------------
+
+class TestCronTemplateRecurring:
+    def test_template_recurring_false_passed(self, tmp_path, monkeypatch):
+        """模板 recurring: false → add_job 收到 recurring=False。"""
+        from agent import templates as T
+        home = tmp_path / "home"
+        (home / "templates").mkdir(parents=True)
+        (home / "templates" / "once.md").write_text(
+            "---\ncron: \"30 14 28 2 *\"\nrecurring: false\n---\n一次性提醒",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OMNIMATE_HOME", str(home))
+        monkeypatch.setattr(
+            "agent.workspace_context.get_workspace_cwd", lambda: str(tmp_path)
+        )
+        T._invalidate_cache()
+
+        sched = MagicMock()
+        sched.add_job.return_value = CronJob(
+            id="job_once", cron="30 14 28 2 *", message="一次性提醒",
+        )
+        result = _handle_cron_create(
+            {"template": "once"}, agent_ref=_make_agent_ref(sched),
+        )
+        data = json.loads(result)
+        assert data["job_id"] == "job_once"
+        sched.add_job.assert_called_once_with(
+            "30 14 28 2 *", "一次性提醒", catch_up=False, recurring=False,
+        )
+
+    def test_explicit_recurring_overrides_template(self, tmp_path, monkeypatch):
+        """显式 recurring=true 覆盖模板 false。"""
+        from agent import templates as T
+        home = tmp_path / "home"
+        (home / "templates").mkdir(parents=True)
+        (home / "templates" / "once.md").write_text(
+            "---\ncron: \"30 14 28 2 *\"\nrecurring: false\n---\n一次性提醒",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OMNIMATE_HOME", str(home))
+        monkeypatch.setattr(
+            "agent.workspace_context.get_workspace_cwd", lambda: str(tmp_path)
+        )
+        T._invalidate_cache()
+
+        sched = MagicMock()
+        sched.add_job.return_value = CronJob(
+            id="job_force", cron="30 14 28 2 *", message="一次性提醒",
+        )
+        result = _handle_cron_create(
+            {"template": "once", "recurring": True},
+            agent_ref=_make_agent_ref(sched),
+        )
+        data = json.loads(result)
+        assert data["job_id"] == "job_force"
+        sched.add_job.assert_called_once_with(
+            "30 14 28 2 *", "一次性提醒", catch_up=False, recurring=True,
+        )

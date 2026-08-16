@@ -45,6 +45,10 @@ CRON_CREATE_SCHEMA = {
                 "default": False,
                 "description": "True 时错过的一次触发会在启动时补跑（默认 False）",
             },
+            "recurring": {
+                "type": "boolean",
+                "description": "是否循环任务（默认 true）。false=一次性，触发后自动 disable。",
+            },
             "template": {
                 "type": "string",
                 "description": (
@@ -123,10 +127,13 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
         cron = str(args.get("cron") or "").strip() or tpl["cron"]
         message = str(args.get("message") or "").strip() or tpl["message"]
         catch_up = bool(args.get("catch_up", tpl["catch_up"]))
+        # R26 #18 review：模板 recurring 透传（false=一次性），显式参数覆盖模板值
+        recurring = bool(args.get("recurring", tpl["recurring"]))
     else:
         cron = (args.get("cron") or "").strip()
         message = (args.get("message") or "").strip()
         catch_up = bool(args.get("catch_up", False))
+        recurring = bool(args.get("recurring", True))
     if not cron or not message:
         return json.dumps(
             {"error": "cron 和 message 都是必填", "error_type": "invalid_args"},
@@ -151,7 +158,7 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
         return _not_configured("cron_create")
 
     try:
-        job = scheduler.add_job(cron, message, catch_up=catch_up)
+        job = scheduler.add_job(cron, message, catch_up=catch_up, recurring=recurring)
         return json.dumps(
             {"job_id": job.id, "cron": job.cron, "message": job.message},
             ensure_ascii=False,
