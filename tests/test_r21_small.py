@@ -423,3 +423,75 @@ def test_expand_paste_missing_file(tmp_path):
     assert out == "[Pasted text #99 +5 lines]"
     # 无占位符文本原样
     assert expand_paste_references("普通消息", tmp_path) == "普通消息"
+
+
+# ---------------------------------------------------------------------------
+# R22 #27：TF-IDF 技能搜索
+# ---------------------------------------------------------------------------
+
+from tools.skill_tools import _skill_search_rank, _tokenize
+
+
+def test_tokenize_mixed():
+    """英文连字符词组 + 中文单字；停用词滤除。"""
+    toks = _tokenize("How to deploy 这个项目 with Docker")
+    assert "deploy" in toks
+    assert "docker" in toks
+    assert "how" not in toks and "to" not in toks and "with" not in toks
+    assert "个" not in toks  # 中文停用字
+
+
+def test_skill_search_rank():
+    skills = {
+        "docker-deploy": {"name": "docker-deploy", "description": "用 Docker 部署项目的流程"},
+        "code-review": {"name": "code-review", "description": "审查代码变更"},
+        "cherry-pick": {"name": "cherry-pick", "description": "git cherry-pick 到 release 分支"},
+        "skillify": {"name": "skillify", "description": "把会话流程沉淀为技能"},
+    }
+    # 中英混合查询命中
+    assert [s["name"] for s in _skill_search_rank(skills, "怎么用 docker 部署")] == ["docker-deploy"]
+    assert [s["name"] for s in _skill_search_rank(skills, "审查代码")] == ["code-review"]
+    # 英文查询
+    assert [s["name"] for s in _skill_search_rank(skills, "docker deploy")] == ["docker-deploy"]
+    # 不相关查询 → 空
+    assert _skill_search_rank(skills, "数据库迁移") == []
+    # 空 query → 空
+    assert _skill_search_rank(skills, "") == []
+    # name 加权：技能名命中 > 描述命中
+    skills2 = {
+        "a": {"name": "a", "description": "release 发布流程"},
+        "b": {"name": "release-notes", "description": "x"},
+    }
+    ranked = _skill_search_rank(skills2, "release")
+    assert ranked[0]["name"] == "release-notes"
+
+
+@pytest.mark.asyncio
+async def test_skills_list_query_dispatch(tmp_path):
+    """dispatch 集成：query 命中返回排序（第一是目标）；无 query 全量（回归）。
+
+    注：自定义 home 仍包含内置技能目录（设计如此），断言用首位而非唯一性。
+    """
+    sd = tmp_path / "skills"
+    (sd / "docker-deploy").mkdir(parents=True)
+    (sd / "docker-deploy" / "SKILL.md").write_text(
+        '---\nname: docker-deploy\ndescription: "用 Docker 部署项目的流程"\n---\n正文',
+        encoding="utf-8",
+    )
+    (sd / "code-review").mkdir(parents=True)
+    (sd / "code-review" / "SKILL.md").write_text(
+        '---\nname: code-review\ndescription: "审查代码变更"\n---\n正文',
+        encoding="utf-8",
+    )
+    r = json.loads(await registry.dispatch(
+        "skills_list", {"query": "docker 部署"},
+        omnimate_home=str(tmp_path),
+    ))
+    assert r["matched"] >= 1
+    assert r["skills"][0]["name"] == "docker-deploy"  # name 命中排首位
+
+    # 无 query：全量（含自定义 + 内置 ≥2）
+    r3 = json.loads(await registry.dispatch(
+        "skills_list", {}, omnimate_home=str(tmp_path),
+    ))
+    assert len(r3["skills"]) >= 2

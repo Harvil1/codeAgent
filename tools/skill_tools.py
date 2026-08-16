@@ -5,6 +5,7 @@ skill_view：查看某技能的完整内容
 """
 
 import json
+import re
 from pathlib import Path
 
 from tools.registry import registry
@@ -14,8 +15,19 @@ from tools.skill_usage import bump_view, load_usage
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "列出所有可用技能。",
-    "parameters": {"type": "object", "properties": {}},
+    "description": (
+        "列出所有可用技能。传 query 时按 TF-IDF 相关性排序返回 Top 匹配"
+        "（推荐先 query 定向找，找不到再全量列）。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词（对 name/description 建词频向量打分，中英文都支持）",
+            },
+        },
+    },
 }
 
 SKILL_VIEW_SCHEMA = {
@@ -63,6 +75,82 @@ def _find_skill_md(name: str, dirs) -> Path:
     return None
 
 
+# ---------------------------------------------------------------------------
+# R22 #27：TF-IDF 技能搜索（对齐 CC localSearch 的轻量版）
+# ---------------------------------------------------------------------------
+
+# 中文常用虚词 + 英文停用词（对齐 CC STOP_WORDS 精简版；中文按字切分时
+# 虚词高频无区分度，直接进停用表）
+_SKILL_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of",
+    "in", "for", "on", "at", "by", "with", "and", "or", "not", "no", "do",
+    "does", "did", "will", "would", "could", "should", "can", "may", "how",
+    "what", "when", "which", "who", "that", "this", "these", "those", "it",
+    "its", "as", "from", "into", "about", "use", "using", "used",
+    # 中文虚词/疑问代词
+    "的", "了", "在", "是", "我", "你", "他", "她", "它", "们", "和", "与",
+    "或", "不", "没", "有", "这", "那", "个", "什么", "怎么", "如何", "哪",
+    "用", "把", "被", "给", "对", "从", "到", "以", "为", "就", "会", "能",
+    "要", "可以", "一个", "一些",
+})
+
+_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_\-]+|[\u4e00-\u9fff]")
+
+
+def _tokenize(text: str) -> list:
+    """分词：英文连字符词组整体 + 部件都收（release-notes → 3 tokens，
+    部件让子词查询可命中）；中文按单字（CJK 无空格，单字可匹配词首）。"""
+    tokens = []
+    for m in _TOKEN_RE.finditer(text or ""):
+        t = m.group(0).lower()
+        if t in _SKILL_STOP_WORDS:
+            continue
+        tokens.append(t)
+        # 连字符词组拆部件（子词可查询）
+        if "-" in t:
+            for part in t.split("-"):
+                if len(part) >= 2 and part not in _SKILL_STOP_WORDS:
+                    tokens.append(part)
+    return tokens
+
+
+def _skill_search_rank(skills: dict, query: str, top_n: int = 10) -> list:
+    """TF-IDF 打分排序（query tokens 对技能 name/description 词频向量）。
+
+    轻量版：TF（词频）× IDF（query 词在多少技能出现——稀有词权重高）；
+    name 命中加权 ×3（名字是最强信号）。无 query 或无命中返回空列表。
+    """
+    q_tokens = _tokenize(query)
+    if not q_tokens or not skills:
+        return []
+    items = list(skills.values())
+    # 每技能的 token 列表（name 加权 ×3）
+    docs = []
+    for s in items:
+        toks = _tokenize(s.get("name", "")) * 3 + _tokenize(s.get("description", ""))
+        docs.append(toks)
+    # IDF：query token 的文档频率
+    n = len(docs)
+    scores = []
+    for i, toks in enumerate(docs):
+        tf_map = {}
+        for t in toks:
+            tf_map[t] = tf_map.get(t, 0) + 1
+        score = 0.0
+        for qt in q_tokens:
+            if qt not in tf_map:
+                continue
+            df = sum(1 for d in docs if qt in d)
+            idf = 1.0 + (n - df) / n  # 稀有词 > 1，全文档命中 → 1
+            # 中文单字（len==1）TF 封顶 2——长描述里高频虚字/常用字会刷分
+            tf = min(tf_map[qt], 2) if len(qt) == 1 else tf_map[qt]
+            score += tf * idf
+        if score > 0:
+            scores.append((score, items[i]))
+    scores.sort(key=lambda x: -x[0])
+    return [s for _, s in scores[:top_n]]
+
+
 def _handle_skills_list(args: dict, **kwargs) -> str:
     dirs = _get_skills_dirs(kwargs)
     usage = load_usage(_get_usage_dir(kwargs))
@@ -95,6 +183,25 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
                 "view_count": rec.get("view_count", 0),
                 "state": rec.get("state", "active"),
             }
+
+    # R22 #27：query 参数 → TF-IDF 相关性排序（找得到才返回，找不到全量列）
+    query = (args.get("query") or "").strip()
+    if query:
+        ranked = _skill_search_rank(skills, query)
+        if ranked:
+            return json.dumps({
+                "query": query,
+                "matched": len(ranked),
+                "total": len(skills),
+                "skills": ranked,
+            }, ensure_ascii=False)
+        return json.dumps({
+            "query": query,
+            "matched": 0,
+            "total": len(skills),
+            "skills": [],
+            "hint": "无匹配——去掉 query 参数看全量列表",
+        }, ensure_ascii=False)
 
     return json.dumps({"skills": list(skills.values())}, ensure_ascii=False)
 
