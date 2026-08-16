@@ -1249,6 +1249,7 @@ def _summarize_child_result(result: str, client, model: str) -> str:
         response = asyncio.run(call_with_retry(
             client,  # child.llm_client（LLMClient 实例）
             [{"role": "user", "content": prompt}],
+            background=True,  # R25 #4：子代理摘要属后台，529 不重试
         ))
         summary = response.choices[0].message.content
         return f"[摘要] {summary}\n\n[完整结果 {len(result)} 字符已省略]"

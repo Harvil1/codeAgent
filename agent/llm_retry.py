@@ -158,6 +158,7 @@ async def call_with_retry(
     max_tokens: Optional[int] = None,
     consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
     config: Optional[Dict[str, Any]] = None,
+    background: bool = False,  # R25 #4：后台调用（子代理摘要等）遇 529 立即放弃
 ):
     """带重试和备用 client 的 async LLM 调用。
 
@@ -196,6 +197,8 @@ async def call_with_retry(
         config: 配置字典（可选）。传入时检查 bash_unattended_retry flag：
                 开启则启用持久重试模式，max_retries 被视为无限，
                 加 max_hours（默认 24h）deadline 守护。
+        background: True 表示后台任务调用。遇 529（服务过载）直接抛出不重试——
+                    后台重试只会火上浇油，下个周期天然重跑（对齐 CCB 防放大）。
     """
     last_error: Optional[Exception] = None
     # X6 fix: max_retries<=0 直接抛友好错误（否则下面 for 循环不进，最后 raise None → TypeError）
@@ -287,6 +290,12 @@ async def call_with_retry(
                         await asyncio.sleep(0.5)
                         continue
             if not is_retryable(e):
+                raise
+
+            # R25 #4：后台调用遇 529 立即放弃（防放大）——非前台 querySource
+            # 不该在已知过载的 endpoint 上排队重试
+            if background and _error_status_code(e) == 529:
+                logger.warning("后台 LLM 调用遇 529（过载），放弃重试（防放大）")
                 raise
 
             # P1-1: 529 连续失败精确切换

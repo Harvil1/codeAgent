@@ -217,3 +217,62 @@ async def test_no_max_tokens_not_passed():
     await call_with_retry(llm_client, [])
     kwargs = llm_client.chat_completions.call_args.kwargs
     assert "max_tokens" not in kwargs
+
+
+# ===== R25 #4：后台调用遇 529 立即放弃（防放大）=====
+
+class FakeConnection529Error(Exception):
+    """名字含 connection 让 is_retryable 兜底命中；带 status_code=529。"""
+    def __init__(self):
+        super().__init__("overloaded")
+        self.status_code = 529
+
+
+class _Always529Client:
+    async def chat_completions(self, messages, **kwargs):
+        raise FakeConnection529Error()
+
+
+class _Flaky529Client:
+    """第 1 次 529，第 2 次成功。"""
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_completions(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise FakeConnection529Error()
+        class _R:  # 最小响应桩
+            class choices:
+                class message:
+                    content = "ok"
+        return _R
+
+
+class TestBackground529GiveUp:
+    async def test_background_raises_immediately(self, monkeypatch):
+        import asyncio
+        from agent.llm_retry import call_with_retry
+        sleeps = []
+        async def fake_sleep(s):
+            sleeps.append(s)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        with pytest.raises(FakeConnection529Error):
+            await call_with_retry(
+                _Always529Client(), [{"role": "user", "content": "x"}],
+                max_retries=5, background=True,
+            )
+        assert sleeps == []  # 没有退避 sleep = 没重试
+
+    async def test_foreground_still_retries(self, monkeypatch):
+        import asyncio
+        from agent.llm_retry import call_with_retry
+        async def fake_sleep(s):
+            pass
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        client = _Flaky529Client()
+        resp = await call_with_retry(
+            client, [{"role": "user", "content": "x"}],
+            max_retries=5, background=False,
+        )
+        assert client.calls == 2  # 前台语义不变：重试后成功
