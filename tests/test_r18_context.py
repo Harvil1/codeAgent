@@ -293,3 +293,53 @@ async def test_llm_compact_passes_fork_prefix():
     # fork 请求以完整 messages（含 system）为前缀
     assert captured["msgs"][0] == {"role": "system", "content": "s"}
     assert len(captured["msgs"]) > 10  # 前缀全量 + 1 指令
+
+
+# ---------------------------------------------------------------------------
+# R18 #17：token 权威计数（usage 回溯 + 粗估混合）
+# ---------------------------------------------------------------------------
+
+from agent.context_pipeline import estimate_tokens_hybrid
+
+
+def test_estimate_tokens_hybrid():
+    msgs = [{"role": "user", "content": "x" * 300} for _ in range(10)]
+    full_est = estimate_message_tokens(msgs)
+
+    # 有锚点 + 消息增长：权威值 + 增量粗估（前 5 条的真实值替换粗估）
+    anchor = (5, 12345)
+    extra = estimate_message_tokens(msgs[5:])
+    assert estimate_tokens_hybrid(msgs, anchor) == 12345 + extra
+    # 增量为 0 的边界：anchor == len → 全量粗估（没有新增）
+    assert estimate_tokens_hybrid(msgs, (10, 99999)) == full_est
+    # 消息回退（压缩后 len < anchor_count）→ 全量粗估
+    assert estimate_tokens_hybrid(msgs[:3], (8, 5000)) == estimate_message_tokens(msgs[:3])
+    # 无锚点 / 结构异常 → 全量粗估
+    assert estimate_tokens_hybrid(msgs, None) == full_est
+    assert estimate_tokens_hybrid(msgs, ("bad",)) == full_est
+    assert estimate_tokens_hybrid(msgs, (0, 100)) == full_est
+
+
+def test_record_llm_usage_anchor():
+    """_record_llm_usage 记录权威锚点（消息条数 + prompt+cache 之和）。"""
+    from agent import AIAgent
+    a = AIAgent.__new__(AIAgent)
+    a._llm_usage_stats = {
+        "total_calls": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0,
+        "total_cache_read_tokens": 0, "total_cache_creation_tokens": 0,
+    }
+    a._last_usage_anchor = None
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=50000,
+        prompt_cache_hit_tokens=30000,
+        prompt_cache_miss_tokens=20000,
+        completion_tokens=100,
+    ))
+    a._record_llm_usage(resp, sent_message_count=42)
+    # 保守偏高：prompt + cache_read + cache_creation（OpenAI 语义下 prompt 已含
+    # read 会重复计——宁可早压）
+    assert a._last_usage_anchor == (42, 50000 + 30000 + 20000)
+    # 不传条数 → 不更新锚点
+    a._last_usage_anchor = None
+    a._record_llm_usage(resp)
+    assert a._last_usage_anchor is None

@@ -436,6 +436,9 @@ class AIAgent:
         # 压缩发生在 _prepare_toolset 之前的轮边界，fork 请求用上一轮的
         # schema 集合保持前缀一致（plan_mode 切换轮会 miss 一次，可接受）。
         self._last_tool_schemas = None
+        # === R18 #17 NEW: 权威 token 锚点（消息条数, 真实输入 token 数）===
+        # _record_llm_usage 更新；compress_if_needed 用它做混合计数。
+        self._last_usage_anchor = None
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -545,30 +548,44 @@ class AIAgent:
             except Exception as e:
                 logger.warning("子 agent 中断失败: %s", e)
 
-    def _record_llm_usage(self, response) -> None:
-        """记录一次 LLM 调用的 token 用量（batch1-T2）。"""
+    def _record_llm_usage(self, response, sent_message_count: int = None) -> None:
+        """记录一次 LLM 调用的 token 用量（batch1-T2）。
+
+        R18 #17：sent_message_count 非 None 时同时记录权威锚点
+        ``_last_usage_anchor = (msg_count, input_tokens)``——input_tokens 取
+        prompt + cache_read + cache_creation 之和（OpenAI 语义下 prompt 已含
+        cache read 会偏高——宁可早压的保守方向），供压缩阈值判定做
+        「权威值 + 新消息粗估」混合计数（替代全程粗估的偏差）。
+        """
         self._llm_usage_stats["total_calls"] += 1
         usage = getattr(response, "usage", None)
         if usage is None:
             return
         try:
-            self._llm_usage_stats["total_prompt_tokens"] += (
-                getattr(usage, "prompt_tokens", 0) or 0
-            )
+            prompt_t = getattr(usage, "prompt_tokens", 0) or 0
+            self._llm_usage_stats["total_prompt_tokens"] += prompt_t
             self._llm_usage_stats["total_completion_tokens"] += (
                 getattr(usage, "completion_tokens", 0) or 0
             )
             # prompt cache 相关（DeepSeek / OpenAI / Anthropic 都可能有）
-            self._llm_usage_stats["total_cache_read_tokens"] += (
+            cache_read = (
                 getattr(usage, "prompt_cache_hit_tokens", 0)
                 or getattr(usage, "cache_read_input_tokens", 0)
                 or 0
             )
-            self._llm_usage_stats["total_cache_creation_tokens"] += (
+            cache_creation = (
                 getattr(usage, "prompt_cache_miss_tokens", 0)
                 or getattr(usage, "cache_creation_input_tokens", 0)
                 or 0
             )
+            self._llm_usage_stats["total_cache_read_tokens"] += cache_read
+            self._llm_usage_stats["total_cache_creation_tokens"] += cache_creation
+            # R18 #17：权威锚点（压缩阈值混合计数用）
+            if sent_message_count:
+                self._last_usage_anchor = (
+                    sent_message_count,
+                    prompt_t + cache_read + cache_creation,
+                )
         except Exception as e:
             logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
 
@@ -1134,7 +1151,8 @@ class AIAgent:
 
             api_call_count += 1
             # batch1-T2: 记录 LLM 用量（prompt cache 记账）
-            self._record_llm_usage(response)
+            # R18 #17：附带消息条数 → 权威锚点（压缩阈值混合计数）
+            self._record_llm_usage(response, sent_message_count=len(messages))
 
             # === batch2-T2: POST_LLM_CALL hook（LLM 返回后、处理 tool_calls 前）===
             response = self._run_post_llm_call_hook(response)
@@ -1501,6 +1519,7 @@ class AIAgent:
             session_id=self.session_id,
             hooks_registry=self.hooks_registry,
             tools=self._last_tool_schemas,  # R18 #15：fork 摘要前缀复用
+            authoritative_tokens=self._last_usage_anchor,  # R18 #17：混合计数
         )
         if not compressed:
             return messages, system_prompt, False

@@ -830,6 +830,32 @@ class CompressionSessionState:
 MAX_CONSECUTIVE_L4_FAILURES = 3
 
 
+def estimate_tokens_hybrid(
+    messages: list,
+    anchor: Optional[tuple] = None,
+) -> int:
+    """R18 #17：权威值 + 新消息粗估的混合 token 计数（对齐 CC tokenCountWithEstimation）。
+
+    anchor = (msg_count, input_tokens)：最近一次主调用的真实输入 token 数
+    （usage 的 prompt + cache_read + cache_creation）与当时消息条数。
+    - len(messages) > msg_count：权威值 + 其后新增消息粗估（阈值判定偏差
+      从「全程粗估」缩到「只估增量」）
+    - 消息被压缩/回退（len <= msg_count）或无锚点：全量粗估（保守回退）
+
+    fail-open：anchor 结构异常时按无锚点处理。
+    """
+    try:
+        if anchor and len(anchor) == 2:
+            anchor_count, anchor_tokens = int(anchor[0]), int(anchor[1])
+            if 0 < anchor_count < len(messages):
+                return anchor_tokens + estimate_message_tokens(
+                    messages[anchor_count:]
+                )
+    except (TypeError, ValueError):
+        pass
+    return estimate_message_tokens(messages)
+
+
 # 冷却窗口 + 上限的默认值（可被 config 覆盖）
 REACTIVE_COOLDOWN_SECONDS = 60
 REACTIVE_MAX_PER_SESSION = 5
@@ -951,6 +977,7 @@ async def compress_if_needed(
     session_id: str,
     hooks_registry=None,
     tools: Optional[list] = None,
+    authoritative_tokens: Optional[tuple] = None,
 ) -> Tuple[list, bool]:
     """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
 
@@ -1145,7 +1172,8 @@ async def compress_if_needed(
     cooldown = config.get("llm_compact_cooldown_turns", 5)
     llm_compact_count = session_state.llm_compact_count
     conv_len = len(_split_system(messages)[1])
-    est_tokens = estimate_message_tokens(messages)
+    # R18 #17：权威锚点混合计数（有锚点用 真实值+增量粗估，否则全量粗估）
+    est_tokens = estimate_tokens_hybrid(messages, authoritative_tokens)
 
     # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 700K)
     # 1M 窗口留 30% 给输出(300K),70% 给输入(700K)
