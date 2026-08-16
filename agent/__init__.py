@@ -442,6 +442,8 @@ class AIAgent:
         # === R18 #19 NEW: tool_use 批间摘要（fire-and-forget + 下轮 ephemeral 注入）===
         self._pending_tool_batch_summary = None  # 待注入的一句话摘要
         self._tool_summary_task = None           # 任务引用（防 asyncio GC 回收）
+        # === R19 #25 NEW: 条件技能动态激活（会话级去重集合）===
+        self._activated_conditional_skills = set()
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1985,6 +1987,44 @@ class AIAgent:
             except Exception as e:
                 logger.debug("checkpoint track 失败: %s", e)
 
+    def _activate_conditional_skills(self, path) -> None:
+        """R19 #25：触碰匹配文件 → 动态激活条件技能（paths frontmatter）。
+
+        有 paths 的技能默认不进静态索引（省索引空间）；read_file/write_file/
+        str_replace 触碰匹配文件时激活——ephemeral user 通知 LLM 该技能可用
+        （load_skill 取正文），会话级去重。fail-open。
+        """
+        try:
+            from agent.skill_commands import find_conditional_skill_matches
+            hits = find_conditional_skill_matches(str(path))
+            new_hits = [
+                h for h in hits
+                if h["name"] not in self._activated_conditional_skills
+            ]
+            if not new_hits:
+                return
+            for h in new_hits:
+                self._activated_conditional_skills.add(h["name"])
+                self._record_recent("skill", h["name"])
+            lines = "\n".join(
+                f"- {h['name']}: {h['description']}" for h in new_hits
+            )
+            self._pending_ephemeral_messages.append({
+                "role": "user",
+                "content": (
+                    "<conditional_skills_ready>你刚触碰了匹配的文件，"
+                    "以下技能现已激活（用 load_skill(name) 获取完整正文）：\n"
+                    f"{lines}\n</conditional_skills_ready>"
+                ),
+                "_ephemeral": True,
+            })
+            logger.info(
+                "条件技能激活（触碰 %s）：%s",
+                path, ", ".join(h["name"] for h in new_hits),
+            )
+        except Exception as e:
+            logger.debug("条件技能激活失败（fail-open）: %s", e)
+
     def _record_recent(self, kind: str, key: str) -> None:
         """记录最近读过的文件 / 加载的技能（去重保序，保留最近 10 个）。
 
@@ -2227,6 +2267,9 @@ class AIAgent:
                 self._record_recent("read", str(tool_args["path"]))
             elif tool_name == "load_skill" and tool_args.get("name"):
                 self._record_recent("skill", str(tool_args["name"]))
+            # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
+            if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
+                self._activate_conditional_skills(tool_args["path"])
             if self.on_tool_call:
                 try:
                     self.on_tool_call(tool_name, tool_args)
@@ -2278,6 +2321,9 @@ class AIAgent:
             self._record_recent("read", str(tool_args["path"]))
         elif tool_name == "load_skill" and tool_args.get("name"):
             self._record_recent("skill", str(tool_args["name"]))
+        # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
+        if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
+            self._activate_conditional_skills(tool_args["path"])
 
         if self.on_tool_call:
             try:

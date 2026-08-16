@@ -184,3 +184,95 @@ def test_redact_fields():
     })
     assert out["count"] == 5
     assert "[REDACTED:token]" in out["text"]
+
+
+# ---------------------------------------------------------------------------
+# R19 #25：条件技能 paths 动态激活
+# ---------------------------------------------------------------------------
+
+from agent.skill_commands import (
+    _fm_summary_cache,
+    find_conditional_skill_matches,
+    path_matches_skill_paths,
+)
+
+
+def test_path_matches_skill_paths():
+    assert path_matches_skill_paths(["*.py"], "D:/proj/main.py")
+    assert path_matches_skill_paths(["src/**"], "D:/proj/src/mod/a.py")
+    assert path_matches_skill_paths(["**/test_*.py"], "D:/proj/tests/test_x.py")
+    # 相对 cwd 形态
+    assert path_matches_skill_paths(
+        ["utils/*.py"], "D:/proj/utils/helpers.py", cwd="D:/proj",
+    )
+    # 不匹配
+    assert not path_matches_skill_paths(["*.py"], "D:/proj/readme.md")
+    assert not path_matches_skill_paths(["src/**"], "D:/proj/lib/a.py")
+    assert not path_matches_skill_paths([], "whatever.py")
+    assert not path_matches_skill_paths(["*.py"], "")
+
+
+def _make_skill(root, name, paths=None):
+    d = root / name
+    d.mkdir(parents=True)
+    fm = f"---\nname: {name}\ndescription: {name} 技能\n"
+    if paths:
+        # glob 的 * 是 YAML alias 语法——必须行内列表加引号
+        fm += "paths: [" + ", ".join(f'"{p}"' for p in paths) + "]\n"
+    (d / "SKILL.md").write_text(fm + "---\n正文", encoding="utf-8")
+    return d
+
+
+def test_find_conditional_skill_matches(tmp_path):
+    _fm_summary_cache.clear()
+    _make_skill(tmp_path, "py-helper", paths=["*.py"])
+    _make_skill(tmp_path, "always-on")  # 无 paths：不在条件集合
+
+    hits = find_conditional_skill_matches("x/main.py", skills_dirs=[tmp_path])
+    assert [h["name"] for h in hits] == ["py-helper"]
+    assert find_conditional_skill_matches("x/a.txt", skills_dirs=[tmp_path]) == []
+
+
+def test_fm_summary_cache_invalidation(tmp_path):
+    _fm_summary_cache.clear()
+    d = _make_skill(tmp_path, "cache-skill", paths=["*.py"])
+    assert find_conditional_skill_matches("f.py", skills_dirs=[tmp_path])
+    # 改 frontmatter（去掉 paths）→ 缓存失效后不再匹配
+    (d / "SKILL.md").write_text(
+        "---\nname: cache-skill\ndescription: d\n---\n正文", encoding="utf-8",
+    )
+    assert find_conditional_skill_matches("f.py", skills_dirs=[tmp_path]) == []
+
+
+def test_agent_activate_conditional_skills(tmp_path, monkeypatch):
+    _fm_summary_cache.clear()
+    _make_skill(tmp_path, "py-helper", paths=["*.py"])
+
+    from agent import AIAgent
+    a = AIAgent.__new__(AIAgent)
+    a._activated_conditional_skills = set()
+    a._pending_ephemeral_messages = []
+    a._recent_read_files = []
+    a._recent_skills = []
+
+    import agent.skill_commands as sc
+    monkeypatch.setattr(
+        sc, "find_conditional_skill_matches",
+        lambda p, skills_dirs=None: (
+            [{"name": "py-helper", "description": "d", "paths": ["*.py"]}]
+            if p.endswith(".py") else []
+        ),
+    )
+
+    a._activate_conditional_skills("proj/main.py")
+    assert len(a._pending_ephemeral_messages) == 1
+    msg = a._pending_ephemeral_messages[0]
+    assert "conditional_skills_ready" in msg["content"]
+    assert "py-helper" in msg["content"]
+    assert msg["_ephemeral"] is True
+    # 会话级去重：第二次同路径不再通知
+    a._activate_conditional_skills("proj/other.py")
+    assert len(a._pending_ephemeral_messages) == 1
+    # 非匹配文件不通知
+    a._activate_conditional_skills("proj/readme.md")
+    assert len(a._pending_ephemeral_messages) == 1

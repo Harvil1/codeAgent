@@ -16,6 +16,11 @@ from tools.skill_usage import (
 )
 from tools.registry import registry
 
+# 触发工具自动发现（skill_view/skill_manage 等注册）——单文件跑时不依赖
+# 其他测试文件的 import 副作用（此前全套跑绿、单跑红的隐性缺陷）
+from model_tools import ensure_tools_discovered
+ensure_tools_discovered()
+
 
 # ---------------------------------------------------------------------------
 # 测试夹具：构造临时技能目录

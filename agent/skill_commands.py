@@ -102,6 +102,110 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
+# R19 #25：条件技能动态激活（paths 匹配被触碰的文件）
+# ---------------------------------------------------------------------------
+
+# frontmatter 摘要缓存 {skill_md_path: ((mtime_ns, size), fm)}
+# 文件操作高频触发扫描，mtime+size 缓存避免每次重解析全部 SKILL.md
+# （双因子——Windows mtime 精度踩过坑）。
+_fm_summary_cache: dict = {}
+
+
+def _iter_skill_fm_summaries(skills_dirs=None):
+    """扫技能目录，yield 有 paths 的 frontmatter 摘要 dict。"""
+    if skills_dirs is None:
+        try:
+            from constants import all_skills_dirs
+            skills_dirs = all_skills_dirs()
+        except Exception:
+            return
+    if isinstance(skills_dirs, (str, Path)):
+        skills_dirs = [skills_dirs]
+    for sd in skills_dirs:
+        sd = Path(sd)
+        if not sd.exists():
+            continue
+        for skill_md in sd.glob("*/SKILL.md"):
+            try:
+                stat = skill_md.stat()
+                cache_key = (stat.st_mtime_ns, stat.st_size)
+                cached = _fm_summary_cache.get(str(skill_md))
+                if cached is not None and cached[0] == cache_key:
+                    fm = cached[1]
+                else:
+                    fm_raw, _body = parse_frontmatter(
+                        skill_md.read_text(encoding="utf-8")
+                    )
+                    fm = {
+                        "name": fm_raw.get("name", skill_md.parent.name),
+                        "description": fm_raw.get("description", ""),
+                        "paths": fm_raw.get("paths") or [],
+                    }
+                    if len(_fm_summary_cache) > 1000:
+                        _fm_summary_cache.clear()
+                    _fm_summary_cache[str(skill_md)] = (cache_key, fm)
+                if fm["paths"]:
+                    yield fm
+            except Exception:
+                continue
+
+
+def path_matches_skill_paths(paths, file_path: str, cwd: str = None) -> bool:
+    """文件路径是否匹配技能的 paths 模式（对齐 CC parseSkillPaths 文件语义）。
+
+    匹配形态：
+    - 文件名 glob：``*.py`` 匹配 ``main.py``
+    - 相对路径 glob：``src/**`` 匹配 src/ 下任意文件（路径段前缀）
+    - 全路径/相对 cwd 路径 fnmatch（``**/test_*.py`` 等）
+    """
+    import fnmatch
+    if not paths or not file_path:
+        return False
+    norm = str(file_path).replace("\\", "/")
+    fname = norm.rsplit("/", 1)[-1]
+    cwd_n = str(cwd).replace("\\", "/") if cwd else None
+    for pat in paths or []:
+        if not isinstance(pat, str) or not pat:
+            continue
+        p = pat.replace("\\", "/")
+        if fnmatch.fnmatch(fname, p):
+            return True
+        if p.endswith("/**"):
+            base = p[:-3].lstrip("/")
+            if f"/{base}/" in norm or norm.startswith(base + "/"):
+                return True
+        if fnmatch.fnmatch(norm, p) or fnmatch.fnmatch(norm, f"*/{p}"):
+            return True
+        if cwd_n and norm.startswith(cwd_n + "/"):
+            rel = norm[len(cwd_n) + 1:]
+            if fnmatch.fnmatch(rel, p):
+                return True
+    return False
+
+
+def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
+    """返回 paths 匹配 file_path 的条件技能 [{name, description, paths}]。
+
+    只返回有 paths 的技能（无 paths 的已在常规索引——动态激活专用）。
+    fail-open：任何异常返回空列表。
+    """
+    try:
+        cwd = None
+        try:
+            from agent.workspace_context import get_workspace_cwd
+            cwd = get_workspace_cwd()
+        except Exception:
+            pass
+        return [
+            {"name": fm["name"], "description": fm["description"], "paths": fm["paths"]}
+            for fm in _iter_skill_fm_summaries(skills_dirs)
+            if path_matches_skill_paths(fm["paths"], file_path, cwd)
+        ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # T3（核心机制对齐第 3 项）：frontmatter files: 附件
 # ---------------------------------------------------------------------------
 
