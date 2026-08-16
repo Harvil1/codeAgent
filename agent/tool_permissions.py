@@ -245,6 +245,8 @@ def _wildcard_regex(pattern: str) -> "re.Pattern":
 # ---------------------------------------------------------------------------
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+# env 赋值 token 含这些字符时不剥离（剥一半会造出更怪的形态；保守停手整条不归一化）
+_SUSPICIOUS_ENV_TOKEN_RE = re.compile(r"[\"'`$]")
 _WRAPPER_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
 
@@ -256,11 +258,12 @@ def _normalize_command_for_rules(command: str) -> str:
     是既有匹配语义未覆盖的形态，记录为已知限制不在此处理。
 
     剥离形态（定点迭代直到剥不动）：
-      - ``NAME=value`` 赋值 token
-      - ``env`` 后跟任意个赋值 token（env 本身也剥）
+      - ``NAME=value`` 赋值 token（含引号/命令替换等可疑字符时整条停手不剥——
+        剥一半会造出更怪的形态，保守返回原命令走原匹配）
+      - ``env`` 本身 + 其 ``-`` 开头选项与选项参数（``-i`` / ``-u NAME``）+ 后续赋值 token
       - ``nohup``
       - ``timeout <时长>``（两 token 一起）
-      - ``nice`` / ``nice -n <数字>``
+      - ``nice`` / ``nice -n <数字>`` / ``nice -5``（POSIX 隐式优先级）
       - ``stdbuf`` 后跟任意个 ``-`` 开头的选项 token
     """
     tokens = command.split()
@@ -269,11 +272,18 @@ def _normalize_command_for_rules(command: str) -> str:
     while i < n:
         tok = tokens[i]
         if _ENV_ASSIGN_RE.match(tok):
+            if _SUSPICIOUS_ENV_TOKEN_RE.search(tok):
+                break  # 可疑 env token（引号/$/反引号）：整条停止归一化，返回原命令
             i += 1
             continue
         if tok == "env":
-            # env 后面跟的赋值也剥；env 后面直接是命令则只剥 env
             i += 1
+            # 吃掉 env 的选项与选项参数（-i / -u NAME / --ignore-environment 等）
+            while i < n and tokens[i].startswith("-") and tokens[i] != "-":
+                if tokens[i] in ("-u", "--unset") and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
             continue
         if tok == "nohup":
             i += 1
@@ -284,6 +294,8 @@ def _normalize_command_for_rules(command: str) -> str:
         if tok == "nice":
             if i + 2 < n and tokens[i + 1] == "-n" and tokens[i + 2].lstrip("-").isdigit():
                 i += 3
+            elif i + 1 < n and re.match(r"^-+\d+$", tokens[i + 1]):
+                i += 2  # nice -5（POSIX 隐式优先级）
             else:
                 i += 1
             continue

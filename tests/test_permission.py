@@ -1570,3 +1570,21 @@ class TestApprovalPrefixWhitelist:
             hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
         )
         assert asked
+
+    def test_newline_compound_not_matched_by_prefix(self, tmp_path):
+        """换行分隔的复合命令不走前缀免审（终审 must-fix）。"""
+        import json
+        from agent.permission import PermissionChecker
+        wf = tmp_path / "approved.json"
+        wf.write_text(json.dumps({"commands": [], "prefixes": ["pytest"]}), encoding="utf-8")
+        asked = []
+        checker = PermissionChecker(
+            approval_callback=lambda cmd: asked.append(cmd) or False,
+            whitelist_file=str(wf),
+        )
+        checker._approval_gate(
+            "pytest tests\nrm -rf build",
+            "default",
+            hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
+        )
+        assert asked  # 没走前缀免审

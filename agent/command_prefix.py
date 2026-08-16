@@ -35,7 +35,9 @@ _PREFIXABLE = (
 )
 
 # 复合操作符/重定向出现 → 不泛化（后半段可能藏破坏性命令；重定向可写文件）
-_COMPOUND_RE = re.compile(r"&&|\|\||;|\||`|\$\(|>|>>")
+# R25 终审补分隔符：换行/\r（`pytest tests\nrm -rf build` 整条换行复合）、
+# ${（参数展开）、<（进程替换）——漏任何一个都等于前缀免审放行整条复合命令。
+_COMPOUND_RE = re.compile(r"&&|\|\||;|\||`|\$\(|\$\{|<\(|\n|\r|>|>>")
 
 
 def derive_approved_prefix(command: str) -> Optional[str]:

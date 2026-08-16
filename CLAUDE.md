@@ -275,6 +275,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **审批前缀规则只从 curated 表派生** —— `agent/command_prefix.py` 白名单外的命令（含一切破坏性命令）保持 exact 匹配，宁可多问一次（批准 `git push origin x` 不会放行 `--force`）。
 - **项目级 .mcp.json 首连审批 fail-closed** —— 未批准/无 callback（非交互）的 server 跳过不连接；批准持久化在 settings.json `mcp.approved_project_servers`（键格式 `<项目路径小写>::<server名>`）。
 - **后台 LLM 调用遇 529 直接放弃** —— `call_with_retry(background=True)`（目前接线：子代理摘要）；前台语义不变。
+- **inline mcpServers（agent .md）不走项目级审批** —— R24 #38 的 per-agent 内联连接与 R25 #3 的项目级 .mcp.json 威胁模型相同（clone 陌生 repo 带入），但绕过首连审批闸门（需 LLM 配合 spawn 才触发）；接线审批留 follow-up。
 
 ### 上下文与韧性
 

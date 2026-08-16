@@ -160,3 +160,17 @@ class TestNormalizeCommandForRules:
         """echo a=b 不是 env 前缀（env 赋值只能出现在命令头部）。"""
         from agent.tool_permissions import _normalize_command_for_rules
         assert _normalize_command_for_rules("echo a=b") == "echo a=b"
+
+    def test_env_options_stripped(self):
+        from agent.tool_permissions import _normalize_command_for_rules
+        assert _normalize_command_for_rules("env -i rm -rf build") == "rm -rf build"
+        assert _normalize_command_for_rules("env -u FOO rm -rf build") == "rm -rf build"
+
+    def test_nice_implicit_priority_stripped(self):
+        from agent.tool_permissions import _normalize_command_for_rules
+        assert _normalize_command_for_rules("nice -5 rm -rf build") == "rm -rf build"
+
+    def test_quoted_env_value_not_stripped(self):
+        from agent.tool_permissions import _normalize_command_for_rules
+        # 带引号 env 值剥一半会更危险 → 整条不归一化（保守）
+        assert _normalize_command_for_rules('FOO="a b" rm -rf build') == 'FOO="a b" rm -rf build'
