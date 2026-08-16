@@ -44,6 +44,30 @@ DEFAULT_OUTPUT_RECOVERY_LIMIT = 3
 # 不在已知过载的 endpoint 上浪费重试次数（避免占用限流配额）。
 DEFAULT_CONSECUTIVE_529_THRESHOLD = 3
 
+# R25 #5：退避心跳分片（对齐 CCB unattended 30s 心跳——长退避期间保持可观察）
+HEARTBEAT_CHUNK_SECONDS = 30.0
+
+
+async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
+    """分片 sleep：每 ≤30s 一个片段，片段间调 heartbeat_cb(elapsed, total)。
+
+    - 无 callback 或 total <= 30s：直接 sleep（零开销，向后兼容）
+    - callback 抛异常：吞掉（fail-open，心跳不能影响重试本身）
+    """
+    if heartbeat_cb is None or total <= HEARTBEAT_CHUNK_SECONDS:
+        await asyncio.sleep(total)
+        return
+    elapsed = 0.0
+    while elapsed < total:
+        chunk = min(HEARTBEAT_CHUNK_SECONDS, total - elapsed)
+        await asyncio.sleep(chunk)
+        elapsed += chunk
+        if elapsed < total:
+            try:
+                heartbeat_cb(elapsed, total)
+            except Exception:
+                pass
+
 
 def _error_status_code(error: Exception) -> Optional[int]:
     """从异常提取 HTTP 状态码（兼容多种 SDK 形态）。"""
@@ -159,6 +183,7 @@ async def call_with_retry(
     consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
     config: Optional[Dict[str, Any]] = None,
     background: bool = False,  # R25 #4：后台调用（子代理摘要等）遇 529 立即放弃
+    heartbeat_cb=None,  # R25 #5：长退避分片心跳（fn(elapsed, total)）
 ):
     """带重试和备用 client 的 async LLM 调用。
 
@@ -199,6 +224,9 @@ async def call_with_retry(
                 加 max_hours（默认 24h）deadline 守护。
         background: True 表示后台任务调用。遇 529（服务过载）直接抛出不重试——
                     后台重试只会火上浇油，下个周期天然重跑（对齐 CCB 防放大）。
+        heartbeat_cb: 长退避分片心跳回调 fn(elapsed, total)。退避 >30s 时
+                      每 30s 调一次（异常吞掉，fail-open）——数分钟退避期间
+                      用户/宿主不至于以为 agent 挂了。
     """
     last_error: Optional[Exception] = None
     # X6 fix: max_retries<=0 直接抛友好错误（否则下面 for 循环不进，最后 raise None → TypeError）
@@ -345,7 +373,7 @@ async def call_with_retry(
                     "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
                     attempt + 1, max_retries, backoff, e,
                 )
-            await asyncio.sleep(backoff)
+            await _sleep_with_heartbeat(backoff, heartbeat_cb)
             attempt += 1
 
     # 主 client 重试耗尽（或被 529 阈值打断 / deadline 到期），尝试备用 client

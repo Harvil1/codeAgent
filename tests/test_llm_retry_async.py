@@ -276,3 +276,52 @@ class TestBackground529GiveUp:
             max_retries=5, background=False,
         )
         assert client.calls == 2  # 前台语义不变：重试后成功
+
+
+# ===== R25 #5：长退避分片心跳 =====
+
+class TestSleepWithHeartbeat:
+    async def test_chunks_and_callbacks(self, monkeypatch):
+        import asyncio
+        from agent.llm_retry import _sleep_with_heartbeat
+        slept = []
+        async def fake_sleep(s):
+            slept.append(s)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        beats = []
+        await _sleep_with_heartbeat(70.0, lambda e, t: beats.append(e))
+        assert slept == [30.0, 30.0, 10.0]
+        assert beats == [30.0, 60.0]  # 结束前每次心跳；最后一片完成不叫
+
+    async def test_no_cb_single_sleep(self, monkeypatch):
+        import asyncio
+        from agent.llm_retry import _sleep_with_heartbeat
+        slept = []
+        async def fake_sleep(s):
+            slept.append(s)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await _sleep_with_heartbeat(70.0, None)
+        assert slept == [70.0]
+
+    async def test_cb_exception_swallowed(self, monkeypatch):
+        import asyncio
+        from agent.llm_retry import _sleep_with_heartbeat
+        async def fake_sleep(s):
+            pass
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        def bad_cb(e, t):
+            raise RuntimeError("boom")
+        await _sleep_with_heartbeat(65.0, bad_cb)  # 不抛
+
+    async def test_accepts_heartbeat_kwarg(self, monkeypatch):
+        """call_with_retry 接受 heartbeat_cb 参数（冒烟）。"""
+        import asyncio
+        from agent.llm_retry import call_with_retry
+        async def fake_sleep(s):
+            pass
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        client = _Flaky529Client()
+        await call_with_retry(
+            client, [{"role": "user", "content": "x"}],
+            max_retries=3, heartbeat_cb=lambda e, t: None,
+        )

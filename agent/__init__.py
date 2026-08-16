@@ -872,6 +872,7 @@ class AIAgent:
                 tools=tools,
                 fallback_llm_client=self.fallback_llm_client,
                 config=self.config,
+                heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
             )
             # 流式回调已经错过，但至少把完整内容回放给 callback
             choice_msg = response.choices[0].message
@@ -941,6 +942,7 @@ class AIAgent:
                     fallback_llm_client=self.fallback_llm_client,
                     max_tokens=new_max,
                     config=self.config,
+                    heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
                 )
                 retried_choice = retried.choices[0]
                 retried_msg = retried_choice.message
@@ -1853,6 +1855,7 @@ class AIAgent:
                     tools=tool_schemas if tool_schemas else None,
                     fallback_llm_client=self.fallback_llm_client,
                     config=self.config,
+                    heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
                 )
                 # P0-3: 非流式路径也支持 max_tokens 升级
                 if (detect_length_finish(response)
@@ -1868,6 +1871,7 @@ class AIAgent:
                             fallback_llm_client=self.fallback_llm_client,
                             max_tokens=new_max,
                             config=self.config,
+                            heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
                         )
                     except Exception as esc_err:
                         logger.warning(
@@ -1911,6 +1915,7 @@ class AIAgent:
                         tools=tool_schemas if tool_schemas else None,
                         fallback_llm_client=self.fallback_llm_client,
                         config=self.config,
+                        heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
                     )
                     logger.info("流空闲超时恢复成功（非流式路径）")
                     return response
@@ -2053,6 +2058,7 @@ class AIAgent:
                     fallback_llm_client=self.fallback_llm_client,
                     max_tokens=recovery_max_tokens,
                     config=self.config,
+                    heartbeat_cb=self._llm_retry_heartbeat,  # R25 #5
                 )
             except Exception as e:
                 logger.warning("续写恢复调用失败（返回已拼接内容）: %s", e)
@@ -2962,6 +2968,14 @@ class AIAgent:
             self._trace_sink.emit("loop_exit", reason=reason, **extra)
         except Exception as e:
             logger.debug("loop_exit trace fail-open: %s", e)
+
+    def _llm_retry_heartbeat(self, elapsed: float, total: float) -> None:
+        """R25 #5：LLM 长退避心跳（>30s 的退避才触发，每 30s 一次）。
+
+        目的：数分钟退避期间用户/宿主不至于以为 agent 挂了。
+        只记 info 日志（进 logs/ 与 trace），不做 toast（30s 一次会刷屏）。
+        """
+        logger.info("LLM 重试退避中：已等待 %.0fs / 预计共 %.0fs", elapsed, total)
 
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
         """循环结束（预算耗尽或中断）的兜底响应。
