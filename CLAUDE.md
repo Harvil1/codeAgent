@@ -269,6 +269,10 @@ uv sync                                 # 同步已声明依赖
 | 条件技能动态激活（R19 #25） | `agent/skill_commands.py:path_matches_skill_paths` + `find_conditional_skill_matches`（mtime+size 双因子缓存）+ `AIAgent._activate_conditional_skills`（ephemeral `<conditional_skills_ready>` 通知，会话级去重）；触发点 `_dispatch_tool_calls` 两处 pre-callback（read/write/str_replace 的 path）；与静态判定互补（paths 目录语义仍进索引）；glob 模式 YAML 里须加引号（* 是 alias 语法） |
 | skillify 内置技能（R19 #28） | `skills/skillify/SKILL.md`（四步：分析会话→ask_user 访谈→skill_manage 保存→确认；用户纠正沉淀进"规则"段；纯 MD 零 Python） |
 | 对话级记忆提取（R19 #21） | `agent/auto_extract.py:run_auto_extract`（增量轨迹→aux 单轮无工具提取→memory_store.save；与 reflection 共用 `build_memory_manifest` 防重复）+ `AIAgent._maybe_auto_extract`（游标始终推进 + 互斥 `_memory_touched_this_turn` + every_n_turns=3 节流 + spawn_depth==0）；config `memory.auto_extract`（默认关） |
+| 空结果保护（R20 #33） | `model_tools.py:handle_function_call` 统一出口（POST hook 后）：空串/纯空白/空 dict → 注入 `(toolName completed with no output)` + `empty_output` 标记（防模型误判回合边界）；非空结果不动 |
+| Read 双上限（R20 #34） | `tools/file_operations.py:READ_MAX_FILE_BYTES=256KB`（大小预检不读盘直接拒）+ `READ_MAX_OUTPUT_TOKENS=25000`（len/3 粗估后检）——超限报错引导 offset/limit 分段（对齐 CC：截断因 token 成本反升而回滚） |
+| WebFetch aux 提炼（R20 #31） | `tools/web_fetch_tool.py:_refine_with_aux`（有 prompt 且 `agent_ref.aux_llm_router` 可用 → 小模型提炼 ≤2000 字保留数字/路径/版本号，`refined=true`；aux 失败/无降级全文 fail-open）；handler 改 async |
+| NotebookEdit（R20 #35） | `tools/file_operations.py:_handle_notebook_edit`（replace/insert/delete；cell_id 匹配 id 字段或数字索引；旧文件补齐 cell_<n> id；check_path write 白名单 + 原子写 + checkpoint/FILE_CHANGED）；`_CORE_TOOLS` 已同步登记 |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -406,6 +410,8 @@ uv sync                                 # 同步已声明依赖
 - **记忆写入命中秘密即拒绝（R19 #24）** —— memory_store.save/update 是 fail-closed（ValueError，工具层转 error 返回）；curator 改写产物命中拒绝保留原文；trace 是 fail-open redact（日志通道不拒）。规则 ID 之外不记录命中值。
 - **auto_extract 默认关 + 与主写入互斥（R19 #21）** —— 每回合 aux 调用有成本，`memory.auto_extract.enabled=False` 默认；本轮 LLM 调过 memory save/update → 跳过并推进游标（主 agent 优先）；游标始终推进——被互斥/节流跳过的回合不再回看。
 - **条件技能 paths 的双语义（R19 #25）** —— 目录形态（`src/**`）匹配 cwd 时仍进静态索引（既有行为）；文件 glob（`*.py`）只走动态激活（ephemeral 通知）。glob 模式在 frontmatter 里必须加引号（YAML 的 `*` 是 alias 语法，不加引号解析成空串）。
+- **Read 超限是报错不是截断（R20 #34）** —— 256KB 预检 / 25K token 后检超限返回 `file_too_large`/`output_too_large` 错误，引导 offset/limit 分段（对齐 CC：截断方案曾因 LLM 反复重读 token 成本反升而被回滚）。offload 落盘层（正常尺寸路径）不受影响。
+- **web_fetch 提炼依赖 aux 注入（R20 #31）** —— 只有主对话（agent_ref 带 aux_llm_router）且有 prompt 时走小模型提炼；子代理/无 aux 环境自动降级全文（fail-open），refined=false 标记来源。
 
 ## 测试策略
 
