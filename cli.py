@@ -318,7 +318,10 @@ class RuntimeContext:
             from agent.permission import set_default_checker, PermissionChecker
             from agent.settings import approved_commands_path, approved_paths_path
             set_default_checker(PermissionChecker(
-                approval_callback=_make_approval_callback(),
+                approval_callback=_make_approval_callback(
+                    # R21 #45：审批 e 选项的 aux 解释器（延迟取——router 此后构造）
+                    aux_provider=lambda: getattr(self, "aux_llm_router", None),
+                ),
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
                 mode=perm_mode,
@@ -932,7 +935,7 @@ class RuntimeContext:
 # 回调
 # ---------------------------------------------------------------------------
 
-def _make_approval_callback():
+def _make_approval_callback(aux_provider=None):
     """创建审批 callback（破坏性命令 + 写入路径都用这个）。
 
     callback 接收字符串,根据内容自动判断是命令还是路径,显示不同 prompt。
@@ -941,7 +944,30 @@ def _make_approval_callback():
     - 路径 → 三档(T5):y=本次允许(父目录进会话缓存,同目录后续写入不再问);
       a=总是允许(父目录持久化到 settings.json security.extra_allowed_roots,
       跨会话生效,与 /add-dir 同通道);N=拒绝
+
+    R21 #45：命令审批加 e 选项——aux LLM 解释这条命令的用途 + LOW/MEDIUM/HIGH
+    风险（aux_provider 注入，None 时选项隐藏）。fail-open。
     """
+    def _explain(command: str):
+        """R21 #45：aux LLM 解释命令（用途 + 风险等级）。fail-open。"""
+        aux = aux_provider() if aux_provider else None
+        if aux is None:
+            console.print("[dim]（解释器不可用——未配置 aux_llm）[/dim]")
+            return
+        try:
+            import asyncio as _aio
+            resp = _aio.run(aux.chat_completions([{"role": "user", "content": (
+                "用中文解释下面这条 shell 命令做什么。输出两行：\n"
+                "第 1 行：用途（一句话）\n"
+                "第 2 行：风险等级：LOW / MEDIUM / HIGH + 一句话理由\n\n"
+                f"命令：{command}"
+            )}]))
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                console.print(Panel.fit(text, title="🔍 命令解释", border_style="cyan"))
+        except Exception as e:
+            console.print(f"[dim]（解释失败: {e}）[/dim]")
+
     def callback(item: str):
         # 启发式判断:含路径分隔符或 ~ 开头 → 路径,否则 → 命令
         is_path = (
@@ -965,14 +991,20 @@ def _make_approval_callback():
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
             console.print(f"[bold]{item}[/bold]")
-            try:
-                answer = console.input(
-                    "[bold]允许执行？(y/N):[/bold] [dim]（同意后此命令不再询问）[/dim] ",
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                console.print()
-                return False
-            return answer in ("y", "yes")
+            explain_hint = "[dim] e=解释[/dim]" if aux_provider else ""
+            while True:
+                try:
+                    answer = console.input(
+                        f"[bold]允许执行？(y/N):[/bold]{explain_hint} "
+                        "[dim]（同意后此命令不再询问）[/dim] ",
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    console.print()
+                    return False
+                if answer == "e" and aux_provider:
+                    _explain(item)
+                    continue  # 解释后重新问
+                return answer in ("y", "yes")
     return callback
 
 
@@ -1612,6 +1644,31 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return _handle_poor_command(args, rt)
     if name == "/trace":
         return _handle_trace_command(args, rt)
+    if name == "/history":
+        # R21 #42：全局输入历史（/history 列最近 20 条；/history N 打印第 N 条原文）
+        try:
+            from agent.input_history import GlobalHistory
+            h = GlobalHistory(rt.home)
+            if args.strip().isdigit():
+                item = h.get(int(args.strip()))
+                if item:
+                    console.print(Panel.fit(item[:2000], title="输入历史（复制后可直接粘贴使用）"))
+                else:
+                    console.print("[yellow]没有第 %s 条历史[/yellow]" % args.strip())
+                return True
+            items = h.recent(20)
+            if not items:
+                console.print("[dim]暂无输入历史[/dim]")
+                return True
+            lines = [
+                f"[cyan]{i}[/cyan]. {t[:80].replace(chr(10), ' ')}"
+                + ("…" if len(t) > 80 else "")
+                for i, t in enumerate(items, 1)
+            ]
+            console.print(Panel.fit("\n".join(lines), title="输入历史（/history N 看原文）"))
+        except Exception as e:
+            console.print(f"[red]历史读取失败: {e}[/red]")
+        return True
     if name == "/mailbox":
         return _handle_mailbox_command(args, rt)
     if name == "/inbox":
@@ -4084,6 +4141,17 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         if not user_input:
             continue
 
+        # R21 #42：全局输入历史（跨会话召回，fail-open）
+        try:
+            from agent.input_history import GlobalHistory
+            GlobalHistory(rt.home).append(user_input)
+        except Exception:
+            pass
+
+        # R21 #39：大段粘贴外存 + 占位符（session 存占位符省空间）
+        from agent.input_history import store_paste_if_large
+        user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
+
         # 0. `#` 快捷写记忆（对齐 Claude Code 体验）
         if user_input.startswith("#"):
             text = user_input[1:].strip()
@@ -4161,6 +4229,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
         # 4. 调用 agent
         try:
+            # R21 #39：发送 agent 前展开粘贴引用（session 里存的是占位符）
+            from agent.input_history import expand_paste_references
+            agent_input = expand_paste_references(user_input, rt.home)
             # Checkpoint：每个用户 prompt 前快照（对齐 Claude Code，/rewind 可回滚）
             if rt.checkpoint_mgr:
                 try:
@@ -4175,7 +4246,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             # 保持 run_interactive 同步签名（run_skill_in_fork 等下游依赖同步上下文），
             # 每次调用用 asyncio.run 驱动一次完整的 async run_conversation。
             # 全量 async 改造留到 Plan 2B（届时 skill_fork 也改 async，可消除嵌套 asyncio.run）。
-            response = asyncio.run(rt.agent.run_conversation(user_input))
+            response = asyncio.run(rt.agent.run_conversation(agent_input))
             # 流式模式(stream_callback 已设)的内容已经在 run_conversation 过程中显示,
             # 不再重复 print。非流式模式(无 callback)才 print response。
             # 但 LLM 失败/预算耗尽等兜底文案不走流式（没有内容增量），必须显示，

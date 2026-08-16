@@ -355,3 +355,71 @@ async def test_memory_prefetch_consume():
     a._memory_prefetch_task = asyncio.create_task(none_fetch())
     out5 = await a._consume_memory_prefetch([{"role": "user", "content": "q"}])
     assert len(out5) == 1
+
+
+# ---------------------------------------------------------------------------
+# R21 #42：全局输入历史 + R21 #39：粘贴引用协议
+# ---------------------------------------------------------------------------
+
+from agent.input_history import (
+    HISTORY_LIMIT,
+    GlobalHistory,
+    expand_paste_references,
+    store_paste_if_large,
+)
+
+
+def test_global_history(tmp_path):
+    h = GlobalHistory(tmp_path)
+    assert h.recent() == []
+    h.append("第一条")
+    h.append("第二条")
+    h.append("第二条")  # 与最近一条相同 → 不记
+    assert h.recent(10) == ["第二条", "第一条"]
+    assert h.get(1) == "第二条"
+    assert h.get(2) == "第一条"
+    assert h.get(3) is None  # 越界
+    # 空文本不记
+    h.append("   ")
+    assert len(h.recent(10)) == 2
+
+    # 跨实例（跨会话语义）
+    h2 = GlobalHistory(tmp_path)
+    assert h2.recent(1) == ["第二条"]
+
+
+def test_global_history_trim(tmp_path):
+    """超 2 倍上限触发软裁剪（保留最新 HISTORY_LIMIT 条 + 其后新增）。"""
+    h = GlobalHistory(tmp_path)
+    for i in range(HISTORY_LIMIT * 2 + 5):
+        h.append(f"msg-{i}")
+    items = h.recent(HISTORY_LIMIT + 10)
+    # 裁剪发生在第 201 条（留 100），其后 4 次新增 → 104
+    assert len(items) == HISTORY_LIMIT + 4
+    assert items[0] == f"msg-{HISTORY_LIMIT * 2 + 4}"  # 最新在前
+
+
+def test_store_paste_threshold(tmp_path):
+    """≤1024 原样；>1024 外存 + 占位符；可往返展开。"""
+    short = "短输入"
+    text, path = store_paste_if_large(short, tmp_path)
+    assert text == short and path is None
+
+    long_text = "x" * 1025 + "\nsecond line"
+    text2, path2 = store_paste_if_large(long_text, tmp_path)
+    assert path2 is not None
+    assert text2.startswith("[Pasted text #1 +2 lines]")
+    # 展开往返
+    expanded = expand_paste_references(text2, tmp_path)
+    assert expanded == long_text
+    # 第二次外存编号递增
+    text3, _ = store_paste_if_large("y" * 2000, tmp_path)
+    assert "#2" in text3
+
+
+def test_expand_paste_missing_file(tmp_path):
+    """占位符无对应文件 → 保留占位符（fail-open）。"""
+    out = expand_paste_references("[Pasted text #99 +5 lines]", tmp_path)
+    assert out == "[Pasted text #99 +5 lines]"
+    # 无占位符文本原样
+    assert expand_paste_references("普通消息", tmp_path) == "普通消息"
