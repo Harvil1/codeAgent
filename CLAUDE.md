@@ -282,6 +282,10 @@ uv sync                                 # 同步已声明依赖
 | 审批命令解释器（R21 #45） | `cli.py:_make_approval_callback(aux_provider=)`（命令审批 e 选项 → aux 解释用途+LOW/MEDIUM/HIGH，Panel 展示后重新问；aux 不可用隐藏） |
 | 粘贴引用协议（R21 #39） | `agent/input_history.py:store_paste_if_large`（>1024 字符外存 `.paste/text_<n>.txt` + `[Pasted text #N +M lines]` 占位；session 存占位）+ `expand_paste_references`（发 agent 前展开；无文件保留占位 fail-open） |
 | 全局输入历史（R21 #42） | `agent/input_history.py:GlobalHistory`（history.jsonl 相邻去重 + 软裁剪 2×上限留 100）+ CLI `/history`（列 20 条 / N 看原文；↑↓ 留待 TUI 化） |
+| TF-IDF 技能搜索（R22 #27） | `tools/skill_tools.py:_skill_search_rank`（name tokens ×3 + TF-IDF；中文单字 TF 封顶 2；连字符词组拆部件）+ `_tokenize`（中英停用词表）；skills_list query 参数命中返回 Top10 / 无命中 hint 全量 |
+| 队列命令消费（R22 #11） | `cli.py` 输入 daemon 线程 + queue.Queue（EOF/Ctrl+C 哨兵）+ `AIAgent.set_input_queue`/`_drain_queued_input`（工具批后 drain → ephemeral `<queued_user_input>` 回流，仅主代理，多条合并） |
+| Monitor 监视器（R22 #32） | `agent/background.py`（BackgroundTask.monitor/output_file；start(monitor=) 豁免 stall 通知 + tee 落盘 `<home>/.task_outputs/monitor/<id>.log` + timeout 默认 24h；_watch_with_stall tee/跳 stall/finally 关文件）+ `bg_start` monitor 字段返回 output_file |
+| compact 边界重链（R22 #40） | 压缩占位入库前加 `[COMPACT_BOUNDARY]` 标记行（`agent/__init__.py`）+ `cli.py:_truncate_at_last_compact_boundary`（resume 从最后边界截断，标记行剥掉保留摘要；无标记保守全量） |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -425,6 +429,9 @@ uv sync                                 # 同步已声明依赖
 - **任务全清是标志不是删除（R21 #48）** —— 全 completed 返回 `all_done: true` 引导 LLM，**不动任务状态**（软删会破坏 completed 持久可查的既有语义——test_task_complete_allows_matching_id 教训）；nudge 只在 complete 结果里出现（≥3 活跃且无验证字样，走 tool result 零主循环改动）。
 - **记忆检索 prefetch 是一次性消费（R21 #8）** —— 结果直接 append 本轮 messages（不进 history 天然 ephemeral）；reactive_retry 回循环时 task 已清不重复注入；检索失败 fail-open 静默。
 - **粘贴占位符 session 存占位、发送展开（R21 #39）** —— 会话记录省空间；外存文件被清理时保留占位符不阻塞对话。历史裁剪是软裁剪（2×上限触发，留最新 100+其后新增）。
+- **排队输入不打断当前响应（R22 #11）** —— 模型跑时输入排队（daemon 输入线程），工具批结束 drain 回流 ephemeral（模型下轮消化）；不做 CC 的 now/next/later 三级优先级（单用户交互 FIFO 足够）；输入等待时 Ctrl+C 哨兵对齐原退出语义。
+- **monitor 豁免 stall 看门狗（R22 #32）** —— tail -f/watch 安静是常态，常规任务的停滞预警对监视器是误报；tee 落盘不受 result cap（read_file 查增量）；一次性命令不要用 monitor（退出通知即完成）。
+- **边界裁剪只在有标记时生效（R22 #40）** —— 旧会话（无 `[COMPACT_BOUNDARY]`）保守全量（行为同现状）；裁剪取**最后**边界（多次压缩只保留最近摘要之后的流）。
 
 ## 测试策略
 
