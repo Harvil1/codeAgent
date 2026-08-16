@@ -112,6 +112,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "reactive_compact_cooldown_seconds": 60,   # 冷却窗口（60s 内最多 1 次）
         "reactive_compact_max_per_session": 5,     # 单会话最多触发 5 次（防失控）
         "reactive_once_per_session": False,        # 向后兼容 flag（已废弃，默认 False）
+        # R18 #19：tool_use 批间摘要（aux 一句话总结本批工具结果，
+        # 下一轮以 ephemeral user 注入——隐藏摘要延迟；默认关）
+        "tool_batch_summary_enabled": False,
         # Transcript
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",

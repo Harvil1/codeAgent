@@ -439,6 +439,9 @@ class AIAgent:
         # === R18 #17 NEW: 权威 token 锚点（消息条数, 真实输入 token 数）===
         # _record_llm_usage 更新；compress_if_needed 用它做混合计数。
         self._last_usage_anchor = None
+        # === R18 #19 NEW: tool_use 批间摘要（fire-and-forget + 下轮 ephemeral 注入）===
+        self._pending_tool_batch_summary = None  # 待注入的一句话摘要
+        self._tool_summary_task = None           # 任务引用（防 asyncio GC 回收）
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1458,6 +1461,20 @@ class AIAgent:
             messages.extend(self._pending_ephemeral_messages)
             self._pending_ephemeral_messages = []
 
+        # === R18 #19：批间摘要注入（上一批工具的一句话总结，ephemeral）===
+        # 后台 aux 任务生成（_dispatch_tool_calls 末尾 fire-and-forget），
+        # 这里消费并清空；未生成完成时本轮跳过（不等待，隐藏延迟）
+        if self._pending_tool_batch_summary:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "<tool_batch_summary>（上一批工具调用的一句话总结）\n"
+                    f"{self._pending_tool_batch_summary}\n</tool_batch_summary>"
+                ),
+                "_ephemeral": True,
+            })
+            self._pending_tool_batch_summary = None
+
         # 注意：不在这里 strip _timestamp——time-based MC 需要读 _timestamp
         # strip 移到主循环 _run_context_compression 之后、发 LLM 之前
         return messages
@@ -2125,11 +2142,72 @@ class AIAgent:
             tool_calls, safe_processed, unsafe_processed,
         )
 
+        # R18 #19：批间摘要（fire-and-forget，idle 时不启动）
+        if not self._idle_requested:
+            self._maybe_start_tool_batch_summary(tool_calls, safe_processed, unsafe_processed)
+
         # P4b-T2: idle 标志检查
         if self._idle_requested:
             logger.info("idle 已请求，退出 run_conversation")
             return False
         return True
+
+    def _maybe_start_tool_batch_summary(self, tool_calls, safe_processed, unsafe_processed) -> None:
+        """R18 #19：启动批间摘要后台任务（对齐 CC toolUseSummaryGenerator）。
+
+        每批工具完成后 fire-and-forget 调 aux 小模型生成一句话摘要，
+        下一轮以 ephemeral user 注入（摘要延迟隐藏在模型流式期间）。
+        门控：config context.tool_batch_summary_enabled（默认关）+
+        aux_llm_router 可用 + 仅主代理（spawn_depth==0，防子代理递归成本）。
+        整链 fail-open。
+        """
+        try:
+            if not (self.config or {}).get("context", {}).get(
+                "tool_batch_summary_enabled", False,
+            ):
+                return
+            if self.aux_llm_router is None or self.spawn_depth > 0:
+                return
+            if not tool_calls:
+                return
+            # 汇总 (工具名, 结果前 300 字)
+            items = []
+            for tc, content in list(safe_processed) + list(unsafe_processed):
+                items.append((tc.function.name, str(content)[:300]))
+            if not items:
+                return
+            # 上一批的任务还没跑完 → 覆盖（旧摘要被新批取代，符合最新语义）
+            self._tool_summary_task = asyncio.create_task(
+                self._generate_tool_batch_summary(items)
+            )
+        except Exception as e:
+            logger.debug("批间摘要启动失败（fail-open）: %s", e)
+
+    async def _generate_tool_batch_summary(self, items) -> None:
+        """R18 #19：aux 小模型一句话总结本批工具调用（fail-open 全吞）。"""
+        try:
+            lines = "\n".join(
+                f"- {name}: {content}" for name, content in items[:20]
+            )
+            prompt = (
+                "用一句中文（不超过 80 字）总结这批工具调用做了什么，"
+                "突出关键产出（文件/命令/结论），直接输出句子：\n" + lines
+            )
+            resp = await self.aux_llm_router.chat_completions(
+                [{"role": "user", "content": prompt}],
+            )
+            text = ""
+            try:
+                text = resp.choices[0].message.content or ""
+            except (AttributeError, IndexError, TypeError):
+                text = resp if isinstance(resp, str) else ""
+            text = str(text).strip()
+            if text:
+                # 只保留最新一批（后到覆盖先到）
+                self._pending_tool_batch_summary = text[:200]
+                logger.debug("批间摘要已生成（%d 字）", len(text))
+        except Exception as e:
+            logger.debug("批间摘要生成失败（fail-open）: %s", e)
 
     async def _run_safe_group_concurrently(self, safe_calls, handle_function_call):
         """safe 组并发执行 handle_function_call。
