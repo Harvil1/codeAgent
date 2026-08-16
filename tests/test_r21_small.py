@@ -310,3 +310,48 @@ def test_review_handoff_flags_dangerous():
 def test_handoff_review_config_default():
     from config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["delegation"]["handoff_review_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# R21 #8：记忆检索并行 prefetch
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_memory_prefetch_consume():
+    """prefetch task 被 _consume_memory_prefetch 一次性消费（append + 清空）。"""
+    from agent import AIAgent
+
+    async def fake_fetch():
+        return {"role": "user", "content": "<relevant_memories>x</relevant_memories>"}
+
+    a = AIAgent.__new__(AIAgent)
+    a._memory_prefetch_task = None
+    # 无 task → 原样
+    out = await a._consume_memory_prefetch([{"role": "user", "content": "q"}])
+    assert len(out) == 1
+
+    import asyncio
+    a._memory_prefetch_task = asyncio.create_task(fake_fetch())
+    msgs = [{"role": "user", "content": "q"}]
+    out2 = await a._consume_memory_prefetch(msgs)
+    assert len(out2) == 2
+    assert "relevant_memories" in out2[-1]["content"]
+    assert a._memory_prefetch_task is None  # 已清（一次性）
+    # 第二次消费：无 task 不追加
+    out3 = await a._consume_memory_prefetch(out2)
+    assert len(out3) == 2
+
+    # task 异常 → fail-open 原样返回
+    async def boom():
+        raise RuntimeError("aux down")
+    a._memory_prefetch_task = asyncio.create_task(boom())
+    out4 = await a._consume_memory_prefetch([{"role": "user", "content": "q"}])
+    assert len(out4) == 1
+    assert a._memory_prefetch_task is None
+
+    # task 返回 None → 不追加
+    async def none_fetch():
+        return None
+    a._memory_prefetch_task = asyncio.create_task(none_fetch())
+    out5 = await a._consume_memory_prefetch([{"role": "user", "content": "q"}])
+    assert len(out5) == 1

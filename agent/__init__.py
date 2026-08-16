@@ -449,6 +449,8 @@ class AIAgent:
         self._memory_touched_this_turn = False  # 本轮 LLM 是否调过 memory save/update
         self._auto_extract_turn_count = 0    # 回合计数（every_n_turns 节流）
         self._auto_extract_task = None       # 任务引用（防 asyncio GC 回收）
+        # === R21 #8 NEW: 记忆检索并行 prefetch（组装消息时 await 消费）===
+        self._memory_prefetch_task = None
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1027,6 +1029,9 @@ class AIAgent:
         # 每轮一次：放在 user 输入刚进主循环处（不是工具循环里）。
         # 降级链：aux_llm_router 为 None → snapshot 索引（实例级 flag 只注入一次，
         # 对齐旧"会话级 frozen"语义防每轮重复注入同一索引）。
+        # R21 #8：检索改并行 prefetch（create_task 发起，_assemble_turn_messages
+        # 开头 await 消费）——窗口覆盖 compress（触发时含 LLM 调用）+ toolset
+        # 准备，检索延迟大部分被并行吸收。
         if (self.spawn_depth == 0 and self.memory_store is not None
                 and self._pending_ephemeral_messages is not None):
             from agent.memory_injection import (
@@ -1036,20 +1041,20 @@ class AIAgent:
             # 每轮开头清缓存（防跨轮 LRU 串）
             reset_injection_cache()
             try:
-                msg = None
                 if self.aux_llm_router is not None:
-                    # 检索路径：每轮按 query 用 aux_llm 检索 Top N
-                    msg = await build_relevant_memories_message(
-                        query=user_message, memory_store=self.memory_store,
-                        aux_llm_router=self.aux_llm_router,
+                    # 检索路径：并行 prefetch（不阻塞；组装消息时 await）
+                    self._memory_prefetch_task = asyncio.create_task(
+                        build_relevant_memories_message(
+                            query=user_message, memory_store=self.memory_store,
+                            aux_llm_router=self.aux_llm_router,
+                        )
                     )
                 elif not self._snapshot_injected:
                     # 降级路径：无 aux → snapshot 一次性注入（本会话仅一次）
                     msg = _fallback_snapshot_message(self.memory_store)
                     if msg is not None:
                         self._snapshot_injected = True
-                if msg is not None:
-                    self._pending_ephemeral_messages.append(msg)
+                        self._pending_ephemeral_messages.append(msg)
             except Exception as e:
                 logger.debug("记忆注入 fail-open: %s", e)
 
@@ -1120,6 +1125,10 @@ class AIAgent:
             # 同时发给 LLM 的 messages 仍不含 _timestamp（保护 prompt cache）。
             # 双重 strip 幂等：strip_internal_fields 创建新 dict，已 stripped 的再 strip 无副作用。
             messages = strip_internal_fields(messages)
+
+            # R21 #8：消费记忆检索 prefetch（并行窗口 = drain/assemble/compress/
+            # strip 全程；直接 append 本轮 messages——天然 ephemeral 不入 history）
+            messages = await self._consume_memory_prefetch(messages)
 
             # 工具集刷新（plan_mode 切换）+ retry warning + 动态记忆 + PRE_LLM_CALL hook
             tool_schemas = await self._prepare_toolset_and_injections(messages)
@@ -1351,6 +1360,28 @@ class AIAgent:
             "team_messages_text": team_messages_text,
             "delegation_results": delegation_results,
         }
+
+    async def _consume_memory_prefetch(self, messages: list) -> list:
+        """R21 #8：await 记忆检索 prefetch，结果作为 ephemeral 追加本轮 messages。
+
+        prefetch 在 run_conversation 开场 create_task 发起（CCAR10 检索注入
+        的并行化）；消费点放在 compress/strip 之后获得最大并行窗口——检索
+        的 aux 调用延迟大部分被主循环准备工作吸收。
+        直接 append 局部 messages（不进 conversation_history，与
+        _pending_ephemeral_messages 同语义）；fail-open；一次性消费
+        （reactive_retry 回循环时 task 已清，不重复注入）。
+        """
+        if self._memory_prefetch_task is None:
+            return messages
+        task, self._memory_prefetch_task = self._memory_prefetch_task, None
+        try:
+            msg = await task
+            if msg is not None:
+                messages.append(msg)
+                logger.debug("记忆 prefetch 已消费（并行检索完成）")
+        except Exception as e:
+            logger.debug("记忆 prefetch 消费 fail-open: %s", e)
+        return messages
 
     def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
         """组装本轮 messages：system + history + 注入临时消息 + reminder。
