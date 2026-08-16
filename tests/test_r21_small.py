@@ -693,3 +693,57 @@ def test_nested_dir_feeds_conditional_match(tmp_path):
         )
         names = [h["name"] for h in hits]
         assert "react-helper" in names, names
+
+
+# ---------------------------------------------------------------------------
+# R24 #36：scratchpad 涂鸦区
+# ---------------------------------------------------------------------------
+
+from agent.scratchpad import (
+    cleanup_old_scratchpads,
+    ensure_scratchpad,
+    scratchpad_context_block,
+    scratchpad_dir,
+)
+
+
+def test_scratchpad_flow(tmp_path):
+    """ensure 创建目录 + 白名单注入；context block 含路径；旧目录清理。"""
+    from agent.permission import clear_extra_allowed_roots, list_extra_allowed_roots
+    clear_extra_allowed_roots()
+    try:
+        d = ensure_scratchpad("sess-abc", tmp_path)
+        assert d is not None and d.is_dir()
+        assert d == tmp_path / ".scratchpad" / "sess-abc"
+        # 白名单已注入（运行时）
+        assert any(str(d) in str(r) for r in list_extra_allowed_roots())
+        # context block 含路径与说明
+        block = scratchpad_context_block("sess-abc", tmp_path)
+        assert str(d) in block and "免权限" in block
+    finally:
+        clear_extra_allowed_roots()
+
+    # 清理：旧目录（mtime 老）删、新目录留
+    import os
+    old = tmp_path / ".scratchpad" / "old-sess"
+    old.mkdir(parents=True)
+    (old / "note.txt").write_text("x", encoding="utf-8")
+    os.utime(old, (0, 0))  # epoch = 必过期
+    keep = ensure_scratchpad("new-sess", tmp_path)
+    removed = cleanup_old_scratchpads(tmp_path, retention_days=7)
+    assert not old.exists()
+    assert keep is not None and keep.is_dir()
+
+
+def test_coordinator_builtin_agent():
+    """内置 coordinator 子代理存在（纯编排 + scratchpad 说明）。"""
+    from agent.agent_defs import scan_agent_defs
+    defs = scan_agent_defs() or {}
+    d = defs.get("coordinator") if isinstance(defs, dict) else None
+    assert d is not None, "coordinator 应在 scan_agent_defs 里"
+    body = getattr(d, "prompt", "") or getattr(d, "system_prompt", "") or ""
+    # 拿不到 body 就读文件
+    if "Scratchpad" not in body:
+        from agent.agent_defs import _builtin_agents_dir
+        body = (_builtin_agents_dir() / "coordinator.md").read_text(encoding="utf-8")
+    assert "Scratchpad" in body and "编排" in body
