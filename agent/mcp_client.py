@@ -57,6 +57,7 @@ import queue
 import subprocess
 import threading
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -1169,6 +1170,29 @@ def load_mcp_config(config_path=None) -> Dict[str, dict]:
     except Exception as e:
         logger.warning("加载 MCP 配置失败 %s: %s", config_path, e)
         return {}
+
+
+def load_project_mcp_config() -> Tuple[Optional[Path], Dict[str, dict]]:
+    """R25 #3：读项目级 .mcp.json（<workspace cwd>/.mcp.json）。
+
+    返回 (配置文件路径或 None, {server_name: cfg})。
+    项目级配置不受用户直接控制（clone 陌生 repo 即带入），调用方
+    （initialize_mcp）必须先过首连审批。
+    """
+    try:
+        from agent.workspace_context import get_workspace_cwd
+        p = Path(get_workspace_cwd()) / ".mcp.json"
+    except Exception:
+        return None, {}
+    if not p.exists():
+        return None, {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        servers = data.get("mcpServers", {}) or {}
+        return p, {str(k): v for k, v in servers.items() if isinstance(v, dict)}
+    except Exception as e:
+        logger.warning("加载项目 MCP 配置失败 %s: %s", p, e)
+        return p, {}
 
 
 # ---------------------------------------------------------------------------

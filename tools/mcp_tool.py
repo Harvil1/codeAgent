@@ -178,14 +178,58 @@ def _register_resource_tools(manager: MCPManager) -> int:
     return registered
 
 
-def initialize_mcp() -> int:
+def initialize_mcp(approval_callback=None) -> int:
     """启动时调用：加载配置、连接 server、注册工具。
+
+    approval_callback: fn(name, desc) -> bool。项目级 .mcp.json 的 server
+    首次连接前必须获批（R25 #3，对齐 CC mcpServerApproval）；未批准/无
+    callback → fail-closed 跳过。用户级 ~/.OmniMate/.mcp.json 是用户直接
+    编辑的，不需要审批。
 
     返回注册的工具数量。
     """
     manager = get_mcp_manager()
     try:
+        # 用户级（受用户直接控制）
         manager.connect_all()
+
+        # R25 #3：项目级 .mcp.json 首连审批
+        from agent.mcp_client import load_mcp_config, load_project_mcp_config
+        from agent.settings import is_project_mcp_approved, persist_project_mcp_approval
+
+        proj_path, proj_servers = load_project_mcp_config()
+        if proj_path and proj_servers:
+            user_cfg = load_mcp_config()
+            # 路径小写归一（Windows 盘符大小写不敏感）
+            proj_key = str(proj_path.parent.resolve()).lower()
+            approved_now: Dict[str, dict] = {}
+            for name, cfg in proj_servers.items():
+                if name in user_cfg:
+                    logger.warning(
+                        "项目 MCP server %s 与用户级同名，跳过项目级（用户级优先）", name,
+                    )
+                    continue
+                key = f"{proj_key}::{name}"
+                if not is_project_mcp_approved(key):
+                    desc = json.dumps(
+                        {k: cfg.get(k) for k in ("command", "url", "transport", "args")},
+                        ensure_ascii=False,
+                    )
+                    ok = False
+                    if approval_callback is not None:
+                        try:
+                            ok = bool(approval_callback(name, desc))
+                        except Exception as e:
+                            logger.warning("MCP 审批 callback 异常（视为拒绝）: %s", e)
+                    if not ok:
+                        logger.warning(
+                            "项目 MCP server %s 未获批准，跳过（fail-closed）", name,
+                        )
+                        continue
+                    persist_project_mcp_approval(key)
+                approved_now[name] = cfg
+            if approved_now:
+                manager.connect_all(approved_now)
         return register_mcp_tools(manager)
     except Exception as e:
         logger.warning("MCP 初始化失败: %s", e)

@@ -33,6 +33,19 @@ from agent.settings import ensure_default_settings
 ensure_default_settings()
 
 # 初始化 MCP（如果有 .mcp.json 配置）
+def _mcp_server_approval(name: str, desc: str) -> bool:
+    """R25 #3：项目级 .mcp.json 首连审批。非交互环境 fail-closed 拒绝。"""
+    import sys
+    if not sys.stdin.isatty():
+        return False
+    try:
+        from rich.prompt import Confirm
+        print(f"[MCP 审批] 当前项目的 .mcp.json 请求连接 server {name!r}: {desc}")
+        return Confirm.ask("允许连接该 MCP server？", default=False)
+    except Exception:
+        return False
+
+
 def _init_mcp_safely():
     """Bug #1 fix: MCP 初始化包裹函数，失败时用户终端可见。
 
@@ -41,7 +54,7 @@ def _init_mcp_safely():
     """
     try:
         from tools.mcp_tool import initialize_mcp
-        initialize_mcp()
+        initialize_mcp(approval_callback=_mcp_server_approval)
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("MCP 初始化失败（可忽略）: %s", e)

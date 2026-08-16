@@ -706,3 +706,78 @@ def test_load_mcp_config_backward_compat_no_transport(tmp_path):
     assert "transport" not in servers["fs"]
     assert servers["fs"]["command"] == "npx"
     assert servers["github"]["url"] == "https://api.github-mcp.com/v1"
+
+
+# ===== R25 #3：项目级 .mcp.json 首连审批 =====
+
+class TestProjectMcpApproval:
+    def _setup(self, tmp_path, monkeypatch, approved_keys=None):
+        """构造隔离环境：假 home + 项目目录（含 .mcp.json）。"""
+        import json as _json
+        home = tmp_path / "home"
+        home.mkdir()
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / ".mcp.json").write_text(_json.dumps({
+            "mcpServers": {"evil": {"command": "run-evil"}, "ok": {"command": "run-ok"}}
+        }), encoding="utf-8")
+        monkeypatch.setenv("OMNIMATE_HOME", str(home))
+        monkeypatch.setattr("agent.workspace_context.get_workspace_cwd", lambda: str(proj))
+        if approved_keys is None:
+            approved_keys = []
+        # settings.json 预置已批准
+        settings = home / "settings.json"
+        settings.write_text(_json.dumps({
+            "mcp": {"approved_project_servers": approved_keys}
+        }), encoding="utf-8")
+        return proj
+
+    def test_unapproved_project_server_skipped(self, tmp_path, monkeypatch):
+        """未批准且 callback 拒绝 → 项目 server 不连接（fail-closed）。"""
+        self._setup(tmp_path, monkeypatch)
+        from tools import mcp_tool
+        from agent.mcp_client import get_mcp_manager
+        connected = []
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: connected.extend((config or {}).keys()),
+        )
+        count = mcp_tool.initialize_mcp(approval_callback=lambda n, d: False)
+        assert "evil" not in connected
+        assert "ok" not in connected
+
+    def test_approved_via_callback_connects_and_persists(self, tmp_path, monkeypatch):
+        """callback 同意 → 连接 + 持久化，第二次不再问。"""
+        proj = self._setup(tmp_path, monkeypatch)
+        from tools import mcp_tool
+        from agent.mcp_client import get_mcp_manager
+        connected = []
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: connected.extend((config or {}).keys()),
+        )
+        asked = []
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: asked.append(n) or True)
+        assert set(asked) == {"evil", "ok"}
+        assert set(connected) == {"evil", "ok"}
+        # 持久化生效：再跑一次不再询问
+        asked.clear()
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: None,
+        )
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: asked.append(n) or True)
+        assert asked == []
+
+    def test_no_callback_fail_closed(self, tmp_path, monkeypatch):
+        """无 callback（daemon/team worker 等非交互场景）→ 项目 server 全跳过。"""
+        self._setup(tmp_path, monkeypatch)
+        from tools import mcp_tool
+        from agent.mcp_client import get_mcp_manager
+        connected = []
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: connected.extend((config or {}).keys()),
+        )
+        mcp_tool.initialize_mcp()  # 不传 callback
+        assert connected == []

@@ -211,6 +211,36 @@ def _same_path(a: str, b: str) -> bool:
         return a == b
 
 
+# ---------------------------------------------------------------------------
+# R25 #3：项目级 .mcp.json 首连审批持久化（settings.json mcp 段）
+# ---------------------------------------------------------------------------
+
+def is_project_mcp_approved(key: str) -> bool:
+    """R25 #3：项目级 MCP server 是否已获用户批准。"""
+    try:
+        data = load_settings()
+        mcp_sec = data.get("mcp")
+        if not isinstance(mcp_sec, dict):
+            return False
+        return key in [str(k) for k in (mcp_sec.get("approved_project_servers") or [])]
+    except Exception:
+        return False
+
+
+def persist_project_mcp_approval(key: str) -> None:
+    """R25 #3：持久化项目级 MCP server 批准（settings.json mcp 段）。"""
+    data = load_settings()
+    mcp_sec = data.get("mcp")
+    if not isinstance(mcp_sec, dict):
+        mcp_sec = {}
+        data["mcp"] = mcp_sec
+    keys = [str(k) for k in (mcp_sec.get("approved_project_servers") or [])]
+    if key not in keys:
+        keys.append(key)
+    mcp_sec["approved_project_servers"] = keys
+    save_settings(data)
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并（override 覆盖 base）。"""
     if not isinstance(override, dict):
