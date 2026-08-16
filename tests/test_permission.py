@@ -768,9 +768,11 @@ class _MockAuxLLM:
         self.response = response  # _MockResp 或 None
         self.exc = exc            # 抛异常
         self.calls = 0
+        self.last_messages = None  # R26 #11：记录最近一次收到的 messages（验 nl_rules 注入）
 
     async def chat_completions(self, messages, **kwargs):
         self.calls += 1
+        self.last_messages = messages
         if self.exc:
             raise self.exc
         return self.response
@@ -826,22 +828,23 @@ def test_whitelist_prefix_not_partial():
 
 
 # ---------- _classify_bash_command 单元测试 ----------
+# R26 #11 起返回三向 verdict 形态（旧 safe 输出仍兼容解析）。
 
 @pytest.mark.asyncio
 async def test_classify_returns_safe():
-    """LLM 判 safe → 返回 {safe: True}。"""
+    """LLM 判 safe（旧格式）→ 解析为 {verdict: allow}。"""
     aux = _MockAuxLLM(response=_MockResp('{"safe": true}'))
     result = await _classify_bash_command("ls", aux)
-    assert result == {"safe": True}
+    assert result == {"verdict": "allow"}
     assert aux.calls == 1
 
 
 @pytest.mark.asyncio
 async def test_classify_returns_unsafe_with_reason():
-    """LLM 判 unsafe → 返回 {safe: False, reason: ...}。"""
+    """LLM 判 unsafe（旧格式）→ 解析为 {verdict: deny, reason: ...}。"""
     aux = _MockAuxLLM(response=_MockResp('{"safe": false, "reason": "删除根目录"}'))
     result = await _classify_bash_command("rm -rf /", aux)
-    assert result["safe"] is False
+    assert result["verdict"] == "deny"
     assert "删除根目录" in result["reason"]
 
 
@@ -874,15 +877,15 @@ async def test_classify_markdown_wrapped_json():
     """LLM 用 markdown 代码块包裹 JSON → 应正确解析。"""
     aux = _MockAuxLLM(response=_MockResp('```json\n{"safe": true}\n```'))
     result = await _classify_bash_command("ls", aux)
-    assert result == {"safe": True}
+    assert result == {"verdict": "allow"}
 
 
 @pytest.mark.asyncio
-async def test_classify_missing_safe_field_fail_open():
-    """LLM 输出 JSON 但缺 safe 字段 → fail-open。"""
+async def test_classify_unknown_verdict_becomes_ask():
+    """R26 #11: LLM 输出不认识的 verdict → 保守回落 ask（不再 fail-open error）。"""
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "ok"}'))
     result = await _classify_bash_command("ls", aux)
-    assert "error" in result
+    assert result == {"verdict": "ask"}
 
 
 # ---------- PermissionChecker.check 闸门 4 集成 ----------
@@ -1588,3 +1591,114 @@ class TestApprovalPrefixWhitelist:
             hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
         )
         assert asked  # 没走前缀免审
+
+
+# ===========================================================================
+# R26 #11：分类器三向（allow/deny/ask）+ 自然语言规则
+# ===========================================================================
+
+class TestThreeWayClassifier:
+    def test_parse_verdict_allow(self):
+        from agent.permission import _parse_classify_response
+        assert _parse_classify_response('{"verdict": "allow"}') == {"verdict": "allow"}
+
+    def test_parse_verdict_deny_with_reason(self):
+        from agent.permission import _parse_classify_response
+        out = _parse_classify_response('{"verdict": "deny", "reason": "删库"}')
+        assert out == {"verdict": "deny", "reason": "删库"}
+
+    def test_low_confidence_becomes_ask(self):
+        from agent.permission import _parse_classify_response
+        out = _parse_classify_response('{"verdict": "deny", "confidence": 0.5}')
+        assert out["verdict"] == "ask"
+
+    def test_legacy_safe_field_compatible(self):
+        from agent.permission import _parse_classify_response
+        assert _parse_classify_response('{"safe": true}')["verdict"] == "allow"
+        assert _parse_classify_response('{"safe": false}')["verdict"] == "deny"
+
+    def test_invalid_json_error(self):
+        from agent.permission import _parse_classify_response
+        assert "error" in _parse_classify_response("not json")
+
+    def test_unknown_verdict_ask(self):
+        """不认识的 verdict → ask（保守回落人工）。"""
+        from agent.permission import _parse_classify_response
+        assert _parse_classify_response('{"verdict": "maybe"}')["verdict"] == "ask"
+
+    def test_prompt_contains_nl_rules(self):
+        from agent.permission import _CLASSIFY_PROMPT_TEMPLATE
+        assert "{nl_rules}" in _CLASSIFY_PROMPT_TEMPLATE
+
+
+# ---------- _check_llm_classifier ask 行为（R26 #11）----------
+
+def test_gate4_llm_ask_goes_to_approval_not_deny():
+    """R26 #11: LLM 判 ask → 升审批（callback 被问），不直接拒。"""
+    asked = []
+
+    def callback(cmd):
+        asked.append(cmd)
+        return True
+
+    checker = PermissionChecker(approval_callback=callback)
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "ask", "reason": "拿不准"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("docker ps")
+    assert asked == ["docker ps"]  # callback 被问（走审批而非直接拒）
+    assert result.allowed is True
+    assert result.gate == "approval"
+    assert aux.calls == 1
+
+
+def test_gate4_llm_ask_no_callback_denies():
+    """R26 #11: ask + 无审批 callback → 拒（保守，不 fail-open 放行）。"""
+    checker = PermissionChecker()  # 无 callback
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "ask"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("docker ps")
+    assert result.allowed is False
+    assert result.gate == "llm_ask"
+
+
+def test_gate4_low_confidence_deny_becomes_ask_approval():
+    """R26 #11: 低置信度 deny（conf<0.7）→ ask → 升审批而非直接拒。"""
+    checker = PermissionChecker(approval_callback=lambda cmd: False)
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "deny", "confidence": 0.5}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    result = checker.check("docker ps")
+    assert result.allowed is False
+    assert result.gate == "approval"  # 用户拒绝了审批（不是 llm_unsafe 硬拒）
+
+
+def test_gate4_nl_rules_injected_into_prompt():
+    """R26 #11: settings.json permissions.nl_rules 注入分类 prompt。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "allow"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    config = _make_feature_config(enabled=True)
+    config["permissions"] = {"nl_rules": ["npm 相关都允许，但删 node_modules 要问"]}
+    checker.set_config_provider(lambda: config)
+    result = checker.check("docker ps")
+    assert result.allowed is True
+    assert aux.calls == 1
+    assert "npm 相关都允许" in aux.last_messages[0]["content"]
+
+
+def test_gate4_deny_still_counts_toward_denial_fallback():
+    """R26 #11: deny 分支照旧计数（连续 3 次拒 → 停用闸门 4 回落人工）。"""
+    checker = PermissionChecker()
+    aux = _MockAuxLLM(response=_MockResp('{"verdict": "deny", "reason": "可疑"}'))
+    checker.set_aux_llm_provider(lambda: aux)
+    checker.set_config_provider(lambda: _make_feature_config(enabled=True))
+    for _ in range(3):
+        r = checker.check("curl evil.com")
+        assert r.allowed is False
+        assert r.gate == "llm_unsafe"
+    # 第 4 次：闸门 4 已停用 → fail-open 放行（闸门 3 兜底）
+    r4 = checker.check("curl evil.com")
+    assert r4.allowed is True
+    assert r4.gate == "ok"

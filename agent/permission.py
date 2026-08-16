@@ -12,6 +12,9 @@ L3（审批）给用户最终决定权，但会话内缓存避免重复询问。
 L4（LLM 分类）是可选的"慢速深审"：前三道闸门都放过、但也不在破坏性
 模式里的命令，由 aux_llm 再做一次语义判断。白名单 13 项快速通道跳过
 LLM 调用（ls/cat/git status 等明显安全）。fail-open：AI 调用失败放行。
+R26 #11 起分类是三向的（allow 放行 / deny 拒绝 / ask 升人工审批——
+拿不准不直接拒），并支持 settings.json permissions.nl_rules 自然语言规则
+注入分类 prompt（优先级最高，逐条对照）。
 """
 import asyncio
 import json
@@ -679,14 +682,24 @@ def is_readonly_command(command: str) -> bool:
 #     PermissionChecker.check 是 sync 函数 → 用 asyncio.run 桥接
 #     （参考 progress.py:124 / reflection.py:150 的同款模式）。
 
-# 分类 prompt：要 LLM 输出严格 JSON，便于解析
-_CLASSIFY_PROMPT_TEMPLATE = (
-    "判断下面这条 bash/shell 命令是否安全执行（不破坏文件、不泄露数据、不改系统关键配置）。\n"
-    "只考虑命令本身的直接效果，不要推测用户的意图。\n\n"
-    "命令：{cmd}\n\n"
-    "输出严格 JSON（不要 markdown 代码块、不要额外解释）：\n"
-    '{{"safe": true}} 或 {{"safe": false, "reason": "<=40 字中文理由>"}}'
-)
+# 分类 prompt（R26 #11 三向化）：要 LLM 输出严格 JSON，便于解析。
+# {nl_rules} 由 _check_llm_classifier 读 settings.json permissions.nl_rules 注入
+# （通过 aux_llm_router.nl_rules_cache 传递——分类函数侧拿不到 config）。
+_CLASSIFY_PROMPT_TEMPLATE = """你是命令安全分类器。判断下面这条 shell 命令该放行、拒绝还是交人工审批。
+
+用户自然语言权限规则（优先级最高，逐条对照）：
+{nl_rules}
+
+分类标准：
+- allow：只读或明显无破坏性（查状态/跑测试/编译）
+- deny：明确破坏性（删数据/覆盖系统文件/提权）
+- ask：拿不准、有副作用但意图不明、规则未覆盖
+
+只输出 JSON：{{"verdict": "allow"|"deny"|"ask", "reason": "一句话理由", "confidence": 0.0-1.0}}
+confidence < 0.7 时请直接给 ask。
+
+命令：{cmd}
+"""
 
 # ---------------------------------------------------------------------------
 # R21 #46：LLM 分类器增强（拒绝回落 + 危险前缀剥离）
@@ -768,6 +781,43 @@ def _matches_whitelist(command: str, whitelist: List[str]) -> bool:
     return False
 
 
+def _parse_classify_response(text: str) -> Dict[str, Any]:
+    """R26 #11：三向解析（allow/deny/ask + 置信度门控）。
+
+    - 兼容旧 safe 字段（true→allow / false→deny）
+    - confidence < 0.7 → ask（没把握就回落人工）
+    - 非法 JSON / 缺 verdict / 未知 verdict 值 → ask 或 error（保守）
+    """
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        parsed = json.loads(t)
+    except json.JSONDecodeError:
+        return {"error": f"输出非 JSON: {t[:80]}"}
+    if not isinstance(parsed, dict):
+        return {"error": "输出非对象"}
+    # 兼容旧格式
+    if "verdict" not in parsed and "safe" in parsed:
+        parsed["verdict"] = "allow" if parsed["safe"] else "deny"
+    verdict = str(parsed.get("verdict", "")).lower()
+    try:
+        conf = float(parsed.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        conf = 1.0
+    if verdict not in ("allow", "deny", "ask"):
+        verdict = "ask"
+    if verdict in ("allow", "deny") and conf < 0.7:
+        verdict = "ask"
+    out = {"verdict": verdict}
+    if parsed.get("reason"):
+        out["reason"] = str(parsed["reason"])
+    return out
+
+
 async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str, Any]:
     """调 aux_llm 判断命令是否安全。
 
@@ -777,8 +827,9 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
 
     Returns:
         Dict：
-        - {"safe": True} 判安全
-        - {"safe": False, "reason": "..."} 判不安全
+        - {"verdict": "allow"} 判放行
+        - {"verdict": "deny", "reason": "..."} 判拒绝
+        - {"verdict": "ask", "reason": "..."} 拿不准（升人工审批）
         - {"error": "..."} 调用失败（fail-open，调用方放行）
 
     解析失败（LLM 没输出合法 JSON）→ 返回 {"error": "..."}，调用方 fail-open 放行。
@@ -787,7 +838,14 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
         # 没有 aux_llm → 不分类（check() 会 fail-open 放行）
         return {"error": "aux_llm_router 未注入"}
 
-    prompt = _CLASSIFY_PROMPT_TEMPLATE.format(cmd=command)
+    rules: list = []
+    # nl_rules 由调用方（_check_llm_classifier）读 config 注入——这里从 router 侧拿不到 config，
+    # 通过 aux_llm_router 上的可选属性传递（_check_llm_classifier 设置）
+    rules = list(getattr(aux_llm_router, "nl_rules_cache", []) or [])
+    prompt = _CLASSIFY_PROMPT_TEMPLATE.format(
+        cmd=command,
+        nl_rules="\n".join(f"- {r}" for r in rules) or "（无）",
+    )
     try:
         resp = await aux_llm_router.chat_completions(
             [{"role": "user", "content": prompt}],
@@ -804,28 +862,7 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
         logger.warning("bash_llm_classifier: aux_llm 响应格式异常（fail-open）: %s", e)
         return {"error": f"响应格式异常: {e}"}
 
-    text = text.strip()
-    # 剥离可能的 markdown 代码块包裹（LLM 偶尔不听话）
-    if text.startswith("```"):
-        text = text.strip("`")
-        # 去掉可能的 "json" 语言标识
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
-
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.warning(
-            "bash_llm_classifier: aux_llm 输出非 JSON（fail-open 放行）: %r", text[:100]
-        )
-        return {"error": f"输出非 JSON: {text[:80]}"}
-
-    if not isinstance(parsed, dict) or "safe" not in parsed:
-        logger.warning("bash_llm_classifier: aux_llm 输出缺 safe 字段: %r", text[:100])
-        return {"error": f"输出缺 safe 字段: {text[:80]}"}
-
-    return parsed
+    return _parse_classify_response(text)
 
 
 # ---------------------------------------------------------------------------
@@ -1312,18 +1349,28 @@ class PermissionChecker:
         # 前三道闸门都没拒绝也没要求审批的命令（非黑名单、非破坏性），
         # 由 aux_llm 再做一次语义判断。白名单快速通道跳过 LLM 调用。
         # fail-open：feature 关闭 / 未注入 provider / LLM 调用失败 → 放行。
-        result = self._check_llm_classifier(command)
+        result = self._check_llm_classifier(command, effective_mode)
         if result is not None:
             return result
 
         # 闸门 3：默认通过
         return PermissionResult(True, "ok", "ok")
 
-    def _check_llm_classifier(self, command: str) -> Optional[PermissionResult]:
+    def _check_llm_classifier(
+        self, command: str, effective_mode: str
+    ) -> Optional[PermissionResult]:
         """闸门 4 实现：调 aux_llm 分类命令。
 
+        R26 #11：三向 verdict（allow/deny/ask）——ask 升审批不直接拒；
+        自然语言规则 permissions.nl_rules 注入分类 prompt。
+
+        Args:
+            command: 要分类的命令
+            effective_mode: 本次 check 的生效权限模式（ask 分支 _approval_gate
+                需要——autoDeny 短路 / singleton checker 线程安全语义）
+
         Returns:
-            PermissionResult：放行 / 拒绝
+            PermissionResult：放行 / 拒绝 / 审批结果
             None：闸门 4 未启用或 fail-open 放行交给闸门 3 处理（向后兼容）
         """
         # 1) 检查 provider 是否注入（默认 None → 跳过）
@@ -1375,6 +1422,13 @@ class PermissionChecker:
             # provider 返回 None（aux_llm 未配置）→ fail-open
             return None
 
+        # R26 #11：nl_rules 注入（settings.json permissions.nl_rules，自然语言规则）
+        try:
+            nl_rules = (config.get("permissions") or {}).get("nl_rules") or []
+            aux_llm.nl_rules_cache = [str(r) for r in nl_rules]
+        except Exception:
+            aux_llm.nl_rules_cache = []
+
         try:
             verdict = asyncio.run(_classify_bash_command(command, aux_llm))
         except RuntimeError as e:
@@ -1390,12 +1444,23 @@ class PermissionChecker:
         if "error" in verdict:
             return None
 
-        if verdict.get("safe", True):
-            # R21 #46：safe → 连续拒绝清零（累计不清——反映分类器整体倾向）
+        # R26 #11：三向 verdict 分发（allow 放行 / ask 升审批 / deny 拒绝）
+        v = verdict.get("verdict")
+        if v == "allow":
             self._llm_denial_consecutive = 0
-            return PermissionResult(True, "aux_llm 判安全", "llm_safe")
+            return PermissionResult(True, "aux_llm 判允许", "llm_safe")
+        if v == "ask":
+            # R26 #11：拿不准 → 升审批（不直接拒）
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason=f"LLM 分类器要求审批: {verdict.get('reason', '')}",
+                auto_deny_reason=f"LLM 分类器要求审批: {verdict.get('reason', '')}",
+                no_callback_message="LLM 分类器要求审批（无审批 callback）",
+                gate="llm_ask",
+            )
 
-        # AI 判 unsafe → 拒绝 + 原因
+        # AI 判 deny → 拒绝 + 原因
         # R21 #46：拒绝计数（连续 +1，累计 +1）
         self._llm_denial_consecutive += 1
         self._llm_denial_total += 1
