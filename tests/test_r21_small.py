@@ -262,3 +262,51 @@ def test_fix_tool_call_pairs_repair_semantics():
     # 补的 result 紧跟在 c1 后（immediately-after 语义）
     idx_c1 = next(i for i, m in enumerate(fixed) if m.get("tool_call_id") == "c1")
     assert fixed[idx_c1 + 1].get("tool_call_id") == "c2"
+
+
+# ---------------------------------------------------------------------------
+# R21 #37：yolo 交接复审
+# ---------------------------------------------------------------------------
+
+def test_review_handoff_flags_dangerous():
+    """aux 判危险 → 结果前附警告；判安全/失败/短文本 → 原文。"""
+    from tools.delegate_tool import _review_handoff
+
+    class _Aux:
+        def __init__(self, verdict):
+            self.verdict = verdict
+
+        async def chat_completions(self, msgs, **kw):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content=json.dumps(self.verdict),
+            ))])
+
+    long_result = "子代理执行完成。" + "x" * 300
+
+    # 判危险 → 警告前缀
+    out = _review_handoff(long_result, SimpleNamespace(
+        aux_llm_router=_Aux({"dangerous": True, "warning": "删除了系统目录"}),
+    ))
+    assert out.startswith("[⚠ 交接复审警告]")
+    assert long_result in out
+
+    # 判安全 → 原文
+    out2 = _review_handoff(long_result, SimpleNamespace(
+        aux_llm_router=_Aux({"dangerous": False}),
+    ))
+    assert out2 == long_result
+
+    # 无 aux / 短文本 → 原文（不调用）
+    assert _review_handoff(long_result, SimpleNamespace(aux_llm_router=None)) == long_result
+    assert _review_handoff("短结果", SimpleNamespace(aux_llm_router=object())) == "短结果"
+
+    # aux 抛异常 → 原文（fail-open）
+    class _Broken:
+        async def chat_completions(self, msgs, **kw):
+            raise RuntimeError("aux down")
+    assert _review_handoff(long_result, SimpleNamespace(aux_llm_router=_Broken())) == long_result
+
+
+def test_handoff_review_config_default():
+    from config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["delegation"]["handoff_review_enabled"] is False

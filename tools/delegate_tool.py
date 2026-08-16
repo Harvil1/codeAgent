@@ -1067,6 +1067,18 @@ def _run_child(
         except Exception as e:
             logger.warning("幻觉检测失败（fail-open）: %s", e)
 
+        # === R21 #37：yolo 交接复审（对齐 CC classifyHandoffIfNeeded）===
+        # bypass/auto 场景下子代理产出直接进父上下文——危险产出（破坏命令
+        # 证据/数据外发/凭证修改痕迹）由 aux LLM 复审，命中在结果前附警告
+        # （不拦截——父代理与用户自行决断）。feature flag
+        # delegation.handoff_review_enabled 门控（默认关）；fail-open 全吞。
+        try:
+            _hr_cfg = (kwargs.get("config") or {}).get("delegation") or {}
+            if _hr_cfg.get("handoff_review_enabled", False):
+                result = _review_handoff(result, parent_agent)
+        except Exception as e:
+            logger.warning("交接复审失败（fail-open）: %s", e)
+
         # summary_only：超长结果用 LLM 生成摘要，节省父代理 context
         summary_only = kwargs.get("summary_only", True)
         if summary_only and len(result) > 500:
@@ -1136,6 +1148,46 @@ def _run_child(
                 })
             except Exception:
                 pass  # fail-open
+
+
+def _review_handoff(result: str, parent_agent) -> str:
+    """R21 #37：aux LLM 复审子代理交接产出，危险则附警告前缀。
+
+    返回可能带 `[⚠ 交接复审警告]` 前缀的 result；aux 不可用/失败/判安全
+    都返回原文（fail-open）。同步接口（_run_child 在线程里跑，无事件循环，
+    asyncio.run 桥接——同 _summarize_child_result 模式）。
+    """
+    import asyncio
+    aux = getattr(parent_agent, "aux_llm_router", None)
+    if aux is None or not result or not result.strip():
+        return result
+    if len(result) < 200:
+        return result  # 短结果人工可读性足够，省 aux 调用
+
+    prompt = (
+        "复审以下子代理交给主代理的产出片段。判断它是否包含危险操作的证据：\n"
+        "- 删除/覆盖大量文件或系统目录\n"
+        "- 数据外发（上传/推送到外部、大段凭证或密钥输出）\n"
+        "- 修改凭证/SSH/认证配置\n"
+        "- 绕过或关闭安全机制\n"
+        "只看产出本身，不推测意图。\n\n"
+        f"产出：\n{result[:4000]}\n\n"
+        '输出严格 JSON：{"dangerous": true/false, "warning": "<=40 字中文说明，仅 dangerous 时非空>"}'
+    )
+    try:
+        resp = asyncio.run(aux.chat_completions(
+            [{"role": "user", "content": prompt}],
+        ))
+        import json as _json
+        text = resp.choices[0].message.content or ""
+        parsed = _json.loads(text.strip().strip("`"))
+        if isinstance(parsed, dict) and parsed.get("dangerous"):
+            warning = str(parsed.get("warning", ""))[:80] or "子代理产出含危险操作证据"
+            logger.warning("交接复审命中: %s", warning)
+            return f"[⚠ 交接复审警告] {warning}\n\n{result}"
+    except Exception as e:
+        logger.debug("交接复审 aux 调用失败（放行原文）: %s", e)
+    return result
 
 
 def _summarize_child_result(result: str, client, model: str) -> str:

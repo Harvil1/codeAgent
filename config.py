@@ -244,6 +244,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Task H: fork 子代理路径（cache-identical 省 token）
         # True 时 subagent(fork=True) 继承父 system prompt + 父对话前缀
         "fork_subagent_enabled": True,
+        # R21 #37：yolo 交接复审（aux LLM 复审子代理产出，危险附警告前缀；
+        # 默认关——每笔交接多一次 aux 调用）
+        "handoff_review_enabled": False,
         # 继承父最近 N 个 assistant turn（cache 命中范围 vs context 污染权衡）
         "fork_max_parent_turns": 3,
         # T10（核心机制对齐第 10 项）：fork="full" 全量模式的 assistant turn 上限（防失控）
