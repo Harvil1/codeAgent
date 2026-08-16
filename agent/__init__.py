@@ -191,6 +191,7 @@ class AIAgent:
         channel_inbox=None,  # === CCAR8 Task 11 NEW: MCP notification 收件箱 ===
         mailbox=None,  # === CCAR8 Task 11 NEW: teammate 异步邮箱 ===
         agent_name: str = "main",  # === CCAR8 Task 11 NEW: 当前 agent 名（mailbox 收件人）===
+        stream_idle_timeout: float = None,  # === R17 #12 NEW: 流空闲看门狗秒数（None=client 默认 90，<=0 禁用）===
     ):
         """
         参数：
@@ -217,6 +218,9 @@ class AIAgent:
             "effort_level": effort_level,
             "model": model,
         }
+        # R17 #12：流空闲看门狗（settings.json llm.stream_idle_timeout_seconds）
+        if stream_idle_timeout is not None:
+            model_config["stream_idle_timeout"] = stream_idle_timeout
         self.llm_client = create_llm_client(model_config)
         self.base_url = base_url
         self.api_key = api_key

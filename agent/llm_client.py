@@ -9,16 +9,68 @@
   - "anthropic" → AnthropicClient（Claude 原生 API）
 """
 
+import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 # 模块级导入 AsyncOpenAI，便于测试用 patch("agent.llm_client.AsyncOpenAI") 替换。
 # （局部 import 无法被 unittest.mock.patch 定位到模块属性）
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+# R17 #12：流空闲看门狗默认值（对齐 CCB STREAM_IDLE_TIMEOUT_MS=90s）
+DEFAULT_STREAM_IDLE_TIMEOUT = 90.0
+
+
+class LLMStreamIdleTimeout(Exception):
+    """流式空闲超时（看门狗触发）：idle_timeout 秒内没有任何 chunk/event。
+
+    上层（扣留-恢复，R17 #9）捕获后转非流式重试，而不是直接报错。
+    """
+
+
+async def _iterate_with_watchdog(
+    stream: AsyncIterator,
+    *,
+    idle_timeout: float,
+    describe: str = "",
+):
+    """带空闲看门狗的 async 迭代器包装（R17 #12）。
+
+    idle_timeout 秒内没等到下一个 item → 尽力关闭流 → 抛 LLMStreamIdleTimeout。
+    idle_timeout <= 0 表示禁用（原样迭代，向后兼容）。
+
+    实现：async for 无法直接加超时，改手工 __anext__ + asyncio.wait_for。
+    超时时 wait_for 会取消挂起的 __anext__（取消底层接收协程，安全）。
+    与 CC 的差异：CC 另有「半超时 warning + >30s 事件间隔停顿计数」遥测，
+    OmniMate 无对应遥测通道，只做超时 abort（记录差异）。
+    """
+    if idle_timeout <= 0:
+        async for item in stream:
+            yield item
+        return
+    it = stream.__aiter__()
+    while True:
+        try:
+            item = await asyncio.wait_for(it.__anext__(), timeout=idle_timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            closer = getattr(stream, "close", None)
+            if closer is not None:
+                try:
+                    result = closer()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    pass  # 关流失败无所谓：__anext__ 已被取消
+            raise LLMStreamIdleTimeout(
+                f"流式空闲超时（{idle_timeout:.0f}s 无数据{describe}），已中止流"
+            )
+        yield item
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +179,19 @@ class LLMClient:
 class OpenAICompatClient(LLMClient):
     """OpenAI 兼容格式的 LLM client（async）。"""
 
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        *,
+        stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
+    ):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
+        # R17 #12：流空闲看门狗（秒；<=0 禁用）
+        self.stream_idle_timeout = stream_idle_timeout
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
         """async 直接转发到 AsyncOpenAI SDK。返回原生的 OpenAI 响应对象。"""
@@ -162,7 +223,12 @@ class OpenAICompatClient(LLMClient):
             stream_options={"include_usage": True},
             **kwargs,
         )
-        async for chunk in stream:
+        # R17 #12：空闲看门狗（90s 无 chunk → 中止流）
+        async for chunk in _iterate_with_watchdog(
+            stream,
+            idle_timeout=self.stream_idle_timeout,
+            describe=f"，model={self.model}",
+        ):
             usage_dict = _extract_openai_usage(getattr(chunk, "usage", None))
             if not chunk.choices:
                 # 最后一个 chunk 可能只有 usage
@@ -207,6 +273,7 @@ class AnthropicClient(LLMClient):
         *,
         auth_token: str = None,
         effort_level: str = None,
+        stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
     ):
         """创建 Anthropic async client。
 
@@ -234,6 +301,8 @@ class AnthropicClient(LLMClient):
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
+        # R17 #12：流空闲看门狗（秒；<=0 禁用）
+        self.stream_idle_timeout = stream_idle_timeout
 
     # effort_level → 思考参数(DeepSeek 格式)
     # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
@@ -318,7 +387,12 @@ class AnthropicClient(LLMClient):
         current_tool_idx: Optional[int] = None
 
         async with self.client.messages.stream(**stream_kwargs) as stream:
-            async for event in stream:
+            # R17 #12：空闲看门狗（90s 无 event → 中止流；async with 兜底清理）
+            async for event in _iterate_with_watchdog(
+                stream,
+                idle_timeout=self.stream_idle_timeout,
+                describe=f"，model={self.model}",
+            ):
                 evt_type = getattr(event, "type", "")
                 if evt_type == "content_block_start":
                     block = getattr(event, "content_block", None)
@@ -551,6 +625,11 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
     api_key = model_config.get("api_key") or ""
     model = model_config.get("model") or ""
     base_url = model_config.get("base_url")
+    # R17 #12：流空闲看门狗（config llm.stream_idle_timeout_seconds，默认 90s，<=0 禁用）
+    try:
+        idle_timeout = float(model_config.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT))
+    except (TypeError, ValueError):
+        idle_timeout = DEFAULT_STREAM_IDLE_TIMEOUT
 
     if fmt == "anthropic":
         # auth_token 用于 DeepSeek 等 Anthropic 兼容端点(Bearer 认证)
@@ -562,7 +641,11 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
             model=model,
             base_url=base_url,
             effort_level=effort_level or None,
+            stream_idle_timeout=idle_timeout,
         )
 
     # 默认 openai 兼容
-    return OpenAICompatClient(base_url=base_url, api_key=api_key, model=model)
+    return OpenAICompatClient(
+        base_url=base_url, api_key=api_key, model=model,
+        stream_idle_timeout=idle_timeout,
+    )

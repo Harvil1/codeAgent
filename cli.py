@@ -703,6 +703,8 @@ class RuntimeContext:
             ask_user_bridge=_make_ask_user_bridge(),  # ask_user CLI 桥接
             checkpoint_manager=self.checkpoint_mgr,  # === Checkpoint NEW ===
             permission_mode=self.config.get("security", {}).get("permission_mode", "default"),  # === B2 NEW: 透传给 AIAgent ===
+            # R17 #12：流空闲看门狗（llm.stream_idle_timeout_seconds，默认 90s，<=0 禁用）
+            stream_idle_timeout=(self.config.get("llm") or {}).get("stream_idle_timeout_seconds"),
         )
 
         # batch2-T3: 如果 memory_manager 还没 LLM client，用 agent 的主 client
