@@ -286,6 +286,7 @@ uv sync                                 # 同步已声明依赖
 | 队列命令消费（R22 #11） | `cli.py` 输入 daemon 线程 + queue.Queue（EOF/Ctrl+C 哨兵）+ `AIAgent.set_input_queue`/`_drain_queued_input`（工具批后 drain → ephemeral `<queued_user_input>` 回流，仅主代理，多条合并） |
 | Monitor 监视器（R22 #32） | `agent/background.py`（BackgroundTask.monitor/output_file；start(monitor=) 豁免 stall 通知 + tee 落盘 `<home>/.task_outputs/monitor/<id>.log` + timeout 默认 24h；_watch_with_stall tee/跳 stall/finally 关文件）+ `bg_start` monitor 字段返回 output_file |
 | compact 边界重链（R22 #40） | 压缩占位入库前加 `[COMPACT_BOUNDARY]` 标记行（`agent/__init__.py`）+ `cli.py:_truncate_at_last_compact_boundary`（resume 从最后边界截断，标记行剥掉保留摘要；无标记保守全量） |
+| 流式并发执行（R23 #7） | `agent/streaming_executor.py:StreamingToolExecutor`（新 index 出现=前 call 完整 + JSON 双重确认；safe create_task 预执行 / unsafe 不预执行 / 流异常 drain 防僵尸）+ `_call_llm_streaming` 接线（index 切换 complete / 流末 collect → `_streaming_preset_results`）+ `_dispatch_tool_calls` 按 tc.id 跳重（preset 补 plan_approval/streak 后处理并入 merge）+ `_run_tool_pre_callbacks` 公共；config `agent.streaming_tool_execution` 默认 False |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -432,6 +433,7 @@ uv sync                                 # 同步已声明依赖
 - **排队输入不打断当前响应（R22 #11）** —— 模型跑时输入排队（daemon 输入线程），工具批结束 drain 回流 ephemeral（模型下轮消化）；不做 CC 的 now/next/later 三级优先级（单用户交互 FIFO 足够）；输入等待时 Ctrl+C 哨兵对齐原退出语义。
 - **monitor 豁免 stall 看门狗（R22 #32）** —— tail -f/watch 安静是常态，常规任务的停滞预警对监视器是误报；tee 落盘不受 result cap（read_file 查增量）；一次性命令不要用 monitor（退出通知即完成）。
 - **边界裁剪只在有标记时生效（R22 #40）** —— 旧会话（无 `[COMPACT_BOUNDARY]`）保守全量（行为同现状）；裁剪取**最后**边界（多次压缩只保留最近摘要之后的流）。
+- **流式预执行只覆盖 safe 且默认关（R23 #7）** —— config `agent.streaming_tool_execution=False` 灰度；完整性是启发式（新 index = 前 call 完整）+ JSON 可解析双确认，坏 JSON 交正常路径；unsafe 不预执行（乱序副作用不可接受）；流异常时 drain 等完成但弃结果（预执行的副作用已发生但结果丢弃——与 CC 同样的权衡）。
 
 ## 测试策略
 
