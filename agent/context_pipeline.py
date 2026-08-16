@@ -1268,6 +1268,14 @@ async def compress_if_needed(
         # 终极保险：再过一遍 _fix_tool_call_pairs
         system, conv = _split_system(messages)
         messages = _reassemble(system, _fix_tool_call_pairs(conv))
+        # R25 #6：任一层实际改动 messages → 通知 cache_monitor 下次 cache
+        # 下降是预期的（L4/reactive 内部已各自 notify；这里补齐 time-MC/
+        # L1/L2*/L3.5 路径。幂等 flag，重复调用无害）
+        try:
+            from agent.cache_monitor import notify_compaction
+            notify_compaction()
+        except Exception as e:
+            logger.debug("notify_compaction fail-open: %s", e)
 
     # POST_COMPACT hook（通知压缩完成）
     if hooks_registry is not None:

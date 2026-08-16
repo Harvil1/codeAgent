@@ -1195,3 +1195,51 @@ def test_context_collapse_flag_on_integrates_via_compress_if_needed():
         assert has_collapse, "flag ON 时应出现 context_collapse 占位"
 
     asyncio.run(_run())
+
+
+# ===== R25 #6：任一层压缩变更 → notify_compaction =====
+
+class TestCompressNotifyCompaction:
+    async def test_offload_change_notifies(self, tmp_path, monkeypatch):
+        """L2 micro 落盘改变了 messages → 出口处应 notify_compaction。"""
+        from agent import context_pipeline
+        from agent.cache_monitor import notify_compaction
+
+        called = []
+        monkeypatch.setattr("agent.cache_monitor.notify_compaction", lambda: called.append(1))
+        # context_pipeline 出口处是局部 import（from agent.cache_monitor import ...），
+        # patch cache_monitor 模块属性即可命中
+
+        # 构造大 tool result 触发 micro_compact（threshold 传小值）。
+        # 注意 keep_recent=3 保护最后 3 条 tool 结果——必须放 4 条，
+        # 首条才会被折叠（只放 1 条会被尾部保护，c2 恒 False）
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": f"c{i}", "type": "function",
+                             "function": {"name": "t", "arguments": "{}"}}
+                            for i in range(1, 5)]},
+            *[{"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 500}
+              for i in range(1, 5)],
+            {"role": "assistant", "content": "done"},
+        ]
+        config = {
+            "output_offload_threshold": 100,   # 触发 L2 落盘
+            "output_offload_preview": 10,
+            "message_offload_threshold": 0,    # 关 L2.5
+            "tool_result_total_budget": 10_000_000,  # 关 L2.6
+            "snip_message_threshold": 10_000,  # 关 L1
+        }
+        from agent.context_pipeline import CompressionSessionState
+        state = CompressionSessionState()
+        await context_pipeline.compress_if_needed(
+            messages,
+            llm_client=None,
+            model=None,
+            config=config,
+            session_state=state,
+            agent_home=str(tmp_path),
+            session_id="test-notify",
+        )
+        assert called == [1]
