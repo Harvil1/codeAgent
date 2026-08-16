@@ -290,6 +290,11 @@ uv sync                                 # 同步已声明依赖
 | partial compact（双向 from / up_to） | `agent/context_compressor.py:_summarize_conversation` 加 `from_idx/up_to_idx` 参数；`agent/context_pipeline.py:llm_compact` 拼装 head + [summary] + tail + `_fix_tool_call_pairs` 兜底；`compact` 工具 schema 加 2 字段 |
 | reactive_compact 多次触发 + 冷却窗口 | `agent/context_pipeline.py:reactive_compact`（session_state.reactive_last_at + reactive_count；冷却 60s + 上限 5 次/会话；`reacted` 改 @property 向后兼容）；config `reactive_compact_cooldown_seconds` + `reactive_compact_max_per_session` |
 | PTL tokenGap 精确算法 | `agent/context_compressor.py:_compute_ptl_drop_count` + `_get_model_max_tokens`（三格式正则 DeepSeek/Anthropic/OpenAI + 三层 fallback 到 20% 旧算法）|
+| 压缩图片剥离（R18 #16） | `agent/context_compressor.py:strip_media_blocks`（content list 的 image/document 块 → `[image]`/`[document]` 文本标记，全文本合并为 str；纯 str 消息 no-op 不拷贝）；`_summarize_conversation` 与 fork 基底共用 |
+| 压缩前缀复用 fork（R18 #15） | `agent/context_compressor.py:_summarize_conversation`（fork_prefix_messages/tools 参数：摘要请求 = 完整对话前缀 + 追加 9 段式指令，不传 model/max_tokens 保前缀缓存；失败降级独立路径；summary_model 配置时不用 fork）；`llm_compact`/`compress_if_needed` 透传 tools；AIAgent `_last_tool_schemas` |
+| token 权威计数（R18 #17） | `agent/context_pipeline.py:estimate_tokens_hybrid`（锚点=上次主调用 usage 的 prompt+cache_read+cache_creation + 消息条数；增长时 权威值+增量粗估，回退/异常全量粗估）+ `_record_llm_usage(sent_message_count)` 记 `_last_usage_anchor`；L4 est_tokens 切换混合计数 |
+| L4 触发熔断（R18 #18） | `agent/context_pipeline.py:MAX_CONSECUTIVE_L4_FAILURES=3` + `CompressionSessionState.llm_compact_failures`（降级产出算触发质量失败——`context_compressor._last_summary_degraded` 模块标志传递信号；连续 3 次降级本会话停触发 L4，真 LLM 摘要成功清零） |
+| 批间摘要（R18 #19） | `agent/__init__.py:_maybe_start_tool_batch_summary`（fire-and-forget，config `context.tool_batch_summary_enabled` 默认关 + 仅主代理）+ `_generate_tool_batch_summary`（aux 一句话 ≤80 字）+ `_assemble_turn_messages` 消费注入 ephemeral `<tool_batch_summary>` |
 | post-compact 主动恢复（最近文件 + invoked skills） | `agent/post_compact_recovery.py:build_post_compact_brief`（compact 末尾注入；走 safe_path 白名单 + fail-open）；追踪在 `_dispatch_tool_calls`（safe + unsafe 两路都调 `_record_recent`）；config `post_compact_recovery_enabled/max_files/max_skills` |
 | 子代理 sidechain transcript 持久化（CCAR5-I） | `agent/subagent_persistence.py`（generate_agent_id / write_metadata / append_message / load_transcript / list_resumable / mark_completed / cleanup_old / cleanup_stale_subagents）；接入 `tools/delegate_tool.py:_run_child`（CCAR13 Task 3：user 指令开头 append + 独立 HookRegistry 的 POST_LLM_CALL 程序式 hook 每轮 append assistant 文本，on_response 最终响应 append 已删 + try/finally 标记 status）；cli.py 启动时清理 stale running + 过期 retention；config 开关 `delegation.subagent_persistence_enabled`（默认 True）+ `subagent_persistence_retention_days`（默认 7） |
 | check_path 白名单语义（CCAR13 Task 4） | `agent/permission.py:PermissionChecker.check_path` 闸门 3 恢复白名单判定（write：workspace cwd / `~/.OmniMate` / `/add-dir` extra roots 之内放行、之外拒；白名单经 `default_allowed_roots()` 与 safe_path 同源）；顺序铁律：闸门 1 受保护路径 / 闸门 2 项目代码写保护在前（加 home 根也写不了 `~/.ssh`）；bypassPermissions 跳白名单不跳闸门 1/2；write_file + str_replace 共用此判定 |
@@ -389,6 +394,10 @@ uv sync                                 # 同步已声明依赖
 - **升级 64k 依赖 400 自适应兜底（R17 #10/#13 联动）** —— 小输出上限 provider（DeepSeek 8K）对 max_tokens=64000 会报 400 溢出，`parse_context_overflow` 解析后动态下调重试；升级调用失败本身 fail-open 沿用截断响应。
 - **续写恢复是局部请求视图（R17 #10）** —— 截断 assistant + 续写 meta 只进当次 API 请求，不进 conversation_history；成功后以拼接完成的**单条** assistant 消息入史（会话记录干净）。只处理纯文本截断；工具调用截断形态原样返回。
 - **看门狗转非流式只重试一次（R17 #12/#9）** —— 流空闲 90s 中止后扣留转非流式 call_with_retry 一次，仍失败才透出（kind=stream_idle）；CC 的半超时 warning/停顿计数遥测无对应通道，只做超时 abort。
+- **fork 摘要的前缀一致性边界（R18 #15）** —— fork 用上一轮 tool_schemas（压缩在轮边界、本轮 schema 未组装；plan_mode 切换轮 miss 一次可接受）；summary_model 显式配置时不 fork（专用小模型不同缓存空间，用户配置优先）；有图片消息时 strip 后 miss（避免压缩调用自身 PTL 优先）。
+- **权威 token 锚点是保守偏高（R18 #17）** —— prompt+cache_read+cache_creation 之和在 OpenAI 语义下重复计 cache read（prompt_tokens 已含）——宁早压方向；锚点只在主调用记录（恢复链调用不更新）。
+- **批间摘要默认关（R18 #19）** —— 注入改变发给 LLM 的消息内容（影响行为），保守默认；仅主代理（spawn_depth==0）；摘要只保留最新一批（后到覆盖）。
+- **L4 触发熔断的失败=降级产出（R18 #18）** —— `_summarize_conversation` 永不抛异常（规则总结兜底），触发层失败信号走模块级 `_last_summary_degraded`（降级压缩可用但有损，连续 3 次停触发——对齐 CC autocompact 失败即停）。
 
 ## 测试策略
 
