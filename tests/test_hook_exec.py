@@ -82,3 +82,35 @@ def test_run_script_env_vars_passed():
     hook.script.env = {"MY_VAR": "xyz"}
     result = run_script_hook(hook, {"event": "stop"})
     assert result == {"v": "xyz"}
+
+
+# ===== R25 #8：http hook ${VAR} 插值白名单 =====
+
+class TestInterpolateEnvVars:
+    def test_whitelisted_var_interpolated(self, monkeypatch):
+        from agent.hook_exec import interpolate_env_vars
+        # 注：简报原文 env 值带 "http://" 前缀与模板重复（插值后 scheme 拼两次
+        # 无法满足断言），此处最小修正为 host:port——模板带 scheme、env 提供地址
+        monkeypatch.setenv("OMNI_TEST_HOOK_URL", "127.0.0.1:9")
+        out = interpolate_env_vars(
+            "http://${OMNI_TEST_HOOK_URL}/hook", ["OMNI_TEST_HOOK_URL"],
+        )
+        assert out == "http://127.0.0.1:9/hook"
+
+    def test_non_whitelisted_left_literal_with_warning(self, monkeypatch, caplog):
+        from agent.hook_exec import interpolate_env_vars
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret")
+        out = interpolate_env_vars(
+            "http://h/${DEEPSEEK_API_KEY}", [],
+        )
+        assert out == "http://h/${DEEPSEEK_API_KEY}"  # 不插值
+
+    def test_no_pattern_unchanged(self):
+        from agent.hook_exec import interpolate_env_vars
+        assert interpolate_env_vars("http://plain/path", []) == "http://plain/path"
+
+    def test_unset_whitelisted_left_literal(self, monkeypatch):
+        from agent.hook_exec import interpolate_env_vars
+        monkeypatch.delenv("OMNI_NOT_SET_VAR", raising=False)
+        out = interpolate_env_vars("${OMNI_NOT_SET_VAR}", ["OMNI_NOT_SET_VAR"])
+        assert out == "${OMNI_NOT_SET_VAR}"

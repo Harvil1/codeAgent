@@ -18,6 +18,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 from typing import Optional
 
@@ -324,6 +325,36 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
 # ============================================================================
 
 
+# R25 #5 → #8：http hook ${VAR} 插值（仅白名单变量）
+_ENV_INTERP_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def interpolate_env_vars(value: str, allowed: list) -> str:
+    """对字符串做 ${VAR} 环境变量插值，只允许白名单里的变量名。
+
+    对齐 CCB httpHookAllowedEnvVars：非白名单引用保留原样并告警
+    （防 hook 配置把 API key 等敏感 env 悄悄发出去；也防用户以为
+    会插值实际没插的静默错配）。
+    """
+    import os as _os
+    warned = set()
+
+    def _sub(m):
+        name = m.group(1)
+        if name in allowed and name in _os.environ:
+            return _os.environ[name]
+        warned.add(name)
+        return m.group(0)
+
+    out = _ENV_INTERP_RE.sub(_sub, value)
+    for n in sorted(warned):
+        logger.warning(
+            "http hook 引用了未白名单环境变量 ${%s}（保留原样）；"
+            "如需插值请把它加进 security.http_hook_allowed_env_vars", n,
+        )
+    return out
+
+
 def run_http_hook(hook, payload: dict) -> Optional[dict]:
     """POST JSON payload 到 hook.script.url，解析响应 JSON dict。
 
@@ -343,11 +374,20 @@ def run_http_hook(hook, payload: dict) -> Optional[dict]:
         return None
     url = hook.script.url.strip()
 
+    config = _get_config()
+    # R25 #8：${VAR} 插值（仅白名单；默认 [] = 完全不插值，原样发送）
+    allowed_env = []
+    if config is not None:
+        allowed_env = [
+            str(v) for v in
+            ((config.get("security") or {}).get("http_hook_allowed_env_vars") or [])
+        ]
+    url = interpolate_env_vars(url, allowed_env)
+
     from agent.ssrf_guard import check_url_against_allowlist, validate_url_for_ssrf
 
     # URL allowlist
     allowed = None
-    config = _get_config()
     if config is not None:
         allowed = (config.get("security") or {}).get("http_hook_allowed_urls")
     block = check_url_against_allowlist(url, allowed)

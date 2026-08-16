@@ -298,6 +298,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # R16 #4: http hook URL allowlist（None=不限 / []=全拒 /
         # 非空=必须匹配其一，* 通配；SSRF 地址段校验始终开启）
         "http_hook_allowed_urls": None,
+        "http_hook_allowed_env_vars": [],  # R25 #8：http hook ${VAR} 插值白名单
     },
 
     # 显示
