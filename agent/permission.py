@@ -975,6 +975,7 @@ class PermissionChecker:
         self._approved_write_roots: set = set()
         self._whitelist_file = whitelist_file
         self._persistent_whitelist = set()
+        self._persistent_prefixes: set = set()  # R25 #2：前缀规则（curated 派生）
         if whitelist_file:
             self._load_whitelist()
         # 路径白名单（write_file 等场景，用户批准过的写入路径）
@@ -1055,6 +1056,8 @@ class PermissionChecker:
             if path.exists():
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self._persistent_whitelist = set(data.get("commands", []))
+                # R25 #2：前缀规则（旧文件无此键 → 空集，向后兼容）
+                self._persistent_prefixes = set(data.get("prefixes", []))
                 logger.info("加载 %d 条已批准命令", len(self._persistent_whitelist))
         except Exception as e:
             logger.debug("加载白名单失败: %s", e)
@@ -1068,7 +1071,10 @@ class PermissionChecker:
             atomic_write_text(
                 path,
                 json.dumps(
-                    {"commands": sorted(self._persistent_whitelist)},
+                    {
+                        "commands": sorted(self._persistent_whitelist),
+                        "prefixes": sorted(self._persistent_prefixes),
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1129,6 +1135,12 @@ class PermissionChecker:
         if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
             return PermissionResult(True, "已批准（白名单）", "approval")
 
+        # R25 #2：前缀规则命中（词边界：cmd == p 或 cmd 以 "p " 开头）
+        # 只匹配持久化前缀——会话内派生的前缀也即时入 _persistent_prefixes
+        for p in self._persistent_prefixes:
+            if cmd_key == p or cmd_key.startswith(p + " "):
+                return PermissionResult(True, "已批准（前缀规则）", "approval")
+
         # auto_deny 短路（fail-closed）：
         # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
         # - 黑名单（sudo 等）已在闸门 1 拒绝，不会走到这里
@@ -1173,6 +1185,15 @@ class PermissionChecker:
         # 批准：加入会话缓存 + 持久化白名单
         self._approved.add(cmd_key)
         self._persistent_whitelist.add(cmd_key)
+        # R25 #2：curated 表可泛化 → 额外存前缀规则（同类测试命令不再询问）
+        from agent.command_prefix import derive_approved_prefix
+        try:
+            prefix = derive_approved_prefix(cmd_key)
+        except Exception:
+            prefix = None
+        if prefix and prefix not in self._persistent_prefixes:
+            self._persistent_prefixes.add(prefix)
+            logger.info("已存前缀规则: %s（同前缀命令不再询问）", prefix)
         self._save_whitelist()
         return PermissionResult(True, "已批准", "approval")
 

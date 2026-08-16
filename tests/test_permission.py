@@ -1462,3 +1462,67 @@ def test_check_path_always_allow_gates_hard_before(tmp_path, monkeypatch):
     c = PermissionChecker(approval_callback=lambda item: "always")
     r = c.check_path(str(Path.home() / ".ssh" / "evil_key"), write=True)
     assert r.allowed is False
+
+
+# ===== R25 #2：审批前缀规则（curated 表派生）=====
+
+class TestCommandPrefix:
+    def test_derive_test_command(self):
+        from agent.command_prefix import derive_approved_prefix
+        assert derive_approved_prefix("uv run pytest tests/test_a.py -v") == "uv run pytest"
+
+    def test_derive_none_for_destructive(self):
+        from agent.command_prefix import derive_approved_prefix
+        assert derive_approved_prefix("rm -rf build") is None
+        assert derive_approved_prefix("git push --force origin x") is None
+
+    def test_derive_none_for_compound(self):
+        from agent.command_prefix import derive_approved_prefix
+        assert derive_approved_prefix("uv run pytest && echo ok") is None
+
+    def test_derive_none_when_no_extra_tokens(self):
+        """与表项完全相同 → 无需前缀（exact 白名单已覆盖）。"""
+        from agent.command_prefix import derive_approved_prefix
+        assert derive_approved_prefix("uv run pytest") is None
+
+
+class TestApprovalPrefixWhitelist:
+    def test_prefix_match_skips_approval(self, tmp_path, monkeypatch):
+        """批准过一次测试命令 → 同前缀的新命令不再询问。"""
+        import json
+        from agent.permission import PermissionChecker
+        wf = tmp_path / "approved.json"
+        wf.write_text(json.dumps({
+            "commands": ["uv run pytest tests/test_old.py"],
+            "prefixes": ["uv run pytest"],
+        }), encoding="utf-8")
+        checker = PermissionChecker(whitelist_file=str(wf))
+        # 破坏性闸门不会拦 pytest；直接构造走 _approval_gate 的场景：
+        # 用注入面形态触发审批（'echo $(date)' 命中注入面 → approval gate）
+        result = checker._approval_gate(
+            "uv run pytest tests/test_new.py",
+            "default",
+            hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
+        )
+        assert result.allowed is True
+        assert "前缀" in result.reason
+
+    def test_approval_stores_derived_prefix(self, tmp_path):
+        """审批通过 → 派生前缀入持久化 prefixes。"""
+        import json
+        from agent.permission import PermissionChecker
+        wf = tmp_path / "approved.json"
+        checker = PermissionChecker(
+            approval_callback=lambda cmd: True,
+            whitelist_file=str(wf),
+        )
+        result = checker._approval_gate(
+            "uv run pytest tests/test_a.py",
+            "default",
+            hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
+        )
+        assert result.allowed is True
+        data = json.loads(wf.read_text(encoding="utf-8"))
+        assert "uv run pytest" in data.get("prefixes", [])
+        # exact 命令也照旧存
+        assert "uv run pytest tests/test_a.py" in data.get("commands", [])

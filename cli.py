@@ -3702,10 +3702,11 @@ def _search_sessions(rt: RuntimeContext, query: str):
 def _manage_whitelist(rt: RuntimeContext, args: str):
     """管理审批白名单（/approved）。
 
-    /approved                    列出已批准命令 + 持久化写入根目录
+    /approved                    列出已批准命令 + 前缀规则 + 持久化写入根目录
     /approved remove <n|命令>    按序号/命令移除已批准命令
     /approved remove-root <n|路径>  移除持久化写入根目录（T5，settings.json
                                    security.extra_allowed_roots + 运行时白名单）
+    /approved remove-prefix <pN|前缀>  移除前缀规则（R25 #2，curated 表派生）
     """
     from agent.permission import get_default_checker, list_extra_allowed_roots
     checker = get_default_checker()
@@ -3720,6 +3721,12 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
                 # 截断长命令
                 display = cmd if len(cmd) <= 80 else cmd[:77] + "..."
                 console.print(f"  [{i}] {display}")
+        # R25 #2：前缀规则展示
+        prefixes = sorted(getattr(checker, "_persistent_prefixes", set()) or set())
+        if prefixes:
+            console.print("\n[bold]前缀规则（同前缀命令免审批）：[/bold]")
+            for i, p in enumerate(prefixes, 1):
+                console.print(f"  p{i}. {p}")
         # T5：持久化写入根目录（"总是允许"档落盘的条目）
         extra_roots = list_extra_allowed_roots()
         console.print(f"\n[bold]写入根目录白名单（{len(extra_roots)} 条，来自 /add-dir 与审批「总是允许」）：[/bold]")
@@ -3729,7 +3736,8 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
             console.print(f"  [{i}] {root}")
         console.print(
             "\n用法：[cyan]/approved remove <序号或命令>[/cyan] | "
-            "[cyan]/approved remove-root <序号或路径>[/cyan]"
+            "[cyan]/approved remove-root <序号或路径>[/cyan] | "
+            "[cyan]/approved remove-prefix <p序号或前缀>[/cyan]"
         )
         return
 
@@ -3759,6 +3767,24 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
             console.print(f"[red]写入根目录白名单中未找到: {target[:80]}[/red]")
         return
 
+    # R25 #2：前缀规则移除（支持 p序号或完整前缀字符串）
+    if action == "remove-prefix":
+        if not target:
+            console.print("[yellow]用法：/approved remove-prefix <p序号或前缀>[/yellow]")
+        else:
+            prefixes = sorted(getattr(checker, "_persistent_prefixes", set()) or set())
+            if target.startswith("p") and target[1:].isdigit():
+                idx = int(target[1:]) - 1
+                if 0 <= idx < len(prefixes):
+                    target = prefixes[idx]
+            if target in getattr(checker, "_persistent_prefixes", set()):
+                checker._persistent_prefixes.discard(target)
+                checker._save_whitelist()
+                console.print(f"[green]已移除前缀规则：{target}[/green]")
+            else:
+                console.print(f"[yellow]未找到前缀规则：{target}[/yellow]")
+        return
+
     if action == "remove" and target:
         if target.isdigit():
             idx = int(target)
@@ -3772,7 +3798,7 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
         else:
             console.print(f"[red]白名单中未找到: {target[:80]}[/red]")
     else:
-        console.print(f"[yellow]用法：/approved remove <序号或命令> | /approved remove-root <序号或路径>[/yellow]")
+        console.print(f"[yellow]用法：/approved remove <序号或命令> | /approved remove-root <序号或路径> | /approved remove-prefix <p序号或前缀>[/yellow]")
 
 
 def _switch_model(rt: RuntimeContext, args: str):
