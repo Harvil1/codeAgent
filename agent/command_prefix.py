@@ -22,6 +22,7 @@ _PREFIXABLE = (
     "uv run pytest",
     "uv run python -m pytest",
     "python -m pytest",
+    "python -m unittest",
     "pytest",
     "npm test",
     "npm run test",
@@ -33,8 +34,8 @@ _PREFIXABLE = (
     "mypy",
 )
 
-# 复合操作符出现 → 不泛化（后半段可能藏破坏性命令）
-_COMPOUND_RE = re.compile(r"&&|\|\||;|\||`|\$\(")
+# 复合操作符/重定向出现 → 不泛化（后半段可能藏破坏性命令；重定向可写文件）
+_COMPOUND_RE = re.compile(r"&&|\|\||;|\||`|\$\(|>|>>")
 
 
 def derive_approved_prefix(command: str) -> Optional[str]:
@@ -56,3 +57,13 @@ def derive_approved_prefix(command: str) -> Optional[str]:
         if tokens[: len(entry_tokens)] == entry_tokens:
             return entry
     return None
+
+
+def is_prefix_match_safe(command: str) -> bool:
+    """前缀规则**匹配**时的安全护栏（R25 #2 review fix）。
+
+    派生侧只保证入库那一刻无复合形态；后续命令若带复合操作符/重定向
+    （如 ``uv run pytest && rm xxx``、``pytest > ~/.bashrc``），
+    前半段匹配不能让整条命令免审批——一律回落 exact/正常闸门。
+    """
+    return not _COMPOUND_RE.search(command or "")

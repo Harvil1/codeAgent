@@ -1485,6 +1485,10 @@ class TestCommandPrefix:
         from agent.command_prefix import derive_approved_prefix
         assert derive_approved_prefix("uv run pytest") is None
 
+    def test_derive_unittest(self):
+        from agent.command_prefix import derive_approved_prefix
+        assert derive_approved_prefix("python -m unittest tests.test_a -v") == "python -m unittest"
+
 
 class TestApprovalPrefixWhitelist:
     def test_prefix_match_skips_approval(self, tmp_path, monkeypatch):
@@ -1526,3 +1530,43 @@ class TestApprovalPrefixWhitelist:
         assert "uv run pytest" in data.get("prefixes", [])
         # exact 命令也照旧存
         assert "uv run pytest tests/test_a.py" in data.get("commands", [])
+
+    def test_compound_not_matched_by_prefix(self, tmp_path):
+        """复合命令不走前缀免审（回落审批）。"""
+        import json
+        from agent.permission import PermissionChecker
+        wf = tmp_path / "approved.json"
+        wf.write_text(json.dumps({
+            "commands": [],
+            "prefixes": ["uv run pytest"],
+        }), encoding="utf-8")
+        asked = []
+        checker = PermissionChecker(
+            approval_callback=lambda cmd: asked.append(cmd) or False,
+            whitelist_file=str(wf),
+        )
+        result = checker._approval_gate(
+            "uv run pytest && echo done",
+            "default",
+            hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
+        )
+        assert result.allowed is False  # 进了审批（callback 拒绝）
+        assert asked  # 确实问了
+
+    def test_redirect_not_matched_by_prefix(self, tmp_path):
+        """重定向命令不走前缀免审。"""
+        import json
+        from agent.permission import PermissionChecker
+        wf = tmp_path / "approved.json"
+        wf.write_text(json.dumps({"commands": [], "prefixes": ["pytest"]}), encoding="utf-8")
+        asked = []
+        checker = PermissionChecker(
+            approval_callback=lambda cmd: asked.append(cmd) or False,
+            whitelist_file=str(wf),
+        )
+        checker._approval_gate(
+            "pytest -q > out.txt",
+            "default",
+            hook_reason="t", auto_deny_reason="t", no_callback_message="t", gate="t",
+        )
+        assert asked

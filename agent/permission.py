@@ -1135,11 +1135,13 @@ class PermissionChecker:
         if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
             return PermissionResult(True, "已批准（白名单）", "approval")
 
-        # R25 #2：前缀规则命中（词边界：cmd == p 或 cmd 以 "p " 开头）
-        # 只匹配持久化前缀——会话内派生的前缀也即时入 _persistent_prefixes
-        for p in self._persistent_prefixes:
-            if cmd_key == p or cmd_key.startswith(p + " "):
-                return PermissionResult(True, "已批准（前缀规则）", "approval")
+        # R25 #2：前缀规则命中（词边界：cmd == p 或 cmd 以 "p " 开头）。
+        # 复合操作符/重定向命令不走前缀免审（防前半段匹配掩护后半段）
+        from agent.command_prefix import is_prefix_match_safe
+        if is_prefix_match_safe(cmd_key):
+            for p in self._persistent_prefixes:
+                if cmd_key == p or cmd_key.startswith(p + " "):
+                    return PermissionResult(True, "已批准（前缀规则）", "approval")
 
         # auto_deny 短路（fail-closed）：
         # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
