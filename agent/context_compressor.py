@@ -55,6 +55,12 @@ _consecutive_failures = 0
 MAX_CONSECUTIVE_FAILURES = 3
 _compact_circuit_open = False
 
+# R18 #18：最近一次摘要是否降级（LLM 失败 → 规则总结兜底）。
+# 触发层（compress_if_needed）读它判定「L4 触发质量失败」——降级压缩虽可用
+# 但有损，连续降级应触发 L4 触发熔断（对齐 CC autocompact 失败即停）。
+# 模块级全局：压缩在主循环内串行，无并发竞争；子代理各有独立模块态可接受。
+_last_summary_degraded = False
+
 # PTL（prompt_too_long）重试上限
 MAX_PTL_RETRIES = 3
 
@@ -144,7 +150,8 @@ async def _summarize_conversation(
         from_idx: 从第 N 条开始压（默认 0 = 从头）
         up_to_idx: 压到第 N 条为止（默认 -1 = 压到末尾）
     """
-    global _consecutive_failures, _compact_circuit_open
+    global _consecutive_failures, _compact_circuit_open, _last_summary_degraded
+    _last_summary_degraded = False  # 每次调用重置（R18 #18）
 
     # Task C：partial 提取（from_idx/up_to_idx）
     is_partial = from_idx != 0 or up_to_idx != -1
@@ -163,6 +170,7 @@ async def _summarize_conversation(
             "摘要熔断器开启（连续 %d 次失败），跳过 LLM 摘要",
             _consecutive_failures,
         )
+        _last_summary_degraded = True  # R18 #18：降级产出
         return _rule_based_summary(to_summarize)
 
     # 2. session memory 优先（有预提取就直接用，省一次 LLM 调用）
@@ -232,6 +240,7 @@ async def _summarize_conversation(
                     _consecutive_failures,
                 )
             logger.warning("LLM 摘要失败（降级规则总结）: %s", e)
+            _last_summary_degraded = True  # R18 #18：降级产出
             return _rule_based_summary(working_messages)
 
     return _rule_based_summary(working_messages)

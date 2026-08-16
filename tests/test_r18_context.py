@@ -105,9 +105,9 @@ async def test_l4_trigger_circuit_breaker(monkeypatch):
     """连续 3 次 L4 触发失败 → 本会话不再触发；成功清零。"""
     state = CompressionSessionState()
     config = {
-        "llm_compact_max_attempts": 10,
-        "llm_compact_cooldown": 0,
-        "llm_compact_threshold": 100,   # 低阈值强制 over_threshold
+        "max_compress_attempts": 10,
+        "llm_compact_cooldown_turns": 0,
+        "llm_compact_token_threshold": 100,   # 低阈值强制 over_threshold
         "transcript_enabled": False,
     }
 

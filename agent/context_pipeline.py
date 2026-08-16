@@ -1196,14 +1196,22 @@ async def compress_if_needed(
         )
         if c4:
             session_state.record_llm_compact()
-            session_state.llm_compact_failures = 0  # 成功清零（R18 #18）
+            # R18 #18：降级产出（LLM 摘要失败 → 规则总结兜底）算触发质量失败——
+            # 降级压缩可用但有损，连续降级应停触发（对齐 CC autocompact 失败即停）。
+            # _summarize_conversation 永不抛异常（内部兜底），失败信号走模块级
+            # _last_summary_degraded（压缩在主循环串行，无并发竞争）。
+            from agent.context_compressor import _last_summary_degraded
+            if _last_summary_degraded:
+                session_state.llm_compact_failures += 1
+                logger.warning(
+                    "L4 触发但摘要降级（连续失败 %d/%d）",
+                    session_state.llm_compact_failures, MAX_CONSECUTIVE_L4_FAILURES,
+                )
+            else:
+                session_state.llm_compact_failures = 0  # 真 LLM 摘要成功清零
         else:
-            # R18 #18：触发后摘要失败（返回未压缩）→ 连续失败计数 +1
-            session_state.llm_compact_failures += 1
-            logger.warning(
-                "L4 触发但压缩未生效（连续失败 %d/%d）",
-                session_state.llm_compact_failures, MAX_CONSECUTIVE_L4_FAILURES,
-            )
+            # llm_compact 拒绝压缩（未过内部门槛）——不计失败
+            pass
     elif over_threshold:
         if tripped:
             logger.info(
