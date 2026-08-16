@@ -264,6 +264,11 @@ uv sync                                 # 同步已声明依赖
 | 记忆三级粒度（L0/L1/L2） | `agent/memory_store.py:MemoryEntry.summary`（L1 摘要层）；索引行追加 summary，retriever 拿到的 index 自动含 L1 |
 | 任务级反思引擎 | `agent/reflection.py:apply_reflection`（aux_llm 从轨迹提炼 user/feedback/project 三类经验，自动 memory_save）；入口 `agent/__init__.py:AIAgent._trigger_reflection_async`（run_conversation 末尾异步触发） |
 | Memory Curator（记忆维护工人） | `agent/memory_curator.py:apply_automatic_transitions`（第 1 阶段确定性状态机）+ `run_memory_review`（第 2 阶段 LLM 合并/矛盾解决）+ `should_run_now_memory`（门控）；配置入口 `config["memory"]["curator"]`（enabled / interval_hours / llm_review_enabled / max_batch_size） |
+| curator 整理增强（R19 #22） | `agent/memory_curator.py:MEMORY_REVIEW_PROMPT_TEMPLATE`（五情况：+delete_falsified 删除被证伪/+normalize_dates 相对日期转绝对）+ `execute_action` 对应执行（均走软删除/原文备份改写，完全可逆） |
+| 秘密扫描全链路（R19 #24） | `agent/secret_scanner.py`（11 类 gitleaks 规则，合并单正则命名组；命中只记规则 ID+50 字符截断）→ `memory_store.save/update` 拒绝写入 / `memory_curator.safe_rewrite_body` 拒绝改写 / `trace.emit` 值级 redact / `handoff._scan_for_secrets` 迁移共用 |
+| 条件技能动态激活（R19 #25） | `agent/skill_commands.py:path_matches_skill_paths` + `find_conditional_skill_matches`（mtime+size 双因子缓存）+ `AIAgent._activate_conditional_skills`（ephemeral `<conditional_skills_ready>` 通知，会话级去重）；触发点 `_dispatch_tool_calls` 两处 pre-callback（read/write/str_replace 的 path）；与静态判定互补（paths 目录语义仍进索引）；glob 模式 YAML 里须加引号（* 是 alias 语法） |
+| skillify 内置技能（R19 #28） | `skills/skillify/SKILL.md`（四步：分析会话→ask_user 访谈→skill_manage 保存→确认；用户纠正沉淀进"规则"段；纯 MD 零 Python） |
+| 对话级记忆提取（R19 #21） | `agent/auto_extract.py:run_auto_extract`（增量轨迹→aux 单轮无工具提取→memory_store.save；与 reflection 共用 `build_memory_manifest` 防重复）+ `AIAgent._maybe_auto_extract`（游标始终推进 + 互斥 `_memory_touched_this_turn` + every_n_turns=3 节流 + spawn_depth==0）；config `memory.auto_extract`（默认关） |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -398,6 +403,9 @@ uv sync                                 # 同步已声明依赖
 - **权威 token 锚点是保守偏高（R18 #17）** —— prompt+cache_read+cache_creation 之和在 OpenAI 语义下重复计 cache read（prompt_tokens 已含）——宁早压方向；锚点只在主调用记录（恢复链调用不更新）。
 - **批间摘要默认关（R18 #19）** —— 注入改变发给 LLM 的消息内容（影响行为），保守默认；仅主代理（spawn_depth==0）；摘要只保留最新一批（后到覆盖）。
 - **L4 触发熔断的失败=降级产出（R18 #18）** —— `_summarize_conversation` 永不抛异常（规则总结兜底），触发层失败信号走模块级 `_last_summary_degraded`（降级压缩可用但有损，连续 3 次停触发——对齐 CC autocompact 失败即停）。
+- **记忆写入命中秘密即拒绝（R19 #24）** —— memory_store.save/update 是 fail-closed（ValueError，工具层转 error 返回）；curator 改写产物命中拒绝保留原文；trace 是 fail-open redact（日志通道不拒）。规则 ID 之外不记录命中值。
+- **auto_extract 默认关 + 与主写入互斥（R19 #21）** —— 每回合 aux 调用有成本，`memory.auto_extract.enabled=False` 默认；本轮 LLM 调过 memory save/update → 跳过并推进游标（主 agent 优先）；游标始终推进——被互斥/节流跳过的回合不再回看。
+- **条件技能 paths 的双语义（R19 #25）** —— 目录形态（`src/**`）匹配 cwd 时仍进静态索引（既有行为）；文件 glob（`*.py`）只走动态激活（ephemeral 通知）。glob 模式在 frontmatter 里必须加引号（YAML 的 `*` 是 alias 语法，不加引号解析成空串）。
 
 ## 测试策略
 
