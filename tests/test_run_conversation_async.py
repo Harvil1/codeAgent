@@ -239,12 +239,13 @@ def _make_prompt_too_long_llm_client():
 
 
 async def test_reactive_compact_flag_off_skips_retry(tmp_path):
-    """flag OFF：context_length_exceeded 不触发响应式回压。
+    """R17 #9 起语义变化：PTL 恢复不再受 reactive_compact flag 门控。
 
-    默认 DEFAULT_CONFIG["features"]["reactive_compact"]["enabled"] = False，
-    所以 AIAgent 默认配置下该路径应被跳过。
+    flag OFF（默认）时 context_length_exceeded 也走扣留恢复（对齐 CC
+    withheld：PTL 是可恢复错误）。Task P1.2 的 flag 门控语义已废弃。
     """
     agent, _ = _make_minimal_agent(tmp_path)
+    from agent import AIAgent
     # 显式确认默认 flag 关（DEFAULT_CONFIG 已设 False，双保险）
     agent.config.setdefault("features", {})["reactive_compact"] = {"enabled": False}
     # 换成抛 context_length_exceeded 的 client
@@ -256,14 +257,12 @@ async def test_reactive_compact_flag_off_skips_retry(tmp_path):
         tool_schemas=[],
         system_prompt="你是助手",
     )
-    # flag 关 → 不走响应式回压 → 返回 None（错误已塞回 history）
-    assert response is None, (
-        "reactive_compact flag OFF 时不应返回 _REACTIVE_RETRY，应返回 None"
+    # PTL → 扣留恢复（不受 flag 门控）→ 返回 _REACTIVE_RETRY
+    assert response is AIAgent._REACTIVE_RETRY, (
+        "R17 #9 起 PTL 应无视 flag 走扣留恢复（_REACTIVE_RETRY）"
     )
-    # _reacted 不应被改（没触发回压）
-    assert agent._reacted is False, (
-        "flag OFF 时 _reacted 应保持 False（回压未触发）"
-    )
+    assert agent._reacted is True
+    assert agent._last_llm_error_kind == "prompt_too_long"
 
 
 async def test_reactive_compact_flag_on_triggers_retry(tmp_path):

@@ -149,17 +149,22 @@ terminal_tool 命令执行叠加 OS 内核级强制隔离，作为权限闸门�
 
 默认允许写入：`cwd` + `~/.OmniMate`，可通过 `config["security"]["sandbox_writable_roots"]` 扩展。
 
-## 韧性机制（重试 + 备用模型 + max_tokens 升级 + 529 早切）
+## 韧性机制（重试 + 备用模型 + max_tokens 升级 + 529 早切 + 看门狗 + 扣留恢复）
 
 `agent/llm_retry.py:call_with_retry` 被 `AIAgent.run_conversation` 用于每次 LLM 调用：
 
 - 可重试错误（429 限流、5xx 服务器错误、连接/超时）：指数退避重试 5 次（1s → 2s → 4s → 8s → 16s），尊重 `Retry-After` header
 - **退避加抖动（P0-1）**：每次 sleep = base + uniform(0, base × 0.25)，多实例并发遇到 429 时避免雷击。`jitter_ratio=0` 关闭抖动（向后兼容）
 - **529 连续失败早切（P1-1）**：连续 `consecutive_529_threshold`（默认 3）次 529 立即切备用 client，不浪费剩余重试次数（Anthropic 过载通常持续一段时间）
-- 不可重试错误（400 参数、401 认证、403 权限）：立即抛
+- 不可重试错误（400 参数、401 认证、403 权限）：立即抛（例外：R17 #13 的 400 溢出自适应）
 - 主模型重试耗尽后，如果配置了 `fallback_model`，用备用模型再试一次
 - AIAgent 构造参数：`AIAgent(..., fallback_model="deepseek-reasoner")`
-- **max_tokens 升级（P0-3）**：LLM 返回 `finish_reason="length"`（max_tokens 截断）时，先升 `max_tokens` 到 32768 用非流式重试一次（不打断思路），升级后仍不够才让主循环走续写路径。`MaxTokensEscalator` 整个会话幂等（最多升 1 次）。入口：流式 `agent/__init__.py:_call_llm_streaming` 末尾 + 非流式 `agent/__init__.py:run_conversation` 非流式分支
+- **max_tokens 升级（P0-3 / R17 #10）**：LLM 返回 `finish_reason="length"`（max_tokens 截断）时，先升 `max_tokens` 到 64000 用非流式重试一次（不打断思路）。`MaxTokensEscalator` 整个会话幂等（最多升 1 次）。入口：流式 `agent/__init__.py:_call_llm_streaming` 末尾 + 非流式 `agent/__init__.py:run_conversation` 非流式分支
+- **续写恢复（R17 #10）**：升级后仍截断的纯文本响应 → `_recover_output_truncation` 把截断内容 + 续写 meta 追加到**局部请求视图**再调 LLM 拼接（最多 `llm.output_recovery_limit`=3 次）；成功以拼接完成的单条 assistant 消息入史
+- **400 溢出自适应（R17 #13）**：400 报文含 `input + max_tokens > context limit` 数值 → 下调到 `limit - input - 1000`（下限 3000）立即重试（最多 2 次不耗正常计数）；输入本身太大照旧抛
+- **unattended 退避帽（R17 #44）**：持久重试模式下 `_compute_backoff` 帽 5min（普通 60s）
+- **流空闲看门狗（R17 #12）**：流式 90s 无 chunk → 中止流转 `LLMStreamIdleTimeout`（`llm.stream_idle_timeout_seconds` 配置，0 禁用）
+- **扣留-恢复（R17 #9）**：流空闲超时 → 转非流式重试一次；PTL → 一律 reactive_compact 恢复（冷却/上限防循环）；恢复失败才透出（`_last_llm_error_kind` 分类）
 
 ## 任务追踪（Task System）
 
@@ -230,8 +235,13 @@ uv sync                                 # 同步已声明依赖
 | 上下文压缩（唯一可改 system prompt 的场景） | `agent/context_pipeline.py:compress_if_needed` + 主循环 `agent/__init__.py` 压缩后注入 `<post_compress_brief>` |
 | 命令权限闸门 | `agent/permission.py:PermissionChecker.check` |
 | 路径白名单 | `agent/permission.py:safe_path`（直接调用方）+ `PermissionChecker.check_path` 闸门 3（write_file/str_replace，CCAR13 Task 4 起同源白名单） |
-| LLM 重试/备用模型/退避抖动/529 早切 | `agent/llm_retry.py:call_with_retry` + `_compute_backoff`（抖动）+ 连续 529 计数 |
-| max_tokens 升级（finish_reason=length 自动重试） | `agent/llm_retry.py:MaxTokensEscalator` + `detect_length_finish`；入口 `agent/__init__.py:_call_llm_streaming`（流式）和 `run_conversation` 非流式分支 |
+| LLM 重试/备用模型/退避抖动/529 早切/unattended 退避帽 | `agent/llm_retry.py:call_with_retry` + `_compute_backoff`（抖动 + `max_backoff` 参数：普通 60s / unattended `UNATTENDED_MAX_BACKOFF`=300s）+ 连续 529 计数 |
+| max_tokens 升级（finish_reason=length 自动重试，64k） | `agent/llm_retry.py:MaxTokensEscalator`（`DEFAULT_ESCALATED_MAX_TOKENS`=64000）+ `detect_length_finish`；入口 `agent/__init__.py:_call_llm_streaming`（流式）和 `run_conversation` 非流式分支 |
+| 400 溢出自适应（R17 #13） | `agent/llm_retry.py:parse_context_overflow`（CC 精确 + OpenAI 经典双正则）+ `compute_overflow_max_tokens`（缓冲 1k/下限 3000）+ `call_with_retry` 400 分支（最多 2 次不耗正常计数） |
+| 续写恢复（R17 #10） | `agent/__init__.py:_recover_output_truncation`（升级后仍截断 → 局部视图续写拼接，`llm.output_recovery_limit`=3）+ `_merge_continuation_response`（拼接单条 assistant 入史） |
+| 流空闲看门狗（R17 #12） | `agent/llm_client.py:_iterate_with_watchdog`（手工 `__anext__` + `wait_for`）+ `LLMStreamIdleTimeout`；两 client 流式循环接入；config `llm.stream_idle_timeout_seconds`（默认 90，0 禁用）经 cli 透传 |
+| 扣留-恢复（R17 #9） | `agent/__init__.py:_call_llm_with_escalation` except 链（流空闲→非流式重试一次；PTL→一律 reactive_compact 不受 flag 门控）+ `_last_llm_error_kind` 分类字段 |
+| 终止原因枚举（R17 #14） | `agent/__init__.py:LoopExitReason`（12 种，旧值保留）+ 主循环赋值点（预算/max_turns 分流、goal/idle/错误分类）+ `_handle_loop_exit`（按枚举生成消息 + PTL/流超时触发 STOP_FAILURE）+ `_emit_loop_exit_trace`（loop_exit 事件进 trace sink，含 completed） |
 | 工具注册模式（添加新工具看这个） | `tools/terminal_tool.py`（含权限集成） |
 | 工具集可见性控制 | `toolsets.py:TOOLSETS` + `model_tools.py:get_tool_definitions` |
 | MCP 外部工具接入 | `agent/mcp_client.py` + `tools/mcp_tool.py` |
@@ -375,6 +385,10 @@ uv sync                                 # 同步已声明依赖
 - **SSRF 预检存在 DNS rebinding 窗口（R16 #4）** —— requests 无自定义 DNS lookup，校验（getaddrinfo）与连接之间理论上可被 rebinding 绕过（CC 用 axios lookup 把校验 IP 钉到 socket 消除了该窗口）；预检已挡配置型 hook 指向元数据/内网的绝大多数场景。环回 127/8 与 ::1 放行（本地 dev policy server 是 http hook 主流用法）。
 - **内容级规则 bypass 边界（R16 #3）** —— deny 任何模式都拒（用户显式 deny 是最高意图）、ask 强制审批 bypass 不豁免；但 allow 只跳过审批类闸门，fatal/黑名单/危险删除硬底线不受影响。前缀匹配是词边界（`build:*` 不匹配 `build/`，对齐 CC）。
 - **路径 suspicious 检查在任何模式都拒（R16 #2）** —— NTFS ADS/短名/尾点等形态即使 bypassPermissions 也拒（安全底线，对齐受保护路径语义）；裸 `.`/`..` 目录引用豁免尾点检查（glob 默认 path=. 不误伤）。
+- **PTL 恢复不受 reactive_compact flag 门控（R17 #9 行为变化）** —— prompt_too_long 是可恢复错误，一律先走 reactive_compact 扣留恢复（冷却/上限防循环在函数内部生效）；Task P1.2 的 feature flag 语义废弃（韧性基线不是可选功能）。
+- **升级 64k 依赖 400 自适应兜底（R17 #10/#13 联动）** —— 小输出上限 provider（DeepSeek 8K）对 max_tokens=64000 会报 400 溢出，`parse_context_overflow` 解析后动态下调重试；升级调用失败本身 fail-open 沿用截断响应。
+- **续写恢复是局部请求视图（R17 #10）** —— 截断 assistant + 续写 meta 只进当次 API 请求，不进 conversation_history；成功后以拼接完成的**单条** assistant 消息入史（会话记录干净）。只处理纯文本截断；工具调用截断形态原样返回。
+- **看门狗转非流式只重试一次（R17 #12/#9）** —— 流空闲 90s 中止后扣留转非流式 call_with_retry 一次，仍失败才透出（kind=stream_idle）；CC 的半超时 warning/停顿计数遥测无对应通道，只做超时 abort。
 
 ## 测试策略
 

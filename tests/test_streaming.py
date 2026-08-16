@@ -489,6 +489,7 @@ async def test_max_tokens_escalate_idempotent_within_session():
 
     # 第二轮：再调一次主调用（length），但不再升级（已升过）
     await agent.run_conversation("round 2")
-    # 第二轮只有 1 次主调用（length），没 escalate 重试
-    assert call_log["non_stream"] == 3
+    # 第二轮 1 次主调用（length）+ 1 次续写恢复（R17 #10：升级后仍截断 →
+    # _recover_output_truncation 局部视图续写，恢复调用返回 stop）= 4 次累计
+    assert call_log["non_stream"] == 4
     assert agent._max_tokens_escalator.has_escalated is True  # 仍 True（幂等）
