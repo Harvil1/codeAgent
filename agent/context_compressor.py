@@ -59,6 +59,60 @@ _compact_circuit_open = False
 MAX_PTL_RETRIES = 3
 
 
+# ---------------------------------------------------------------------------
+# R18 #16：媒体块剥离（防压缩调用自身 PTL）
+# ---------------------------------------------------------------------------
+
+# image 块类型（OpenAI image_url / Anthropic image / 新 input_image）
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
+# document/file 块类型
+_DOC_BLOCK_TYPES = frozenset({"document", "file", "input_file"})
+
+
+def strip_media_blocks(messages: list) -> list:
+    """R18 #16：把消息里的 image/document 块替换为文本标记（对齐 CCB stripImagesFromMessages）。
+
+    content 为 list（多模态块）时：image 块 → "[image]"、document/file 块 →
+    "[document]"，text 块保留；全部替换为文本后合并为纯 str content
+    （下游 _format_dialog_for_summary 只处理 str）。
+    content 为 str 的消息原样保留。不污染入参（改动的消息新建 dict）。
+
+    与 #15 前缀复用的配合：无多模态消息时本函数是 no-op（前缀逐字节一致，
+    缓存命中）；有图片时剥除（缓存 miss 可接受——避免压缩调用自身 PTL）。
+    """
+    out = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        new_blocks = []
+        for b in content:
+            if isinstance(b, dict):
+                btype = b.get("type", "")
+                if btype in _IMAGE_BLOCK_TYPES:
+                    new_blocks.append({"type": "text", "text": "[image]"})
+                    continue
+                if btype in _DOC_BLOCK_TYPES:
+                    new_blocks.append({"type": "text", "text": "[document]"})
+                    continue
+            new_blocks.append(b)
+        # 全为文本块时合并为 str（消除 list content 形态）
+        if all(
+            isinstance(b, dict) and b.get("type") == "text"
+            for b in new_blocks
+        ):
+            new_content = "\n".join(
+                str(b.get("text", "")) for b in new_blocks
+            )
+        else:
+            new_content = new_blocks
+        if new_content != content:
+            msg = {**msg, "content": new_content}
+        out.append(msg)
+    return out
+
+
 async def _summarize_conversation(
     messages: list,
     llm_client=None,
@@ -121,7 +175,9 @@ async def _summarize_conversation(
         return _rule_based_summary(to_summarize)
 
     # 4. 格式化对话 + 9 段式 prompt（用 to_summarize 而不是全量 messages）
-    working_messages = list(to_summarize)  # 不污染入参（PTL 重试会修改）
+    # R18 #16：先剥媒体块（image/document → [image]/[document] 文本标记），
+    # 防多模态消息把压缩调用自身撑爆 PTL；str content 消息不受影响。
+    working_messages = strip_media_blocks(to_summarize)  # 不污染入参（PTL 重试会再切片）
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
 

@@ -789,6 +789,9 @@ class CompressionSessionState:
     - llm_compact_count: L4 触发次数
     - last_llm_compact_turn: 上次 L4 触发时的 current_turn（用于 cooldown）
     - current_turn: 当前 LLM 轮次（由 agent 主循环 increment）
+    - llm_compact_failures: R18 #18 L4 连续失败计数（触发熔断用；
+      摘要生成层的熔断在 context_compressor 的模块级状态里，这里管的是
+      「触发」层——失败后本会话不再触发 L4，省无效的摘要调用）
 
     向后兼容：``reacted`` 属性保留为只读代理（``reactive_count > 0``），
     旧代码读 ``state.reacted`` 不破坏。
@@ -798,6 +801,7 @@ class CompressionSessionState:
     llm_compact_count: int = 0
     last_llm_compact_turn: int = -10**6
     current_turn: int = 0
+    llm_compact_failures: int = 0
 
     @property
     def reacted(self) -> bool:
@@ -813,6 +817,10 @@ class CompressionSessionState:
 
     def increment_turn(self) -> None:
         self.current_turn += 1
+
+
+# R18 #18：L4 触发熔断阈值（对齐 CCB MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3）
+MAX_CONSECUTIVE_L4_FAILURES = 3
 
 
 # 冷却窗口 + 上限的默认值（可被 config 覆盖）
@@ -1149,13 +1157,18 @@ async def compress_if_needed(
     )
     over_threshold = est_tokens + growth >= token_threshold
     cooldown_ok = session_state.cooldown_ok(cooldown)
+    # R18 #18：L4 触发熔断——连续失败达阈值本会话不再触发（触发层熔断，
+    # 与摘要生成层熔断互补：前者省无效调用，后者降级规则总结）
+    tripped = session_state.llm_compact_failures >= MAX_CONSECUTIVE_L4_FAILURES
     logger.info(
         "L4 trigger check: over_threshold=%s, est_tokens=%d, growth=%d, conv_msgs=%d, "
-        "llm_compact_count=%d/%d, cooldown_ok=%s",
+        "llm_compact_count=%d/%d, cooldown_ok=%s, failures=%d%s",
         over_threshold, est_tokens, growth, conv_len,
         llm_compact_count, max_attempts, cooldown_ok,
+        session_state.llm_compact_failures,
+        " (TRIPPED)" if tripped else "",
     )
-    if over_threshold and llm_compact_count < max_attempts and cooldown_ok:
+    if over_threshold and llm_compact_count < max_attempts and cooldown_ok and not tripped:
         logger.info("L4 triggered")
         # L4 前落盘 transcript（force=True，因为 L4 是有损的）
         if config.get("transcript_enabled", True):
@@ -1183,8 +1196,21 @@ async def compress_if_needed(
         )
         if c4:
             session_state.record_llm_compact()
+            session_state.llm_compact_failures = 0  # 成功清零（R18 #18）
+        else:
+            # R18 #18：触发后摘要失败（返回未压缩）→ 连续失败计数 +1
+            session_state.llm_compact_failures += 1
+            logger.warning(
+                "L4 触发但压缩未生效（连续失败 %d/%d）",
+                session_state.llm_compact_failures, MAX_CONSECUTIVE_L4_FAILURES,
+            )
     elif over_threshold:
-        if llm_compact_count >= max_attempts:
+        if tripped:
+            logger.info(
+                "L4 skipped: 触发熔断（连续失败 %d 次）",
+                session_state.llm_compact_failures,
+            )
+        elif llm_compact_count >= max_attempts:
             logger.info("L4 skipped: max_attempts reached (%d/%d)", llm_compact_count, max_attempts)
         else:
             logger.info("L4 skipped: cooldown active (last=%d, current=%d, need=%d)",
