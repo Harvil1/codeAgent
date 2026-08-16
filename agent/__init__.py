@@ -451,6 +451,8 @@ class AIAgent:
         self._auto_extract_task = None       # 任务引用（防 asyncio GC 回收）
         # === R21 #8 NEW: 记忆检索并行 prefetch（组装消息时 await 消费）===
         self._memory_prefetch_task = None
+        # === R22 #11 NEW: 用户输入队列（模型跑时排队，工具批结束后回流）===
+        self._input_queue = None  # queue.Queue（cli.py 输入线程灌入）
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -614,6 +616,47 @@ class AIAgent:
     def set_channel_inbox(self, inbox) -> None:
         """注入 ChannelInbox（None=清除）。"""
         self._channel_inbox = inbox
+
+    def set_input_queue(self, q) -> None:
+        """R22 #11：注入用户输入队列（cli.py 输入线程灌入）。
+
+        模型跑时用户输入进队列（不打断当前响应）；_dispatch_tool_calls
+        工具批结束后 drain，排队输入以 ephemeral <queued_user_input> 回流
+        ——模型下一轮看到并回应（对齐 CC messageQueueManager 回流语义）。
+        """
+        self._input_queue = q
+
+    def _drain_queued_input(self) -> None:
+        """R22 #11：drain 输入队列 → ephemeral 回流（非阻塞，fail-open）。
+
+        仅主代理（spawn_depth==0）——子代理无用户交互面。
+        多条输入合并为一条 ephemeral（同轮消化）；队列空 no-op。
+        """
+        if self._input_queue is None or self.spawn_depth != 0:
+            return
+        try:
+            lines = []
+            while True:
+                try:
+                    lines.append(self._input_queue.get_nowait())
+                except Exception:
+                    break
+            if not lines:
+                return
+            joined = "\n".join(l for l in lines if l and l.strip())
+            if not joined.strip():
+                return
+            self._pending_ephemeral_messages.append({
+                "role": "user",
+                "content": (
+                    "<queued_user_input>（模型执行期间用户发来的消息，"
+                    "请在完成当前工作后回应）\n" + joined + "\n</queued_user_input>"
+                ),
+                "_ephemeral": True,
+            })
+            logger.info("排队输入回流（%d 条）", len(lines))
+        except Exception as e:
+            logger.debug("输入队列 drain fail-open: %s", e)
 
     def set_mailbox(self, mailbox, agent_name: str = None) -> None:
         """注入 Mailbox。agent_name 为空时保留原值。"""
@@ -2259,6 +2302,9 @@ class AIAgent:
         self._merge_results_in_order(
             tool_calls, safe_processed, unsafe_processed,
         )
+
+        # R22 #11：工具批结束 → drain 排队的用户输入（ephemeral 回流，下轮消化）
+        self._drain_queued_input()
 
         # R18 #19：批间摘要（fire-and-forget，idle 时不启动）
         if not self._idle_requested:

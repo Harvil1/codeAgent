@@ -495,3 +495,54 @@ async def test_skills_list_query_dispatch(tmp_path):
         "skills_list", {}, omnimate_home=str(tmp_path),
     ))
     assert len(r3["skills"]) >= 2
+
+
+# ---------------------------------------------------------------------------
+# R22 #11：队列命令消费（输入排队 + 工具批后回流）
+# ---------------------------------------------------------------------------
+
+def _mk_queue_agent(queue_obj=None, depth=0):
+    from agent import AIAgent
+    a = AIAgent.__new__(AIAgent)
+    a._input_queue = queue_obj
+    a.spawn_depth = depth
+    a._pending_ephemeral_messages = []
+    return a
+
+
+def test_drain_queued_input():
+    """队列输入 → 合并 ephemeral 回流；空队列/无队列 no-op；子代理不回流。"""
+    import queue as _q
+
+    q = _q.Queue()
+    a = _mk_queue_agent(q)
+    q.put("先看这个")
+    q.put("还有这个")
+    a._drain_queued_input()
+    assert len(a._pending_ephemeral_messages) == 1
+    msg = a._pending_ephemeral_messages[0]
+    assert "queued_user_input" in msg["content"]
+    assert "先看这个" in msg["content"] and "还有这个" in msg["content"]
+    assert msg["_ephemeral"] is True
+    # 队列已清（再 drain no-op）
+    a._drain_queued_input()
+    assert len(a._pending_ephemeral_messages) == 1
+
+    # 无队列 no-op
+    b = _mk_queue_agent(None)
+    b._drain_queued_input()
+    assert b._pending_ephemeral_messages == []
+
+    # 子代理（spawn_depth>0）不回流
+    q2 = _q.Queue()
+    q2.put("x")
+    c = _mk_queue_agent(q2, depth=1)
+    c._drain_queued_input()
+    assert c._pending_ephemeral_messages == []
+
+    # 纯空白输入被滤
+    q3 = _q.Queue()
+    q3.put("   ")
+    d = _mk_queue_agent(q3)
+    d._drain_queued_input()
+    assert d._pending_ephemeral_messages == []

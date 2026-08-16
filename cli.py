@@ -4130,11 +4130,40 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     else:
         _maybe_prompt_resume(rt)
 
+    # R22 #11：输入线程 + 队列（模型跑时用户输入排队，不打断当前响应；
+    # 工具批结束后由 agent._drain_queued_input 回流 ephemeral）
+    import queue as _queue_mod
+    import threading as _threading_mod
+    _input_q = _queue_mod.Queue()
+    _input_stop = _threading_mod.Event()
+
+    def _input_reader():
+        """daemon 线程：持续读控制台输入入队（EOF/异常即停）。"""
+        while not _input_stop.is_set():
+            try:
+                line = console.input("[bold cyan]你:[/bold cyan] ")
+                _input_q.put(line.strip())
+            except EOFError:
+                _input_q.put("__EOF__")
+                return
+            except KeyboardInterrupt:
+                # 对齐原语义：输入等待时 Ctrl+C = 退出（原 except 里打"再见"）
+                _input_q.put("__INTERRUPT__")
+                return
+            except Exception:
+                return
+    _input_thread = _threading_mod.Thread(target=_input_reader, daemon=True)
+    _input_thread.start()
+    # agent 接队列（回流通道）
+    try:
+        rt.agent.set_input_queue(_input_q)
+    except Exception:
+        pass
+
     # 主循环
     while True:
-        try:
-            user_input = console.input("[bold cyan]你:[/bold cyan] ").strip()
-        except (EOFError, KeyboardInterrupt):
+        user_input = _input_q.get()
+        if user_input in ("__EOF__", "__INTERRUPT__"):
             console.print("\n再见！")
             break
 
