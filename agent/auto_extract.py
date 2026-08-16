@@ -17,16 +17,53 @@
 防重复：预注入已有记忆 manifest（与 reflection 共用 build_memory_manifest）。
 秘密扫描：memory_store.save 内置（R19 #24），提取产物命中自动拒绝。
 整链 fail-open：任何异常不影响主对话。
+
+机械查证（R26 #13）：
+- CC 用带工具的 fork agent 查证；OmniMate 裁决为**机械验证**（提取产物中
+  出现的文件路径须真实存在，否则丢弃该条）——零 LLM 成本、覆盖最主要的
+  幻觉形态（编造路径入库）。完整带工具查证不搬（每轮成本不可接受）。
 """
 import json
 import logging
 import re
+from pathlib import Path
 from typing import List
 
 logger = logging.getLogger(__name__)
 
 # 提取产物上限（对齐 reflection 的防堆积语义）
 MAX_EXTRACT_ITEMS = 3
+
+# 形如 path/to/file.py 或 file.py 的 token（含扩展名；跨平台分隔符）。
+# 注：目录段可为零——简报测试锚定裸文件名（fake_path.py）也须查证，
+# 故用 * 而非 +（纯单词无扩展名仍不验）。
+_PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z]{1,4}")
+
+
+def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
+    """R26 #13：机械查证——条目 body/summary 里提到的文件路径必须存在。
+
+    LLM 提取最常见的幻觉是编造文件路径；命中不存在路径的条目直接丢弃
+    （宁缺毋滥）。验证只认"像路径"的 token（file.py / a/b.py 形态），
+    纯单词不验。
+    """
+    base = Path(base_dir) if base_dir else Path.cwd()
+    kept = []
+    for item in items:
+        text = f"{item.get('body', '')} {item.get('summary', '')}"
+        paths = _PATH_TOKEN_RE.findall(text)
+        ok = True
+        for p in paths:
+            cand = Path(p)
+            if cand.is_absolute():
+                continue  # 绝对路径跨机器不稳，不验（保守放行）
+            if not (cand.exists() or (base / cand).exists()):
+                ok = False
+                logger.info("auto_extract 丢弃幻觉路径条目（%s 不存在）: %s", p, item.get("name"))
+                break
+        if ok:
+            kept.append(item)
+    return kept
 
 
 async def run_auto_extract(agent, start_idx: int) -> int:
@@ -66,6 +103,13 @@ async def run_auto_extract(agent, start_idx: int) -> int:
             return 0
 
         items = _parse_items(content)
+        # R26 #13：机械查证（幻觉路径条目丢弃）
+        from agent.workspace_context import get_workspace_cwd
+        try:
+            base_dir = get_workspace_cwd()
+        except Exception:
+            base_dir = ""
+        items = _filter_verified_items(items, base_dir)
         valid_types = {"user", "feedback", "project", "reference"}
         saved = 0
         for item in items[:MAX_EXTRACT_ITEMS]:
