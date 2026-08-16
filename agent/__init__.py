@@ -453,6 +453,8 @@ class AIAgent:
         self._memory_prefetch_task = None
         # === R22 #11 NEW: 用户输入队列（模型跑时排队，工具批结束后回流）===
         self._input_queue = None  # queue.Queue（cli.py 输入线程灌入）
+        # === R23 #7 NEW: 流式预执行结果（_call_llm_streaming 产，_dispatch 消费）===
+        self._streaming_preset_results = {}
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -757,6 +759,20 @@ class AIAgent:
         reasoning_content = None   # DeepSeek thinking(工具调用回传需要)
         thinking_signature = None
 
+        # === R23 #7：流式并发执行（safe 工具在流式期间预执行）===
+        # config agent.streaming_tool_execution（默认关）。预执行结果存
+        # _streaming_preset_results，_dispatch_tool_calls 按 tc.id 消费跳重。
+        _executor = None
+        if (self.config or {}).get("agent", {}).get(
+            "streaming_tool_execution", False,
+        ):
+            try:
+                from agent.streaming_executor import StreamingToolExecutor
+                _executor = StreamingToolExecutor(self)
+            except Exception as e:
+                logger.debug("流式执行器构造失败（退正常路径）: %s", e)
+        _last_seen_idx = None
+
         try:
             # 从 config 读 max_tokens（用户在 settings.json llm 块配 "max_tokens": 8192）
             # 不配就不传，让 API 用默认值（换模型不用改代码）
@@ -789,6 +805,18 @@ class AIAgent:
                 # 工具调用增量累积
                 for tc in delta.get("tool_calls") or []:
                     idx = getattr(tc, "index", 0)
+                    # R23 #7：新 index 出现 → 前一个 index 的参数已完整，
+                    # safe 工具立即预执行（与模型继续输出重叠）
+                    if (
+                        _executor is not None
+                        and _last_seen_idx is not None
+                        and idx != _last_seen_idx
+                        and _last_seen_idx in tool_call_buffers
+                    ):
+                        _executor.complete(
+                            _last_seen_idx, tool_call_buffers[_last_seen_idx],
+                        )
+                    _last_seen_idx = idx
                     buf = tool_call_buffers.setdefault(
                         idx, {"id": "", "name": "", "arguments": ""}
                     )
@@ -834,6 +862,9 @@ class AIAgent:
             logger.warning(
                 "流式调用失败，fallback 到非流式重试: %s", stream_err
             )
+            # R23 #7：流异常 → drain 预执行 task（等完成但弃用结果，防僵尸）
+            if _executor is not None:
+                await _executor.drain()
             from agent.llm_retry import call_with_retry
             response = await call_with_retry(
                 self.llm_client,
@@ -854,6 +885,18 @@ class AIAgent:
                 except Exception:
                     pass
             return response
+
+        # R23 #7：流正常结束 → 最后一个 index 完整化 + collect 预执行结果
+        if _executor is not None:
+            try:
+                if _last_seen_idx is not None and _last_seen_idx in tool_call_buffers:
+                    _executor.complete(
+                        _last_seen_idx, tool_call_buffers[_last_seen_idx],
+                    )
+                self._streaming_preset_results = await _executor.collect()
+            except Exception as e:
+                logger.debug("流式预执行 collect 失败（弃用）: %s", e)
+                self._streaming_preset_results = {}
 
         # 合成 tool_calls 列表（按 idx 排序，过滤掉没 name 的）
         tool_calls_out = []
@@ -2248,6 +2291,31 @@ class AIAgent:
 
         # ---- Task F2: safe/unsafe 分组 ----
         tool_calls = list(assistant_msg.tool_calls)
+
+        # === R23 #7：消费流式预执行结果（已预执行的 call 跳过重复执行）===
+        # 预执行走完整 handle_function_call（含 hook/权限）✓；此处只补
+        # plan_approval / 失败统计（与 safe 组后处理同款）。
+        preset_processed = []
+        try:
+            preset = getattr(self, "_streaming_preset_results", None) or {}
+        except AttributeError:
+            preset = {}
+        self._streaming_preset_results = {}
+        if preset:
+            remaining = []
+            for tc in tool_calls:
+                if tc.id in preset:
+                    content = self._maybe_handle_plan_approval(tc, preset[tc.id])
+                    self._update_failure_streak(content)
+                    preset_processed.append((tc, content))
+                else:
+                    remaining.append(tc)
+            tool_calls = remaining
+            if preset_processed:
+                logger.info(
+                    "流式预执行命中 %d 个工具（跳过重复执行）", len(preset_processed),
+                )
+
         safe_calls = []
         unsafe_calls = []
         for tc in tool_calls:
@@ -2306,8 +2374,11 @@ class AIAgent:
         unsafe_processed = [(tc, c) for tc, c in zip(unsafe_calls, unsafe_results)]
 
         # 按原 tool_call 顺序合并并回填 history
+        # （R23 #7：preset_processed 一并入 merge——_merge 按完整 tool_calls 序对齐）
         self._merge_results_in_order(
-            tool_calls, safe_processed, unsafe_processed,
+            list(assistant_msg.tool_calls),
+            preset_processed + safe_processed,
+            unsafe_processed,
         )
 
         # R22 #11：工具批结束 → drain 排队的用户输入（ephemeral 回流，下轮消化）
@@ -2380,6 +2451,33 @@ class AIAgent:
         except Exception as e:
             logger.debug("批间摘要生成失败（fail-open）: %s", e)
 
+    def _run_tool_pre_callbacks(self, tc) -> None:
+        """工具执行前的记录/通知副作用（safe 组顺序版 + 流式预执行共用）。
+
+        _record_recent / 条件技能激活 / memory 互斥标记 / on_tool_call。
+        fail-open（各回调自身已带异常保护）。
+        """
+        tool_name = tc.function.name
+        try:
+            tool_args = json.loads(tc.function.arguments)
+        except json.JSONDecodeError:
+            tool_args = {}
+        if tool_name == "read_file" and tool_args.get("path"):
+            self._record_recent("read", str(tool_args["path"]))
+        elif tool_name == "load_skill" and tool_args.get("name"):
+            self._record_recent("skill", str(tool_args["name"]))
+        # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
+        if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
+            self._activate_conditional_skills(tool_args["path"])
+        # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
+        if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
+            self._memory_touched_this_turn = True
+        if self.on_tool_call:
+            try:
+                self.on_tool_call(tool_name, tool_args)
+            except Exception:
+                pass
+
     async def _run_safe_group_concurrently(self, safe_calls, handle_function_call):
         """safe 组并发执行 handle_function_call。
 
@@ -2389,26 +2487,7 @@ class AIAgent:
         """
         # 按顺序跑 pre-callback（保持 _record_recent 的语义：先记录再执行）
         for tc in safe_calls:
-            tool_name = tc.function.name
-            try:
-                tool_args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                tool_args = {}
-            if tool_name == "read_file" and tool_args.get("path"):
-                self._record_recent("read", str(tool_args["path"]))
-            elif tool_name == "load_skill" and tool_args.get("name"):
-                self._record_recent("skill", str(tool_args["name"]))
-            # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
-            if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
-                self._activate_conditional_skills(tool_args["path"])
-            # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
-            if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
-                self._memory_touched_this_turn = True
-            if self.on_tool_call:
-                try:
-                    self.on_tool_call(tool_name, tool_args)
-                except Exception:
-                    pass
+            self._run_tool_pre_callbacks(tc)
 
         # 并发跑 handle_function_call
         async def _one(tc):

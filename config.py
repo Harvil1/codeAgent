@@ -67,6 +67,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_iterations": 200,
         "compression_enabled": True,
         "system_prompt": None,
+        # R23 #7：流式并发执行（safe 工具在模型流式输出期间预执行；
+        # 默认关——灰度，验证稳定后再默认开）
+        "streaming_tool_execution": False,
     },
 
     # 上下文压缩管线（Phase 1）
