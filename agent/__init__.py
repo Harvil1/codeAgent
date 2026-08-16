@@ -506,6 +506,10 @@ class AIAgent:
         # 下一轮 _assemble_turn_messages 末尾消费并清空。这样既让 LLM 看到，
         # 又不污染 conversation_history（保护持久化 + prompt cache）
         self._pending_ephemeral_messages: list = []
+        # R26 #16：待激活的条件技能触碰路径（收集-批量执行）
+        # 工具回调只收集；_assemble_turn_messages 开头统一 flush
+        # （一轮多工具只扫一次技能目录，消重复磁盘 IO）
+        self._pending_skill_paths: list = []
         # R26 #9：goal nudge 每条 user 消息最多触发一次
         # （防连续 nudge 死循环——模型坚持宣布完成时第二次放行正常 complete）
         self._nudged_this_turn: bool = False
@@ -1114,6 +1118,8 @@ class AIAgent:
         # （nudge 一条消息最多一次；"最近有进展"从本条消息重新累计）
         self._nudged_this_turn = False
         self._last_turn_had_tool_success = False
+        # R26 #16：未消费的技能激活路径跨用户消息不保留（防陈旧路径残留）
+        self._pending_skill_paths = []
         # CCAR15 Task 3：记录本轮 history 起点（轮末 skill_learning 只观察本轮轨迹）
         self._sl_turn_start = len(self.conversation_history)
 
@@ -1533,6 +1539,11 @@ class AIAgent:
         CCAR8 Task 11：channel/mailbox 走 ephemeral 注入（fail-open），
         不进 conversation_history（保护 prompt cache + 持久化）。
         """
+        # R26 #16：开头先 flush 上一批工具触碰收集的技能激活路径——
+        # 必须赶在本方法末尾 _pending_ephemeral_messages 消费块之前，
+        # 激活通知才能在同一轮组装（下一次 LLM 调用）中可见，不晚一拍。
+        self._flush_skill_activations()
+
         messages = [
             {"role": "system", "content": system_prompt},
             *self.conversation_history,
@@ -2183,6 +2194,34 @@ class AIAgent:
             except Exception as e:
                 logger.debug("checkpoint track 失败: %s", e)
 
+    def _queue_skill_activation(self, path: str) -> None:
+        """R26 #16：工具触发的条件技能激活改为收集-批量执行。
+
+        原实现每个 read/write/str_replace 工具回调里同步扫技能目录
+        （磁盘 glob），一轮多工具就扫多次；改为先收集路径（去重），
+        在 _assemble_turn_messages 开头统一 flush——正好赶在
+        _pending_ephemeral_messages 消费之前，激活结果同轮可见，
+        时序与原内联实现完全一致。
+        """
+        if self._pending_skill_paths is None:
+            self._pending_skill_paths = []
+        if path and path not in self._pending_skill_paths:
+            self._pending_skill_paths.append(path)
+
+    def _flush_skill_activations(self) -> None:
+        """批量执行收集到的条件技能激活（fail-open）。
+
+        同步调用：_assemble_turn_messages 是 sync 方法（主循环每轮
+        LLM 调用前调一次），扫描有 mtime+size 双因子 frontmatter 缓存
+        兜底，且已从每工具一次去重到每轮一次——不值得为此改 async。
+        """
+        paths, self._pending_skill_paths = (self._pending_skill_paths or []), []
+        for p in paths:
+            try:
+                self._activate_conditional_skills(p)
+            except Exception as e:
+                logger.debug("条件技能激活失败（fail-open）: %s", e)
+
     def _activate_conditional_skills(self, path) -> None:
         """R19 #25：触碰匹配文件 → 动态激活条件技能（paths frontmatter）。
 
@@ -2529,8 +2568,9 @@ class AIAgent:
         elif tool_name == "load_skill" and tool_args.get("name"):
             self._record_recent("skill", str(tool_args["name"]))
         # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
+        # R26 #16：改收集-批量执行（回调里只入队，flush 见 _assemble_turn_messages）
         if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
-            self._activate_conditional_skills(tool_args["path"])
+            self._queue_skill_activation(str(tool_args["path"]))
         # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
         if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
             self._memory_touched_this_turn = True
@@ -2597,8 +2637,9 @@ class AIAgent:
         elif tool_name == "load_skill" and tool_args.get("name"):
             self._record_recent("skill", str(tool_args["name"]))
         # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
+        # R26 #16：改收集-批量执行（回调里只入队，flush 见 _assemble_turn_messages）
         if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
-            self._activate_conditional_skills(tool_args["path"])
+            self._queue_skill_activation(str(tool_args["path"]))
         # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
         if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
             self._memory_touched_this_turn = True

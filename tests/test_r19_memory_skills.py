@@ -5,6 +5,7 @@
 #25 条件技能 paths
 #28 skillify 内置技能
 #21 每轮自动记忆提取
+R26 #16 条件技能激活收集-批量执行
 """
 
 import json
@@ -276,6 +277,98 @@ def test_agent_activate_conditional_skills(tmp_path, monkeypatch):
     # 非匹配文件不通知
     a._activate_conditional_skills("proj/readme.md")
     assert len(a._pending_ephemeral_messages) == 1
+
+
+# ---------------------------------------------------------------------------
+# R26 #16：条件技能激活收集-批量执行（一轮多工具只扫一次技能目录）
+# ---------------------------------------------------------------------------
+
+def _fake_tc(name, args):
+    """构造最小 tool_call 桩（_run_tool_pre_callbacks 只读 name/arguments）。"""
+    return SimpleNamespace(
+        function=SimpleNamespace(name=name, arguments=json.dumps(args)),
+    )
+
+
+class TestSkillActivationDeferred:
+    """工具回调只收集路径；激活统一延迟到 _assemble_turn_messages 开头 flush。"""
+
+    def _make_agent(self):
+        from agent import AIAgent
+        a = AIAgent.__new__(AIAgent)
+        a._activated_conditional_skills = set()
+        a._pending_ephemeral_messages = []
+        a._recent_read_files = []
+        a._recent_skills = []
+        a.on_tool_call = None
+        return a
+
+    def test_paths_collected_not_activated_inline(self, monkeypatch):
+        """工具回调里只收集路径；激活发生在 flush。"""
+        from agent import AIAgent
+        agent = self._make_agent()
+        called = []
+        monkeypatch.setattr(
+            AIAgent, "_activate_conditional_skills",
+            lambda self, path: called.append(str(path)),
+        )
+        agent._pending_skill_paths = []
+        agent._run_tool_pre_callbacks(_fake_tc("read_file", {"path": "a.py"}))
+        assert agent._pending_skill_paths == ["a.py"]  # 只收集未激活
+        assert called == []
+        agent._flush_skill_activations()
+        assert called == ["a.py"]  # flush 时统一激活
+        assert agent._pending_skill_paths == []  # 队列已清空
+
+    def test_queue_dedup_and_flush_fail_open(self, monkeypatch):
+        """重复路径只入队一次；单路径激活异常 fail-open 不炸其余项。"""
+        from agent import AIAgent
+        agent = self._make_agent()
+        agent._pending_skill_paths = []
+        agent._queue_skill_activation("a.py")
+        agent._queue_skill_activation("a.py")  # 重复路径去重
+        agent._queue_skill_activation("b.py")
+        assert agent._pending_skill_paths == ["a.py", "b.py"]
+
+        def boom(self, path):
+            if path == "a.py":
+                raise RuntimeError("scan failed")
+        monkeypatch.setattr(AIAgent, "_activate_conditional_skills", boom)
+        agent._flush_skill_activations()  # a.py 抛异常被吞（fail-open）
+        assert agent._pending_skill_paths == []  # 队列仍清空
+
+    def test_assemble_flushes_before_ephemeral_consume(self, monkeypatch):
+        """flush 在 _assemble_turn_messages 开头——激活结果同一轮组装即可见。"""
+        import agent.skill_commands as sc
+        agent = self._make_agent()
+        # _assemble_turn_messages 需要的最小字段
+        agent.conversation_history = []
+        agent._channel_inbox = None
+        agent._mailbox = None
+        agent._agent_name = "main"
+        agent.plan_mode = False
+        agent._context_tip_shown = False
+        agent.model = "test-model"
+        agent.config = {}
+        agent._pending_tool_batch_summary = None
+        agent._pending_skill_paths = ["proj/main.py"]
+        monkeypatch.setattr(
+            sc, "find_conditional_skill_matches",
+            lambda p, skills_dirs=None: (
+                [{"name": "py-helper", "description": "d", "paths": ["*.py"]}]
+                if p.endswith(".py") else []
+            ),
+        )
+
+        messages = agent._assemble_turn_messages("sys", {})
+        assert agent._pending_skill_paths == []  # 组装开头已 flush
+        # 激活结果同轮进入 ephemeral 消息（不等下一轮）
+        ready = [
+            m for m in messages
+            if "conditional_skills_ready" in str(m.get("content", ""))
+        ]
+        assert len(ready) == 1
+        assert "py-helper" in ready[0]["content"]
 
 
 # ---------------------------------------------------------------------------
