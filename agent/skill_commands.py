@@ -187,6 +187,8 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
     """返回 paths 匹配 file_path 的条件技能 [{name, description, paths}]。
 
     只返回有 paths 的技能（无 paths 的已在常规索引——动态激活专用）。
+    R24 #26：skills_dirs=None 时自动并入**动态发现的嵌套技能目录**
+    （从文件父目录向上走到 cwd 的 .omnimate/skills / .claude/skills）。
     fail-open：任何异常返回空列表。
     """
     try:
@@ -196,11 +198,75 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
             cwd = get_workspace_cwd()
         except Exception:
             pass
+        if skills_dirs is None:
+            # R24 #26：常规目录 + 嵌套发现目录（后者覆盖同名）
+            try:
+                from constants import all_skills_dirs
+                base_dirs = list(all_skills_dirs())
+            except Exception:
+                base_dirs = []
+            skills_dirs = base_dirs + discover_skill_dirs_for_path(file_path, cwd)
         return [
             {"name": fm["name"], "description": fm["description"], "paths": fm["paths"]}
             for fm in _iter_skill_fm_summaries(skills_dirs)
             if path_matches_skill_paths(fm["paths"], file_path, cwd)
         ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# R24 #26：动态技能目录发现（对齐 CC discoverSkillDirsForPaths）
+# ---------------------------------------------------------------------------
+
+# 嵌套技能目录名约定（.omnimate/skills 为主，.claude/skills 兼容 CC）
+_NESTED_SKILL_DIR_NAMES = (".omnimate/skills", ".claude/skills")
+# 向上走时跳过的目录（防 node_modules 等投放目录里的技能）
+_SKIP_DIR_NAMES = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
+
+
+def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
+    """从文件父目录向上走到 cwd，发现嵌套技能目录。
+
+    深路径优先（最靠近文件的在前——同名技能覆盖浅层，对齐 CC）；
+    候选目录相对 cwd 的路径段含跳过目录（node_modules 等）的不收（投放防护）。
+    返回 Path 列表（可能为空）。fail-open。
+    """
+    try:
+        if not file_path:
+            return []
+        if cwd is None:
+            try:
+                from agent.workspace_context import get_workspace_cwd
+                cwd = get_workspace_cwd()
+            except Exception:
+                return []
+        if not cwd:
+            return []
+        f = Path(str(file_path))
+        if not f.is_absolute():
+            f = Path(cwd) / f
+        cwd_p = Path(cwd).resolve()
+        f_resolved = f.resolve()
+        if not f_resolved.is_relative_to(cwd_p):
+            return []  # 文件在 cwd 外（如 ~/.OmniMate offload）不适用
+        found = []
+        for parent in f_resolved.parents:
+            for name in _NESTED_SKILL_DIR_NAMES:
+                cand = parent / name
+                if not cand.is_dir():
+                    continue
+                try:
+                    parts = set(cand.relative_to(cwd_p).parts)
+                except ValueError:
+                    parts = set()
+                if parts & _SKIP_DIR_NAMES:
+                    continue  # 投放防护
+                if cand not in found:
+                    found.append(cand)
+            if parent == cwd_p:
+                break
+        return found
     except Exception:
         return []
 

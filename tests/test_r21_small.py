@@ -643,3 +643,53 @@ def test_truncate_at_last_compact_boundary():
     # 无标记 → 原样（旧会话保守路径）
     plain = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}]
     assert trunc(plain) == plain
+
+
+# ---------------------------------------------------------------------------
+# R24 #26：动态技能目录发现
+# ---------------------------------------------------------------------------
+
+from agent.skill_commands import discover_skill_dirs_for_path
+
+
+def test_discover_skill_dirs_nested(tmp_path):
+    """深路径向上发现嵌套 .omnimate/skills；node_modules 投放跳过；cwd 外不适用。"""
+    api_skills = tmp_path / "services" / "api" / ".omnimate" / "skills"
+    api_skills.mkdir(parents=True)
+    root_skills = tmp_path / ".claude" / "skills"
+    root_skills.mkdir(parents=True)
+    poisoned = tmp_path / "node_modules" / "pkg" / ".omnimate" / "skills"
+    poisoned.mkdir(parents=True)
+
+    deep = tmp_path / "services" / "api" / "src" / "main.py"
+    found = discover_skill_dirs_for_path(str(deep), str(tmp_path))
+    # 深路径优先：api 的目录在前，root 的 .claude/skills 也在链上
+    assert found[0] == api_skills
+    assert root_skills in found
+    # 投放目录不收
+    assert poisoned not in found
+
+    # 文件在 cwd 外 → 空
+    assert discover_skill_dirs_for_path("C:/elsewhere/x.py", str(tmp_path)) == []
+    # 空 path → 空
+    assert discover_skill_dirs_for_path("", str(tmp_path)) == []
+
+
+def test_nested_dir_feeds_conditional_match(tmp_path):
+    """嵌套目录里的条件技能可被 find_conditional_skill_matches 发现。"""
+    import agent.skill_commands as sc
+    sc._fm_summary_cache.clear()
+    nested = tmp_path / "packages" / "web" / ".omnimate" / "skills"
+    d = nested / "react-helper"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        '---\nname: react-helper\ndescription: "React 组件规范"\npaths: ["*.tsx"]\n---\n正文',
+        encoding="utf-8",
+    )
+    from agent.workspace_context import workspace_cwd_context
+    with workspace_cwd_context(str(tmp_path)):
+        hits = sc.find_conditional_skill_matches(
+            str(tmp_path / "packages" / "web" / "src" / "App.tsx"),
+        )
+        names = [h["name"] for h in hits]
+        assert "react-helper" in names, names
