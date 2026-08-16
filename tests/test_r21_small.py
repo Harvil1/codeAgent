@@ -747,3 +747,63 @@ def test_coordinator_builtin_agent():
         from agent.agent_defs import _builtin_agents_dir
         body = (_builtin_agents_dir() / "coordinator.md").read_text(encoding="utf-8")
     assert "Scratchpad" in body and "编排" in body
+
+
+# ---------------------------------------------------------------------------
+# R24 #38：agent 内联 mcpServers
+# ---------------------------------------------------------------------------
+
+def test_inline_mcp_parse():
+    """frontmatter 的 inlineMcpServers dict 正确解析进 AgentDefinition。"""
+    import tempfile
+    from agent.agent_defs import _parse_inline_mcp, _parse_one
+    raw = {"weather": {"command": "uvx", "args": ["mcp-weather"]}, "bad": "not-dict"}
+    parsed = _parse_inline_mcp(raw)
+    assert "weather" in parsed and "bad" not in parsed
+    assert _parse_inline_mcp(None) == {} and _parse_inline_mcp(["list"]) == {}
+
+    # _parse_one 端到端
+    tmp = Path(tempfile.mkdtemp())
+    md = tmp / "my-agent.md"
+    md.write_text(
+        "---\n"
+        "name: my-agent\n"
+        "description: d\n"
+        "inlineMcpServers:\n"
+        "  weather:\n"
+        "    command: uvx\n"
+        "    args: [mcp-weather]\n"
+        "---\n正文",
+        encoding="utf-8",
+    )
+    d = _parse_one(md)
+    assert d is not None and d.name == "my-agent"
+    assert "weather" in d.inline_mcp_servers
+    assert d.inline_mcp_servers["weather"]["command"] == "uvx"
+
+
+def test_mcp_manager_connect_one_disconnect(monkeypatch):
+    """connect_one 幂等复用；disconnect_one 断开移除。"""
+    from agent.mcp_client import MCPManager, MCPClient
+
+    mgr = MCPManager()
+    created = []
+
+    class _FakeClient:
+        def __init__(self, **kw):
+            self.connected = True
+            self.closed = False
+            created.append(self)
+        def connect(self):
+            pass
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("agent.mcp_client.MCPClient", _FakeClient)
+    cfg = {"command": "uvx", "args": ["x"]}
+    c1 = mgr.connect_one("tmp-srv", cfg)
+    c2 = mgr.connect_one("tmp-srv", cfg)  # 幂等：复用
+    assert c1 is c2 and len(created) == 1
+    assert mgr.disconnect_one("tmp-srv") is True
+    assert c1.closed
+    assert mgr.disconnect_one("tmp-srv") is False  # 已移除

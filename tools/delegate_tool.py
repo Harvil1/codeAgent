@@ -850,6 +850,32 @@ def _run_child(
                 child_config = dict(parent_cfg) if isinstance(parent_cfg, dict) else {}
             child_config["mcp_server_filter"] = custom_def.mcp_servers
 
+        # === R24 #38：内联 mcpServers — spawn 时临时连接，结束断开 ===
+        # （不进全局 .mcp.json 注册；连接进共享 MCPManager，工具以
+        #   mcp__<name>__<tool> 前缀动态注册；finally 断开）
+        _inline_mcp_connected: list = []  # 本次临时连接的 server 名
+        if custom_def and getattr(custom_def, "inline_mcp_servers", None):
+            try:
+                from agent.mcp_client import get_mcp_manager
+                from tools.mcp_tool import register_mcp_tools
+                _mgr = get_mcp_manager()
+                _app_cfg = kwargs.get("config")
+                for _sname, _scfg in custom_def.inline_mcp_servers.items():
+                    _mgr.connect_one(_sname, _scfg, app_config=_app_cfg)
+                    _inline_mcp_connected.append(_sname)
+                if _inline_mcp_connected:
+                    register_mcp_tools(_mgr, servers=_inline_mcp_connected)
+                    # child 暴露这些 server 的工具（与 mcp_servers 过滤合并）
+                    _filter = child_config.get("mcp_server_filter") if child_config else None
+                    if child_config is None:
+                        _pcfg = kwargs.get("config")
+                        child_config = dict(_pcfg) if isinstance(_pcfg, dict) else {}
+                    child_config["mcp_server_filter"] = (
+                        (list(_filter) if _filter else []) + _inline_mcp_connected
+                    )
+            except Exception as e:
+                logger.warning("内联 mcpServers 连接失败（fail-open 继续无 MCP）: %s", e)
+
         # === Task H: fork 子代理路径（cache-identical 省 token）===
         # fork=True 时：子代理继承父 system prompt 字节 + 父对话前缀（最近 N 个 assistant turn），
         # 构造 cache-identical 前缀，prompt cache 命中省 token 50%+。
@@ -1097,6 +1123,16 @@ def _run_child(
 
         return result
     finally:
+        # === R24 #38：断开内联临时 MCP server（不残留全局连接）===
+        if _inline_mcp_connected:
+            try:
+                from agent.mcp_client import get_mcp_manager
+                _mgr = get_mcp_manager()
+                for _sname in _inline_mcp_connected:
+                    _mgr.disconnect_one(_sname)
+            except Exception:
+                pass  # fail-open：断开失败不阻塞清理链
+
         # === Task I: 异常时标记 failed（_fork_success=False 表示没到 return）===
         if _child_agent_id and not _fork_success:
             try:

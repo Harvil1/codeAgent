@@ -28,15 +28,19 @@ def _make_server_check(mgr: MCPManager, sname: str):
     return check
 
 
-def register_mcp_tools(manager: MCPManager = None) -> int:
-    """把所有 MCP server 的工具注册到 registry。
+def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
+    """把 MCP server 的工具注册到 registry。
 
-    返回注册的工具数量。
+    servers=None 注册全部；否则只注册指定 server 列表（R24 #38 内联临时
+    server 用——只暴露 agent 声明的那些）。返回注册的工具数量。
     """
     if manager is None:
         manager = get_mcp_manager()
 
     tools = manager.get_all_tools()
+    if servers is not None:
+        wanted = set(servers)
+        tools = [t for t in tools if t.get("server") in wanted]
     count = 0
 
     for tool in tools:

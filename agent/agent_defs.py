@@ -33,6 +33,10 @@ class AgentDefinition:
     memory: bool = False                                  # frontmatter "memory: true"
     skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
     mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
+    # R24 #38：内联 mcpServers dict（{name: {command/args/url/...}}）——spawn 时
+    # 临时连接结束断开（不进全局配置）；与 mcp_servers 互补：
+    # mcp_servers 过滤已配置全局 server；inline_mcp_servers 定义新临时 server
+    inline_mcp_servers: dict = field(default_factory=dict)
     effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
     # === Task N 新增 4 字段（借鉴 Claude Code）===
     omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理跳过项目 OMNIMATE.md（省 token）
@@ -58,6 +62,13 @@ def _builtin_agents_dir() -> Path:
     return Path(__file__).parent / "builtin_agents"
 
 
+def _parse_inline_mcp(raw) -> dict:
+    """R24 #38：解析 frontmatter 的内联 mcpServers（{name: cfg} dict）。"""
+    if isinstance(raw, dict):
+        return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+    return {}
+
+
 def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
     try:
         content = skill_md.read_text(encoding="utf-8")
@@ -77,6 +88,7 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             memory=bool(fm.get("memory", False)),
             skills=fm.get("skills") or [],
             mcp_servers=fm.get("mcpServers") or [],
+            inline_mcp_servers=_parse_inline_mcp(fm.get("mcpServersInline") or fm.get("inlineMcpServers")),
             effort=fm.get("effort"),
             # === Task N: 4 新字段 frontmatter camelCase → snake_case ===
             omit_claude_md=bool(fm.get("omitClaudeMd", False)),

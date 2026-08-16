@@ -1204,24 +1204,59 @@ class MCPManager:
 
         for name, cfg in config.items():
             try:
-                client = MCPClient(
-                    name=name,
-                    command=cfg.get("command"),
-                    args=cfg.get("args"),
-                    env=cfg.get("env"),
-                    url=cfg.get("url"),
-                    headers=cfg.get("headers"),
-                    oauth=cfg.get("oauth"),
-                    transport=cfg.get("transport"),
-                    include=cfg.get("include"),
-                    exclude=cfg.get("exclude"),
-                    config=app_config,
-                )
-                client.connect()
-                with self._lock:
-                    self._clients[name] = client
+                self.connect_one(name, cfg, app_config=app_config)
             except Exception as e:
+                # 保持原语义：单个 server 失败（含 transport flag 未开）只跳过
                 logger.warning("MCP server %s 连接失败: %s", name, e)
+
+    def connect_one(
+        self,
+        name: str,
+        cfg: dict,
+        *,
+        app_config: Optional[dict] = None,
+    ) -> "MCPClient":
+        """连接单个 server（R24 #38：agent 内联 mcpServers 用）。
+
+        返回 MCPClient；连接失败抛异常（调用方决定 fail-open 还是抛）。
+        已存在同名连接直接复用（幂等）。
+        """
+        with self._lock:
+            existing = self._clients.get(name)
+        if existing is not None and existing.connected:
+            return existing
+        client = MCPClient(
+            name=name,
+            command=cfg.get("command"),
+            args=cfg.get("args"),
+            env=cfg.get("env"),
+            url=cfg.get("url"),
+            headers=cfg.get("headers"),
+            oauth=cfg.get("oauth"),
+            transport=cfg.get("transport"),
+            include=cfg.get("include"),
+            exclude=cfg.get("exclude"),
+            config=app_config,
+        )
+        client.connect()
+        with self._lock:
+            self._clients[name] = client
+        return client
+
+    def disconnect_one(self, name: str) -> bool:
+        """断开并移除单个 server 连接（R24 #38：临时连接结束断开）。
+
+        返回是否找到并断开。
+        """
+        with self._lock:
+            client = self._clients.pop(name, None)
+        if client is None:
+            return False
+        try:
+            client.close()
+        except Exception as e:
+            logger.debug("MCP server %s 关闭异常（忽略）: %s", name, e)
+        return True
 
     def get_all_tools(self) -> List[dict]:
         """获取所有 server 的工具列表（含 server 名前缀）。"""
