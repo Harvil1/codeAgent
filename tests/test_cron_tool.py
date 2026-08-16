@@ -178,8 +178,9 @@ def test_schemas_use_openai_parameters_key():
 
 def test_create_schema_required_fields():
     props = CRON_CREATE_SCHEMA["parameters"]["properties"]
-    assert set(props) == {"cron", "message", "catch_up"}
-    assert sorted(CRON_CREATE_SCHEMA["parameters"]["required"]) == ["cron", "message"]
+    assert set(props) == {"cron", "message", "catch_up", "template"}
+    # R26 #18：template 模式下 cron/message 可省略（取模板值），不再硬性 required
+    assert not CRON_CREATE_SCHEMA["parameters"].get("required")
     assert props["catch_up"]["default"] is False
 
 

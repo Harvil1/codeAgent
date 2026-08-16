@@ -45,8 +45,17 @@ CRON_CREATE_SCHEMA = {
                 "default": False,
                 "description": "True 时错过的一次触发会在启动时补跑（默认 False）",
             },
+            "template": {
+                "type": "string",
+                "description": (
+                    "任务模板名（~/.OmniMate/templates/*.md 或项目 .omnimate/templates/*.md）。"
+                    "给定后 cron/message/catch_up 用模板值；显式传的 cron/message 参数优先。"
+                ),
+            },
         },
-        "required": ["cron", "message"],
+        # template 模式下 cron/message 可省略（取模板值），不再硬性 required；
+        # 全缺时由 handler 兜底校验（invalid_args）。
+        "required": [],
     },
 }
 
@@ -100,9 +109,24 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
     流程：参数校验 → cron 表达式校验（cron_match 不抛才算合法）→
     scheduler.add_job → 返回 job_id。
     """
-    cron = (args.get("cron") or "").strip()
-    message = (args.get("message") or "").strip()
-    catch_up = bool(args.get("catch_up", False))
+    template_name = str(args.get("template") or "").strip()
+    if template_name:
+        from agent.templates import load_task_templates
+        tpl = load_task_templates().get(template_name)
+        if tpl is None:
+            return json.dumps({
+                "error": f"模板不存在: {template_name}",
+                "error_type": "invalid_template",
+                "available": sorted(load_task_templates().keys()),
+            }, ensure_ascii=False)
+        # 显式参数优先模板值
+        cron = str(args.get("cron") or "").strip() or tpl["cron"]
+        message = str(args.get("message") or "").strip() or tpl["message"]
+        catch_up = bool(args.get("catch_up", tpl["catch_up"]))
+    else:
+        cron = (args.get("cron") or "").strip()
+        message = (args.get("message") or "").strip()
+        catch_up = bool(args.get("catch_up", False))
     if not cron or not message:
         return json.dumps(
             {"error": "cron 和 message 都是必填", "error_type": "invalid_args"},
