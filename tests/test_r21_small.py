@@ -112,8 +112,10 @@ def test_denial_total_fallback():
         checker.check("cmd")
     assert checker._llm_denial_total == 20
     assert checker._llm_denial_total >= LLM_DENIAL_MAX_TOTAL
-    assert checker._llm_denial_consecutive == 0  # 最后一次是 safe
-    # 20 次累计达限 → 闸门 4 停用（后续 0 新调用）
+    # 第 29 次 unsafe 后 total=20 → 闸门停用；第 30 次不再调 LLM
+    # （verdicts 里的 safe 没被消费）→ consecutive 保持 2
+    assert checker._llm_denial_consecutive == 2
+    # 后续 0 新调用
     n_before = calls["n"]
     checker.check("cmd")
     assert calls["n"] == n_before
