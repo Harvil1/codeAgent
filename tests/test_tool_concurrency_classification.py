@@ -59,6 +59,7 @@ UNSAFE_TOOLS = {
     "notebook_edit",    # R20 #35: notebook 单元格编辑（写文件）
     # 执行类
     "terminal",         # shell 命令（最强副作用）
+    "lsp",              # R26 #17: pylsp 子进程 stdin/stdout 有状态 JSON-RPC 交互
     # 交互式
     "ask_user",         # 阻塞等用户输入（并发会导致提示交错）
     # 上下文管理（副作用）

@@ -16,6 +16,7 @@ _CORE_TOOLS = [
     "notebook_edit",   # Jupyter 单元格编辑（R20 #35，对齐 CC NotebookEdit）
     "search_files",    # 搜索文件内容（grep）
     "glob",            # 按文件名模式查找（CCAR11 Task 1，与 search_files 正交）
+    "lsp",             # LSP 符号导航 definitions/references（R26 #17，pylsp check_fn 门控）
     "str_replace",     # 文件定点替换编辑
     # 技能相关（05 实现）
     "skills_list",
