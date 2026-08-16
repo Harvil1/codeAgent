@@ -38,7 +38,12 @@ def _check_bg_enabled() -> bool:
 
 BG_START_SCHEMA = {
     "name": "bg_start",
-    "description": "启动后台任务（异步执行长命令，立即返回 task_id）",
+    "description": (
+        "启动后台任务（异步执行长命令，立即返回 task_id）。"
+        "monitor=true 走流式监视语义（tail -f/watch/轮询命令）：豁免停滞看门狗"
+        "（安静是常态）、stdout 增量落盘 output_file（read_file 随时查）、"
+        "timeout 默认 24h、进程退出时通知。一次性命令不要用 monitor。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -52,7 +57,11 @@ BG_START_SCHEMA = {
                 "type": "boolean",
                 "description": "是否脱离 agent 进程组（默认 false）",
             },
-            "timeout": {"type": "number", "description": "超时秒数（默认 600）"},
+            "timeout": {"type": "number", "description": "超时秒数（默认 600；monitor 默认 86400）"},
+            "monitor": {
+                "type": "boolean",
+                "description": "流式监视模式（tail -f/watch/轮询），默认 false",
+            },
         },
         "required": ["command"],
     },
@@ -184,10 +193,12 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
     cwd = Path(cwd_raw) if cwd_raw else None
     detach = bool(args.get("detach", False))
     timeout = args.get("timeout")
+    monitor = bool(args.get("monitor", False))  # R22 #32：流式监视模式
     try:
         task_id = bg_manager.start(
             command, cwd=cwd, detach=detach,
             timeout=timeout if timeout is not None else None,
+            monitor=monitor,
         )
     except RuntimeError as e:
         return json.dumps({
@@ -195,11 +206,17 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
             "error_type": "bg_task_full",
         }, ensure_ascii=False)
     task = bg_manager.status(task_id)
-    return json.dumps({
+    resp = {
         "task_id": task_id,
         "status": task.status,
         "pid": task.pid,
-    }, ensure_ascii=False)
+    }
+    if monitor:
+        resp["monitor"] = True
+        if task.output_file:
+            resp["output_file"] = task.output_file
+        resp["hint"] = "监视器已启动：用 read_file(output_file) 查增量输出；进程退出时会收到通知"
+    return json.dumps(resp, ensure_ascii=False)
 
 
 def _handle_bg_status(args: dict, **kwargs) -> str:

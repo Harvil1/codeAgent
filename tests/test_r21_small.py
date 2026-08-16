@@ -546,3 +546,68 @@ def test_drain_queued_input():
     d = _mk_queue_agent(q3)
     d._drain_queued_input()
     assert d._pending_ephemeral_messages == []
+
+
+# ---------------------------------------------------------------------------
+# R22 #32：Monitor 监视器
+# ---------------------------------------------------------------------------
+
+def test_monitor_mode_tee_and_no_stall(tmp_path):
+    """monitor：stdout tee 落盘 + 豁免 stall 通知；退出照常通知。"""
+    import time as _time
+    from agent.background import BackgroundManager
+
+    mgr = BackgroundManager(stall_timeout=45.0)
+    # 轮询型"监视器"：每 0.2s 输出一行，1s 后退出（stall 45s 永不触发；
+    # 常规任务若真停滞才会触发——这里 monitor 豁免逻辑靠 exit 验证不误报）
+    tid = mgr.start(
+        ["python", "-c",
+         "import time\nfor i in range(5):\n    print(f'line {i}', flush=True)\n    time.sleep(0.15)"],
+        timeout=30, monitor=True, monitor_dir=tmp_path,
+    )
+    # 等完成（轮询通知）
+    deadline = _time.time() + 15
+    notifications = []
+    while _time.time() < deadline:
+        notifications.extend(mgr.drain_notifications())
+        task = mgr.status(tid)
+        if task and task.status in ("completed", "failed"):
+            break
+        _time.sleep(0.2)
+    notifications.extend(mgr.drain_notifications())
+    task = mgr.status(tid)
+    assert task.status == "completed"
+    assert task.monitor is True
+    # tee 文件含全部输出（不受 result cap 影响）
+    assert task.output_file and Path(task.output_file).exists()
+    tee_text = Path(task.output_file).read_text(encoding="utf-8")
+    assert "line 0" in tee_text and "line 4" in tee_text
+    # 退出通知（无 stall 标志）
+    final = [n for n in notifications if n.get("task_id") == tid]
+    assert final and final[-1].get("status") == "completed"
+    assert not final[-1].get("stall")
+
+
+def test_monitor_quiet_no_stall_notification(tmp_path):
+    """monitor 安静期（无输出）不触发 stall 通知（安静是常态）。"""
+    import time as _time
+    from agent.background import BackgroundManager
+
+    # stall_timeout 极短（0.5s）+ monitor 任务 1.2s 无输出——豁免则无 stall 通知
+    mgr = BackgroundManager(stall_timeout=0.5)
+    tid = mgr.start(
+        ["python", "-c", "import time; time.sleep(1.2); print('done', flush=True)"],
+        timeout=30, monitor=True, monitor_dir=tmp_path,
+    )
+    deadline = _time.time() + 15
+    notifications = []
+    while _time.time() < deadline:
+        notifications.extend(mgr.drain_notifications())
+        task = mgr.status(tid)
+        if task and task.status in ("completed", "failed"):
+            break
+        _time.sleep(0.2)
+    notifications.extend(mgr.drain_notifications())
+    assert mgr.status(tid).status == "completed"
+    stalls = [n for n in notifications if n.get("stall")]
+    assert stalls == []  # monitor 豁免——同场景常规任务必报 stall

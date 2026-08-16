@@ -47,6 +47,9 @@ class BackgroundTask:
     stdout: str = ""
     stderr: str = ""
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
+    # R22 #32：monitor 模式（流式监视——tail -f/watch/轮询）
+    monitor: bool = False                  # 豁免 stall 通知（安静是常态）
+    output_file: Optional[str] = None      # stdout tee 落盘路径（read_file 随时查增量）
 
 
 class BackgroundManager:
@@ -80,8 +83,15 @@ class BackgroundManager:
         cwd: Optional[Path] = None,
         detach: bool = False,
         timeout: Optional[float] = None,
+        monitor: bool = False,
+        monitor_dir=None,
     ) -> str:
         """启动后台任务。返回 task_id。
+
+        R22 #32：monitor=True 走流式监视语义（tail -f/watch/轮询命令）——
+        stdout 增量 tee 到 <monitor_dir>/<task_id>.log（read_file 随时查）、
+        豁免 stall 看门狗通知（安静是常态）、timeout 默认 24h（长跑）。
+        进程退出时照常 push 通知（对齐 CC Monitor 的退出通知）。
 
         Raises RuntimeError if at max_concurrent.
         """
@@ -139,11 +149,26 @@ class BackgroundManager:
                 started_at=datetime.now(),
                 detach=detach,
                 _proc=proc,
+                monitor=monitor,
             )
+            # R22 #32：monitor 输出文件（stdout tee，read_file 随时查增量）
+            if monitor:
+                try:
+                    m_dir = Path(monitor_dir) if monitor_dir else (
+                        Path.home() / ".OmniMate" / ".task_outputs" / "monitor"
+                    )
+                    m_dir.mkdir(parents=True, exist_ok=True)
+                    task.output_file = str(m_dir / f"{task_id}.log")
+                except Exception:
+                    task.output_file = None  # fail-open：落盘失败仍可跑
             self._tasks[task_id] = task
 
         # 起 daemon thread 监控
         effective_timeout = timeout if timeout is not None else self._default_timeout
+        if monitor:
+            # R22 #32：监视器长跑（默认 24h）+ 强制 stall 轮询路径（增量 tee 需要）
+            if timeout is None:
+                effective_timeout = 86400.0
         t = threading.Thread(
             target=self._watch,
             args=(task_id, proc, effective_timeout, self._stall_timeout),
@@ -166,9 +191,16 @@ class BackgroundManager:
           - 主线程轮询：proc.poll() / stall 检测 / 总 timeout
           - stall_timeout 秒无 stdout 新增 → push 停滞通知（不 kill，让 LLM 决定）
         stall_timeout == 0 时走旧 communicate 单次阻塞路径（向后兼容）。
+        monitor 任务（task.monitor=True）走 stall 路径但**跳过 stall 通知**
+        （流式监视安静是常态）并 tee stdout 到 output_file。
         """
-        if stall_timeout > 0:
-            return self._watch_with_stall(task_id, proc, timeout, stall_timeout)
+        task = self._tasks.get(task_id)
+        is_monitor = bool(task and task.monitor)
+        if stall_timeout > 0 or is_monitor:
+            return self._watch_with_stall(
+                task_id, proc, timeout,
+                stall_timeout if stall_timeout > 0 else 30.0,
+            )
         return self._watch_classic(task_id, proc, timeout)
 
     def _watch_classic(
@@ -265,6 +297,18 @@ class BackgroundManager:
         stall_notified = False
         deadline = time.monotonic() + timeout
 
+        # R22 #32：monitor 语义——tee stdout 到文件 + 跳过 stall 通知
+        with self._lock:
+            _task_ref = self._tasks.get(task_id)
+            is_monitor = bool(_task_ref and _task_ref.monitor)
+            output_file = (_task_ref.output_file if _task_ref else None)
+        tee_f = None
+        if is_monitor and output_file:
+            try:
+                tee_f = open(output_file, "a", encoding="utf-8")
+            except Exception:
+                tee_f = None  # fail-open：落盘失败不影响监视
+
         try:
             while True:
                 # I-3: stop() 已介入则退出
@@ -277,7 +321,14 @@ class BackgroundManager:
                 got_new = False
                 try:
                     while True:
-                        stdout_parts.append(stdout_q.get_nowait())
+                        line = stdout_q.get_nowait()
+                        stdout_parts.append(line)
+                        if tee_f is not None:
+                            try:
+                                tee_f.write(line)
+                                tee_f.flush()
+                            except Exception:
+                                pass
                         got_new = True
                 except queue.Empty:
                     pass
@@ -341,9 +392,10 @@ class BackgroundManager:
                         self._push_notification_locked(task)
                     return
 
-                # 停滞检测
+                # 停滞检测（R22 #32：monitor 任务跳过——流式监视安静是常态）
                 if (
                     not stall_notified
+                    and not is_monitor
                     and (now - last_output_time) >= stall_timeout
                 ):
                     with self._lock:
@@ -389,6 +441,13 @@ class BackgroundManager:
                 task.exit_code = -1
                 task.stderr = str(e)[: self._result_stdout_cap]
                 self._push_notification_locked(task)
+        finally:
+            # R22 #32：monitor tee 文件关闭（所有退出路径）
+            if tee_f is not None:
+                try:
+                    tee_f.close()
+                except Exception:
+                    pass
 
     def _push_notification_locked(self, task: BackgroundTask):
         """必须在持有 self._lock 时调。push 一个通知到 deque。"""
