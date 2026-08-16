@@ -121,3 +121,42 @@ async def test_dispatch_allowed_tool_normal(tmp_path, monkeypatch):
     result = await registry.dispatch("skills_list", {})
     data = json.loads(result)
     assert data.get("error_type") != "permission_denied"
+
+
+# ===== R25 #1：环境变量前缀/安全包装词剥离（防 deny 规则绕过）=====
+
+class TestNormalizeCommandForRules:
+    """FOO=bar rm xxx / nohup rm xxx 不能绕过 deny(rm ...) 规则。"""
+
+    def test_env_prefix_stripped_for_deny(self):
+        from agent.tool_permissions import check_command_rules
+        # 注：规则不能用 Bash(rm -rf build:*)——前缀是词边界语义（R16 #3，
+        # test_r16_security.py 已断言 build:* 不匹配 build/），改用 rm -rf 前缀。
+        rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
+        assert check_command_rules("FOO=1 rm -rf build/x", rules) == "deny"
+
+    def test_multiple_env_prefixes_stripped(self):
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(git push:*)"], "allow": [], "ask": []}
+        assert check_command_rules("A=1 B=2 git push origin x", rules) == "deny"
+
+    def test_env_command_prefix_stripped(self):
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(curl:*)"], "allow": [], "ask": []}
+        assert check_command_rules("env C=3 curl http://x", rules) == "deny"
+
+    def test_nohup_timeout_nice_stripped(self):
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(rm:*)"], "allow": [], "ask": []}
+        assert check_command_rules("nohup rm -rf build", rules) == "deny"
+        assert check_command_rules("timeout 30 rm -rf build", rules) == "deny"
+        assert check_command_rules("nice -n 5 rm -rf build", rules) == "deny"
+
+    def test_no_env_prefix_unchanged(self):
+        from agent.tool_permissions import _normalize_command_for_rules
+        assert _normalize_command_for_rules("uv run pytest") == "uv run pytest"
+
+    def test_plain_word_with_equals_not_stripped(self):
+        """echo a=b 不是 env 前缀（env 赋值只能出现在命令头部）。"""
+        from agent.tool_permissions import _normalize_command_for_rules
+        assert _normalize_command_for_rules("echo a=b") == "echo a=b"

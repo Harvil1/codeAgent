@@ -239,6 +239,63 @@ def _wildcard_regex(pattern: str) -> "re.Pattern":
     return compiled
 
 
+# ---------------------------------------------------------------------------
+# R25 #1：命令形态归一化（剥 env 前缀 + 安全包装词，防规则绕过）
+# 对齐 CCB bashPermissions.stripAllLeadingEnvVars + SAFE_WRAPPER 剥离。
+# ---------------------------------------------------------------------------
+
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+_WRAPPER_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+
+
+def _normalize_command_for_rules(command: str) -> str:
+    """剥掉命令头部的环境变量赋值前缀和安全包装词，用于内容级规则匹配。
+
+    防的是：用户 deny 了 ``Bash(rm:*)``，agent 发 ``FOO=1 rm xxx`` 绕过匹配。
+    只剥**头部**（对齐 CCB 语义）；复合命令中段的 env 赋值（``a && B=1 rm``）
+    是既有匹配语义未覆盖的形态，记录为已知限制不在此处理。
+
+    剥离形态（定点迭代直到剥不动）：
+      - ``NAME=value`` 赋值 token
+      - ``env`` 后跟任意个赋值 token（env 本身也剥）
+      - ``nohup``
+      - ``timeout <时长>``（两 token 一起）
+      - ``nice`` / ``nice -n <数字>``
+      - ``stdbuf`` 后跟任意个 ``-`` 开头的选项 token
+    """
+    tokens = command.split()
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if tok == "env":
+            # env 后面跟的赋值也剥；env 后面直接是命令则只剥 env
+            i += 1
+            continue
+        if tok == "nohup":
+            i += 1
+            continue
+        if tok == "timeout" and i + 1 < n and _WRAPPER_DURATION_RE.match(tokens[i + 1]):
+            i += 2
+            continue
+        if tok == "nice":
+            if i + 2 < n and tokens[i + 1] == "-n" and tokens[i + 2].lstrip("-").isdigit():
+                i += 3
+            else:
+                i += 1
+            continue
+        if tok == "stdbuf":
+            i += 1
+            while i < n and tokens[i].startswith("-"):
+                i += 1
+            continue
+        break
+    return " ".join(tokens[i:]) if i else command
+
+
 def command_rule_matches(rule: str, command: str) -> bool:
     """内容级规则是否匹配命令（exact / prefix / wildcard 三形态）。"""
     parsed = parse_command_rule(rule)
@@ -258,9 +315,11 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
 
     返回 "deny" / "ask" / "allow" / "none"，优先级 deny > ask > allow。
     工具可见性条目（read_file 等无括号形态）不参与——parse 返回 None。
+    R25 #1：匹配前先剥 env 前缀/安全包装词（FOO=bar rm xxx 绕不过 deny(rm)）。
     """
     if rules is None:
         rules = load_tool_permission_rules()
+    command = _normalize_command_for_rules(command)
     for r in (rules.get("deny") or []):
         if command_rule_matches(r, command):
             return "deny"
