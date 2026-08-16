@@ -209,8 +209,10 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | 复刻指南（设计权衡详解） | `D:\project\hermes-agent-main\replication-guide\` |
 | 会话移交 bundle / 跨项目恢复 | `agent/handoff.py` + `agent/cross_project.py` |
 | Vision / Glob / WebFetch / WebSearch / Read 双上限 / NotebookEdit | `tools/image_tool.py` / `glob_tool.py` / `web_fetch_tool.py` / `web_search_tool.py` / `file_operations.py` |
+| LSP 符号导航（pylsp 门控） | `tools/lsp_tool.py` |
 | Plan Mode（计划 + 审批 + 清上下文执行） | `agent/__init__.py`（plan_mode 分支 + `_apply_post_plan_clear`）+ `tools/plan_mode_tool.py` |
 | Cron 调度（一次性 + catch_up） | `agent/cron.py:CronScheduler` + `tools/cron_tool.py` |
+| cron 任务模板发现 | `agent/templates.py` |
 | Goal 驱动系统（状态机 + token 预算） | `agent/goal.py:GoalState` + `tools/goal_tool.py` |
 | 后台任务 + monitor 监视器 + stall 看门狗 | `agent/background.py:BackgroundManager` |
 | Hook 事件（27 种）+ 5 种 handler 类型 | `agent/hooks.py:HookEvent` + `agent/hook_exec.py:dispatch_hook` + `agent/hook_loader.py` |
@@ -269,6 +271,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **permissions.allow 的唯一语义** —— allow 条目只在"豁免 deny"时生效（deny 整服务器 + allow 单工具），不是白名单模式。
 - **只读表保守优先** —— 识别不了的形态一律不算只读；`env` 不进表；git branch/tag/remote 只收只读子形态。
 - **分类器白名单剥离只影响闸门 4** —— 危险前缀白名单条目仍走正常 LLM 分类；连续 3/累计 20 拒绝本会话停用闸门 4 回落人工。
+- **分类器三向 + nl_rules** —— verdict=ask 升审批不拒；confidence<0.7 一律 ask；`permissions.nl_rules` 是自然语言规则（分类器优先对照）。
 - **Windows 沙箱 = 进程管控** —— Job Object 管子进程树，不隔离文件系统。
 - **hook 沙箱 Windows 走 Job Object**（terminal 同款）；approved_paths.json 持久化机制存在但未接线。
 - **goal_start/goal_resume/worktree_enter/cron_create/cron_delete 禁用于 async 子代理** —— 止损类（pause/clear/exit）保留自救。
@@ -292,12 +295,14 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **流式预执行只覆盖 safe 且默认关** —— `agent.streaming_tool_execution=False` 灰度；unsafe 不预执行（乱序副作用不可接受）。
 - **plan 清上下文只清 LLM 上下文** —— 会话库 append-only 可恢复；stable prompt 段保留。
 - **http hook env 插值默认关** —— `${VAR}` 只在 `security.http_hook_allowed_env_vars` 白名单内插值，非白名单保留原样并告警。
+- **goal nudge 只在有预算限制时生效** —— `should_nudge` 需 `token_budget_limit` + 最近一轮工具成功；无预算 goal 不踢（对齐 CCB 收益递减门控的保守面）。
 
 ### 记忆与技能
 
 - **记忆分层项目隔离** —— project/reference 类存 `.memory/projects/<canonical-git-root>/`，项目间物理不可见；user/feedback/other 全局共享；worktree 与主 repo 共享项目区。
 - **记忆写入命中秘密即拒绝** —— memory_store fail-closed（ValueError）；curator 改写产物命中拒绝保留原文；trace 是 fail-open redact。
 - **auto_extract 默认关 + 与主写入互斥** —— 本轮 LLM 调过 memory save/update 则跳过；游标始终推进不回看。
+- **auto_extract 机械查证** —— 引用不存在相对路径的条目丢弃；绝对路径不验（保守放行）；完整带工具查证裁决不搬。
 - **检索式记忆注入每轮一次** —— 主代理 only（spawn_depth==0）；无 aux_llm_router 降级 snapshot（会话一次）。
 - **记忆检索 prefetch 是一次性消费** —— 结果 append 本轮 messages（天然 ephemeral），reactive_retry 不重复注入；失败 fail-open 静默。
 - **技能 files 附件不进索引** —— 只在触发时注入（execute_skill / load_skill），skill_view 与索引不含。
@@ -314,6 +319,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **transcript 落盘 fail-open** —— 轨迹 = user 指令 + 每轮 assistant 文本（tool_calls 不落盘，无配对 result 会造孤儿消息 → API 400）；默认开，7 天 retention。
 - **async 子代理默认拒审批**（autoDeny 第 4 模式）—— 保留 fatal/safe-fs 底线。
 - **monitor 豁免 stall 看门狗** —— tail -f/watch 安静是常态；一次性命令不要用 monitor。
+- **LSP 工具依赖外部 pylsp** —— check_fn 门控自动隐藏；server 崩溃自动重建；不进项目依赖。
 
 ### CLI 与桌面
 

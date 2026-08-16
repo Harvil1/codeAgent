@@ -53,7 +53,7 @@ CRON_CREATE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "任务模板名（~/.OmniMate/templates/*.md 或项目 .omnimate/templates/*.md）。"
-                    "给定后 cron/message/catch_up 用模板值；显式传的 cron/message 参数优先。"
+                    "给定后 cron/message/catch_up 用模板值；显式传的 cron/message/catch_up/recurring 参数优先。"
                 ),
             },
         },
