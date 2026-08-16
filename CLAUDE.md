@@ -273,6 +273,15 @@ uv sync                                 # 同步已声明依赖
 | Read 双上限（R20 #34） | `tools/file_operations.py:READ_MAX_FILE_BYTES=256KB`（大小预检不读盘直接拒）+ `READ_MAX_OUTPUT_TOKENS=25000`（len/3 粗估后检）——超限报错引导 offset/limit 分段（对齐 CC：截断因 token 成本反升而回滚） |
 | WebFetch aux 提炼（R20 #31） | `tools/web_fetch_tool.py:_refine_with_aux`（有 prompt 且 `agent_ref.aux_llm_router` 可用 → 小模型提炼 ≤2000 字保留数字/路径/版本号，`refined=true`；aux 失败/无降级全文 fail-open）；handler 改 async |
 | NotebookEdit（R20 #35） | `tools/file_operations.py:_handle_notebook_edit`（replace/insert/delete；cell_id 匹配 id 字段或数字索引；旧文件补齐 cell_<n> id；check_path write 白名单 + 原子写 + checkpoint/FILE_CHANGED）；`_CORE_TOOLS` 已同步登记 |
+| auto 分类器增强（R21 #46） | `agent/permission.py:LLM_DENIAL_MAX_CONSECUTIVE=3/_TOTAL=20`（连续/累计拒绝回落人工）+ `_is_dangerous_whitelist_entry`（解释器/runner/shell/ssh/eval/exec/env/xargs/sudo/curl/wget 白名单条目闸门 4 内忽略；四形态精确/x:*/首词/组合词） |
+| 任务全清 + verification nudge（R21 #48） | `tools/task_tools.py:_all_done_cleanup`（全 completed → complete 结果附 `all_done` 标志引导 LLM 不再列任务——不动状态，completed 持久可查）+ `_verification_nudge`（≥3 活跃且描述无 verif/验证/test/测试/检查 → 附 reminder） |
+| 记忆路径安全（R21 #23） | `agent/memory_store.py:validate_memory_dir`（受保护路径词法+realpath 双形式拒 + realpath 必须在 home realpath 下）+ `MemoryStore.__init__` 强制校验（fail-closed）+ 可选 memory_dir 参数 |
+| 孤儿并行结果修复（R21 #41） | `cli.py:resume_session` 加载时过 `_fix_tool_call_pairs`（发送前修复不落盘——这里立即修让持久化干净；fail-open 有兜底） |
+| yolo 交接复审（R21 #37） | `tools/delegate_tool.py:_review_handoff`（aux 复审子代理产出，危险附 `[⚠ 交接复审警告]` 前缀不拦截；≥200 字才复审；config `delegation.handoff_review_enabled` 默认关） |
+| 记忆检索并行 prefetch（R21 #8） | `agent/__init__.py:_consume_memory_prefetch`（轮首 create_task 发起，compress/strip 后消费 append 本轮 messages——窗口最大且天然 ephemeral；一次性消费防 reactive_retry 重复注入） |
+| 审批命令解释器（R21 #45） | `cli.py:_make_approval_callback(aux_provider=)`（命令审批 e 选项 → aux 解释用途+LOW/MEDIUM/HIGH，Panel 展示后重新问；aux 不可用隐藏） |
+| 粘贴引用协议（R21 #39） | `agent/input_history.py:store_paste_if_large`（>1024 字符外存 `.paste/text_<n>.txt` + `[Pasted text #N +M lines]` 占位；session 存占位）+ `expand_paste_references`（发 agent 前展开；无文件保留占位 fail-open） |
+| 全局输入历史（R21 #42） | `agent/input_history.py:GlobalHistory`（history.jsonl 相邻去重 + 软裁剪 2×上限留 100）+ CLI `/history`（列 20 条 / N 看原文；↑↓ 留待 TUI 化） |
 | WebSearch（Tavily 网络搜索） | `tools/web_search_tool.py`（check_fn 门控：无 TAVILY_API_KEY 自动隐藏）；schema 在 `WEB_SEARCH_SCHEMA` |
 | 自定义子代理 .md 定义 | `agent/agent_defs.py:scan_agent_defs`（扫描 `~/.OmniMate/agents/` + `<cwd>/.claude/agents/`，项目级覆盖用户级）；集成在 `tools/delegate_tool.py:_run_child`（subagent_type 传自定义名）+ cli.py `/agents` |
 | 权限模式（default / bypassPermissions） | `agent/permission.py:PermissionChecker.mode`（bypass 跳过审批，但保留 fatal 底线 + 自我保护 + 受保护路径）；切换 `/permission` 命令或 `config.security.permission_mode` |
@@ -412,6 +421,10 @@ uv sync                                 # 同步已声明依赖
 - **条件技能 paths 的双语义（R19 #25）** —— 目录形态（`src/**`）匹配 cwd 时仍进静态索引（既有行为）；文件 glob（`*.py`）只走动态激活（ephemeral 通知）。glob 模式在 frontmatter 里必须加引号（YAML 的 `*` 是 alias 语法，不加引号解析成空串）。
 - **Read 超限是报错不是截断（R20 #34）** —— 256KB 预检 / 25K token 后检超限返回 `file_too_large`/`output_too_large` 错误，引导 offset/limit 分段（对齐 CC：截断方案曾因 LLM 反复重读 token 成本反升而被回滚）。offload 落盘层（正常尺寸路径）不受影响。
 - **web_fetch 提炼依赖 aux 注入（R20 #31）** —— 只有主对话（agent_ref 带 aux_llm_router）且有 prompt 时走小模型提炼；子代理/无 aux 环境自动降级全文（fail-open），refined=false 标记来源。
+- **分类器白名单剥离只影响闸门 4（R21 #46）** —— 危险前缀白名单条目不进快速通道但命令仍走正常 LLM 分类（不修改 config；连续 3/累计 20 拒绝本会话停用闸门 4 回落人工）。
+- **任务全清是标志不是删除（R21 #48）** —— 全 completed 返回 `all_done: true` 引导 LLM，**不动任务状态**（软删会破坏 completed 持久可查的既有语义——test_task_complete_allows_matching_id 教训）；nudge 只在 complete 结果里出现（≥3 活跃且无验证字样，走 tool result 零主循环改动）。
+- **记忆检索 prefetch 是一次性消费（R21 #8）** —— 结果直接 append 本轮 messages（不进 history 天然 ephemeral）；reactive_retry 回循环时 task 已清不重复注入；检索失败 fail-open 静默。
+- **粘贴占位符 session 存占位、发送展开（R21 #39）** —— 会话记录省空间；外存文件被清理时保留占位符不阻塞对话。历史裁剪是软裁剪（2×上限触发，留最新 100+其后新增）。
 
 ## 测试策略
 

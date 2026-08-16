@@ -150,16 +150,16 @@ async def test_task_all_done_cleanup_and_nudge(tmp_path):
     assert "all_tasks_cleared" not in r1
     assert "reminder" not in r1
 
-    # 完成第 3 个 → 全 completed → 清空
+    # 完成第 3 个 → 全 completed → all_done 标志（状态保留可查）
     await registry.dispatch("task_complete", {"id": t2},
                             omnimate_home=home, agent_ref=_FakeAgent())
     r3 = json.loads(await registry.dispatch("task_complete", {"id": t3},
                                             omnimate_home=home, agent_ref=_FakeAgent()))
-    assert r3.get("all_tasks_cleared") is True
-    assert r3.get("cleared_count") == 3
-    # 软删（可恢复）：全部 status=deleted，活跃列表为空
+    assert r3.get("all_done") is True
+    assert r3.get("total") == 3
+    # completed 状态持久可查（不软删——保持既有语义）
     statuses = {t["status"] for t in store.list_all()}
-    assert statuses == {"deleted"}
+    assert statuses == {"completed"}
     assert store.list_all(status="pending") == []
 
 

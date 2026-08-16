@@ -468,10 +468,12 @@ _VERIF_KEYWORDS = ("verif", "验证", "test", "测试", "检查")
 
 
 def _all_done_cleanup(store) -> dict:
-    """R21 #48：全部任务 completed → 自动清空列表（软删 status=deleted，可恢复）。
+    """R21 #48：全部任务 completed → 返回 all_done 标志（不删任务）。
 
-    对齐 CC allDone→[]：列表清空让下个任务集从干净状态开始；
-    软删保留文件（完全可逆铁律）。
+    对齐 CC allDone→[] 的**行为引导**语义（清空是显示层概念）：在 complete
+    结果里附 all_done=true，提示 LLM「全部完成、无需再列任务」。
+    不动任务状态——completed 状态持久可查（软删会破坏既有
+    test_task_complete_allows_matching_id 等语义，裁决不删）。
     """
     try:
         all_tasks = store.list_all()
@@ -480,16 +482,7 @@ def _all_done_cleanup(store) -> dict:
             if t.get("status") not in ("completed", "deleted")
         ]
         if all_tasks and not active:
-            cleared = 0
-            for t in all_tasks:
-                if t.get("status") == "completed":
-                    try:
-                        store.update(t["id"], status="deleted")
-                        cleared += 1
-                    except Exception:
-                        pass
-            if cleared:
-                return {"all_tasks_cleared": True, "cleared_count": cleared}
+            return {"all_done": True, "total": len(all_tasks)}
         return {}
     except Exception:
         return {}
