@@ -12,6 +12,7 @@
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -188,3 +189,44 @@ async def test_task_verification_nudge(tmp_path):
     r2 = json.loads(await registry.dispatch("task_complete", {"id": d2},
                                             omnimate_home=home2, agent_ref=_FakeAgent()))
     assert "reminder" not in r2
+
+
+# ---------------------------------------------------------------------------
+# R21 #23：记忆路径安全
+# ---------------------------------------------------------------------------
+
+from agent.memory_store import MemoryStore, validate_memory_dir
+
+
+def test_validate_memory_dir_rules(tmp_path):
+    """受保护路径拒绝 + 越界拒绝 + 正常路径通过。"""
+    # 正常：home/.memory
+    assert validate_memory_dir(tmp_path / ".memory", tmp_path) is None
+
+    # 受保护路径（词法形式）
+    assert validate_memory_dir(Path.home() / ".ssh" / "mem", tmp_path) is not None
+    # 越界（realpath 不在 home 下）
+    assert validate_memory_dir(Path("C:/elsewhere/mem"), tmp_path) is not None
+
+
+def test_validate_memory_dir_symlink_escape(tmp_path):
+    """.memory 是指向受保护路径的软链 → realpath 形式拒。"""
+    link_dir = tmp_path / "evil"
+    try:
+        link_dir.symlink_to(Path.home() / ".ssh")
+    except (OSError, NotImplementedError):
+        pytest.skip("本环境无法创建符号链接")
+    reason = validate_memory_dir(link_dir, tmp_path)
+    assert reason is not None
+
+
+def test_memory_store_rejects_bad_dir(tmp_path):
+    """构造时校验失败 → ValueError（fail-closed）。"""
+    with pytest.raises(ValueError, match="安全校验失败"):
+        MemoryStore(omnimate_home=tmp_path, memory_dir=Path.home() / ".ssh" / "mem")
+    # 越界目录同样拒
+    with pytest.raises(ValueError):
+        MemoryStore(omnimate_home=tmp_path, memory_dir=tmp_path.parent / "other")
+    # 正常自定义目录（home 内）通过
+    s = MemoryStore(omnimate_home=tmp_path, memory_dir=tmp_path / "custom_mem")
+    assert s._memory_dir.name == "custom_mem"

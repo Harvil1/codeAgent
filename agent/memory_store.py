@@ -115,12 +115,64 @@ def _format_frontmatter(meta: dict) -> str:
     return "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + "---\n"
 
 
+def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
+    """R21 #23：memory 目录安全校验（对齐 CC memdir/paths.validateMemoryPath）。
+
+    返回拒绝原因（中文），通过返回 None。两条规则：
+    1. **受保护路径拒绝**：memory_dir（realpath 后）落在 ~/.ssh / /etc /
+       C:\\Windows 等受保护路径下——挡 AGENT_HOME 环境变量或 memory_dir
+       配置指向敏感位置获得写豁免
+    2. **符号链接逃逸检测**：memory_dir 经 realpath 解析后必须仍在
+       omnimate_home 的 realpath 之下——挡「home/.memory 是指向 ~/.ssh
+       的软链」这类最深存在祖先攻击
+
+    OmniMate 与 CC 的差异：CC 有多来源 settings（policy/user/project），
+    只接受 policy/local/user 排除 projectSettings（防恶意 repo 配置）；
+    OmniMate 的 config 只从用户级 settings.json 加载（无项目级注入面），
+    来源校验天然满足，只补路径内容校验。
+    """
+    try:
+        memory_dir = Path(memory_dir)
+        omnimate_home = Path(omnimate_home)
+    except TypeError:
+        return "路径类型异常"
+
+    # 规则 1：受保护路径（词法 + realpath 双形式判定——词法指向软链也算）
+    from agent.permission import is_protected_path
+    prot = is_protected_path(memory_dir)
+    if prot:
+        return f"落在受保护路径（{prot}）"
+    try:
+        real_mem = memory_dir.resolve()
+    except (OSError, RuntimeError) as e:
+        return f"realpath 解析失败: {e}"
+    prot2 = is_protected_path(real_mem)
+    if prot2:
+        return f"realpath 落在受保护路径（{prot2}）——符号链接逃逸"
+
+    # 规则 2：realpath 必须在 home 的 realpath 下
+    try:
+        real_home = omnimate_home.resolve()
+        real_mem.relative_to(real_home)
+    except (ValueError, OSError, RuntimeError):
+        return (
+            f"realpath {real_mem} 不在 agent home {real_home} 之下"
+            "（符号链接逃逸或配置越界）"
+        )
+    return None
+
+
 class MemoryStore:
     """主题组织的多文件记忆存储。"""
 
-    def __init__(self, *, omnimate_home: Path):
+    def __init__(self, *, omnimate_home: Path, memory_dir=None):
         self._home = Path(omnimate_home)
-        self._memory_dir = self._home / ".memory"
+        self._memory_dir = Path(memory_dir) if memory_dir else self._home / ".memory"
+        # R21 #23：memory 目录安全校验（受保护路径 + 符号链接逃逸）。
+        # fail-closed：记忆系统构造失败好过静默写到敏感位置。
+        violation = validate_memory_dir(self._memory_dir, self._home)
+        if violation:
+            raise ValueError(f"memory 目录安全校验失败: {violation}")
         self._index_path = self._home / "MEMORY.md"
         self._lock = threading.Lock()
         self._memory_dir.mkdir(parents=True, exist_ok=True)
