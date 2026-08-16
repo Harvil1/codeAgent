@@ -44,12 +44,16 @@ READ_FILE_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "读取行数（默认全部）",
+                "description": "读取行数（默认全部）。文件 >256KB 或单次读取 >25K tokens 会报错——用 offset/limit 分段",
             },
         },
         "required": ["path"],
     },
 }
+
+# R20 #34：Read 双上限（对齐 CC FileReadTool/limits——超限报错而非截断）
+READ_MAX_FILE_BYTES = 256 * 1024   # 256KB 文件大小预检
+READ_MAX_OUTPUT_TOKENS = 25_000    # 输出 token 后检（len/3 粗估）
 
 
 def _handle_read_file(args: dict, **kwargs) -> str:
@@ -74,6 +78,24 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     if not path.is_file():
         return json.dumps({"error": f"不是文件: {path}"}, ensure_ascii=False)
 
+    # === R20 #34：Read 双上限错误化（对齐 CC FileReadTool/limits）===
+    # CC 试验过截断，因 token 成本反升而回滚——超限直接报错让 LLM 分段读。
+    # 预检 1：文件大小 > 256KB（不读盘直接拒）
+    try:
+        file_size = path.stat().st_size
+    except OSError as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    if file_size > READ_MAX_FILE_BYTES:
+        return json.dumps({
+            "error": (
+                f"文件过大: {file_size} 字节 > 上限 {READ_MAX_FILE_BYTES}（256KB）。"
+                f"用 offset/limit 分段读取，或用 search/glob 定位目标区域。"
+            ),
+            "error_type": "file_too_large",
+            "path": str(path),
+            "file_size": file_size,
+        }, ensure_ascii=False)
+
     try:
         # 关键：必须指定 encoding，否则 Windows 默认 cp1252 会乱码
         content = path.read_text(encoding="utf-8")
@@ -89,6 +111,23 @@ def _handle_read_file(args: dict, **kwargs) -> str:
             for i, line in enumerate(selected)
         ]
         raw_content = "\n".join(numbered)
+
+        # === R20 #34 后检：输出 token 估算 > 25K → 报错（而非截断）===
+        # 粗估 len/3（与 estimate_message_tokens 同口径）；超限说明 offset/limit
+        # 分段还不够细——报错引导再分段，避免大输出无提示进上下文。
+        if len(raw_content) // 3 > READ_MAX_OUTPUT_TOKENS:
+            est_tokens = len(raw_content) // 3
+            return json.dumps({
+                "error": (
+                    f"读取结果过大: 约 {est_tokens} tokens > 上限 {READ_MAX_OUTPUT_TOKENS}。"
+                    f"文件共 {len(lines)} 行，本次选了 {len(selected)} 行——"
+                    f"用更小的 offset/limit 分段读取。"
+                ),
+                "error_type": "output_too_large",
+                "path": str(path),
+                "total_lines": len(lines),
+                "est_tokens": est_tokens,
+            }, ensure_ascii=False)
 
         # 大输出 offload（Phase 1 后始终启用）
         tool_call_id = kwargs.get("tool_call_id")

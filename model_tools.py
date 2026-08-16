@@ -217,6 +217,17 @@ async def handle_function_call(
         except Exception:
             pass  # fail-open
 
+    # === R20 #33: 空结果保护（对齐 CC toolResultStorage）===
+    # 工具空输出（空串/空白/空 dict）注入显式标记——防模型误判回合边界
+    # （部分 API 把空 tool result 当流异常）。{"success": true} 等非空不拦。
+    if isinstance(result, str):
+        stripped = result.strip()
+        if not stripped or stripped == "{}":
+            result = json.dumps({
+                "content": f"({function_name} completed with no output)",
+                "empty_output": True,
+            }, ensure_ascii=False)
+
     return result
 
 
