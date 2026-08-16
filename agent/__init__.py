@@ -444,6 +444,11 @@ class AIAgent:
         self._tool_summary_task = None           # 任务引用（防 asyncio GC 回收）
         # === R19 #25 NEW: 条件技能动态激活（会话级去重集合）===
         self._activated_conditional_skills = set()
+        # === R19 #21 NEW: 对话级轻量记忆提取（增量游标 + 互斥 + 节流）===
+        self._auto_extract_cursor = 0        # 已提取到的 history 下标
+        self._memory_touched_this_turn = False  # 本轮 LLM 是否调过 memory save/update
+        self._auto_extract_turn_count = 0    # 回合计数（every_n_turns 节流）
+        self._auto_extract_task = None       # 任务引用（防 asyncio GC 回收）
         # === P0-3 NEW: max_tokens 升级机制 ===
         # finish_reason=length 时先升 max_tokens 重试，避免直接续写打断思路。
         # 整个会话复用；升级是幂等的（最多升一次）。
@@ -1236,6 +1241,9 @@ class AIAgent:
             # fail-open：学习链路任何异常只 debug log，绝不影响主对话返回
             await self._maybe_skill_learning(user_message)
 
+            # R19 #21：对话级轻量记忆提取（fire-and-forget，fail-open）
+            self._maybe_auto_extract()
+
             # R17 #14：正常返回路径记 trace（goal 决策存在时用对应 reason）
             self._emit_loop_exit_trace(
                 {
@@ -1256,6 +1264,8 @@ class AIAgent:
             else:
                 turn_exit_reason = LoopExitReason.BUDGET_EXHAUSTED
         await self._maybe_skill_learning(user_message)
+        # R19 #21：循环退出路径同样推进提取游标（fail-open）
+        self._maybe_auto_extract()
         return self._handle_loop_exit(turn_exit_reason, user_message)
 
     # ------------------------------------------------------------------
@@ -2025,6 +2035,43 @@ class AIAgent:
         except Exception as e:
             logger.debug("条件技能激活失败（fail-open）: %s", e)
 
+    def _maybe_auto_extract(self) -> None:
+        """R19 #21：对话级轻量记忆提取的启动器（run_conversation 末尾调）。
+
+        门控：config memory.auto_extract.enabled（默认关）+ 每 N 回合节流 +
+        仅主代理（spawn_depth==0，子代理有独立记忆目录不走这条链）。
+        互斥（对齐 CC）：本轮 LLM 调过 memory save/update → 跳过并推进游标
+        （主 agent 已写过，不重复抢写）。
+        fire-and-forget：create_task 跑 run_auto_extract（aux 单轮提取），
+        任务引用保活；fail-open。
+        """
+        try:
+            cfg = (self.config or {}).get("memory", {}).get("auto_extract", {})
+            if not cfg.get("enabled", False):
+                return
+            # 游标始终推进（本轮内容要么被提取要么被互斥/节流跳过，都不再回看）
+            start_idx = self._auto_extract_cursor
+            self._auto_extract_cursor = len(self.conversation_history)
+            self._auto_extract_turn_count += 1
+            every = int(cfg.get("every_n_turns", 3) or 3)
+            should_run = (
+                self._auto_extract_turn_count % every == 0
+                and self.spawn_depth == 0
+                and not self._memory_touched_this_turn
+                and self.aux_llm_router is not None
+                and self.conversation_history
+                and start_idx < self._auto_extract_cursor
+            )
+            self._memory_touched_this_turn = False  # 每回合重置
+            if not should_run:
+                return
+            from agent.auto_extract import run_auto_extract
+            self._auto_extract_task = asyncio.create_task(
+                run_auto_extract(self, start_idx)
+            )
+        except Exception as e:
+            logger.debug("auto_extract 启动失败（fail-open）: %s", e)
+
     def _record_recent(self, kind: str, key: str) -> None:
         """记录最近读过的文件 / 加载的技能（去重保序，保留最近 10 个）。
 
@@ -2270,6 +2317,9 @@ class AIAgent:
             # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
             if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
                 self._activate_conditional_skills(tool_args["path"])
+            # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
+            if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
+                self._memory_touched_this_turn = True
             if self.on_tool_call:
                 try:
                     self.on_tool_call(tool_name, tool_args)
@@ -2324,6 +2374,9 @@ class AIAgent:
         # R19 #25：文件触碰 → 条件技能动态激活（paths 匹配）
         if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
             self._activate_conditional_skills(tool_args["path"])
+        # R19 #21：主 agent 本轮写过记忆 → 自动提取互斥标记
+        if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
+            self._memory_touched_this_turn = True
 
         if self.on_tool_call:
             try:

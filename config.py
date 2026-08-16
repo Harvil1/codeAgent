@@ -195,6 +195,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_batch_size": 30,        # 单桶每批发给 LLM 的最大条数
             "archive_after_multiplier": 2,  # archived 阈值 = N × valid_days
         },
+        # R19 #21：对话级轻量记忆提取（aux 单轮增量提取，每 N 回合一次；
+        # 与主 agent 写入互斥；默认关——每回合有 aux 调用成本）
+        "auto_extract": {
+            "enabled": False,
+            "every_n_turns": 3,
+        },
     },
 
     # 技能

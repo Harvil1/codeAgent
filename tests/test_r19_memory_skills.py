@@ -298,3 +298,114 @@ def test_skillify_builtin_skill_discoverable():
     assert "ask_user" in body
     assert "skill_manage" in body
     assert "规则" in body  # 用户纠正沉淀段
+
+
+# ---------------------------------------------------------------------------
+# R19 #21：对话级轻量记忆提取
+# ---------------------------------------------------------------------------
+
+from agent.auto_extract import _parse_items, run_auto_extract
+
+
+def test_auto_extract_config_default():
+    from config import DEFAULT_CONFIG
+    ae = DEFAULT_CONFIG["memory"]["auto_extract"]
+    assert ae["enabled"] is False  # 默认关
+    assert ae["every_n_turns"] == 3
+
+
+def test_parse_items_tolerant():
+    items = _parse_items('前置文字 [{"type": "user", "name": "n", "description": "d"}] 后缀')
+    assert len(items) == 1
+    assert _parse_items("不是 JSON") == []
+    assert _parse_items('{"type": "not-a-list"}') == []
+
+
+@pytest.mark.asyncio
+async def test_run_auto_extract_saves(tmp_path):
+    from agent import AIAgent
+    from agent.memory_store import MemoryStore
+
+    class _Aux:
+        async def chat_completions(self, msgs, **kw):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='[{"type": "user", "name": "偏好vim", "description": "用户偏好 vim 键位", "body": "编辑器用 vim 键位"}]',
+            ))])
+
+    a = AIAgent.__new__(AIAgent)
+    a.conversation_history = [
+        {"role": "user", "content": "我用 vim 键位"},
+        {"role": "assistant", "content": "好的，记住了"},
+    ]
+    a.aux_llm_router = _Aux()
+    a.session_id = "t1"
+    a.memory_store = MemoryStore(omnimate_home=tmp_path)
+
+    saved = await run_auto_extract(a, start_idx=0)
+    assert saved == 1
+    entries = a.memory_store.list_all()
+    assert len(entries) == 1
+    assert entries[0].name == "偏好vim"
+    assert entries[0].source_session_id.startswith("auto_extract:")
+
+
+@pytest.mark.asyncio
+async def test_run_auto_extract_empty_slice(tmp_path):
+    from agent import AIAgent
+    a = AIAgent.__new__(AIAgent)
+    a.conversation_history = [{"role": "user", "content": "x"}]
+    a.aux_llm_router = None
+    a.memory_store = None
+    a.session_id = "t"
+    assert await run_auto_extract(a, start_idx=0) == 0  # 消息不足/无 aux
+
+
+def _mk_extract_agent(config, aux=None, history_len=5, touched=False, depth=0, turn_count=0):
+    from agent import AIAgent
+    a = AIAgent.__new__(AIAgent)
+    a.config = config
+    a.aux_llm_router = aux
+    a.conversation_history = [{"role": "user", "content": "x"}] * history_len
+    a._auto_extract_cursor = 0
+    a._memory_touched_this_turn = touched
+    a._auto_extract_turn_count = turn_count
+    a._auto_extract_task = None
+    a.spawn_depth = depth
+    return a
+
+
+def test_maybe_auto_extract_gates():
+    """默认关不启动；节流第 3 回合启动；互斥跳过但游标推进。"""
+    import asyncio as _aio
+    a = _mk_extract_agent({"memory": {"auto_extract": {}}})  # 默认关
+    a._maybe_auto_extract()
+    assert a._auto_extract_task is None
+
+    cfg = {"memory": {"auto_extract": {"enabled": True, "every_n_turns": 3}}}
+    # 第 1、2 回合：节流未到
+    a2 = _mk_extract_agent(cfg)
+    a2._maybe_auto_extract()
+    a2._maybe_auto_extract()
+    assert a2._auto_extract_task is None
+    assert a2._auto_extract_cursor == 5  # 游标仍推进
+
+    # 第 3 回合：启动（需要 event loop——用 pytest-asyncio 提供的）
+    async def run():
+        a3 = _mk_extract_agent(cfg, aux=object(), turn_count=2)
+        a3._maybe_auto_extract()
+        assert a3._auto_extract_task is not None
+        # 清理后台任务（aux 是 object 会 fail-open 返回 0）
+        await a3._auto_extract_task
+    import asyncio
+    asyncio.run(run())
+
+    # 互斥：本轮 LLM 写过记忆 → 跳过但游标推进
+    a4 = _mk_extract_agent(cfg, aux=object(), touched=True, turn_count=2)
+    a4.conversation_history = a4.conversation_history + [{"role": "user", "content": "y"}]
+    a4._auto_extract_cursor = 5
+    async def run4():
+        a4._maybe_auto_extract()
+        assert a4._auto_extract_task is None
+        assert a4._auto_extract_cursor == 6  # 推进
+        assert a4._memory_touched_this_turn is False  # 重置
+    asyncio.run(run4())
