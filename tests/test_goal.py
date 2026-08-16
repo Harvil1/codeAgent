@@ -463,3 +463,139 @@ def test_pause_notify_failure_does_not_break_state_machine():
     assert g.status == "paused"
     assert g.pause_reason == "network"
     assert "paused: reason=network" in g.notes[-1]
+
+
+# ============================================================================
+# R26 #9：预算未用完"踢一脚"（nudge）
+# ============================================================================
+
+class TestShouldNudge:
+    """R26 #9：预算未用完 + 最近有进展 → 该踢一脚让它继续。"""
+
+    def _state(self, limit=100_000):
+        from agent.goal import GoalState
+        return GoalState(objective="修 lint", token_budget_limit=limit)
+
+    def test_nudge_when_budget_left_and_progress(self):
+        gs = self._state()
+        gs.iteration_count = 3
+        gs.token_budget = 50_000
+        assert gs.should_nudge(recent_tool_success=True) is True
+
+    def test_no_nudge_without_progress(self):
+        gs = self._state()
+        gs.iteration_count = 3
+        gs.token_budget = 50_000
+        assert gs.should_nudge(recent_tool_success=False) is False
+
+    def test_no_nudge_when_budget_mostly_used(self):
+        gs = self._state()
+        gs.iteration_count = 3
+        gs.token_budget = 95_000
+        assert gs.should_nudge(recent_tool_success=True) is False
+
+    def test_no_nudge_without_limit_or_early(self):
+        gs = self._state(limit=None)
+        gs.iteration_count = 3
+        assert gs.should_nudge(recent_tool_success=True) is False
+        gs2 = self._state()
+        gs2.iteration_count = 1  # 刚开始，模型还没收尾过，无需踢
+        assert gs2.should_nudge(recent_tool_success=True) is False
+
+
+# ============================================================================
+# R26 #9：nudge 主循环接线（防 silent-dead-code：单元测试过 ≠ 生产路径生效）
+# ============================================================================
+
+async def test_goal_nudge_wiring_in_run_conversation(tmp_path):
+    """宣布完成 + 预算剩很多 → 注入 [goal nudge] 继续，第二次才放行 complete。
+
+    LLM 响应序列：
+      1. tool_calls（fake 工具成功 → _last_turn_had_tool_success=True）
+      2. 最终响应（iteration 0→1，任务未全完 → <continue_goal>）
+      3. 最终响应（iteration 1→2，任务未全完 → <continue_goal>）
+      4. 最终响应（iteration=2 + 任务全完 + 预算剩 → nudge！不 complete）
+      5. 最终响应（_nudged_this_turn 已置 → 正常 evaluate complete）
+    """
+    from agent import AIAgent
+    from tools.registry import registry
+
+    tool_name = "_r26_fake_ok_tool"
+    registry.register(
+        name=tool_name,
+        toolset="test",
+        schema={"name": tool_name, "description": "fake ok", "parameters": {}},
+        handler=lambda args, **kw: json.dumps({"ok": True}, ensure_ascii=False),
+        isConcurrencySafe=True,
+    )
+    try:
+        agent = AIAgent(
+            api_key="fake", model="test",
+            enabled_toolsets=[], omnimate_home=tmp_path,
+        )
+
+        def _resp(text="", tool_calls=None):
+            msg = SimpleNamespace(content=text, tool_calls=tool_calls)
+            usage = SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5,
+                prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0,
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=msg, finish_reason="stop",
+                )],
+                usage=usage,
+            )
+
+        tc = SimpleNamespace(
+            id="call_r26_1", type="function",
+            function=SimpleNamespace(name=tool_name, arguments="{}"),
+        )
+        responses = [_resp(tool_calls=[tc])] + [
+            _resp(f"done {i}") for i in range(4)
+        ]
+        recorded = []
+
+        async def _fake_cc(messages, *a, **kw):
+            recorded.append([dict(m) for m in messages])
+            return responses.pop(0)
+
+        client = MagicMock()
+        client.chat_completions = _fake_cc
+        client.model = "mock-model"
+        agent.llm_client = client
+
+        # 任务"全完成"只在第 3 次 _check_all_goal_tasks_done 调用起为 True
+        # （前两个最终响应轮任务未全完 → <continue_goal>；第 3 个最终响应轮
+        # 恰好是 all_done + 预算剩 → nudge 拦截）
+        check_calls = {"n": 0}
+
+        def fake_check():
+            check_calls["n"] += 1
+            return check_calls["n"] >= 3
+
+        agent._check_all_goal_tasks_done = fake_check
+
+        g = GoalState(objective="修 20 个文件", token_budget_limit=100_000)
+        g.token_budget = 50_000  # 预算剩一半
+        agent.set_goal_state(g)
+
+        await agent.chat("start")
+
+        # 第二次宣布完成被放行（nudge 只拦一次）
+        assert g.status == "completed"
+        # nudge 轮不进 evaluate_after_turn：2 次 continue + 1 次 complete = 3
+        assert g.iteration_count == 3
+        # nudge 消息确实发给了 LLM（ephemeral 进 messages），
+        # 且不进 conversation_history（保护持久化 + prompt cache）
+        seen_nudge = any(
+            "[goal nudge]" in str(m.get("content", ""))
+            for msgs in recorded for m in msgs
+        )
+        assert seen_nudge, "[goal nudge] 应注入发给 LLM 的 messages"
+        for m in agent.conversation_history:
+            content = str(m.get("content", ""))
+            assert "[goal nudge]" not in content, "nudge 不能进 conversation_history"
+    finally:
+        with registry._lock:
+            registry._tools.pop(tool_name, None)

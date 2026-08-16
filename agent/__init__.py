@@ -472,6 +472,9 @@ class AIAgent:
         self._tool_failure_streak: int = 0
         self._last_tool_error: str = ""
         self._failure_threshold: int = 3
+        # R26 #9：本条 user 消息内是否出现过成功工具调用（goal nudge 判据，
+        # "最近有进展没空转"；与 _tool_failure_streak 对称，成功时置 True）
+        self._last_turn_had_tool_success: bool = False
 
         # === CCALS-P0-2 NEW: 任务级反思引擎 ===
         # 每次任务正常结束时异步触发：用 aux_llm 从轨迹提炼 3 类经验写入 memory_store。
@@ -503,6 +506,9 @@ class AIAgent:
         # 下一轮 _assemble_turn_messages 末尾消费并清空。这样既让 LLM 看到，
         # 又不污染 conversation_history（保护持久化 + prompt cache）
         self._pending_ephemeral_messages: list = []
+        # R26 #9：goal nudge 每条 user 消息最多触发一次
+        # （防连续 nudge 死循环——模型坚持宣布完成时第二次放行正常 complete）
+        self._nudged_this_turn: bool = False
         # CCAR10 Task 2: 降级 snapshot 一次性注入标志
         # 无 aux_llm_router 时主循环降级回 snapshot 索引注入；对齐旧"会话级 frozen"
         # 语义，注入一次后本会话不再重复注入（避免每轮重复塞同一索引）
@@ -1099,6 +1105,10 @@ class AIAgent:
         # S8 配套：每条用户消息独立 grace 机会（_grace_triggered 防同一消息内循环）
         self._grace_triggered = False
         self._budget_grace_call = False
+        # R26 #9：goal nudge 标志 + 工具成功标志每条用户消息重置
+        # （nudge 一条消息最多一次；"最近有进展"从本条消息重新累计）
+        self._nudged_this_turn = False
+        self._last_turn_had_tool_success = False
         # CCAR15 Task 3：记录本轮 history 起点（轮末 skill_learning 只观察本轮轨迹）
         self._sl_turn_start = len(self.conversation_history)
 
@@ -1309,6 +1319,42 @@ class AIAgent:
             # - 决策 pause/complete → break 正常返回
             # - prompt cache 保护：不动 system prompt，只加 user 消息
             if self._goal_state is not None and self._goal_state.status == "active":
+                # === R26 #9：预算没用完且最近有工具成功 → 注入 nudge 继续而不是收尾 ===
+                # 场景：模型修了 14/20 个文件就标记任务全完成（all_tasks_done →
+                # evaluate_after_turn 会 complete 收尾退出），预算还剩很多 → 踢一脚
+                # 让它继续/验证，而不是接受过早收尾。
+                # 必须在 evaluate_after_turn **之前**检查：complete 路径会把 status
+                # 置 "completed"，should_nudge 的 active 前置就永远过不去。
+                # all_tasks_done 是"本轮评估即将 complete 退出"的信号——普通
+                # continue 轮不触发（<continue_goal> 机制已覆盖，避免重复注入）。
+                # _nudged_this_turn 每条 user 消息最多一次：模型坚持宣布完成时
+                # 第二次放行正常 complete（防连续 nudge 死循环）。
+                if (not self._nudged_this_turn
+                        and self._goal_state.should_nudge(
+                            recent_tool_success=self._last_turn_had_tool_success,
+                        )
+                        and self._check_all_goal_tasks_done()):
+                    self._nudged_this_turn = True
+                    self._pending_ephemeral_messages.append({
+                        "role": "user",
+                        "content": (
+                            "[goal nudge] 预算尚有余量"
+                            f"（已用 {self._goal_state.token_budget}/"
+                            f"{self._goal_state.token_budget_limit}），"
+                            "且最近一轮仍有进展。请继续推进目标；"
+                            "若确已完成，请验证关键结果后明确说明完成依据。"
+                        ),
+                        "_ephemeral": True,
+                    })
+                    logger.info(
+                        "goal nudge（预算未用完不收尾）: budget=%d/%d, iteration=%d",
+                        self._goal_state.token_budget,
+                        self._goal_state.token_budget_limit,
+                        self._goal_state.iteration_count,
+                    )
+                    # nudge 轮不进 evaluate_after_turn（iteration/token 不累加，
+                    # 状态机保持 active 原样交下一轮重新评估）
+                    continue
                 # 提取本轮 token 用量（从 response.usage）
                 turn_tokens = self._extract_turn_tokens(response)
                 decision = self._goal_state.evaluate_after_turn(
@@ -2682,6 +2728,9 @@ class AIAgent:
             self._last_tool_error = str(err_snippet)[:200]
         else:
             self._tool_failure_streak = 0
+            # R26 #9：任一工具结果非 error → 本条 user 消息内有进展
+            # （goal nudge 的 recent_tool_success 判据）
+            self._last_turn_had_tool_success = True
 
     def _merge_results_in_order(self, all_calls, safe_processed, unsafe_processed):
         """按原 tool_call 顺序合并 safe/unsafe 结果并回填 history + 持久化。

@@ -104,6 +104,22 @@ class GoalState:
 
         return "continue"
 
+    def should_nudge(self, recent_tool_success: bool) -> bool:
+        """R26 #9：预算没用完且最近有进展 → 值得"踢一脚"让它继续。
+
+        场景：goal 要求修 20 个文件，agent 修了 14 个就宣布完成。
+        预算剩 10% 以上且最近一轮有成功工具调用（没空转）→ 调用方
+        注入 nudge 消息继续循环，而不是等用户重新发令。
+        对齐 CCB query/tokenBudget 的"预算未满 + 无收益递减 → nudge"。
+        """
+        if self.status != "active" or self.token_budget_limit is None:
+            return False
+        if self.iteration_count < 2:
+            return False
+        if self.token_budget >= 0.9 * self.token_budget_limit:
+            return False
+        return bool(recent_tool_success)
+
     # ---- 持久化 ----
 
     def save(self, path: Path) -> None:
