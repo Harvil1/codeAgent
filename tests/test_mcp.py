@@ -932,3 +932,98 @@ class TestInlineMcpApproval:
         ad2 = AgentDefinition(name="u", inline_mcp_servers={"evil": cfg})
         assert ad2.source == "user"
         assert inline_mcp_spawn_allowed(ad2, "evil", cfg) is True
+
+
+# ---------------------------------------------------------------------------
+# 真实子进程回归（2026-08-17 对话测试逮到 reader 线程 _connected 鸡蛋问题）
+# ---------------------------------------------------------------------------
+
+# 最小 stdio JSON-RPC server（纯 ASCII 输出，避免编码干扰）
+_REAL_SERVER_SRC = r'''
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    rid = req.get("id")
+    if rid is None:
+        continue
+    m = req.get("method", "")
+    if m == "initialize":
+        out = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+               "serverInfo": {"name": "t", "version": "0"}}
+    elif m == "tools/list":
+        out = {"tools": [{"name": "echo", "description": "echo",
+                          "inputSchema": {"type": "object", "properties": {}}}]}
+    elif m == "tools/call":
+        out = {"content": [{"type": "text", "text": "ECHO-REAL-OK"}], "isError": False}
+    else:
+        out = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": out}) + "\n")
+    sys.stdout.flush()
+'''
+
+
+class TestStdioRealSubprocess:
+    def test_handshake_list_call_with_real_subprocess(self, tmp_path):
+        """真实 spawn：握手 + tools/list + tools/call 全链路。
+
+        历史回归：_reader_loop 曾以 `while self._connected` 为条件，而
+        _connected 在握手成功后才置 True → 握手期间 reader 立即退出 →
+        60s 超时 → stdio MCP 生产全断（mock 测试看不见，必须真 spawn）。
+        """
+        import sys as _sys
+        import time
+        server = tmp_path / "srv.py"
+        server.write_text(_REAL_SERVER_SRC, encoding="utf-8")
+        client = MCPClient("t-real", command=_sys.executable, args=[str(server)])
+        # 超时缩短：真坏时 60s 太慢
+        client._transport._response_timeout = 10.0
+        t0 = time.time()
+        client.connect()
+        assert time.time() - t0 < 10, "握手应在秒级完成（曾回归为 60s 超时）"
+        tools = client.list_tools()
+        assert tools and tools[0]["name"] == "echo"
+        result = client.call_tool("echo", {})
+        assert result["content"][0]["text"] == "ECHO-REAL-OK"
+        client.close()
+
+    def test_reader_survives_non_utf8_line(self, tmp_path):
+        """server 输出坏字节行后连接仍可用（errors=replace 容错）。"""
+        import sys as _sys
+        # 全二进制读写（避免文本层/buffer 混用打乱顺序）；先吐一行坏字节
+        # （模拟 server 往 stdout 打 GBK/二进制日志）
+        src = (
+            "import sys, json\n"
+            "sys.stdout.buffer.write(b'\\xbb\\xdc bad bytes\\n')\n"
+            "sys.stdout.buffer.flush()\n"
+            "for line in sys.stdin.buffer:\n"
+            "    line = line.strip()\n"
+            "    if not line:\n"
+            "        continue\n"
+            "    req = json.loads(line.decode('utf-8'))\n"
+            "    rid = req.get('id')\n"
+            "    if rid is None:\n"
+            "        continue\n"
+            "    m = req.get('method', '')\n"
+            "    if m == 'initialize':\n"
+            "        out = {'protocolVersion': '2024-11-05', 'capabilities': {},\n"
+            "               'serverInfo': {'name': 't', 'version': '0'}}\n"
+            "    elif m == 'tools/list':\n"
+            "        out = {'tools': [{'name': 'echo', 'description': 'echo',\n"
+            "                          'inputSchema': {'type': 'object', 'properties': {}}}]}\n"
+            "    else:\n"
+            "        out = {}\n"
+            "    data = json.dumps({'jsonrpc': '2.0', 'id': rid, 'result': out})\n"
+            "    sys.stdout.buffer.write(data.encode('utf-8') + b'\\n')\n"
+            "    sys.stdout.buffer.flush()\n"
+        )
+        server = tmp_path / "srv_bad.py"
+        server.write_text(src, encoding="utf-8")
+        client = MCPClient("t-bad", command=_sys.executable, args=[str(server)])
+        client._transport._response_timeout = 10.0
+        client.connect()
+        tools = client.list_tools()
+        assert tools and tools[0]["name"] == "echo"
+        client.close()

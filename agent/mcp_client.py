@@ -197,6 +197,10 @@ class StdioTransport(MCPTransport):
             env=full_env,
             text=True,
             encoding="utf-8",
+            # server 输出坏字节（GBK/二进制日志混入）不能炸 reader 线程：
+            # replace 成 U+FFFD 后按"非 JSON 行"跳过（fail-open），否则一条
+            # UnicodeDecodeError 就让连接永久失效（2026-08-17 真实 server 测试逮到）
+            errors="replace",
             bufsize=1,  # 行缓冲
         )
         try:
@@ -238,8 +242,13 @@ class StdioTransport(MCPTransport):
         - 非 JSON 行 → 跳过（server debug 输出）
         - handler 抛异常 → log 不影响后续读
         - readline 返回空（EOF）→ 退出循环
+
+        ⚠️ 循环条件不能带 self._connected：握手期间（懒启动本线程时）
+        _connected 仍是 False（connect() 要握手成功才置 True），带它会让
+        reader 立即退出 → 响应永远读不到 → 握手 60s 超时（stdio MCP 全断，
+        2026-08-17 真实 server 对话测试逮到）。退出靠 EOF / 进程结束 / close()。
         """
-        while self._connected and self.process and self.process.poll() is None:
+        while self.process and self.process.poll() is None:
             try:
                 line = self.process.stdout.readline()
             except Exception as e:
