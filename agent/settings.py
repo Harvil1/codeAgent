@@ -241,6 +241,29 @@ def persist_project_mcp_approval(key: str) -> None:
     save_settings(data)
 
 
+def server_cfg_fingerprint(cfg: dict) -> str:
+    """R29 #3：MCP server 配置指纹（规范化 JSON sha256 前 8 位）。
+
+    审批 key 带指纹后，git pull 让 .mcp.json 的 command 漂移（如换成恶意
+    命令）时 key 不再匹配 → 重新询问。旧的无指纹 key 自然失效（fail-safe
+    方向：多问一次，不会漏拦）。
+    """
+    import hashlib
+    payload = json.dumps(cfg or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def mcp_approval_key(proj_key: str, server_name: str, cfg: Optional[dict] = None) -> str:
+    """R29 #2/#3：项目级 MCP 审批 key 统一构造。
+
+    - cfg=None：`<proj>::<name>`（无指纹形态）
+    - 有 cfg：`<proj>::<name>::<hash8>`（配置漂移即 key 变）
+    """
+    if cfg is None:
+        return f"{proj_key}::{server_name}"
+    return f"{proj_key}::{server_name}::{server_cfg_fingerprint(cfg)}"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并（override 覆盖 base）。"""
     if not isinstance(override, dict):

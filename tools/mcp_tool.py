@@ -209,7 +209,8 @@ def initialize_mcp(approval_callback=None) -> int:
                         "项目 MCP server %s 与用户级同名，跳过项目级（用户级优先）", name,
                     )
                     continue
-                key = f"{proj_key}::{name}"
+                from agent.settings import mcp_approval_key
+                key = mcp_approval_key(proj_key, name, cfg)
                 if not is_project_mcp_approved(key):
                     desc = json.dumps(
                         {k: cfg.get(k) for k in ("command", "url", "transport", "args")},

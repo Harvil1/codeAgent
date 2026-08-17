@@ -781,3 +781,73 @@ class TestProjectMcpApproval:
         )
         mcp_tool.initialize_mcp()  # 不传 callback
         assert connected == []
+
+
+# ===== R29 #3：审批 key 内容指纹 =====
+
+class TestApprovalKeyFingerprint:
+    def test_fingerprint_stable_and_config_sensitive(self):
+        from agent.settings import server_cfg_fingerprint
+        a = server_cfg_fingerprint({"command": "run-a", "args": [1, 2]})
+        b = server_cfg_fingerprint({"args": [1, 2], "command": "run-a"})  # 键序无关
+        c = server_cfg_fingerprint({"command": "run-evil", "args": [1, 2]})
+        assert a == b and a != c and len(a) == 8
+
+    def test_approval_key_formats(self):
+        from agent.settings import mcp_approval_key
+        # 无 cfg：老格式（兼容内联场景的 server 名命名空间）
+        assert mcp_approval_key("/p", "foo") == "/p::foo"
+        # 有 cfg：带指纹
+        k = mcp_approval_key("/p", "foo", {"command": "x"})
+        assert k.startswith("/p::foo::") and len(k) == len("/p::foo::") + 8
+
+    def test_project_server_key_changes_with_config(self):
+        """项目 .mcp.json server 配置变了 → 审批 key 变 → 重新询问。"""
+        from agent.settings import mcp_approval_key
+        k1 = mcp_approval_key("/p", "evil", {"command": "run-ok"})
+        k2 = mcp_approval_key("/p", "evil", {"command": "run-evil"})
+        assert k1 != k2
+
+    def test_initialize_mcp_uses_fingerprinted_key(self, tmp_path, monkeypatch):
+        """端到端：批准时持久化的 key 带指纹；配置漂移后再启动会再问。"""
+        import json as _json
+        from tools import mcp_tool
+        from agent.mcp_client import get_mcp_manager
+
+        proj = self._setup_proj(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: None,
+        )
+
+        # ① 第一次 callback 拒绝 → settings 无 key
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: False)
+        approved = self._load_approved(tmp_path)
+        assert approved == []
+
+        # ② callback 同意 → settings 里存在含 "::" 两次的指纹 key
+        asked = []
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: asked.append(n) or True)
+        approved = self._load_approved(tmp_path)
+        assert len(approved) == 2
+        for k in approved:
+            assert k.count("::") == 2 and len(k.rsplit("::", 1)[1]) == 8
+
+        # ③ 改 .mcp.json 的 command → approved key 不再匹配 → 又被问（asked 再 +1）
+        (proj / ".mcp.json").write_text(_json.dumps({
+            "mcpServers": {"evil": {"command": "run-evil-2"}, "ok": {"command": "run-ok-2"}}
+        }), encoding="utf-8")
+        asked.clear()
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: asked.append(n) or True)
+        assert set(asked) == {"evil", "ok"}
+
+    def _setup_proj(self, tmp_path, monkeypatch):
+        """复用 TestProjectMcpApproval._setup 的隔离构造。"""
+        return TestProjectMcpApproval._setup(self, tmp_path, monkeypatch)
+
+    def _load_approved(self, tmp_path):
+        import json as _json
+        data = _json.loads(
+            (tmp_path / "home" / "settings.json").read_text(encoding="utf-8")
+        )
+        return data.get("mcp", {}).get("approved_project_servers", [])
