@@ -161,6 +161,20 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
 # 运行时初始化
 # ---------------------------------------------------------------------------
 
+def _thread_llm_client(config: dict):
+    """线程上下文专用 LLM client（R26 终审 follow-up）：per-call 独立连接，跨 loop 安全。"""
+    from agent.llm_client import ThreadedLLMClient
+    mc = (config or {}).get("model", {}) or {}
+    # api_key 推导与 RuntimeContext 构造主 client 同源（见 RuntimeContext._derive_api_key）
+    api_key = RuntimeContext._derive_api_key(mc)
+    return ThreadedLLMClient({
+        "format": mc.get("format", "openai"),
+        "base_url": mc.get("base_url"),
+        "model": mc.get("name"),
+        "api_key": api_key,
+    })
+
+
 class RuntimeContext:
     """聚合 agent 运行时的所有组件。"""
 
@@ -593,9 +607,10 @@ class RuntimeContext:
         if endpoints_cfg or (aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model")):
             try:
                 from agent.aux_llm import AuxLLMRouter, LLMEndpoint
-                # 先创建一个临时的主 client 供 router 用
-                from agent.llm_client import create_llm_client
-                main_client = create_llm_client({
+                # R26 终审 follow-up：router 的降级 fallback 也可能从线程调
+                # （分类器/curator）——用 per-call 独立 client，别建绑主循环的临时池
+                from agent.llm_client import ThreadedLLMClient
+                main_client = ThreadedLLMClient({
                     "format": model_cfg.get("format", "openai"),
                     "base_url": model_cfg.get("base_url"),
                     "api_key": api_key,
@@ -626,14 +641,8 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
                 aux_llm_router = None
-                # X4 fix: 关闭临时创建的 main_client，避免 HTTP 连接池泄漏
-                try:
-                    if main_client is not None:
-                        close_fn = getattr(main_client, "close", None)
-                        if callable(close_fn):
-                            close_fn()
-                except Exception as close_err:
-                    logger.warning("关闭临时 main_client 失败（忽略）: %s", close_err)
+                # R26 终审 follow-up：ThreadedLLMClient 无持久连接池可泄，无需 close
+                main_client = None
 
         # === 04 NEW: 流式输出 callback ===
         # config["streaming"]["enabled"] 默认 True（CLI 边生成边打印）
@@ -788,6 +797,36 @@ class RuntimeContext:
 
         return agent
 
+    @staticmethod
+    def _derive_api_key(model_cfg: dict) -> str:
+        """api_key 推导：settings 值优先，为空时按 provider/base_url 环境变量兜底。
+
+        与 _create_agent 主推导链同款（供 _thread_llm_client 复用，保证
+        ThreadedLLMClient 拿到的凭证与主 client 一致）。
+        """
+        api_key = model_cfg.get("api_key") or ""
+        auth_token = model_cfg.get("auth_token") or ""
+        if not api_key and not auth_token:
+            provider = (model_cfg.get("provider") or "").upper()
+            candidates = [
+                model_cfg.get("api_key_env") or "",
+                f"{provider}_API_KEY" if provider else None,
+            ]
+            base_url = str(model_cfg.get("base_url") or "").lower()
+            for _host in ("deepseek", "openai", "anthropic", "openrouter"):
+                if _host in base_url:
+                    candidates.append(f"{_host.upper()}_API_KEY")
+            candidates.extend(
+                ["DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]
+            )
+            for cand in candidates:
+                if cand and os.environ.get(cand):
+                    api_key = os.environ.get(cand)
+                    break
+        # 与主 client 构造一致：auth_token 场景下用 auth_token 作凭证
+        return api_key or auth_token
+
     def _maybe_trigger_curator(self):
         """后台检查 curator 是否该运行（非阻塞）。"""
         if not self.config.get("curator", {}).get("enabled", True):
@@ -803,10 +842,13 @@ class RuntimeContext:
                     # （与 reflection 的 llm_for_reflection 同模式）。
                     # 缺任一组件时 run_curator_review 内部跳过并 log。
                     _agent = getattr(self, "agent", None)
-                    _llm = (
-                        getattr(_agent, "aux_llm_router", None)
-                        or getattr(_agent, "llm_client", None)
-                    )
+                    _aux = getattr(_agent, "aux_llm_router", None)
+                    if _aux is not None and _aux.is_aux_configured:
+                        _llm = _aux
+                    else:
+                        # R26 终审 follow-up：线程上下文绝不借用主循环绑定的
+                        # 主 client——ThreadedLLMClient per-call 独立连接
+                        _llm = _thread_llm_client(self.config)
                     run_curator_review(
                         skills_dir(),
                         session_store=self.session_store,

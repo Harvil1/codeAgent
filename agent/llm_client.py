@@ -700,3 +700,39 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
         base_url=base_url, api_key=api_key, model=model,
         stream_idle_timeout=idle_timeout,
     )
+
+
+async def aclose_llm_client(client) -> None:
+    """best-effort 关闭底层 SDK client（AsyncOpenAI/AsyncAnthropic 都暴露 .client.close 协程；fail-open）。"""
+    try:
+        inner = getattr(client, "client", None)
+        if inner is not None and hasattr(inner, "close"):
+            result = inner.close()
+            if asyncio.iscoroutine(result):
+                await result
+    except Exception:
+        pass
+
+
+class ThreadedLLMClient(LLMClient):
+    """线程上下文专用 LLM client（R26 终审 follow-up 修复）。
+
+    问题：httpx 连接池绑定首次使用时的事件循环。daemon 线程（curator/
+    progress/ticker）里 asyncio.run 每次新建循环——复用主循环绑定的
+    主 client 会报 "Event loop is closed"，甚至污染主对话的连接池。
+
+    方案：每次调用在**当前循环内**新建底层 client，用完即关（aclose）。
+    成本 = 每次一次 TCP 握手（后台任务低频，可忽略）；换来彻底的跨循环
+    安全（在主循环调用同样安全——loop 无关）。reset_client 继承基类
+    no-op（无持久池可重建）。
+    """
+
+    def __init__(self, model_config: Dict[str, Any]):
+        self._model_config = dict(model_config or {})
+
+    async def chat_completions(self, messages, *, tools=None, **kwargs):
+        client = create_llm_client(self._model_config)
+        try:
+            return await client.chat_completions(messages, tools=tools, **kwargs)
+        finally:
+            await aclose_llm_client(client)
