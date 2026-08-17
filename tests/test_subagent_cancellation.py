@@ -369,6 +369,7 @@ class TestRunConversationCancelEvent:
         agent._interrupt_requested = False
         agent._budget_grace_call = False
         agent._grace_triggered = False
+        agent._pending_skill_paths = []  # R26 #16/T8 flush：每条 user 消息重置会调 _flush_skill_activations
         agent._idle_requested = False
         agent.iteration_budget = MagicMock()
         agent.iteration_budget.remaining = 100
