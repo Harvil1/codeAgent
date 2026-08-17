@@ -101,6 +101,28 @@ class TestWorkflowTool:
             {"action": "kill", "run_id": rid}, config={}))
         assert kill.get("killed") is False  # 已结束的 run 无活跃事件
 
+    async def test_status_does_not_truncate_journal(self, monkeypatch, tmp_path):
+        """status 是只读操作——hash 失配（手改快照）也不得删 journal。"""
+        import json
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        from tools import workflow_tool as WT
+        import agent.workflow_engine as WE
+
+        async def fake_runner(p):
+            return "r"
+        monkeypatch.setattr(WE, "make_agent_runner", lambda kw: fake_runner)
+        out1 = json.loads(await WT._handle_workflow(
+            {"action": "run", "script": "async def main():\n    return await agent('x')\n"},
+            config={}))
+        rid = out1["run_id"]
+        from constants import get_omnimate_home
+        snap = get_omnimate_home() / ".workflows" / rid / "script.py"
+        snap.write_text("async def main():\n    return 2\n", encoding="utf-8")  # 手改 → hash 失配
+        st = json.loads(await WT._handle_workflow(
+            {"action": "status", "run_id": rid}, config={}))
+        assert st["status"] == "completed"
+        assert st["journal_entries"] >= 1  # journal 还在（没被 status 截断）
+
     async def test_run_by_name_from_registry(self, monkeypatch, tmp_path):
         import json
         monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))

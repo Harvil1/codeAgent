@@ -66,7 +66,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         if not run_dir.exists():
             return json.dumps({"error": f"run 不存在: {run_id}",
                                "error_type": "invalid_run_id"}, ensure_ascii=False)
-        j = WorkflowJournal.load(run_dir)
+        j = WorkflowJournal(run_dir)  # 只读加载——status 不得触发 hash 截断（终审修）
         meta = j.load_meta()
         return json.dumps({
             "run_id": run_id,
