@@ -211,6 +211,8 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | 会话移交 bundle / 跨项目恢复 | `agent/handoff.py` + `agent/cross_project.py` |
 | Vision / Glob / WebFetch / WebSearch / Read 双上限 / NotebookEdit | `tools/image_tool.py` / `glob_tool.py` / `web_fetch_tool.py` / `web_search_tool.py` / `file_operations.py` |
 | LSP 符号导航（pylsp 门控） | `tools/lsp_tool.py` |
+| 确定性工作流引擎（DSL/journal/预算） | `agent/workflow_engine.py` + `agent/workflow_journal.py` + `tools/workflow_tool.py` |
+| workflow 脚本目录发现 | `agent/workflow_registry.py` |
 | Plan Mode（计划 + 审批 + 清上下文执行） | `agent/__init__.py`（plan_mode 分支 + `_apply_post_plan_clear`）+ `tools/plan_mode_tool.py` |
 | Cron 调度（一次性 + catch_up） | `agent/cron.py:CronScheduler` + `tools/cron_tool.py` |
 | cron 任务模板发现 | `agent/templates.py` |
@@ -322,6 +324,8 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **async 子代理默认拒审批**（autoDeny 第 4 模式）—— 保留 fatal/safe-fs 底线。
 - **monitor 豁免 stall 看门狗** —— tail -f/watch 安静是常态；一次性命令不要用 monitor。
 - **LSP 工具依赖外部 pylsp** —— check_fn 门控自动隐藏；server 崩溃自动重建；不进项目依赖。
+- **workflow 引擎的边界** —— goal=主循环多轮驱动，workflow=一次工具调用内编排（口径不同不双计：workflow 子代理 usage 不回累 goal）；journal 与 task_store 语义分离（task=待办，run=执行记录）；脚本 exec 是防误用不是安全边界（AST 白名单拦显式逃逸）；resume 只信 run 目录快照。
+- **workflow 禁入 async 子代理** —— ASYNC_AGENT_DISALLOWED_TOOLS 含 workflow/subagent（防递归 spawn）；workflow 内的 agent() 一律 leaf 角色 + minimal 工具集。
 
 ### CLI 与桌面
 
