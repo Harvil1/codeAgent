@@ -231,6 +231,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 委托
     "delegation": {
         "max_concurrent_children": 5,
+        # R28：workflow 引擎默认预算（子代理产出 token 估算口径）
+        "workflow_budget_total": 500000,
         "max_spawn_depth": 2,
         "child_timeout_seconds": 600,
         "orchestrator_enabled": True,

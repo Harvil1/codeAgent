@@ -31,6 +31,8 @@ _CORE_TOOLS = [
     "session_search",
     # 委托（09 实现）
     "subagent",  # 子代理（对齐 Claude Code Agent；delegate_task 为兼容别名）
+    # 确定性工作流编排（R28：批量子代理 + journal 断点续跑 + 预算封顶）
+    "workflow",
     "subagent_kill",  # Task K: 中断 async 子代理（set cancel_event）
     "subagent_resume",  # CCAR10 Task 4: 恢复中断的子代理续跑（load transcript + spawn）
     # 澄清（AskUserQuestion 复刻）
@@ -177,6 +179,8 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     # 模块级 _session_worktree——主对话再 enter 被 already_in_worktree 卡死；
     # worktree_exit 留给子代理自救，对齐 goal_pause/goal_clear 处置）
     "worktree_enter",
+    # workflow 编排（防 workflow 内嵌 workflow 递归；subagent 已在列）
+    "workflow",
 })
 
 

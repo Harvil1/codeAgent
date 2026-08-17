@@ -70,6 +70,7 @@ UNSAFE_TOOLS = {
     "delegate_task",    # subagent 的 _compat alias
     "subagent_kill",    # Task K: set cancel_event + 改注册表（副作用）
     "subagent_resume",  # CCAR10 Task 4: 重启 AIAgent 子代理（重资源 + 写 transcript）
+    "workflow",         # R28 W4: 批量子代理 spawn + journal 落盘（大量副作用）
     # 图像（外部 API）
     "image_analyze",    # vision API 调用
     "image_ocr",        # OCR API 调用
