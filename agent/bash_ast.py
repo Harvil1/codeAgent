@@ -47,7 +47,8 @@ def parse_info(command: str) -> Optional[dict]:
         kind = getattr(node, "kind", "")
         if kind == "redirect":
             has_redirect = True
-        if kind in ("commandsubstitution", "procsubstitute"):
+        # bashlex 实测 kind 是 "processsubstitution"；"procsubstitute" 兜底别名保留
+        if kind in ("commandsubstitution", "procsubstitute", "processsubstitution"):
             has_substitution = True
         if kind == "command":
             toks = []
@@ -60,9 +61,18 @@ def parse_info(command: str) -> Optional[dict]:
                     toks.append(text)
             if toks:
                 segments.append(toks)
-            return  # command 叶子不再向内递归（word 无 parts 需求）
+        # R27 复审 Critical 修复：command 不再提前 return——word 子节点的 parts
+        # 里嵌着 commandsubstitution/procsubstitute/redirect，必须全树递归扫到，
+        # 否则 `echo $(rm -rf /)` 的替换体漏检 → has_substitution 恒 False。
+        # 语义变化（收紧，方向正确）：替换体内的嵌套 command 节点也进 segments，
+        # 逐段 deny/只读判定能命中替换体本身。
         for child in getattr(node, "parts", []):
             _walk(child)
+        # bashlex 实测：commandsubstitution/processsubstitution 的子命令挂在
+        # .command 属性（不在 .parts），必须单独递归才能扫到替换体内部
+        inner = getattr(node, "command", None)
+        if inner is not None:
+            _walk(inner)
 
     try:
         for n in nodes:

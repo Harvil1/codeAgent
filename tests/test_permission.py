@@ -1732,3 +1732,20 @@ class TestReadonlyAstFallback:
         assert _tokens_readonly(["git", "push"]) is False
         assert _tokens_readonly(["find", ".", "-name", "x", "-delete"]) is False
         assert _tokens_readonly(["FOO=1", "ls"]) is True  # assignment 前缀跳过后判动词
+
+    def test_command_substitution_not_readonly(self):
+        """命令替换体不得免审（Critical 修复回归测试）。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("echo $(rm -rf /)") is False
+        assert _is_readonly_command("echo `ls`") is False
+        assert _is_readonly_command("cat <(ls)") is False
+
+    def test_single_quoted_substitution_readonly(self):
+        """单引号里的 $() 是字面文本不执行——但仍非只读（保守方向）。
+
+        实测：bashlex 对单引号内 $() 不建 substitution 节点（AST 判只读），
+        但 word 文本保留 "$(rm -rf /)"，_is_readonly_command 的逐段 _SUBSHELL_RE
+        兜底命中 → False（交审批，不放行）。宁可多问一次，不给替换体免审面。
+        """
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("echo '$(rm -rf /)'") is False

@@ -627,6 +627,8 @@ _READONLY_FORBIDDEN_TOKENS = (
 # 复合命令切分（&& || ; |）+ 子命令替换（$() 反引号）+ 重定向（> >>）
 _COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 _SUBSHELL_RE = re.compile(r"\$\(|`")
+# 进程替换形态 <( ) >( )——bashlex 实测与 $() 分开识别，正则层单独拦
+_PROCSUB_RE = re.compile(r"[<>]\(")
 _REDIRECT_RE = re.compile(r"(?:^|\s|\d)>{1,2}(?:&\d+)?")
 
 
@@ -686,15 +688,15 @@ def _is_readonly_command(command: str) -> bool:
     """
     if not command or not command.strip():
         return False
-    if _SUBSHELL_RE.search(command) or _REDIRECT_RE.search(command):
-        # 正则命中子 shell/重定向形态 → 仍可能只是引号里的文本，交给 AST 裁决
-        pass
+    # 替换形态（$() 反引号 <() >()）禁止正则快速通道直通——必须交 AST 裁决
+    # （引号里的字面 $() AST 分得清；实测曾漏 `cat <(ls)` 免审，Critical 修复）
+    has_sub_form = bool(_SUBSHELL_RE.search(command) or _PROCSUB_RE.search(command))
     regex_ok = True
     for seg in _COMPOUND_SPLIT_RE.split(command):
         if not _is_readonly_segment(seg):
             regex_ok = False
             break
-    if regex_ok:
+    if regex_ok and not has_sub_form:
         return True
 
     # R27 #21：AST 兜底（一次解析，逐段判）
@@ -705,6 +707,10 @@ def _is_readonly_command(command: str) -> bool:
     if info["has_redirect"] or info["has_substitution"]:
         return False
     for tokens in info["segments"]:
+        seg_text = " ".join(tokens)
+        # 纵深防御：bashlex 漏检的替换形态，正则兜底拦（双保险）
+        if _SUBSHELL_RE.search(seg_text):
+            return False
         if not _tokens_readonly(tokens):
             return False
     return True

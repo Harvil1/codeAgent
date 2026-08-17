@@ -63,3 +63,22 @@ class TestParseInfo:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         assert bash_ast.parse_info("echo hi") is None
+
+    def test_substitution_flagged(self):
+        from agent.bash_ast import parse_info
+        info = parse_info("echo $(rm -rf /)")
+        assert info is not None
+        assert info["has_substitution"] is True
+
+    def test_backtick_flagged(self):
+        from agent.bash_ast import parse_info
+        info = parse_info("echo `ls`")
+        assert info is not None
+        assert info["has_substitution"] is True
+
+    def test_procsubstitution_flagged(self):
+        """<() 进程替换实测 kind 是 'processsubstitution'——一并置标记。"""
+        from agent.bash_ast import parse_info
+        info = parse_info("cat <(ls)")
+        assert info is not None
+        assert info["has_substitution"] is True
