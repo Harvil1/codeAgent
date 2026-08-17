@@ -328,19 +328,57 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
     返回 "deny" / "ask" / "allow" / "none"，优先级 deny > ask > allow。
     工具可见性条目（read_file 等无括号形态）不参与——parse 返回 None。
     R25 #1：匹配前先剥 env 前缀/安全包装词（FOO=bar rm xxx 绕不过 deny(rm)）。
+    R27 #21：AST 成功时 deny/ask **逐段**匹配（复合命令后半段命中即命中，
+    只收紧不放宽）；allow 保持整串且复合命令不生效（对齐 CC "allow 须覆盖
+    全部段"语义——AST 成功且多段时 allow 整串命中不放宽，回落逐段只查
+    deny/ask）；AST 失败回落整串现状。
     """
     if rules is None:
         rules = load_tool_permission_rules()
     command = _normalize_command_for_rules(command)
-    for r in (rules.get("deny") or []):
-        if command_rule_matches(r, command):
-            return "deny"
-    for r in (rules.get("ask") or []):
-        if command_rule_matches(r, command):
-            return "ask"
-    for r in (rules.get("allow") or []):
-        if command_rule_matches(r, command):
-            return "allow"
+
+    def _match_one(cmd: str) -> str:
+        """单条命令串的三级判定（deny/ask/allow，none）。"""
+        for r in (rules.get("deny") or []):
+            if command_rule_matches(r, cmd):
+                return "deny"
+        for r in (rules.get("ask") or []):
+            if command_rule_matches(r, cmd):
+                return "ask"
+        for r in (rules.get("allow") or []):
+            if command_rule_matches(r, cmd):
+                return "allow"
+        return "none"
+
+    whole = _match_one(command)
+    # R27 #21：AST 逐段信息（失败回落整串现状）
+    from agent.bash_ast import parse_info
+    info = parse_info(command)
+    if (
+        whole == "allow"
+        and info is not None
+        and len(info["segments"]) > 1
+        and not info["has_substitution"]
+    ):
+        # 顶层复合命令（&&/;/|，无命令替换）的 allow 整串命中不放宽——
+        # 前缀规则会盖到 && 后面的段（对齐 CC "allow 须覆盖全部段"）。
+        # 回落逐段——逐段只查 deny/ask，不查 allow。
+        # 含命令替换时（rm -rf x $(gen)）保持整串 allow 现状（fail-open，
+        # 不为收紧 allow 引入新拒绝面）。
+        whole = "none"
+    if whole in ("deny", "ask", "allow"):
+        return whole
+
+    if info is None:
+        return "none"
+    seg_results = []
+    for tokens in info["segments"]:
+        seg_cmd = _normalize_command_for_rules(" ".join(tokens))
+        seg_results.append(_match_one(seg_cmd))
+    if "deny" in seg_results:
+        return "deny"
+    if "ask" in seg_results:
+        return "ask"
     return "none"
 
 

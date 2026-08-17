@@ -174,3 +174,43 @@ class TestNormalizeCommandForRules:
         from agent.tool_permissions import _normalize_command_for_rules
         # 带引号 env 值剥一半会更危险 → 整条不归一化（保守）
         assert _normalize_command_for_rules('FOO="a b" rm -rf build') == 'FOO="a b" rm -rf build'
+
+
+# ===== R27 #21：内容级规则 AST 逐段匹配 =====
+
+class TestRuleAstSegmentMatching:
+    def test_deny_matches_second_segment(self):
+        """deny 规则命中复合命令的后半段 → 整条 deny。"""
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
+        assert check_command_rules("echo hi && rm -rf build", rules) == "deny"
+
+    def test_env_prefix_second_segment(self):
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(git push:*)"], "allow": [], "ask": []}
+        assert check_command_rules("ls -la && FOO=1 git push origin x", rules) == "deny"
+
+    def test_quoted_text_not_matched(self):
+        """引号内的规则词是参数不是命令——不误拦。"""
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
+        assert check_command_rules('echo "rm -rf build"', rules) == "none"
+
+    def test_ask_segment_matched(self):
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": [], "ask": ["Bash(git push:*)"], "allow": []}
+        assert check_command_rules("git status && git push origin x", rules) == "ask"
+
+    def test_allow_not_segment_matched(self):
+        """allow 保持整串匹配，不因逐段命中而放宽。"""
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": [], "ask": [], "allow": ["Bash(git status:*)"]}
+        assert check_command_rules("git status && npm run build", rules) == "none"
+
+    def test_unparseable_whole_string_fallback(self):
+        """AST 失败 → 现状整串匹配行为。"""
+        from agent.tool_permissions import check_command_rules
+        rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
+        # 构造一条 AST 解析不了的命令（未闭合引号）：现状整串不匹配 → none
+        # （规则不能用整串命中的形态，否则测不出 AST 回落语义）
+        assert check_command_rules("echo 'unclosed && rm -rf /", rules) == "none"
