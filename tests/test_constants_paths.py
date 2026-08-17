@@ -97,37 +97,3 @@ def test_subpath_funcs(monkeypatch, tmp_path):
     assert sessions_db_path() == tmp_path / "sessions.db"
 
 
-# ----------------------------------------------------------------------------
-# 迁移脚本：已永久禁用（no-op）
-# ----------------------------------------------------------------------------
-
-def test_migration_never_needed(monkeypatch, tmp_path):
-    """[DEPRECATED] needs_migration 永远返回 False，无论平台/目录状态。"""
-    from scripts.migrate_to_appdata import needs_migration
-    # Windows + 老目录存在 + 无标记 → 旧逻辑会迁移，新逻辑永远 False
-    monkeypatch.setattr(sys, "platform", "win32")
-    fake_home = tmp_path / "fakehome"
-    legacy = fake_home / ".agent"
-    legacy.mkdir(parents=True)
-    (legacy / "x.txt").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(constants.Path, "home", classmethod(lambda cls: fake_home))
-    assert needs_migration(new_home=tmp_path / "newhome") is False
-
-
-def test_migration_is_noop(monkeypatch, tmp_path):
-    """[DEPRECATED] migrate 永远返回 False（不执行任何复制）。"""
-    from scripts.migrate_to_appdata import migrate
-    monkeypatch.setattr(sys, "platform", "win32")
-    fake_home = tmp_path / "fakehome"
-    legacy = fake_home / ".agent"
-    legacy.mkdir(parents=True)
-    (legacy / "MEMORY.md").write_text("index", encoding="utf-8")
-    monkeypatch.setattr(constants.Path, "home", classmethod(lambda cls: fake_home))
-    new_home = tmp_path / "newhome"
-    new_home.mkdir()
-
-    result = migrate(new_home=new_home)
-    assert result is False
-    # 确认没复制任何东西过去
-    assert not (new_home / "MEMORY.md").exists()
-    assert not (new_home / ".migrated_to_appdata").exists()

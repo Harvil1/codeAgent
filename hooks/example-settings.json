@@ -11,7 +11,7 @@
         "command": ["python", "hooks/audit_log.py"],
         "timeout": 2.0,
         "env": {
-          "AUDIT_LOG_PATH": "~/.agent/.audit.log"
+          "AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"
         }
       }
     ],
@@ -21,7 +21,7 @@
         "command": ["python", "hooks/audit_log.py"],
         "timeout": 2.0,
         "env": {
-          "AUDIT_LOG_PATH": "~/.agent/.audit.log"
+          "AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"
         }
       }
     ],
