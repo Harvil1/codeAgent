@@ -86,7 +86,8 @@ class TestRunWorkflow:
             "async def main():\n"
             "    rs = await pipeline(['a','b'], [lambda v: agent(v), lambda v: agent(v + '!')])\n"
             "    return rs\n")
-        assert sorted(out["return"]) == ["echo:a!", "echo:b!"]
+        # 链式：stage1('a')='echo:a' → stage2('echo:a')='echo:echo:a!'
+        assert sorted(out["return"]) == ["echo:echo:a!", "echo:echo:b!"]
 
     async def test_phase_and_log_and_args(self):
         out = await self._run(

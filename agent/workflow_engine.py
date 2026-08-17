@@ -188,17 +188,15 @@ async def run_workflow(
         return list(await asyncio.gather(*[_one(f) for f in factories]))
 
     async def pipeline(items: list, stages: list) -> list:
-        """逐 item 过末 stage，item 间并发（map 形态；各 stage 以原始 item 为输入，
-        结果取末 stage——对齐蓝图测试契约）。"""
+        """逐 item 链式串 stage（stage N 收 stage N-1 输出），item 间并发。"""
         async def _item(v):
-            out = v
             for stage in stages:
                 r = stage(v)
                 if asyncio.iscoroutine(r) or hasattr(r, "__await__"):
-                    out = await r
+                    v = await r
                 else:
-                    out = r
-            return out
+                    v = r
+            return v
         return await parallel([lambda v=v: _item(v) for v in items])
 
     @contextmanager
