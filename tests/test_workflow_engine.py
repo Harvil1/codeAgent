@@ -170,3 +170,62 @@ class TestRunWorkflow:
     async def test_script_error_reported(self):
         out = await self._run("async def main():\n    1/0\n")
         assert out["ok"] is False and out["error_type"] == "script_error"
+
+
+class TestStructuredOutput:
+    def test_strip_json_fence(self):
+        from agent.workflow_engine import _strip_json_fence
+        assert _strip_json_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+        assert _strip_json_fence('{"a": 1}') == '{"a": 1}'
+
+    def test_make_validator_ok(self):
+        from agent.workflow_engine import make_validator
+        v = make_validator()
+        assert v('{"a": 1}') is True
+        assert v('not json') is False
+
+    async def test_schema_validation_via_engine(self):
+        """validator 校验失败两次 → dead → None（W1 契约 + jsonschema 真跑）。"""
+        from agent.workflow_engine import run_workflow, make_validator
+
+        async def runner(prompt):
+            return "我覺得應該可以"  # 非 JSON
+        out = await run_workflow(
+            "async def main():\n    return await agent('x')\n",
+            agent_runner=runner,
+            validator=make_validator(),
+        )
+        assert out["return"] is None and out["stats"]["dead"] == 1
+
+
+class TestMakeAgentRunner:
+    async def test_runner_calls_run_child_with_leaf(self, monkeypatch):
+        """runner 经 to_thread 调 _run_child：leaf/summary_only=False/disabled 追加。"""
+        import agent.workflow_engine as WE
+
+        captured = {}
+
+        def fake_run_child(goal, context, role, **kwargs):
+            captured.update(goal=goal, role=role,
+                            summary_only=kwargs.get("summary_only"),
+                            disabled=(kwargs.get("config") or {}).get("disabled_tools"))
+            return "raw-final"
+
+        monkeypatch.setattr("tools.delegate_tool._run_child", fake_run_child)
+        runner = WE.make_agent_runner({"config": {"disabled_tools": ["foo"]}})
+        out = await runner("do something")
+        assert out == "raw-final"
+        assert captured["role"] == "leaf"
+        assert captured["summary_only"] is False
+        assert set(captured["disabled"]) >= {"foo", "subagent", "workflow"}
+        assert "结构化" in captured["goal"] or captured["goal"] == "do something"
+
+    async def test_runner_exception_returns_none(self, monkeypatch):
+        import agent.workflow_engine as WE
+
+        def boom(*a, **kw):
+            raise RuntimeError("child crashed")
+
+        monkeypatch.setattr("tools.delegate_tool._run_child", boom)
+        runner = WE.make_agent_runner({})
+        assert await runner("x") is None

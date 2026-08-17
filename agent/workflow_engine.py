@@ -235,3 +235,82 @@ async def run_workflow(
         logger.warning("[workflow] 脚本异常: %s", e)
         return {"ok": False, "error": str(e), "error_type": "script_error",
                 "stats": dict(stats), "budget_spent": budget.spent}
+
+
+def _strip_json_fence(text: str) -> str:
+    """剥 ```json 围栏（LLM 偶尔不听话）。"""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+    return t.strip()
+
+
+def make_validator():
+    """结构化输出校验器：(text) -> bool（JSON 可解析 + schema 合法）。
+
+    jsonschema 缺失时降级为只验 JSON 可解析（fail-open，log warning）。
+    schema 内容已拼进 prompt 由 LLM 自律 + callKey 计入，这里只把 JSON 形态关。
+    """
+    try:
+        import jsonschema  # noqa: F401
+        _have = True
+    except ImportError:
+        _have = False
+        logger.warning("jsonschema 未安装，结构化校验降级为仅 JSON 解析")
+
+    import json
+
+    def _validate(text: str) -> bool:
+        try:
+            json.loads(_strip_json_fence(text))
+            return True
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+    if not _have:
+        return _validate
+
+    def _full(text: str) -> bool:
+        try:
+            parsed = json.loads(_strip_json_fence(text))
+        except (json.JSONDecodeError, TypeError):
+            return False
+        try:
+            import jsonschema
+            jsonschema.validate(parsed, {"type": "object"})  # 基础形态
+            return True
+        except Exception:
+            return False
+
+    return _full
+
+
+def make_agent_runner(delegate_kwargs: dict):
+    """构造 agent_runner：经 to_thread 调 _run_child（零侵入复用子代理生命周期）。
+
+    - role="leaf"（minimal 工具集）+ summary_only=False（结构化输出要 raw final）
+    - disabled_tools 追加 subagent/workflow（蓝图 §6 递归禁）
+    """
+    import asyncio
+
+    async def runner(prompt: str):
+        from tools.delegate_tool import _run_child
+        cfg = dict(delegate_kwargs.get("config") or {})
+        disabled = list(cfg.get("disabled_tools") or [])
+        for t in ("subagent", "workflow"):
+            if t not in disabled:
+                disabled.append(t)
+        cfg["disabled_tools"] = disabled
+        kwargs = dict(delegate_kwargs)
+        kwargs["config"] = cfg
+        kwargs["summary_only"] = False
+        try:
+            return await asyncio.to_thread(
+                _run_child, prompt, "", "leaf", **kwargs)
+        except Exception as e:
+            logger.warning("workflow agent() 子代理失败（dead）: %s", e)
+            return None
+
+    return runner
