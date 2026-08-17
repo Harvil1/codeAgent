@@ -1750,6 +1750,11 @@ class TestReadonlyAstFallback:
         from agent.permission import _is_readonly_command
         assert _is_readonly_command("ls \nrm -rf build") is False
 
+    def test_cr_separator_not_readonly(self):
+        """CR 分隔（bashlex 不认 \r，parse_info 归一化成 \n 后正确切段）。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("ls \rrm -rf build") is False
+
     def test_readonly_compound_still_ok(self):
         """既有只读复合（&& / |）不受影响。"""
         from agent.permission import _is_readonly_command

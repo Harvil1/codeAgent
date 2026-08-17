@@ -27,6 +27,9 @@ def parse_info(command: str) -> Optional[dict]:
     cmd = (command or "").strip()
     if not cmd:
         return None
+    # bash 视 \r 为命令分隔（bashlex 不认）——统一归一成 \n 再解析，
+    # 防 "ls \r rm xxx" 被 AST 当单段翻案回只读（R27 终审 follow-up）
+    cmd = cmd.replace("\r\n", "\n").replace("\r", "\n")
     try:
         import bashlex
     except ImportError:
