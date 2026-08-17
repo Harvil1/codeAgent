@@ -72,9 +72,23 @@ class TestThreadedLLMClient:
         assert c._model_config["api_key"] == "sk-env"
 
     def test_thread_helper_auth_token_preferred(self):
-        """auth_token 场景：api_key 为空时用 auth_token 作凭证。"""
+        """auth_token 场景：auth_token 键独立透传（anthropic 分支 auth_token 优先 Bearer）。"""
         from cli import _thread_llm_client
         cfg = {"model": {"format": "anthropic", "name": "m",
                          "base_url": "https://x", "auth_token": "tok-1"}}
         c = _thread_llm_client(cfg)
+        assert c._model_config["auth_token"] == "tok-1"
+        # 现场实际：_derive_api_key 末尾 `api_key or auth_token` 折叠保持不动，
+        # api_key 字段仍为 "tok-1"；anthropic 分支 auth_token 优先，不受影响。
         assert c._model_config["api_key"] == "tok-1"
+
+    def test_thread_helper_auth_token_passthrough(self):
+        """auth_token 独立透传（anthropic + Bearer 端点不被折叠丢失）。"""
+        from cli import _thread_llm_client
+        cfg = {"model": {"format": "anthropic", "base_url": "https://x",
+                          "name": "m", "auth_token": "tok-abc"}}
+        c = _thread_llm_client(cfg)
+        assert c._model_config["auth_token"] == "tok-abc"
+        # 现场实际修正：_derive_api_key 保持折叠（api_key == "tok-abc"），
+        # 修复核心是 auth_token 键存在且被 anthropic 分支优先消费（Bearer）。
+        assert c._model_config["api_key"] == "tok-abc"

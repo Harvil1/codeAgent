@@ -162,7 +162,8 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
 # ---------------------------------------------------------------------------
 
 def _thread_llm_client(config: dict):
-    """线程上下文专用 LLM client（R26 终审 follow-up）：per-call 独立连接，跨 loop 安全。"""
+    """线程上下文专用 LLM client（R26 终审 follow-up）：per-call 独立连接，跨 loop 安全。
+    改主 client 构造链（RuntimeContext）时须同步本镜像字段。"""
     from agent.llm_client import ThreadedLLMClient
     mc = (config or {}).get("model", {}) or {}
     # api_key 推导与 RuntimeContext 构造主 client 同源（见 RuntimeContext._derive_api_key）
@@ -172,6 +173,7 @@ def _thread_llm_client(config: dict):
         "base_url": mc.get("base_url"),
         "model": mc.get("name"),
         "api_key": api_key,
+        "auth_token": mc.get("auth_token") or "",
     })
 
 
