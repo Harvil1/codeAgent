@@ -43,6 +43,9 @@ class AgentDefinition:
     initial_prompt: str = ""                # frontmatter "initialPrompt" → 首 user turn 前置（slash 风格预处理）
     required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺失则 agent 不显示
     critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼 system_prompt（cache 友好）
+    # R29 #2：定义来源（builtin/user/cli/project）——project 来源的内联 MCP
+    # 需过首连审批（clone 陌生 repo 带入的 agent .md 与 .mcp.json 同威胁模型）
+    source: str = "user"
 
 
 def _user_agents_dir() -> Path:
@@ -111,12 +114,13 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
       4. 项目级（<cwd>/.omnimate/agents/）
     """
     defs: Dict[str, AgentDefinition] = {}
-    for d in [_builtin_agents_dir(), _user_agents_dir()]:
+    for d, _src in [(_builtin_agents_dir(), "builtin"), (_user_agents_dir(), "user")]:
         if not d.exists():
             continue
         for md in sorted(d.glob("*.md")):
             ad = _parse_one(md)
             if ad and ad.name:
+                ad.source = _src
                 defs[ad.name] = ad  # 后扫的覆盖先扫的
     # 阶段 6 NEW: CLI 注入的子代理（优先级介于 user 和 project 之间）
     for name, ad in _cli_injected.items():
@@ -127,8 +131,22 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
         for md in sorted(proj_dir.glob("*.md")):
             ad = _parse_one(md)
             if ad and ad.name:
+                ad.source = "project"
                 defs[ad.name] = ad
     return defs
+
+
+def project_inline_mcp_servers() -> Dict[str, dict]:
+    """R29 #2：项目级 agent .md 定义的内联 MCP server 合并（fail-open）。"""
+    try:
+        return {
+            name: cfg
+            for ad in scan_agent_defs().values()
+            if ad.source == "project"
+            for name, cfg in (ad.inline_mcp_servers or {}).items()
+        }
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +190,7 @@ def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
                 initial_prompt=str(cfg.get("initialPrompt") or ""),
                 required_mcp_servers=cfg.get("requiredMcpServers") or [],
                 critical_reminder=str(cfg.get("criticalReminder") or ""),
+                source="cli",
             )
             _cli_injected[name] = ad
             count += 1

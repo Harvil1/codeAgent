@@ -116,3 +116,56 @@ def test_parse_defaults_when_fields_absent(tmp_path):
     assert ad.memory is False
     assert ad.skills == []
     assert ad.mcp_servers == []
+
+
+# ===== R29 #2：AgentDefinition.source 来源标记 =====
+
+class TestAgentDefSource:
+    def test_project_def_marked(self, tmp_path, monkeypatch):
+        """项目级 .omnimate/agents 扫描出的定义 source=project。"""
+        user_dir = tmp_path / "u"; user_dir.mkdir()
+        proj_dir = tmp_path / "proj" / ".omnimate" / "agents"
+        proj_dir.mkdir(parents=True)
+        (user_dir / "u1.md").write_text(
+            "---\nname: u1\ndescription: t\n---\nbody\n", encoding="utf-8")
+        (proj_dir / "helper.md").write_text(
+            "---\nname: helper\ndescription: t\n---\nbody\n", encoding="utf-8")
+        monkeypatch.setattr("agent.agent_defs._user_agents_dir", lambda: user_dir)
+        monkeypatch.setattr("agent.agent_defs._project_agents_dir", lambda: proj_dir)
+        from agent.agent_defs import scan_agent_defs
+        defs = scan_agent_defs()
+        assert defs["helper"].source == "project"
+        assert defs["u1"].source == "user"
+        # 内置目录来源标记
+        assert defs["explore"].source == "builtin"
+
+    def test_cli_injected_marked(self):
+        """CLI 注入的定义 source=cli（信任源，不参与首连审批）。"""
+        from agent.agent_defs import inject_cli_agents, get_cli_injected, clear_cli_injected
+        clear_cli_injected()
+        try:
+            inject_cli_agents({"cliagent": {"description": "t", "prompt": "p"}})
+            assert get_cli_injected()["cliagent"].source == "cli"
+        finally:
+            clear_cli_injected()
+
+    def test_default_source_is_user(self):
+        """未显式标记时默认 user（getattr 兼容旧对象）。"""
+        from agent.agent_defs import AgentDefinition
+        assert AgentDefinition(name="x").source == "user"
+
+    def test_project_inline_mcp_servers(self, tmp_path, monkeypatch):
+        """项目级 agent .md 的内联 MCP server 合并输出（只收 project 来源）。"""
+        user_dir = tmp_path / "u"; user_dir.mkdir()
+        proj_dir = tmp_path / "proj" / ".omnimate" / "agents"
+        proj_dir.mkdir(parents=True)
+        (user_dir / "a0.md").write_text(
+            "---\nname: a0\ninlineMcpServers:\n  mine: {command: run-mine}\n---\nx\n",
+            encoding="utf-8")
+        (proj_dir / "a1.md").write_text(
+            "---\nname: a1\ninlineMcpServers:\n  evil: {command: run-evil}\n---\nx\n",
+            encoding="utf-8")
+        monkeypatch.setattr("agent.agent_defs._user_agents_dir", lambda: user_dir)
+        monkeypatch.setattr("agent.agent_defs._project_agents_dir", lambda: proj_dir)
+        from agent.agent_defs import project_inline_mcp_servers
+        assert project_inline_mcp_servers() == {"evil": {"command": "run-evil"}}

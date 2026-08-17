@@ -79,6 +79,27 @@ def get_delegation_queue() -> DelegationCompletionQueue:
     return _delegation_queue
 
 
+def inline_mcp_spawn_allowed(agent_def, server_name: str, server_cfg: dict) -> bool:
+    """R29 #2：spawn 时校验项目来源的内联 MCP 是否已获首连审批。
+
+    fail-closed：项目来源（source="project"，即 <cwd>/.omnimate/agents/ 扫描）
+    且未批准 → False（调用方跳过连接并告警）；用户级/CLI 注入缺省按 user
+    不拦（信任源）。审批 key 与 tools/mcp_tool.py 启动审批处同源：
+    workspace cwd resolve().lower() + agent-mcp::<name> + 配置指纹。
+    """
+    if getattr(agent_def, "source", "user") != "project":
+        return True
+    try:
+        from agent.settings import is_project_mcp_approved, mcp_approval_key
+        from agent.workspace_context import get_workspace_cwd
+        _pk = str(Path(get_workspace_cwd()).resolve()).lower()
+        return is_project_mcp_approved(
+            mcp_approval_key(_pk, f"agent-mcp::{server_name}", server_cfg))
+    except Exception as e:
+        logger.warning("内联 MCP 审批校验异常（fail-closed 拒绝）: %s", e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # subagent 工具
 # ---------------------------------------------------------------------------
@@ -957,6 +978,15 @@ def _run_child(
                 _mgr = get_mcp_manager()
                 _app_cfg = kwargs.get("config")
                 for _sname, _scfg in custom_def.inline_mcp_servers.items():
+                    # R29 #2：项目来源的内联 MCP 必须已获首连审批（fail-closed 跳过）
+                    if not inline_mcp_spawn_allowed(custom_def, _sname, _scfg):
+                        logger.warning(
+                            "内联 MCP server %s（agent %s，项目来源）未获首连审批，"
+                            "跳过连接（启动时会请求审批，或手动在 settings.json "
+                            "mcp.approved_project_servers 加 key）",
+                            _sname, custom_def.name,
+                        )
+                        continue
                     _mgr.connect_one(_sname, _scfg, app_config=_app_cfg)
                     _inline_mcp_connected.append(_sname)
                 if _inline_mcp_connected:

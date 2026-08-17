@@ -851,3 +851,84 @@ class TestApprovalKeyFingerprint:
             (tmp_path / "home" / "settings.json").read_text(encoding="utf-8")
         )
         return data.get("mcp", {}).get("approved_project_servers", [])
+
+
+# ===== R29 #2：项目级 agent 内联 MCP 首连审批 =====
+
+class TestInlineMcpApproval:
+    def _setup_inline(self, tmp_path, monkeypatch, approved_keys=None):
+        """隔离环境：假 home + 项目目录（agent .md 带内联 MCP，无 .mcp.json）。"""
+        import json as _json
+        home = tmp_path / "home"
+        home.mkdir()
+        proj = tmp_path / "proj"
+        agents_dir = proj / ".omnimate" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "helper.md").write_text(
+            "---\nname: helper\ndescription: t\n"
+            "inlineMcpServers:\n  evil: {command: run-evil}\n---\nbody\n",
+            encoding="utf-8")
+        monkeypatch.setenv("OMNIMATE_HOME", str(home))
+        monkeypatch.setattr(
+            "agent.workspace_context.get_workspace_cwd", lambda: str(proj))
+        settings = home / "settings.json"
+        settings.write_text(_json.dumps({
+            "mcp": {"approved_project_servers": approved_keys or []}
+        }), encoding="utf-8")
+        return proj
+
+    def _approved_in_settings(self, tmp_path):
+        import json as _json
+        data = _json.loads(
+            (tmp_path / "home" / "settings.json").read_text(encoding="utf-8"))
+        return data.get("mcp", {}).get("approved_project_servers", [])
+
+    def test_startup_asks_and_persists(self, tmp_path, monkeypatch):
+        """项目 agent .md 的内联 server 启动时过审批（同 .mcp.json 语义）。"""
+        from tools import mcp_tool
+        from agent.mcp_client import get_mcp_manager
+        proj = self._setup_inline(tmp_path, monkeypatch)
+        # ① callback 拒 → 持久化无 key
+        monkeypatch.setattr(
+            get_mcp_manager(), "connect_all",
+            lambda config=None, **kw: None,
+        )
+        asked = []
+        mcp_tool.initialize_mcp(
+            approval_callback=lambda n, d: asked.append(n) or False)
+        assert asked == ["(agent 内联) evil"]
+        assert self._approved_in_settings(tmp_path) == []
+        # ② callback 允 → settings 有指纹 key；再跑不再问
+        mcp_tool.initialize_mcp(
+            approval_callback=lambda n, d: asked.append(n) or True)
+        approved = self._approved_in_settings(tmp_path)
+        assert len(approved) == 1 and "evil" in approved[0] and "agent-mcp" in approved[0]
+        asked.clear()
+        mcp_tool.initialize_mcp(approval_callback=lambda n, d: asked.append(n) or True)
+        assert asked == []
+
+    def test_spawn_skips_unapproved(self, tmp_path, monkeypatch):
+        """delegate spawn 时未批准的项目级内联 server → fail-closed 跳过。"""
+        from agent.agent_defs import AgentDefinition
+        from tools.delegate_tool import inline_mcp_spawn_allowed
+
+        proj = self._setup_inline(tmp_path, monkeypatch)
+        ad = AgentDefinition(
+            name="helper", description="t",
+            inline_mcp_servers={"evil": {"command": "run-evil"}},
+        )
+        ad.source = "project"
+        cfg = {"command": "run-evil"}
+
+        # ① 项目来源 + 无批准 → 拒（fail-closed）
+        assert inline_mcp_spawn_allowed(ad, "evil", cfg) is False
+        # ② 写入同源 key（cwd resolve lower + agent-mcp:: 前缀 + 指纹）→ 放行
+        from agent.settings import mcp_approval_key, persist_project_mcp_approval
+        _pk = str(Path(proj).resolve()).lower()
+        persist_project_mcp_approval(
+            mcp_approval_key(_pk, "agent-mcp::evil", cfg))
+        assert inline_mcp_spawn_allowed(ad, "evil", cfg) is True
+        # ③ 用户级/CLI 来源（缺省按 user）不拦
+        ad2 = AgentDefinition(name="u", inline_mcp_servers={"evil": cfg})
+        assert ad2.source == "user"
+        assert inline_mcp_spawn_allowed(ad2, "evil", cfg) is True

@@ -8,6 +8,7 @@ check_fn：只在 MCP server 连接时才暴露工具（动态门控）。
 
 import json
 import logging
+from pathlib import Path
 from typing import Dict
 
 from agent.mcp_client import get_mcp_manager, MCPManager
@@ -198,8 +199,8 @@ def initialize_mcp(approval_callback=None) -> int:
         from agent.settings import is_project_mcp_approved, persist_project_mcp_approval
 
         proj_path, proj_servers = load_project_mcp_config()
+        user_cfg = load_mcp_config()
         if proj_path and proj_servers:
-            user_cfg = load_mcp_config()
             # 路径小写归一（Windows 盘符大小写不敏感）
             proj_key = str(proj_path.parent.resolve()).lower()
             approved_now: Dict[str, dict] = {}
@@ -231,6 +232,51 @@ def initialize_mcp(approval_callback=None) -> int:
                 approved_now[name] = cfg
             if approved_now:
                 manager.connect_all(approved_now)
+
+        # R29 #2：项目级 agent .md 的内联 MCP server 同款首连审批
+        # （威胁模型与项目 .mcp.json 相同：clone 陌生 repo 带入）
+        try:
+            from agent.agent_defs import project_inline_mcp_servers
+            inline_servers = project_inline_mcp_servers()
+        except Exception:
+            inline_servers = {}
+        if inline_servers:
+            from agent.settings import mcp_approval_key
+            # proj_key 统一用 workspace cwd resolve lower（项目可能只有
+            # agent 内联没有 .mcp.json——与 delegate spawn 校验处必须同源）
+            from agent.workspace_context import get_workspace_cwd
+            try:
+                inline_proj_key = str(Path(get_workspace_cwd()).resolve()).lower()
+            except Exception:
+                inline_proj_key = ""
+            inline_approved: Dict[str, dict] = {}
+            for name, cfg in inline_servers.items():
+                if name in user_cfg:
+                    continue  # 用户级同名优先，不重复处理
+                key = mcp_approval_key(inline_proj_key, f"agent-mcp::{name}", cfg)
+                if not is_project_mcp_approved(key):
+                    desc = json.dumps(
+                        {k: cfg.get(k) for k in ("command", "url", "transport", "args")},
+                        ensure_ascii=False,
+                    )
+                    ok = False
+                    if approval_callback is not None:
+                        try:
+                            ok = bool(approval_callback(
+                                f"(agent 内联) {name}", desc))
+                        except Exception as e:
+                            logger.warning("内联 MCP 审批 callback 异常（视为拒绝）: %s", e)
+                    if not ok:
+                        logger.warning(
+                            "项目 agent 内联 MCP server %s 未获批准，"
+                            "spawn 时将跳过（fail-closed）", name,
+                        )
+                        continue
+                    persist_project_mcp_approval(key)
+                inline_approved[name] = cfg
+            # 内联 server 不在此连接（spawn 时临时连）——审批只管放行名单
+            if inline_approved:
+                logger.info("项目 agent 内联 MCP 已批准: %s", sorted(inline_approved))
         return register_mcp_tools(manager)
     except Exception as e:
         logger.warning("MCP 初始化失败: %s", e)
