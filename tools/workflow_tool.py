@@ -56,9 +56,20 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         source = (run_dir / "script.py").read_text(encoding="utf-8")
         journal = WorkflowJournal.load(run_dir)
         meta = journal.load_meta()
+        # 剩余额度制：总额 - 累计已花，耗尽直接拒（防多次 resume 无限烧钱）
+        total = int(meta.get("budget_total") or 0)
+        cumulative = int(meta.get("cumulative_spent") or 0)
+        remaining = total - cumulative
+        if remaining <= 0:
+            return json.dumps({
+                "ok": False,
+                "error": f"累计预算已耗尽（{cumulative}/{total}），resume 拒绝",
+                "error_type": "budget_exceeded",
+                "run_id": run_id,
+            }, ensure_ascii=False)
         return await _execute(run_id, run_dir, source, journal, args, kwargs,
-                              budget_total=meta.get("budget_total"),
-                              resume=True)
+                              budget_total=remaining, resume=True,
+                              declared_total=total)
 
     if action == "status":
         run_id = str(args.get("run_id") or "")
@@ -111,7 +122,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
 
 
 async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
-                   budget_total=None, resume=False):
+                   budget_total=None, resume=False, declared_total=None):
     """公共执行路径：注册取消通道 → 跑引擎 → meta 落盘。"""
     # 经模块属性调用（测试 monkeypatch agent.workflow_engine.make_agent_runner 可命中）
     import agent.workflow_engine as WE
@@ -142,11 +153,15 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
     finally:
         _ACTIVE_RUNS.pop(run_id, None)
 
+    # 跨 resume 累计：读旧值 + 本次；declared_total 保 meta 记录的是声明总额（首跑值），
+    # 不被 resume 时的剩余额覆盖
+    cumulative = int(journal.load_meta().get("cumulative_spent") or 0)
     journal.save_meta({
         "status": "completed" if out.get("ok") else "failed",
         "stats": out.get("stats"),
         "budget_spent": out.get("budget_spent"),
-        "budget_total": budget,
+        "budget_total": declared_total or budget,
+        "cumulative_spent": cumulative + int(out.get("budget_spent") or 0),
         "error": out.get("error"),
         "finished_at": time.time(),
     })

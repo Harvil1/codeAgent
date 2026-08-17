@@ -151,3 +151,55 @@ class TestWorkflowTool:
         from toolsets import ASYNC_AGENT_DISALLOWED_TOOLS
         assert "workflow" in registry.list_all()
         assert "workflow" in ASYNC_AGENT_DISALLOWED_TOOLS
+
+
+class TestResumeBudgetCumulative:
+    async def test_resume_budget_is_cumulative(self, monkeypatch, tmp_path):
+        """resume 领的是剩余额度（总额 - 已花），不是全新一份。"""
+        import json
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        from tools import workflow_tool as WT
+        import agent.workflow_engine as WE
+
+        # runner 返回 ~500 token 的产出（2000 字符）；prompt 带 args 便于 resume 换参绕开 journal 缓存
+        async def big_runner(p):
+            return "x" * 2000
+        monkeypatch.setattr(WE, "make_agent_runner", lambda kw: big_runner)
+
+        script = "async def main():\n    return await agent('a' * args.get('n', 1))\n"
+        out1 = json.loads(await WT._handle_workflow(
+            {"action": "run", "script": script,
+             "budget_total": 999},  # 引擎口径 spent>total 才爆；999 使剩余 499 < 第二次 ~500，严格不等
+            config={}))
+        assert out1["ok"] is True
+        assert out1["budget_spent"] >= 500  # 首跑已花 ≥500
+
+        out2 = json.loads(await WT._handle_workflow(
+            {"action": "resume", "run_id": out1["run_id"], "args": {"n": 2}},
+            config={}))  # 换 prompt 绕缓存，真实再跑一次 agent
+        # 总额 999 - 已花 ≥500 → 剩余 ≤499 → 第二次 agent(~500) 应预算耗尽
+        assert out2["ok"] is False
+        assert out2["error_type"] == "budget_exceeded"
+
+    async def test_resume_zero_budget_rejected(self, monkeypatch, tmp_path):
+        import json
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        from tools import workflow_tool as WT
+        import agent.workflow_engine as WE
+
+        async def runner(p):
+            return "x" * 2000
+        monkeypatch.setattr(WE, "make_agent_runner", lambda kw: runner)
+        out1 = json.loads(await WT._handle_workflow(
+            {"action": "run", "script": "async def main():\n    return await agent('a')\n",
+             "budget_total": 600},
+            config={}))
+        # 手动把累计灌满（绕过估算边界）再 resume
+        from agent.workflow_journal import WorkflowJournal
+        from constants import get_omnimate_home
+        j = WorkflowJournal(get_omnimate_home() / ".workflows" / out1["run_id"])
+        j.save_meta({"cumulative_spent": 600, "budget_total": 600})
+        out2 = json.loads(await WT._handle_workflow(
+            {"action": "resume", "run_id": out1["run_id"]}, config={}))
+        assert out2["ok"] is False
+        assert out2["error_type"] == "budget_exceeded"
