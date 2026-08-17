@@ -624,8 +624,10 @@ _READONLY_FORBIDDEN_TOKENS = (
     "-fprint", "-fprintf", "-fls", "-fprint0",
 )
 
-# 复合命令切分（&& || ; |）+ 子命令替换（$() 反引号）+ 重定向（> >>）
-_COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+# 复合命令切分（&& || ; | & 后台 换行）+ 子命令替换（$() 反引号）+ 重定向（> >>）
+# R27 终审 follow-up：& 后台分隔与换行分隔也切——切段后逐段判只读，
+# 交给 AST/正则精确判定，不再让 "ls & rm xxx" 整串混过
+_COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
 _SUBSHELL_RE = re.compile(r"\$\(|`")
 # 进程替换形态 <( ) >( )——bashlex 实测与 $() 分开识别，正则层单独拦
 _PROCSUB_RE = re.compile(r"[<>]\(")

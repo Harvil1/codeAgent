@@ -1740,6 +1740,22 @@ class TestReadonlyAstFallback:
         assert _is_readonly_command("echo `ls`") is False
         assert _is_readonly_command("cat <(ls)") is False
 
+    def test_background_ampersand_not_readonly(self):
+        """& 后台分隔的复合命令不整串判只读（R27 终审 follow-up）。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("ls & rm -rf build") is False
+
+    def test_newline_separator_not_readonly(self):
+        """换行分隔的复合命令不整串判只读。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("ls \nrm -rf build") is False
+
+    def test_readonly_compound_still_ok(self):
+        """既有只读复合（&& / |）不受影响。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("git status && ls") is True
+        assert _is_readonly_command("cat x.py | grep foo") is True
+
     def test_single_quoted_substitution_readonly(self):
         """单引号里的 $() 是字面文本不执行——但仍非只读（保守方向）。
 
