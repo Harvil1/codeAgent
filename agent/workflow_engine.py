@@ -129,7 +129,7 @@ async def run_workflow(
             key = call_key(prompt, schema)
             cached = journal.lookup(key)
             if cached is not None:
-                out = cached.get("result", {}).get("output")
+                out = cached.get("output")  # lookup 返回的就是 result dict
                 # 缓存回放重新过校验（蓝图 §4，对齐 hooks.ts:90）
                 if validator is None or schema is None or validator(out):
                     stats["cached"] += 1
