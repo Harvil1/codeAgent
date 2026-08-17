@@ -186,7 +186,8 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | 流式并发执行（safe 预执行，默认关灰度） | `agent/streaming_executor.py:StreamingToolExecutor` |
 | 命令权限闸门 / 权限模式（default/acceptEdits/bypass/autoDeny） | `agent/permission.py:PermissionChecker.check` |
 | 路径白名单 / 路径绕过检测 / 双路径检查 / 危险删除 | `agent/permission.py:safe_path` + `check_path` + `check_suspicious_path` |
-| 只读快速通道 / Bash 注入面检查 | `agent/permission.py:_is_readonly_command` + `agent/bash_injection.py` |
+| bash AST 解析（bashlex wrapper） | `agent/bash_ast.py:parse_info` |
+| 只读快速通道 / Bash 注入面检查 |`agent/permission.py:_is_readonly_command` + `agent/bash_injection.py` |
 | 内容级权限规则 / 工具可见性（permissions.allow/deny） | `agent/tool_permissions.py` |
 | SSRF 防护（http hook） | `agent/ssrf_guard.py` + `agent/hook_exec.py:run_http_hook` |
 | LLM 重试 / 备用模型 / 退避 / 529 早切 | `agent/llm_retry.py:call_with_retry` |
@@ -267,6 +268,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **注入面命中是升审批不是拒** —— 对齐 CC ask 语义（所见非所执行 ≠ 攻击）；与 CC 的实现差异记录在 `agent/bash_injection.py` 模块头。
 - **内容级规则 bypass 边界** —— deny 任何模式都拒（用户显式 deny 是最高意图）、ask 强制审批 bypass 不豁免、allow 只跳审批类闸门。前缀匹配是词边界（`build:*` 不匹配 `build/`）。不搬 Bash(cmd:*) 子命令级（避免与权限闸门两套语义打架）。
 - **路径 suspicious 检查在任何模式都拒** —— NTFS ADS/短名/尾点等；裸 `.`/`..` 豁免尾点检查。
+- **bashlex AST 只收紧不放宽** —— deny/ask 逐段命中即命中（复合命令后半段拦得住，含命令替换体内的嵌套段）；allow 在复合命令上整串命中不生效（对齐 CC『allow 须覆盖全部段』的收紧语义）；只读正判的动词仍须在既有白名单表内；bashlex 解析失败一律回落现状正则（fail-open）。
 - **SSRF 预检存在 DNS rebinding 窗口** —— requests 无自定义 DNS lookup（CC 用 axios lookup 钉死）；环回 127/8 与 ::1 放行。
 - **permissions.allow 的唯一语义** —— allow 条目只在"豁免 deny"时生效（deny 整服务器 + allow 单工具），不是白名单模式。
 - **只读表保守优先** —— 识别不了的形态一律不算只读；`env` 不进表；git branch/tag/remote 只收只读子形态。
