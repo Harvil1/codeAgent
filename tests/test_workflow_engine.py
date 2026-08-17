@@ -167,6 +167,25 @@ class TestRunWorkflow:
         assert len(calls) == 2  # 重试一次
         assert out["stats"]["dead"] == 1
 
+    async def test_cached_schema_bad_json_reruns(self, tmp_path):
+        """schema 调用的缓存结果是坏 JSON → 视为 miss 重跑（不绕过校验）。"""
+        from agent.workflow_engine import run_workflow
+        from agent.workflow_journal import WorkflowJournal, call_key
+        schema = {"type": "object"}
+        src = ("async def main():\n"
+               f"    return await agent('x', {schema!r})\n")
+        j = WorkflowJournal.create(tmp_path / "run", src)
+        # 注入坏缓存（key 与实际调用一致：prompt 'x' + schema）
+        j.append(call_key("x", schema), {"kind": "ok", "output": "not-json"})
+        calls = []
+
+        async def runner(p):
+            calls.append(p)
+            return '{"ok": 1}'
+        out = await run_workflow(src, agent_runner=runner, journal=j)
+        assert calls  # 坏缓存没被直接回放
+        assert out["ok"] is True
+
     async def test_script_error_reported(self):
         out = await self._run("async def main():\n    1/0\n")
         assert out["ok"] is False and out["error_type"] == "script_error"

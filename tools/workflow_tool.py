@@ -19,7 +19,7 @@ _ACTIVE_RUNS: dict = {}
 
 
 async def _handle_workflow(args: dict, **kwargs) -> str:
-    from agent.workflow_engine import run_workflow, make_agent_runner, make_validator
+    from agent.workflow_engine import run_workflow, make_agent_runner
     from agent.workflow_journal import WorkflowJournal
     from agent.workflow_registry import load_workflow_scripts
     from constants import get_omnimate_home

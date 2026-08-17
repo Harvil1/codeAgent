@@ -130,8 +130,8 @@ async def run_workflow(
             cached = journal.lookup(key)
             if cached is not None:
                 out = cached.get("output")  # lookup 返回的就是 result dict
-                # 缓存回放重新过校验（蓝图 §4，对齐 hooks.ts:90）
-                if validator is None or schema is None or validator(out):
+                # 缓存回放校验：schema 调用必须仍是合法 JSON（防坏缓存经 resume 绕过）
+                if schema is None or _json_parseable(out):
                     stats["cached"] += 1
                     return out
                 # 校验不过 → 视为 miss 重跑
