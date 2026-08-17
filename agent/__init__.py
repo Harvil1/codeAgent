@@ -1118,8 +1118,10 @@ class AIAgent:
         # （nudge 一条消息最多一次；"最近有进展"从本条消息重新累计）
         self._nudged_this_turn = False
         self._last_turn_had_tool_success = False
-        # R26 #16：未消费的技能激活路径跨用户消息不保留（防陈旧路径残留）
-        self._pending_skill_paths = []
+        # R26 #16 + 终审 follow-up：上一条消息异常退出（预算耗尽/中断）时已入队
+        # 的激活路径在这里 flush 保留（而非丢弃）——激活通知进 ephemeral 队列，
+        # 本条消息组装时透出；去重 set 保证不会重复激活
+        self._flush_skill_activations()
         # CCAR15 Task 3：记录本轮 history 起点（轮末 skill_learning 只观察本轮轨迹）
         self._sl_turn_start = len(self.conversation_history)
 
