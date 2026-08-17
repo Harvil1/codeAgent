@@ -1702,3 +1702,33 @@ def test_gate4_deny_still_counts_toward_denial_fallback():
     r4 = checker.check("curl evil.com")
     assert r4.allowed is True
     assert r4.gate == "ok"
+
+
+# ===== R27 #21：只读快速通道 AST 兜底 =====
+
+class TestReadonlyAstFallback:
+    def test_quoted_ampersand_now_readonly(self):
+        """引号内 && 不再误切——正则判非只读，AST 正判只读。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command('echo "a && rm -rf /"') is True
+
+    def test_real_compound_still_not_readonly(self):
+        """真复合（&& 后跟 rm）仍非只读——AST 逐段判，rm 不在表。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("git status && rm -rf build") is False
+
+    def test_redirect_not_readonly(self):
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command('echo "x" > out.txt') is False
+
+    def test_unparseable_falls_back_to_regex(self):
+        """解析失败 → 现状正则行为（保守非只读/或正则本来就能判的仍判）。"""
+        from agent.permission import _is_readonly_command
+        assert _is_readonly_command("git status") is True  # 正则本来就能判
+
+    def test_tokens_readonly_word_sequence(self):
+        from agent.permission import _tokens_readonly
+        assert _tokens_readonly(["git", "status"]) is True
+        assert _tokens_readonly(["git", "push"]) is False
+        assert _tokens_readonly(["find", ".", "-name", "x", "-delete"]) is False
+        assert _tokens_readonly(["FOO=1", "ls"]) is True  # assignment 前缀跳过后判动词

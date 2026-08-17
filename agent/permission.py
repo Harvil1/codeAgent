@@ -647,18 +647,65 @@ def _is_readonly_segment(seg: str) -> bool:
     return False
 
 
+def _tokens_readonly(tokens: List[str]) -> bool:
+    """token 序列是否只读（R27 #21：AST 段的词序列匹配版 _is_readonly_segment）。
+
+    - 跳过头部 env 赋值 token（FOO=1 ls → 动词 ls）
+    - 任一禁 token（find -delete 等）出现 → False
+    - 动词序列须命中 _READONLY_PREFIXES 的**词序列前缀**（比正则的
+      字符串前缀更精确：`gitx status` 不会因 "git" 前缀误判）
+    """
+    toks = [t for t in tokens if t]
+    i = 0
+    while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+        i += 1
+    rest = [t.lower() for t in toks[i:]]
+    if not rest:
+        return False
+    joined = " ".join(rest)
+    for token in _READONLY_FORBIDDEN_TOKENS:
+        if token in joined:
+            return False
+    for prefix in _READONLY_PREFIXES:
+        p = prefix.split()
+        if rest[: len(p)] == p:
+            return True
+    return False
+
+
 def _is_readonly_command(command: str) -> bool:
-    """命令是否整体只读（T7）。
+    """命令是否整体只读（T7；R27 #21 加 AST 兜底）。
 
     复合命令（含 && / || / ; / | / $() / 反引号）必须**每段**都是只读才算只读；
     出现重定向（> >>）直接判非只读。保守优先：识别不了的形态一律不算只读。
+
+    R27 #21 AST 兜底：正则判非只读时用 bashlex 精确解析一次——
+    引号内的 && 是参数不是分隔（正则误切），AST 分得清；每段动词
+    仍须在 _READONLY_PREFIXES 表内（正判不放宽白名单面）。
+    解析失败 → 维持正则结论（fail-open）。
     """
     if not command or not command.strip():
         return False
     if _SUBSHELL_RE.search(command) or _REDIRECT_RE.search(command):
-        return False
+        # 正则命中子 shell/重定向形态 → 仍可能只是引号里的文本，交给 AST 裁决
+        pass
+    regex_ok = True
     for seg in _COMPOUND_SPLIT_RE.split(command):
         if not _is_readonly_segment(seg):
+            regex_ok = False
+            break
+    if regex_ok:
+        return True
+
+    # R27 #21：AST 兜底（一次解析，逐段判）
+    from agent.bash_ast import parse_info
+    info = parse_info(command)
+    if info is None:
+        return False  # 解析不了 → 维持正则结论（False）
+    if info["has_redirect"] or info["has_substitution"]:
+        return False
+    for tokens in info["segments"]:
+        if not _tokens_readonly(tokens):
             return False
     return True
 

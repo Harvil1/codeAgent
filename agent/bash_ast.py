@@ -16,9 +16,6 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 已知节点 kind（遍历用；spike 后按实际增删）
-_CONTAINER_KINDS = {"list", "pipeline", "compound", "command", "redirect", "procsubstitute", "function"}
-
 
 def parse_info(command: str) -> Optional[dict]:
     """解析命令 → {"segments": [[token...]], "has_redirect": bool, "has_substitution": bool}。
