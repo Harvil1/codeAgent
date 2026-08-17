@@ -58,6 +58,8 @@ def has_worktree_changes(worktree_path: Path) -> bool:
             cwd=str(wt),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         if result.returncode == 0:
@@ -165,6 +167,8 @@ def is_git_repo(path=None) -> bool:
             cwd=str(path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
@@ -181,6 +185,8 @@ def get_repo_root(path=None) -> Optional[Path]:
             cwd=str(path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0:
@@ -251,6 +257,8 @@ def _create_git_worktree(base: Path, name: str, *,
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     if result.returncode != 0:
@@ -417,6 +425,8 @@ def list_worktrees(base_path=None) -> list:
             cwd=str(base),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode != 0:

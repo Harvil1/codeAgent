@@ -11,9 +11,14 @@ import sys
 
 # Windows 控制台默认 GBK，遇 emoji/特殊字符（\u26a0 等）会 UnicodeEncodeError 崩。
 # 启动时强制 stdout/stderr 为 utf-8 + errors='replace'，保证任意 unicode 都能输出（不可编码字符替换为 ?）。
+# stdin 同理：管道/重定向喂数时 locale 是 GBK，UTF-8 中文会解码成乱码
+# （实测 /handoff save "中文标题" 存盘乱码）。真终端（PEP 528 WindowsConsoleIO）
+# 本来就是 unicode，只在非 tty 时重配，交互输入不受影响。
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    if not sys.stdin.isatty():
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, ValueError):
     pass  # 某些环境（重定向/捕获）不支持 reconfigure，忽略
 

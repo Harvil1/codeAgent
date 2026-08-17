@@ -258,6 +258,7 @@ class TestWorktreeExit:
             branches = subprocess.run(
                 ["git", "branch", "--list", enter["branch"]],
                 cwd=str(repo), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
             ).stdout.strip()
             assert branches == ""
 

@@ -11,7 +11,8 @@ from pathlib import Path
 
 def main() -> int:
     root = subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"], text=True
+        ["git", "rev-parse", "--show-toplevel"], text=True,
+        encoding="utf-8", errors="replace",
     ).strip()
     workdir = Path(root) / ".superpowers" / "sdd"
     workdir.mkdir(parents=True, exist_ok=True)

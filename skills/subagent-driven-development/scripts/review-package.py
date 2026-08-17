@@ -29,6 +29,8 @@ def _sdd_dir() -> Path:
     out = subprocess.check_output(
         [sys.executable, str(Path(__file__).resolve().parent / "sdd-workspace.py")],
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).strip()
     return Path(out)
 
