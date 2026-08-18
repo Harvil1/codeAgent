@@ -24,6 +24,37 @@ def _content_hash(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# R30e-H2：read 结果去重（对齐 CC file_unchanged stub）——同文件同 range
+# 且 mtime+size 未变时返回 stub，不重复把全文送进上下文烧 token。
+# 双因子（mtime_ns + size）：Windows mtime 精度 ~15ms，单因子会误判；
+# 本进程写路径（write_file/str_replace）主动失效，terminal 等外部写靠
+# 双因子自然失效。
+# ---------------------------------------------------------------------------
+from collections import OrderedDict  # noqa: E402
+
+_READ_SEEN_LIMIT = 200
+_READ_SEEN: "OrderedDict[str, dict]" = OrderedDict()
+# key: resolved path；value: {"sig": (mtime_ns, size), "ranges": {range_key: (hash, total_lines)}}
+
+
+def _read_range_key(offset: int, limit) -> str:
+    return f"{offset}:{limit if limit is not None else 'all'}"
+
+
+def _read_seen_invalidate(path) -> None:
+    """写路径主动失效该文件的 read 去重缓存。"""
+    try:
+        _READ_SEEN.pop(str(Path(path).resolve()), None)
+    except Exception:
+        pass
+
+
+def reset_read_seen() -> None:
+    """测试用：清空去重缓存。"""
+    _READ_SEEN.clear()
+
+
+# ---------------------------------------------------------------------------
 # read_file
 # ---------------------------------------------------------------------------
 
@@ -82,9 +113,34 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     # CC 试验过截断，因 token 成本反升而回滚——超限直接报错让 LLM 分段读。
     # 预检 1：文件大小 > 256KB（不读盘直接拒）
     try:
-        file_size = path.stat().st_size
+        _st = path.stat()
+        file_size = _st.st_size
     except OSError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    # === R30e-H2：同文件同 range 且 mtime+size 未变 → unchanged stub ===
+    try:
+        _seen_key = str(path.resolve())
+        _sig = (_st.st_mtime_ns, _st.st_size)
+        _rkey = _read_range_key(offset, limit)
+        _seen = _READ_SEEN.get(_seen_key)
+        if _seen and _seen["sig"] == _sig and _rkey in _seen["ranges"]:
+            _saved_hash, _saved_lines = _seen["ranges"][_rkey]
+            _READ_SEEN.move_to_end(_seen_key)
+            return json.dumps({
+                "path": str(path),
+                "content": (
+                    f"(file unchanged: {path} 自上次读取后未变化"
+                    f"（mtime+size 一致），不再重复返回全文省 token；"
+                    f"需要重看内容请换 offset/limit)"
+                ),
+                "file_unchanged": True,
+                "content_hash": _saved_hash,
+                "total_lines": _saved_lines,
+            }, ensure_ascii=False)
+    except Exception:
+        pass  # 去重缓存异常 fail-open 走正常读取
+
     if file_size > READ_MAX_FILE_BYTES:
         return json.dumps({
             "error": (
@@ -153,6 +209,18 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         else:
             final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
             content_offloaded = final_content != raw_content
+
+        # R30e-H2：记录本次读取签名（下次同 range 未变化即回 stub）
+        try:
+            _READ_SEEN[_seen_key] = {
+                "sig": _sig,
+                "ranges": {_rkey: (_content_hash(content), len(lines))},
+            }
+            _READ_SEEN.move_to_end(_seen_key)
+            while len(_READ_SEEN) > _READ_SEEN_LIMIT:
+                _READ_SEEN.popitem(last=False)
+        except Exception:
+            pass
 
         return json.dumps({
             "path": str(path),
@@ -306,6 +374,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             atomic_write_text(path, content)
 
         _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
+        _read_seen_invalidate(path)  # R30e-H2：写后失效 read 去重缓存
         _trigger_file_changed(path, "append" if append else "write", kwargs)  # Task N: FILE_CHANGED hook
 
         return json.dumps({
@@ -326,7 +395,7 @@ SEARCH_FILES_SCHEMA = {
     "name": "search_files",
     "description": (
         "在目录中搜索文件内容（类似 grep）。"
-        "返回匹配的行和文件路径。"
+        "返回匹配的行和文件路径；支持 offset 分页翻看更多结果。"
     ),
     "parameters": {
         "type": "object",
@@ -345,8 +414,23 @@ SEARCH_FILES_SCHEMA = {
             },
             "max_matches": {
                 "type": "integer",
-                "description": "最大匹配数（默认 50）",
+                "description": "本页返回的最大匹配数（默认 50，配合 offset 翻页）",
                 "default": 50,
+            },
+            "offset": {
+                "type": "integer",
+                "description": "跳过前 N 个匹配（分页翻看：第 2 页传 offset=50，第 3 页 offset=100……）",
+                "default": 0,
+            },
+            "context": {
+                "type": "integer",
+                "description": "每个匹配附带前后各 N 行上下文（0-10，默认 0）",
+                "default": 0,
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "description": "大小写不敏感匹配（默认 False）",
+                "default": False,
             },
             "include_hidden": {
                 "type": "boolean",
@@ -383,8 +467,12 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     pattern = args.get("pattern", "")
     search_path = Path(args.get("path") or ".").expanduser()
     file_glob = args.get("glob") or "**/*"
-    max_matches = int(args.get("max_matches", 50))
+    max_matches = max(1, int(args.get("max_matches", 50)))
     include_hidden = bool(args.get("include_hidden", False))
+    # R30e-H3：offset 分页 + 上下文行 + 大小写开关
+    page_offset = max(0, int(args.get("offset", 0) or 0))
+    context = min(10, max(0, int(args.get("context", 0) or 0)))
+    ignore_case = bool(args.get("case_insensitive", False))
 
     if not pattern:
         return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
@@ -404,15 +492,19 @@ def _handle_search_files(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"路径不存在: {search_path}"}, ensure_ascii=False)
 
     try:
-        regex = re.compile(pattern)
+        regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
     except re.error as e:
         return json.dumps({"error": f"非法正则: {e}"}, ensure_ascii=False)
 
     matches = []
     files_searched = 0
     files_skipped = 0
+    has_more = False
+    # 收集到 offset+max+1 条即停（+1 用于判定 has_more，不精确计数总数）
+    collect_limit = page_offset + max_matches + 1
     try:
-        for file_path in search_path.glob(file_glob):
+        # R30e-H3：文件列表排序——offset 分页要求两页之间的顺序稳定
+        for file_path in sorted(search_path.glob(file_glob)):
             if not file_path.is_file():
                 continue
             # 默认跳过 .git/.venv/__pycache__/node_modules 等
@@ -428,29 +520,51 @@ def _handle_search_files(args: dict, **kwargs) -> str:
             except (UnicodeDecodeError, OSError):
                 continue
 
-            for line_no, line in enumerate(content.splitlines(), 1):
+            all_lines = content.splitlines()
+            for line_no, line in enumerate(all_lines, 1):
                 if regex.search(line):
-                    matches.append({
+                    m = {
                         "file": str(file_path),
                         "line": line_no,
                         "content": line[:500],  # 截断长行
-                    })
-                    if len(matches) >= max_matches:
-                        return json.dumps({
-                            "matches": matches,
-                            "truncated": True,
-                            "files_searched": files_searched,
-                            "files_skipped_hidden": files_skipped,
-                        }, ensure_ascii=False)
+                    }
+                    if context > 0:
+                        m["before"] = [
+                            f"{n}: {all_lines[n - 1][:200]}"
+                            for n in range(max(1, line_no - context), line_no)
+                        ]
+                        m["after"] = [
+                            f"{n}: {all_lines[n - 1][:200]}"
+                            for n in range(line_no + 1,
+                                           min(len(all_lines), line_no + context) + 1)
+                        ]
+                    matches.append(m)
+                    if len(matches) >= collect_limit:
+                        has_more = True
+                        break
+            if has_more:
+                break
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-    return json.dumps({
-        "matches": matches,
-        "match_count": len(matches),
+    total_collected = len(matches)
+    page = matches[page_offset: page_offset + max_matches]
+    result = {
+        "matches": page,
+        "match_count": len(page),
+        "shown_range": (
+            f"{page_offset + 1}-{page_offset + len(page)}"
+            if page else "0-0"
+        ),
         "files_searched": files_searched,
         "files_skipped_hidden": files_skipped,
-    }, ensure_ascii=False)
+    }
+    if has_more or page_offset + max_matches < total_collected:
+        result["truncated"] = True
+        result["pagination_hint"] = (
+            f"还有更多匹配——传 offset={page_offset + max_matches} 翻下一页"
+        )
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +709,7 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     _track_checkpoint(path, kwargs)  # /rewind 追踪该文件
+    _read_seen_invalidate(path)  # R30e-H2：写后失效 read 去重缓存
     _trigger_file_changed(path, "edit", kwargs)  # Task N: FILE_CHANGED hook
 
     return json.dumps({

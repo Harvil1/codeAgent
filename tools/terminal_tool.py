@@ -318,26 +318,36 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 encoding="utf-8",
                 errors="replace",
             )
-        # 截断（防止爆 context）
-        stdout_truncated_raw = _truncate_output(result.stdout)
-        stderr_truncated_raw = _truncate_output(result.stderr)
-
-        # 大输出 offload（Phase 1 后始终启用）
+        # R30e-H1：大输出先无损落盘（offload 原文 + 预览回传），落不了再截断。
+        # 此前顺序相反——先中段截断（前 25K + 后 25K 拼接）再落盘，磁盘上
+        # 存的也是残缺版，中段永久丢失；且 stderr 完全没接 offload。
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
         omnimate_home = kwargs.get("omnimate_home")
-        final_stdout = _finalize_output(stdout_truncated_raw, tool_call_id, omnimate_home, config)
-        stdout_offloaded = final_stdout != stdout_truncated_raw
+
+        def _emit(raw: str, suffix: str = ""):
+            """超限输出：offload 原文（无损）→ 失败/缺上下文再中段截断兜底。"""
+            if raw and len(raw) > MAX_OUTPUT_CHARS:
+                tc_id = f"{tool_call_id}{suffix}" if tool_call_id else None
+                final = _finalize_output(raw, tc_id, omnimate_home, config)
+                if final != raw:
+                    # offload 成功（预览 JSON + full_at 指针）或 IO 降级 JSON
+                    return final, True
+            return _truncate_output(raw), False
+
+        final_stdout, stdout_offloaded = _emit(result.stdout)
+        final_stderr, stderr_offloaded = _emit(result.stderr, "_stderr")
 
         return json.dumps({
             "stdout": final_stdout,
-            "stderr": stderr_truncated_raw,
+            "stderr": final_stderr,
             "exit_code": result.returncode,
             "command": command,
             "cwd": cwd,
             "stdout_truncated": len(result.stdout or "") > MAX_OUTPUT_CHARS,
             "stderr_truncated": len(result.stderr or "") > MAX_OUTPUT_CHARS,
             "stdout_offloaded": stdout_offloaded,
+            "stderr_offloaded": stderr_offloaded,
         }, ensure_ascii=False)
     except subprocess.TimeoutExpired:
         return json.dumps({
