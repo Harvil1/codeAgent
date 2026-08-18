@@ -239,7 +239,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | Trace 本地 sink（/trace） | `agent/trace.py:TraceSink` |
 | 输入历史 + 粘贴引用协议 | `agent/input_history.py` |
 | 队列命令消费（不打断当前响应） | `cli.py` 输入 daemon 线程 + `AIAgent._drain_queued_input` |
-| statusline / CLI 命令（/rewind /compact /context /status /doctor /diff /add-dir /paste /history /init …） | `cli.py` |
+| statusline / CLI 命令（/rewind /compact /context /status /doctor /diff /add-dir /paste /history /init …） | `cli.py`（主分发 + RuntimeContext）+ `cli_diag_cmds.py`（/status /doctor /context /compact /usage /stats）+ `cli_session_cmds.py`（/resume /sessions /search /history）+ `cli_skill_memory_cmds.py`（/skills /memory /skill-learning）+ `cli_ui.py`（共享 console） |
 | 桌面通知（Windows toast） | `agent/notifier.py` |
 | preventSleep（Windows 防休眠） | `agent/prevent_sleep.py` |
 | scratchpad 涂鸦区 + coordinator | `agent/scratchpad.py` + `agent/builtin_agents/coordinator.md` |
