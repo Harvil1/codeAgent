@@ -642,26 +642,36 @@ class MemoryStore:
         with self._lock:
             return self._scan_all_entries()
 
-    def find_by_topic_name(self, topic: str, name: str) -> Optional[MemoryEntry]:
-        """同主题同 name 查重（写入即维护）。跨区查（先全局后项目区）。
+    def find_by_topic_name(
+        self, topic: str, name: str, *, type: Optional[str] = None,
+    ) -> Optional[MemoryEntry]:
+        """同主题同 name 查重（写入即维护）。
 
-        注意：save 路由时 type 决定写哪个区，本方法查重不指定 type，
-        所以两个区都要扫（避免同 name 跨区重复）。
+        R30d-D9：type 给定时只查 ``save(type=...)`` 会路由到的**目标区**——
+        与 save 的单区查重语义一致（handler 用它判"本次是更新还是新建"，
+        此前跨区查会导致标签谎报）。type 省略时维持旧行为跨区查
+        （先全局后当前项目区）。跨区同 name 允许共存（CCAR9 物理隔离
+        是特性：项目区条目对其他项目不可见）。
         """
         if not name:
             return None
         topic = topic or "general"
         with self._lock:
-            # 1. 全局区
+            if type is not None:
+                zone = self._resolve_zone(type)
+                for row in self._read_topic_rows(topic, zone_dir=zone):
+                    if row.get("name") == name and row.get("state", "active") != "archived":
+                        return self._row_to_entry(topic, row, zone_dir=zone)
+                return None
+            # 跨区（旧行为）：先全局后当前项目区
             for row in self._read_topic_rows(topic, zone_dir=None):
                 if row.get("name") == name and row.get("state", "active") != "archived":
                     return self._row_to_entry(topic, row)
-            # 2. 当前项目区
-            zone = self._current_project_zone()
-            if zone is not None:
-                for row in self._read_topic_rows(topic, zone_dir=zone):
+            pz = self._current_project_zone()
+            if pz is not None:
+                for row in self._read_topic_rows(topic, zone_dir=pz):
                     if row.get("name") == name and row.get("state", "active") != "archived":
-                        return self._row_to_entry(topic, row)
+                        return self._row_to_entry(topic, row, zone_dir=pz)
             return None
 
     # ------------------------------------------------------------------

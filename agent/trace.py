@@ -235,17 +235,26 @@ def _register_trace_hooks(hooks_registry, sink: "TraceSink") -> None:
 
 
 def _estimate_messages_tokens(messages: Optional[list]) -> int:
-    """粗估 messages 总 token 数（4 字符 ≈ 1 token）。
+    """粗估 messages 总 token 数（混合中英文系数，R30d-D6）。
 
-    OpenAI/Anthropic 都没有 client-side token 计数，这里用经验比例估。
+    OpenAI/Anthropic 都没有 client-side token 计数，这里用经验比例估：
+    ASCII ≈ 4 字符/token，CJK ≈ 1.5 字符/token（中文实际 1-2 字符/token，
+    此前统一 4 字符/token 对中文会低估 2.5 倍+，/trace 成本观测失真）。
     fail-open：任何异常返回 0。
     """
     try:
-        total_chars = 0
+        ascii_chars = 0
+        cjk_chars = 0
         for m in messages or []:
             content = m.get("content", "") if isinstance(m, dict) else str(m)
-            total_chars += len(str(content))
-        return total_chars // 4
+            for ch in str(content):
+                if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" \
+                        or "\uff00" <= ch <= "\uffef":
+                    cjk_chars += 1
+                else:
+                    ascii_chars += 1
+        # CJK: 1.5 字符/token → *2/3；ASCII: 4 字符/token → *1/4（整数运算）
+        return ascii_chars // 4 + (cjk_chars * 2) // 3
     except Exception:
         return 0
 

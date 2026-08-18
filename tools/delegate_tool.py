@@ -280,6 +280,19 @@ def _delegate_sync(
     cancel_event = threading.Event()
     kwargs["cancel_event"] = cancel_event
 
+    # R30d-D8：预生成持久化 id 透传给 _run_child——超时强制 abandon 时可
+    # 立即把 meta 标 interrupted（不等下次启动的 cleanup_stale_subagents；
+    # 残留 running meta 会误导 subagent_resume 以为是可恢复的活任务）
+    _pid = None
+    if ((kwargs.get("config") or {}).get("delegation", {})
+            .get("subagent_persistence_enabled", True)):
+        try:
+            from agent.subagent_persistence import generate_agent_id as _gen_id
+            _pid = _gen_id(parent_session_id=kwargs.get("session_id", ""))
+            kwargs["subagent_agent_id"] = _pid
+        except Exception:
+            _pid = None
+
     box: dict = {}
 
     def _run():
@@ -309,6 +322,14 @@ def _delegate_sync(
                 "Task K: 子代理在 %ss 内未响应 cancel，强制 abandon",
                 sync_cancel_timeout,
             )
+            # R30d-D8：立即标 interrupted（僵尸线程若之后真跑完会再覆盖成
+            # completed/failed——那是对的；这里只是不让 meta 悬挂 running）
+            if _pid:
+                try:
+                    from agent.subagent_persistence import mark_completed as _mark
+                    _mark(_pid, "interrupted")
+                except Exception:
+                    logger.debug("abandon 标记 interrupted 失败（fail-open）")
             return json.dumps({
                 "success": False,
                 "error": (
@@ -709,9 +730,11 @@ def _run_child(
             from agent.subagent_persistence import (
                 generate_agent_id, write_metadata as _sp_write_meta,
             )
-            _child_agent_id = generate_agent_id(
-                parent_session_id=kwargs.get("session_id", ""),
-            )
+            # R30d-D8：调用方预生成的 id 优先（_delegate_sync abandon 标记用）
+            _child_agent_id = kwargs.pop("subagent_agent_id", None) \
+                or generate_agent_id(
+                    parent_session_id=kwargs.get("session_id", ""),
+                )
             _sp_write_meta(_child_agent_id, {
                 "agent_type": kwargs.get("subagent_type", "general-purpose"),
                 "parent_session_id": kwargs.get("session_id", ""),

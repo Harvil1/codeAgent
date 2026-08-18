@@ -1170,9 +1170,12 @@ async def compress_if_needed(
                 cc_threshold, context_window,
             )
 
-    # L4 llm（条件：未超 max_attempts + cooldown 已过 + 超阈值）
+    # L4 llm（条件：cooldown 已过 + 超阈值 + 未熔断）
+    # R30d-D1：取消"每会话最多 N 次"总量上限（对齐 CCB——只留 cooldown +
+    # 连续失败熔断）。此前默认 3 次的总量帽让长会话在第 3 次压缩后永久
+    # 失去 L4，退化为频繁紧急截断；成功压缩受 cooldown + token 阈值双重
+    # 门控，不会失控烧钱。llm_compact_count 仅作遥测展示。
     c4 = False
-    max_attempts = config.get("max_compress_attempts", 3)
     cooldown = config.get("llm_compact_cooldown_turns", 5)
     llm_compact_count = session_state.llm_compact_count
     conv_len = len(_split_system(messages)[1])
@@ -1202,13 +1205,13 @@ async def compress_if_needed(
     tripped = session_state.llm_compact_failures >= MAX_CONSECUTIVE_L4_FAILURES
     logger.info(
         "L4 trigger check: over_threshold=%s, est_tokens=%d, growth=%d, conv_msgs=%d, "
-        "llm_compact_count=%d/%d, cooldown_ok=%s, failures=%d%s",
+        "llm_compact_count=%d, cooldown_ok=%s, failures=%d%s",
         over_threshold, est_tokens, growth, conv_len,
-        llm_compact_count, max_attempts, cooldown_ok,
+        llm_compact_count, cooldown_ok,
         session_state.llm_compact_failures,
         " (TRIPPED)" if tripped else "",
     )
-    if over_threshold and llm_compact_count < max_attempts and cooldown_ok and not tripped:
+    if over_threshold and cooldown_ok and not tripped:
         logger.info("L4 triggered")
         # L4 前落盘 transcript（force=True，因为 L4 是有损的）
         if config.get("transcript_enabled", True):
@@ -1259,9 +1262,8 @@ async def compress_if_needed(
                 "L4 skipped: 触发熔断（连续失败 %d 次）",
                 session_state.llm_compact_failures,
             )
-        elif llm_compact_count >= max_attempts:
-            logger.info("L4 skipped: max_attempts reached (%d/%d)", llm_compact_count, max_attempts)
         else:
+            # R30d-D1：总量上限分支已移除——剩下的唯一拦截原因是 cooldown
             logger.info("L4 skipped: cooldown active (last=%d, current=%d, need=%d)",
                         session_state.last_llm_compact_turn, session_state.current_turn, cooldown)
     else:

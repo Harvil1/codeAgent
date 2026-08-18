@@ -248,7 +248,10 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
         return _fail_closed_or_none(hook, f"hook {hook.name} command 为空")
 
     payload_json = json.dumps(payload, ensure_ascii=False)
-    env = {**os.environ, **(hook.script.env or {})}
+    # R30d-B6a：hook 子进程 env 不再继承宿主全量（含 API key 等敏感变量），
+    # 改用 terminal 同款 build_safe_env（洗掉密钥类）+ hook 自身声明的 env 覆盖
+    from agent.sandbox_env import build_safe_env
+    env = {**build_safe_env(), **(hook.script.env or {})}
 
     # P3.8: 可选 sandbox 包装
     argv = hook.script.command
@@ -435,6 +438,16 @@ def run_http_hook(hook, payload: dict) -> Optional[dict]:
         timeout=hook.script.timeout,
         allow_redirects=False,  # R16 #4: 重定向可绕过预检
     )
+    # R30d-H1：响应体大小上限（防恶意/异常 server 用超大 body 打爆内存；
+    # requests 已下载完成，这里至少阻止超大 JSON 的解析放大）。
+    # getattr 容错：非 requests 传输/测试替身无 content 属性时按小 body 处理。
+    _body = getattr(resp, "content", None) or b""
+    if len(_body) > _MAX_HTTP_HOOK_BODY_BYTES:
+        logger.warning(
+            "http hook %s 响应体 %d bytes 超上限 %d，丢弃",
+            hook.name, len(_body), _MAX_HTTP_HOOK_BODY_BYTES,
+        )
+        return None
     if resp.status_code != 200:
         logger.warning("http hook %s 返回 %d", hook.name, resp.status_code)
         return None
@@ -475,6 +488,17 @@ def run_mcp_tool_hook(hook, payload: dict) -> Optional[dict]:
 # ============================================================================
 
 
+# R30d-H1：http hook 响应体上限（1MB——hook 协议只需小 JSON 决策）
+_MAX_HTTP_HOOK_BODY_BYTES = 1_000_000
+
+
+class _SafeFormatDict(dict):
+    """format_map 的安全 dict：缺 key 时保留 {key} 原样（不抛 KeyError）。"""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
     """单轮 LLM 评估（走注入的 aux_llm_router）。
 
@@ -490,8 +514,12 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         )
         return None
 
-    # 安全 format：payload 里缺字段时保持原样
-    prompt_text = (hook.script.prompt or "").format(**payload) if hook.script.prompt else ""
+    # R30d-H2：真·安全 format——format_map + _SafeFormatDict，payload 缺字段
+    # 保留 {field} 原样（此前裸 .format(**payload) 缺 key 直接 KeyError 抛穿）
+    prompt_text = (
+        (hook.script.prompt or "").format_map(_SafeFormatDict(payload))
+        if hook.script.prompt else ""
+    )
     full_prompt = (
         f"{prompt_text}\n\n"
         f"payload: {json.dumps(payload, ensure_ascii=False)}\n"

@@ -676,21 +676,20 @@ async def test_compress_runs_l4_for_huge_conv(tmp_path):
     assert state.llm_compact_count == 1
 
 
-async def test_compress_respects_max_attempts(tmp_path):
-    """llm_compact_count >= max_compress_attempts 时不再 L4。
-
-    C2 修复后，L4 预算用 session_state.llm_compact_count 而非 attempt_count。
-    """
+async def test_compress_no_total_attempt_cap_r30d(tmp_path):
+    """R30d-D1：L4 不再有总量上限——count 到 3 后仍可继续触发（只受
+    cooldown + 连续失败熔断约束，对齐 CCB；长会话不再退化为紧急截断）。"""
     msgs = _mk_msgs(80)
     state = CompressionSessionState()
-    state.llm_compact_count = 3  # 已达上限
+    state.llm_compact_count = 3  # 旧语义下已达上限
+    cfg = {**_DEFAULT_CFG, "llm_compact_token_threshold": 1}
     out, changed = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
-        config={**_DEFAULT_CFG, "max_compress_attempts": 3}, session_state=state,
+        config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
     )
-    # L1+L2 仍跑，L4 被跳过
-    assert state.llm_compact_count == 3  # 未增长
+    # L4 照常触发（count 继续 growth）
+    assert state.llm_compact_count == 4
 
 
 async def test_compress_respects_cooldown(tmp_path):

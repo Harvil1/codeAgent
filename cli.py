@@ -2252,20 +2252,33 @@ def _handle_poor_command(args: str, rt) -> bool:
         console.print(f"Poor Mode: [cyan]{'ON' if is_on else 'OFF'}[/cyan]")
         return True
     if arg == "on":
+        import copy as _copy_mod
         from agent.poor_mode import apply_poor_preset
+        # R30d-C11：开启前快照 config，off 时完整回滚（此前 off 只清标志，
+        # 被关掉的 reflection/摘要等要等重启才恢复——on/off 不对称）
+        if not getattr(rt, "_poor_config_snapshot", None):
+            rt._poor_config_snapshot = _copy_mod.deepcopy(rt.config)
         rt.config = apply_poor_preset(rt.config, on=True)
         rt._poor_mode_on = True
         console.print(
             "[green]Poor Mode 已开启（runtime）[/green] "
-            "[dim]（reflection/9段摘要/cache监控等已关，重启恢复默认）[/dim]"
+            "[dim]（reflection/9段摘要/cache监控等已关；/poor off 可回滚）[/dim]"
         )
         return True
     if arg == "off":
         rt._poor_mode_on = False
-        console.print(
-            "[green]Poor Mode 已关闭（runtime 标记）[/green] "
-            "[dim]（配置改动不回滚，重启会话恢复默认配置）[/dim]"
-        )
+        snapshot = getattr(rt, "_poor_config_snapshot", None)
+        if snapshot is not None:
+            rt.config = snapshot
+            rt._poor_config_snapshot = None
+            console.print(
+                "[green]Poor Mode 已关闭，配置已回滚到开启前[/green]"
+            )
+        else:
+            console.print(
+                "[green]Poor Mode 已关闭（runtime 标记）[/green] "
+                "[dim]（本会话未开启过，无配置需要回滚）[/dim]"
+            )
         return True
     console.print("[yellow]用法: /poor on|off|status[/yellow]")
     return True
@@ -3208,7 +3221,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
     # 主循环
     while True:
-        user_input = _input_q.get()
+        # R30d-C8：优先消费模型运行期间排队的 slash 命令（agent drain 分流
+        # 进 _queued_cli_commands；对话结束后在此按正常命令处理执行）
+        _deferred = getattr(rt.agent, "_queued_cli_commands", None)
+        if _deferred:
+            user_input = _deferred.pop(0)
+        else:
+            user_input = _input_q.get()
         if user_input is _EOF_SENTINEL or user_input is _INTERRUPT_SENTINEL:
             console.print("\n再见！")
             break
@@ -3216,16 +3235,18 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         if not user_input:
             continue
 
+        # R21 #39：大段粘贴外存 + 占位符（session 存占位符省空间）
+        from agent.input_history import store_paste_if_large
+        user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
+
         # R21 #42：全局输入历史（跨会话召回，fail-open）
+        # R30d-C10：先外存再记历史——历史里存占位符而非全文大原文
+        #（此前顺序反了，history.jsonl 存的是未替换的大原文，越滚越大）
         try:
             from agent.input_history import GlobalHistory
             GlobalHistory(rt.home).append(user_input)
         except Exception:
             pass
-
-        # R21 #39：大段粘贴外存 + 占位符（session 存占位符省空间）
-        from agent.input_history import store_paste_if_large
-        user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
 
         # 0. `#` 快捷写记忆（对齐 Claude Code 体验）
         if user_input.startswith("#"):

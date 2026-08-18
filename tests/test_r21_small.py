@@ -400,7 +400,8 @@ def test_global_history_trim(tmp_path):
 
 
 def test_store_paste_threshold(tmp_path):
-    """≤1024 原样；>1024 外存 + 占位符；可往返展开。"""
+    """≤1024 原样；>1024 外存 + 占位符；可往返展开；同内容去重（R30d-C10）。"""
+    import re as _re
     short = "短输入"
     text, path = store_paste_if_large(short, tmp_path)
     assert text == short and path is None
@@ -408,13 +409,17 @@ def test_store_paste_threshold(tmp_path):
     long_text = "x" * 1025 + "\nsecond line"
     text2, path2 = store_paste_if_large(long_text, tmp_path)
     assert path2 is not None
-    assert text2.startswith("[Pasted text #1 +2 lines]")
+    # 内容寻址 id：8 位 hex（不再递增编号）
+    assert _re.match(r"^\[Pasted text #[0-9a-f]{8} \+2 lines\]$", text2)
     # 展开往返
     expanded = expand_paste_references(text2, tmp_path)
     assert expanded == long_text
-    # 第二次外存编号递增
-    text3, _ = store_paste_if_large("y" * 2000, tmp_path)
-    assert "#2" in text3
+    # 同内容重复粘贴 → 复用同一文件（内容寻址去重）
+    text3, path3 = store_paste_if_large(long_text, tmp_path)
+    assert path3 == path2
+    # 不同内容 → 不同 id
+    text4, path4 = store_paste_if_large("y" * 2000, tmp_path)
+    assert path4 != path2
 
 
 def test_expand_paste_missing_file(tmp_path):

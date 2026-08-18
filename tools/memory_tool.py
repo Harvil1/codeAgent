@@ -81,7 +81,11 @@ def _handle_memory(args: dict, **kwargs) -> str:
             topic = args.get("topic", "general")
             name = args.get("name", "")
             # 写入即维护：同 topic 同 name 已有 → 本次是更新（不堆积）
-            existing = store.find_by_topic_name(topic, name)
+            # R30d-D9：查重限定 save 会路由到的目标区（与 store.save 的
+            # 单区查重同语义，防标签谎报"已更新"实际却在别区新建）
+            existing = store.find_by_topic_name(
+                topic, name, type=args.get("type", "other"),
+            )
             mid = store.save(
                 name=name,
                 description=args.get("description", ""),

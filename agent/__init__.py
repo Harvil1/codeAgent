@@ -168,6 +168,19 @@ class LoopExitReason:
     GOAL_FAIL = "goal_fail"                    # goal 决策 fail
 
 
+def _drop_leading_system(messages: list) -> list:
+    """剥掉组装视图开头的 system 消息（R30d-D3）。
+
+    压缩/续写后用 messages 重建 conversation_history 时用。此前裸切
+    ``messages[1:]`` 依赖"system 恒在 [0]"的隐式契约——system 缺失时会
+    静默丢掉第一条真实消息；现在只在 [0] 确实是 system 时才剥。
+    """
+    if messages and isinstance(messages[0], dict) \
+            and messages[0].get("role") == "system":
+        return messages[1:]
+    return messages
+
+
 class AIAgent:
     """核心 Agent 类。一个实例对应一个会话。"""
 
@@ -341,6 +354,9 @@ class AIAgent:
             self._delegation_queue = DelegationCompletionQueue()
         except Exception:
             self._delegation_queue = None
+        # R30d-C8：运行中排队的 slash 命令暂存（drain 分流进来，cli 主循环
+        # 在本轮对话结束后取走执行——不喂 LLM）
+        self._queued_cli_commands: list = []
         # R30b-A1：不再调 reset_offload_decisions()——模块级决策表是同进程内
         # 所有 agent（主代理 + 并发子代理）共享的，__init__ 里清空会把正在
         # 运行的其他 agent 的冻结决策一起清掉，下一轮 tool result 被还原成
@@ -662,6 +678,7 @@ class AIAgent:
             return
         try:
             lines = []
+            commands = []
             while True:
                 try:
                     item = input_queue.get_nowait()
@@ -669,8 +686,18 @@ class AIAgent:
                     break
                 # R30c-C6：跳过非 str 项（cli 输入线程的 EOF/中断用对象哨兵，
                 # 用户字面输入的任何字符串都不可能与之碰撞）
-                if isinstance(item, str):
-                    lines.append(item)
+                if not isinstance(item, str):
+                    continue
+                # R30d-C8：排队输入里的 slash 命令不喂 LLM——分流到
+                # _queued_cli_commands 由 cli 主循环在本轮对话结束后执行
+                #（此前 /compact /quit 在模型运行中敲会被当普通文本吞掉）
+                if item.startswith("/") and self._is_cli_command_like(item):
+                    commands.append(item)
+                    continue
+                lines.append(item)
+            if commands:
+                self._queued_cli_commands.extend(commands)
+                logger.info("排队 slash 命令转交 CLI 执行（%d 条）", len(commands))
             if not lines:
                 return
             joined = "\n".join(l for l in lines if l and l.strip())
@@ -687,6 +714,20 @@ class AIAgent:
             logger.info("排队输入回流（%d 条）", len(lines))
         except Exception as e:
             logger.debug("输入队列 drain fail-open: %s", e)
+
+    @staticmethod
+    def _is_cli_command_like(line: str) -> bool:
+        """命令名形态判定（与 cli.py C6 的未知命令启发式同规则）。
+
+        `/compact`、`/skills_list` 这类 /word 形态算命令；`/etc/passwd 是什么`
+        （含路径分隔符/非命令字符）不算，仍作为消息喂给模型。
+        """
+        name = line.split()[0][1:] if line.split() else ""
+        return bool(
+            name
+            and name[0].isalpha()
+            and all(c.isalnum() or c in "_-" for c in name)
+        )
 
     def set_mailbox(self, mailbox, agent_name: str = None) -> None:
         """注入 Mailbox。agent_name 为空时保留原值。"""
@@ -1767,8 +1808,10 @@ class AIAgent:
 
         # 压缩修改了历史，同步并重建 system prompt
         # CCAR8 Task 11：strip ephemeral 消息（保护持久化——ephemeral 不应进 history）
+        # R30d-D3：不再裸切 messages[1:]——system 缺失时会静默丢第一条真实
+        # 消息；只在 [0] 确实是 system 时才剥
         self.conversation_history = [
-            m for m in messages[1:] if not m.get("_ephemeral")
+            m for m in _drop_leading_system(messages) if not m.get("_ephemeral")
         ]
         self.invalidate_system_prompt()
         system_prompt = self._get_system_prompt()
@@ -2042,8 +2085,10 @@ class AIAgent:
                 if changed:
                     self._reacted = True  # 向后兼容标记
                     # CCAR8 Task 11：strip ephemeral（保护持久化）
+                    # R30d-D3：_drop_leading_system 防御 system 缺失时丢消息
                     self.conversation_history = [
-                        m for m in messages[1:] if not m.get("_ephemeral")
+                        m for m in _drop_leading_system(messages)
+                        if not m.get("_ephemeral")
                     ]
                     self.invalidate_system_prompt()
                     logger.warning("reactive_compact 后重试本轮")

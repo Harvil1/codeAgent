@@ -101,7 +101,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "llm_compact_message_threshold": 500,
         "llm_compact_keep_recent": 30,
         "llm_compact_cooldown_turns": 5,
-        "max_compress_attempts": 3,
+        # R30d-D1：max_compress_attempts（每会话 L4 总量帽）已移除——
+        # 长会话第 3 次后永久失去 L4 会退化为频繁紧急截断；只留
+        # cooldown + 连续失败熔断（对齐 CCB 语义）
         # T1（核心机制对齐第 1 项）：单轮增长预估（防压缩震荡）
         # L4 判定 est + growth >= threshold 提前触发；growth = 最近
         # growth_window 轮的最大单轮 token，历史不足回退 growth_default

@@ -248,7 +248,6 @@ def test_default_config_has_context_block():
         "micro_keep_recent_results",
         "llm_compact_token_threshold", "llm_compact_message_threshold",
         "llm_compact_keep_recent", "llm_compact_cooldown_turns",
-        "max_compress_attempts",
         "reactive_keep_recent", "reactive_once_per_session",
         "transcript_enabled", "transcript_trigger", "transcript_retention",
     }
