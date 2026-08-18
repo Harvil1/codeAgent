@@ -32,8 +32,16 @@ def reset_injection_cache() -> None:
 
 async def build_relevant_memories_message(
     *, query: str, memory_store, aux_llm_router, max_results: int = 5,
+    active_tools=None, surfaced: set = None,
 ) -> Optional[dict]:
-    """检索相关记忆并构造 ephemeral 注入消息。None = 不注入。fail-open。"""
+    """检索相关记忆并构造 ephemeral 注入消息。None = 不注入。fail-open。
+
+    R30f-H9：
+      - active_tools：当前对话正在使用的工具名（反噪音——用法文档类不召回）
+      - surfaced：调用方持有的"已注入记忆 id"集合。双重作用：作为 exclude
+        传入检索（跨轮去重，已注入的不占槽位），并把本轮新选中的 id 收进去
+        （调用方跨轮持有）。
+    """
     if not query or not query.strip():
         return None
     if memory_store is None or aux_llm_router is None:
@@ -53,6 +61,8 @@ async def build_relevant_memories_message(
             query=query, index_text=index_text,
             llm_client=aux_llm_router, model=None,
             max_results=max_results,
+            active_tools=list(active_tools) if active_tools else None,
+            exclude_ids=set(surfaced) if surfaced else None,
         )
     except Exception as e:
         logger.warning("检索式记忆注入失败（fail-open 不注入）: %s", e)
@@ -60,7 +70,10 @@ async def build_relevant_memories_message(
         _last_result_var.set(None)
         return None
 
+    from datetime import datetime, timezone as _tz
+    now = datetime.now(_tz.utc)
     lines = []
+    selected_ids = []
     for mid in memory_ids or []:
         try:
             entry = memory_store.get(mid)
@@ -69,11 +82,26 @@ async def build_relevant_memories_message(
         if entry is None:
             continue
         body = (getattr(entry, "body", "") or "")[:500]
-        lines.append(f"- [{entry.type}] {entry.name}: {body}")
+        # R30f-H9：过期警示（对齐 CCB staleness caveat）——老记忆里的
+        # file:line 引用会让错误断言显得权威，>1 天的标注"须核对"
+        stale_note = ""
+        updated = getattr(entry, "updated_at", None)
+        if isinstance(updated, datetime) and updated.tzinfo is not None:
+            days = (now - updated).days
+            if days > 1:
+                stale_note = f" [age: {days}d 引用可能已过期，使用前核对当前代码]"
+        lines.append(f"- [{entry.type}] {entry.name}: {body}{stale_note}")
+        selected_ids.append(mid)
     if not lines:
         _last_query_var.set(query)
         _last_result_var.set(None)
         return None
+
+    if surfaced is not None:
+        try:
+            surfaced.update(selected_ids)
+        except Exception:
+            pass
 
     msg = {
         "role": "user",
@@ -81,7 +109,7 @@ async def build_relevant_memories_message(
             f'<relevant_memories count="{len(lines)}">\n'
             + "\n".join(lines)
             + "\n</relevant_memories>\n"
-            "（以上是按当前问题检索的历史记忆，仅供参考）"
+            "（以上是按当前问题检索的历史记忆，仅供参考；带 age 标注的引用可能过期）"
         ),
         "_ephemeral": True,
     }

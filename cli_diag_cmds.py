@@ -373,6 +373,26 @@ def _show_usage(rt: RuntimeContext):
                 hit_rate = stats["total_cache_read_tokens"] / total_in * 100
                 console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
 
+            # R30f-H8：per-model 用量 + 成本（tracker 注入时才有；aux 模型
+            # 与主模型分开计，金额复用 agent/pricing.py 价表）
+            tracker = getattr(rt, "usage_tracker", None)
+            if tracker is not None:
+                try:
+                    s = tracker.summary()
+                    if s.get("models"):
+                        console.print(f"\n[bold]按模型（本会话持久累计）：[/bold]")
+                        for name, row in s["models"].items():
+                            cost = (f"  ${row['cost_usd']:.4f}"
+                                    if "cost_usd" in row else "  $?")
+                            console.print(
+                                f"  [cyan]{name}[/cyan]: {row['calls']} 次 | "
+                                f"in {row['prompt']:,} / out {row['completion']:,} | "
+                                f"cache r{row['cache_read']:,}/w{row['cache_creation']:,}"
+                                f"{cost}"
+                            )
+                except Exception as e:
+                    logger.debug("per-model 用量展示失败（fail-open）: %s", e)
+
             # 成本估算（批次 2：A3）
             try:
                 from agent.pricing import estimate_cost_usd

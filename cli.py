@@ -449,6 +449,17 @@ class RuntimeContext:
 
         # 4. 创建 agent
         self.agent = self._create_agent()
+        # R30f-H8：per-model 用量追踪（注入 agent；/usage 按 model 展示）
+        try:
+            from agent.usage_tracker import UsageTracker
+            self.usage_tracker = UsageTracker(
+                self.home, self.session_id or "default",
+                default_provider=(self.config.get("model") or {}).get("provider", ""),
+            )
+            self.agent.set_usage_tracker(self.usage_tracker)
+        except Exception as e:
+            logger.warning("UsageTracker 初始化失败（fail-open）: %s", e)
+            self.usage_tracker = None
 
         # 5. 扫描技能命令(内置 + 用户两个目录,用户优先)
         self.skill_commands = scan_skill_commands(all_skills_dirs())

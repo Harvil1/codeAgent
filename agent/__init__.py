@@ -357,6 +357,10 @@ class AIAgent:
         # R30d-C8：运行中排队的 slash 命令暂存（drain 分流进来，cli 主循环
         # 在本轮对话结束后取走执行——不喂 LLM）
         self._queued_cli_commands: list = []
+        # R30f-H9：已注入过的记忆 id 集合（跨轮去重，防同一条记忆反复占槽位）
+        self._surfaced_memory_ids: set = set()
+        # R30f-H8：per-model 用量追踪器（cli 注入；None = 不追踪）
+        self._usage_tracker = None
         # R30b-A1：不再调 reset_offload_decisions()——模块级决策表是同进程内
         # 所有 agent（主代理 + 并发子代理）共享的，__init__ 里清空会把正在
         # 运行的其他 agent 的冻结决策一起清掉，下一轮 tool result 被还原成
@@ -640,6 +644,21 @@ class AIAgent:
                     sent_message_count,
                     prompt_t + cache_read + cache_creation,
                 )
+            # R30f-H8：per-model 四维累计（tracker 注入时；fail-open）
+            if getattr(self, "_usage_tracker", None) is not None:
+                try:
+                    self._usage_tracker.record(
+                        model=str(
+                            getattr(response, "model", None)
+                            or self.model or "unknown"
+                        ),
+                        prompt=prompt_t,
+                        completion=getattr(usage, "completion_tokens", 0) or 0,
+                        cache_read=cache_read,
+                        cache_creation=cache_creation,
+                    )
+                except Exception as te:
+                    logger.debug("usage_tracker 记录失败（fail-open）: %s", te)
         except Exception as e:
             logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
 
@@ -729,11 +748,33 @@ class AIAgent:
             and all(c.isalnum() or c in "_-" for c in name)
         )
 
+    def _recent_active_tools(self, lookback: int = 8, limit: int = 3) -> list:
+        """R30f-H9：最近用过的工具名（记忆检索反噪音信号）。
+
+        从 conversation_history 尾部倒扫 assistant 的 tool_calls，按时间
+        正序去重收集，最多 limit 个。倒扫保"最近"，insert(0) 恢复正序。
+        """
+        names: list = []
+        for m in reversed((self.conversation_history or [])[-lookback:]):
+            if not isinstance(m, dict) or m.get("role") != "assistant":
+                continue
+            for tc in (m.get("tool_calls") or []):
+                fn = ((tc.get("function") or {}) or {}).get("name") or ""
+                if fn and fn not in names:
+                    names.insert(0, fn)
+            if len(names) >= limit:
+                break
+        return names[:limit]
+
     def set_mailbox(self, mailbox, agent_name: str = None) -> None:
         """注入 Mailbox。agent_name 为空时保留原值。"""
         self._mailbox = mailbox
         if agent_name:
             self._agent_name = agent_name
+
+    def set_usage_tracker(self, tracker) -> None:
+        """R30f-H8：注入 per-model 用量追踪器（_record_llm_usage 消费）。"""
+        self._usage_tracker = tracker
 
     def _goal_state_path(self):
         """goal 持久化路径：~/.OmniMate/.goal/current.json。"""
@@ -1213,10 +1254,13 @@ class AIAgent:
             try:
                 if self.aux_llm_router is not None:
                     # 检索路径：并行 prefetch（不阻塞；组装消息时 await）
+                    # R30f-H9：带 active_tools 反噪音 + surfaced 跨轮去重
                     self._memory_prefetch_task = asyncio.create_task(
                         build_relevant_memories_message(
                             query=user_message, memory_store=self.memory_store,
                             aux_llm_router=self.aux_llm_router,
+                            active_tools=self._recent_active_tools(),
+                            surfaced=self._surfaced_memory_ids,
                         )
                     )
                 elif not self._snapshot_injected:
