@@ -250,7 +250,7 @@ _SUSPICIOUS_ENV_TOKEN_RE = re.compile(r"[\"'`$]")
 _WRAPPER_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
 
-def _normalize_command_for_rules(command: str) -> str:
+def _normalize_command_for_rules(command: str, *, aggressive: bool = False) -> str:
     """剥掉命令头部的环境变量赋值前缀和安全包装词，用于内容级规则匹配。
 
     防的是：用户 deny 了 ``Bash(rm:*)``，agent 发 ``FOO=1 rm xxx`` 绕过匹配。
@@ -258,8 +258,11 @@ def _normalize_command_for_rules(command: str) -> str:
     是既有匹配语义未覆盖的形态，记录为已知限制不在此处理。
 
     剥离形态（定点迭代直到剥不动）：
-      - ``NAME=value`` 赋值 token（含引号/命令替换等可疑字符时整条停手不剥——
-        剥一半会造出更怪的形态，保守返回原命令走原匹配）
+      - ``NAME=value`` 赋值 token（含引号/命令替换等可疑字符时按 aggressive 分流：
+        默认整条停手不剥——剥一半会造出更怪的形态，保守返回原命令走原匹配；
+        aggressive=True（deny/ask 匹配用）也剥——R30b-B2：否则
+        ``FOO="x" rm -rf data`` 绕过 ``deny Bash(rm:*)``。对齐 CCB
+        stripAllLeadingEnvVars 的不对称语义：收紧方向永不因剥不动而放行）
       - ``env`` 本身 + 其 ``-`` 开头选项与选项参数（``-i`` / ``-u NAME``）+ 后续赋值 token
       - ``nohup``
       - ``timeout <时长>``（两 token 一起）
@@ -272,7 +275,7 @@ def _normalize_command_for_rules(command: str) -> str:
     while i < n:
         tok = tokens[i]
         if _ENV_ASSIGN_RE.match(tok):
-            if _SUSPICIOUS_ENV_TOKEN_RE.search(tok):
+            if _SUSPICIOUS_ENV_TOKEN_RE.search(tok) and not aggressive:
                 break  # 可疑 env token（引号/$/反引号）：整条停止归一化，返回原命令
             i += 1
             continue
@@ -328,41 +331,52 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
     返回 "deny" / "ask" / "allow" / "none"，优先级 deny > ask > allow。
     工具可见性条目（read_file 等无括号形态）不参与——parse 返回 None。
     R25 #1：匹配前先剥 env 前缀/安全包装词（FOO=bar rm xxx 绕不过 deny(rm)）。
+    R30b-B2：剥离不对称——deny/ask 剥到激进形态（可疑 env token 也剥），
+    allow 只认保守形态（防 ``FOO=$(evil) cmd`` 激进剥离后误命中 allow）。
     R27 #21：AST 成功时 deny/ask **逐段**匹配（复合命令后半段命中即命中，
     只收紧不放宽）；allow 保持整串且复合命令不生效（对齐 CC "allow 须覆盖
     全部段"语义——AST 成功且多段时 allow 整串命中不放宽，回落逐段只查
-    deny/ask）；AST 失败回落整串现状。
+    deny/ask）；AST 失败时 deny/ask 整串仍生效，allow 整串命中不生效
+    （R30b-B3 fail-safe：解析不了就不放宽）。
     """
     if rules is None:
         rules = load_tool_permission_rules()
-    command = _normalize_command_for_rules(command)
+    # R30b-B2：双形态归一化——deny/ask 用激进剥离（可疑 env token 也剥），
+    # allow 用保守剥离（可疑 env token 停手）。对齐 CCB 不对称语义。
+    cmd_c = _normalize_command_for_rules(command)
+    cmd_a = _normalize_command_for_rules(command, aggressive=True)
 
-    def _match_one(cmd: str) -> str:
-        """单条命令串的三级判定（deny/ask/allow，none）。"""
+    def _match_pair(cmd_conservative: str, cmd_aggressive: str) -> str:
+        """单条命令串的三级判定（deny/ask/allow，none）。
+
+        deny/ask 对激进形态匹配（收紧方向不因剥不动而放行）；
+        allow 只对保守形态匹配（放宽方向不因激进剥离而误放行——
+        ``FOO=$(evil) git status`` 不能命中 allow(git status)）。
+        """
         for r in (rules.get("deny") or []):
-            if command_rule_matches(r, cmd):
+            if command_rule_matches(r, cmd_aggressive):
                 return "deny"
         for r in (rules.get("ask") or []):
-            if command_rule_matches(r, cmd):
+            if command_rule_matches(r, cmd_aggressive):
                 return "ask"
         for r in (rules.get("allow") or []):
-            if command_rule_matches(r, cmd):
+            if command_rule_matches(r, cmd_conservative):
                 return "allow"
         return "none"
 
-    whole = _match_one(command)
-    # R27 #21：AST 逐段信息（失败回落整串现状）
+    whole = _match_pair(cmd_c, cmd_a)
+    # R27 #21：AST 逐段信息；R30b-B3：AST 解析失败时 allow 整串命中不再放行
     from agent.bash_ast import parse_info
-    info = parse_info(command)
-    if (
-        whole == "allow"
-        and info is not None
-        and len(info["segments"]) > 1
-        and not info["has_substitution"]
+    info = parse_info(cmd_c)
+    if whole == "allow" and (
+        info is None
+        or (len(info["segments"]) > 1 and not info["has_substitution"])
     ):
         # 顶层复合命令（&&/;/|，无命令替换）的 allow 整串命中不放宽——
         # 前缀规则会盖到 && 后面的段（对齐 CC "allow 须覆盖全部段"）。
-        # 回落逐段——逐段只查 deny/ask，不查 allow。
+        # AST 解析失败（info is None）：无法证明"allow 覆盖全部段"，
+        # 同样不放宽（fail-safe，对齐 CC "解析不了→升审批"的方向；
+        # 此前 fail-open 直接放行是绕过面）。
         # 含命令替换时（rm -rf x $(gen)）保持整串 allow 现状（fail-open，
         # 不为收紧 allow 引入新拒绝面）。
         whole = "none"
@@ -373,8 +387,9 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
         return "none"
     seg_results = []
     for tokens in info["segments"]:
-        seg_cmd = _normalize_command_for_rules(" ".join(tokens))
-        seg_results.append(_match_one(seg_cmd))
+        seg_c = _normalize_command_for_rules(" ".join(tokens))
+        seg_a = _normalize_command_for_rules(" ".join(tokens), aggressive=True)
+        seg_results.append(_match_pair(seg_c, seg_a))
     if "deny" in seg_results:
         return "deny"
     if "ask" in seg_results:

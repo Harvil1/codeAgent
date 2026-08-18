@@ -223,7 +223,8 @@ def test_task_update_blocked_route(tmp_path: Path):
     from tools.task_tools import _handle_task_update
     from agent.task_store import get_task_store
 
-    # 全局单例（task_tools 内部用 get_task_store()）
+    # R30b-A5：get_task_store 按 home 键控缓存，不再有"设置全局单例"的副作用；
+    # handler 按真实契约从 kwargs 拿 omnimate_home
     store = get_task_store(omnimate_home=str(tmp_path))
     task = store.create(subject="A", description="")
 
@@ -232,7 +233,7 @@ def test_task_update_blocked_route(tmp_path: Path):
         "status": "blocked",
         "block_kind": "dependency",
         "block_reason": "等 task_X",
-    })
+    }, omnimate_home=str(tmp_path))
     result = json.loads(result_json)
     assert result["success"] is True
     assert result["action"] == "block"
@@ -256,7 +257,7 @@ def test_task_update_blocked_triage_after_three(tmp_path: Path):
             "status": "blocked",
             "block_kind": "dependency",
             "block_reason": "等",
-        }))
+        }, omnimate_home=str(tmp_path)))
     assert last["upgraded_to_triage"] is True
     assert last["new_status"] == "triage"
 
@@ -273,7 +274,7 @@ def test_task_update_normal_status_unchanged(tmp_path: Path):
         "id": task["id"],
         "status": "in_progress",
         "owner": "tester",
-    })
+    }, omnimate_home=str(tmp_path))
     result = json.loads(result_json)
     assert result["success"] is True
     assert "task" in result

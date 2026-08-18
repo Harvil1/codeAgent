@@ -426,9 +426,13 @@ def _record_decision(tc_id: str, preview: str, file_path: str = None) -> None:
 
 
 def reset_offload_decisions() -> None:
-    """会话开始时清空决策（避免跨会话泄漏）。
+    """清空模块级落盘决策表（测试隔离用）。
 
-    在 AIAgent.__init__ 调用，保证新会话不复用上一会话的落盘决策。
+    R30b-A1：不再在 AIAgent.__init__ 调用——该表是同进程内所有 agent
+    （主代理 + 并发子代理）共享的，新建 agent 时清空会把其他正在运行的
+    agent 的冻结决策一起清掉，破坏 byte-identical 重放（打穿 prompt cache）。
+    生产路径靠 _OFFLOAD_DECISIONS_LIMIT LRU 控内存；跨会话泄漏面不存在
+    （tool_call_id 由 provider 随机生成，call_xxx 不碰撞）。
     """
     _offload_decisions.clear()
 

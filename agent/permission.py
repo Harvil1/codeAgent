@@ -619,9 +619,12 @@ _READONLY_PREFIXES = frozenset({
 })
 
 # 只读段里禁止出现的 token（find 的写形态等）
+# R30b-B4：加 "--output"——git diff/show 的 --output=<file> 会写文件，
+# 不能享受只读快速通道 + 并发放宽（重定向 > 已由 _REDIRECT_RE 拦，这是参数形态）
 _READONLY_FORBIDDEN_TOKENS = (
     "-delete", "-exec", "-execdir", "-ok", "-okdir",
     "-fprint", "-fprintf", "-fls", "-fprint0",
+    "--output",
 )
 
 # 复合命令切分（&& || ; | & 后台 换行）+ 子命令替换（$() 反引号）+ 重定向（> >>）
@@ -968,8 +971,9 @@ def is_dangerous_removal_path(resolved_path) -> bool:
 
 # 删除类动词（首 token；Remove-Item 走闸门 2 破坏性审批兜底，不在此列）
 _REMOVAL_VERBS = frozenset({"rm", "rmdir", "del", "erase", "rd"})
-# 复合命令切段（与只读通道同款）
-_CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+# 复合命令切段（与只读通道 _COMPOUND_SPLIT_RE 同款——R30b-B1：补 & 后台
+# 与 \r\n 换行，此前 "echo hi\nrm -rf /" 会被当成一段、verb=echo 漏过本闸门）
+_CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
 # Windows del/rd 的斜杠 flag（/s /q）；不匹配 /usr 这类真路径
 _CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]?$")
 

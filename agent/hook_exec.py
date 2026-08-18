@@ -156,10 +156,30 @@ def _wrap_with_sandbox(hook) -> list:
 # ============================================================================
 
 
-def dispatch_hook(hook, payload: dict) -> Optional[dict]:
+class HookExecutionError(RuntimeError):
+    """声明式 hook 执行失败（启动失败/超时/非零退出/输出解析失败）。
+
+    R30b-A6：fail_closed=True 的 hook 在失败路径抛出。只有 pre_tool_use
+    路径（dispatch_hook(propagate_error=True)）会把异常放行给 registry
+    转为 deny；其他事件维持 fail-open（吞掉返回 None）。
+    """
+
+
+def _fail_closed_or_none(hook, reason: str) -> None:
+    """失败分叉：fail_closed hook 抛 HookExecutionError，否则返回 None。"""
+    if getattr(hook, "fail_closed", False):
+        raise HookExecutionError(reason)
+    return None
+
+
+def dispatch_hook(hook, payload: dict, *, propagate_error: bool = False) -> Optional[dict]:
     """按 hook.script.handler_type 分发到对应执行器。
 
     所有执行器异常都被吞掉返回 None（fail-open），与原 run_script_hook 一致。
+
+    R30b-A6：propagate_error=True（仅 pre_tool_use 路径用）且 hook.fail_closed
+    时，异常向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远不可达
+    （声明式 hook 配了 fail_closed: true 出错仍是 fail-open 放行）。
 
     P3.2: http / mcp_tool / agent 三种 handler 受 feature flag 门控。
     flag 未开启时直接返回 None（视为 skip），不调对应执行器。
@@ -189,6 +209,8 @@ def dispatch_hook(hook, payload: dict) -> Optional[dict]:
         logger.warning("未知 handler_type %s（hook %s）", ht, hook.name)
         return None
     except Exception as e:
+        if propagate_error and getattr(hook, "fail_closed", False):
+            raise  # pre_tool_use 的 fail_closed 语义：异常 → registry 转 deny
         logger.warning("hook %s (%s) 执行失败（fail-open）: %s", hook.name, ht, e)
         return None
 
@@ -213,14 +235,17 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
     CCAR14 Task 2: Windows + use_sandbox=True 走 Job Object 模式——命令不包装，
           正常 Popen 启动后 attach_job（对齐 terminal_tool 的 CCAR12 分支）；
           attach 失败 fail-open 继续（log warning）。
+    R30b-A6：失败分支（启动失败/超时/非零退出/输出解析失败）在 hook.fail_closed
+          时抛 HookExecutionError——经 pre_tool_use 路径转为 deny；exit 2 是
+          主动 block 决策不算失败，维持原协议。
     """
     if hook.script is None:
         logger.warning("hook %s 缺 script 配置", hook.name)
-        return None
+        return _fail_closed_or_none(hook, f"hook {hook.name} 缺 script 配置")
 
     if not hook.script.command:
         logger.warning("hook %s command 类型但 command 为空", hook.name)
-        return None
+        return _fail_closed_or_none(hook, f"hook {hook.name} command 为空")
 
     payload_json = json.dumps(payload, ensure_ascii=False)
     env = {**os.environ, **(hook.script.env or {})}
@@ -264,10 +289,10 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
             )
         except OSError as e:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
-            return None
+            return _fail_closed_or_none(hook, f"hook {hook.name} 启动失败: {e}")
         except subprocess.TimeoutExpired:
             logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
-            return None
+            return _fail_closed_or_none(hook, f"hook {hook.name} 超时")
         stdout = result.stdout
         stderr = result.stderr
         returncode = result.returncode
@@ -285,10 +310,10 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
             )
         except subprocess.TimeoutExpired:
             logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
-            return None
+            return _fail_closed_or_none(hook, f"hook {hook.name} 超时")
         except OSError as e:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
-            return None
+            return _fail_closed_or_none(hook, f"hook {hook.name} 启动失败: {e}")
         stdout = proc.stdout
         stderr = proc.stderr
         returncode = proc.returncode
@@ -303,7 +328,9 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
             return {"action": "block", "reason": stderr_txt or "hook blocked (exit 2)"}
         logger.warning("hook %s exit %d: %s",
                        hook.name, returncode, (stderr or "")[:200])
-        return None
+        return _fail_closed_or_none(
+            hook, f"hook {hook.name} exit {returncode}: {(stderr or '')[:200]}"
+        )
 
     stdout = (stdout or "").strip()
     if not stdout:
@@ -313,11 +340,11 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
         parsed = json.loads(stdout)
         if not isinstance(parsed, dict):
             logger.warning("hook %s stdout 非合法 JSON dict: %r", hook.name, parsed)
-            return None
+            return _fail_closed_or_none(hook, f"hook {hook.name} stdout 非 JSON dict")
         return parsed
     except json.JSONDecodeError as e:
         logger.warning("hook %s stdout 非合法 JSON: %s", hook.name, e)
-        return None
+        return _fail_closed_or_none(hook, f"hook {hook.name} stdout 非合法 JSON: {e}")
 
 
 # ============================================================================

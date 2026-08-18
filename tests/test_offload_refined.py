@@ -420,18 +420,24 @@ async def test_e2e_offload_refined_full_chain(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# E2E: AIAgent.__init__ 调 reset_offload_decisions
+# E2E: AIAgent.__init__ 与 _offload_decisions（R30b-A1 语义翻转）
 # ---------------------------------------------------------------------------
 
-def test_aiagent_init_resets_offload_decisions(tmp_path):
-    """新建 AIAgent 实例时 _offload_decisions 应被清空（不跨会话泄漏）。"""
+def test_aiagent_init_preserves_offload_decisions_r30b(tmp_path):
+    """R30b-A1：新建 AIAgent **不再**清空 _offload_decisions。
+
+    模块级决策表是同进程内所有 agent（主代理 + 并发子代理）共享的，
+    __init__ 里清空会把正在运行的其他 agent 的冻结决策一起清掉，
+    下一轮 tool result 被还原成全文重新落盘，破坏 byte-identical 重放
+    （打穿 prompt cache）。跨会话泄漏面不存在（tool_call_id 随机不碰撞）。
+    """
     from agent import AIAgent
 
-    # 先填充 _offload_decisions
-    _offload_decisions["stale_session_id"] = {"preview": "x", "file_path": None}
+    # 模拟一个正在运行的兄弟 agent 已冻结的决策
+    _offload_decisions["running_sibling_call"] = {"preview": "x", "file_path": None}
     assert len(_offload_decisions) > 0
 
-    # 新建 agent（模拟新会话开始）
+    # 新建 agent（模拟并发子代理/新会话开始）
     AIAgent(
         api_key="fake",
         model="test",
@@ -439,9 +445,9 @@ def test_aiagent_init_resets_offload_decisions(tmp_path):
         enabled_toolsets=[],
     )
 
-    # _offload_decisions 应被清空
-    assert len(_offload_decisions) == 0, (
-        "新会话开始后 _offload_decisions 应清空（防跨会话泄漏）"
+    # 兄弟 agent 的冻结决策应保留
+    assert "running_sibling_call" in _offload_decisions, (
+        "新建 AIAgent 不应清空共享决策表（会打穿并发 agent 的 prompt cache）"
     )
 
 

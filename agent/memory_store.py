@@ -724,13 +724,15 @@ class MemoryStore:
                 self._mark_index_dirty()
                 return f"{topic}#{existing['id']}"
 
-            now = datetime.now()
+            # R30b-A3：新建路径也用 _now_iso()（UTC）——此前 naive 本地时间
+            # 与更新路径的 UTC 混用，东八区新记忆年龄恒偏大 8h（curator 跟着偏）
+            now = _now_iso()
             uid = _generate_id()
             row = {
                 "id": uid, "name": name, "description": description,
                 "type": type, "body": body, "summary": summary,
-                "created_at": now.isoformat(timespec="seconds"),
-                "updated_at": now.isoformat(timespec="seconds"),
+                "created_at": now,
+                "updated_at": now,
                 "confidence": confidence,
                 "expected_valid_days": expected_valid_days,
                 "source_session_id": source_session_id,
@@ -752,15 +754,23 @@ class MemoryStore:
         confidence: Optional[float] = None,
         expected_valid_days: Optional[int] = None,
         source_session_id: Optional[str] = None,
+        state: Optional[str] = None,
     ) -> MemoryEntry:
         """更新字段。不存在的 id 抛 KeyError。
 
         CCAR9 Task 2：跨区查找条目（先全局后项目区）。条目留在原区
         （update 不支持跨区移动——即使改 type 字段也写回原区，
         不重新路由。要跨区移动需 delete + save）。
+
+        R30b-A4：新增 state 字段（"active"/"stale"，archived 走 delete）。
+        **state-only 更新不刷新 updated_at**——curator 的年龄判定按内容
+        年龄，若标 stale 时刷新 updated_at，下一轮 age 归零会把 stale
+        误判为新内容反复翻转（stale↔active 死循环）。
         """
         if type is not None and type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
+        if state is not None and state not in ("active", "stale"):
+            raise ValueError("state 只接受 active/stale（archived 走 delete）")
         # R19 #24：秘密扫描（只查传入的新值；命中拒绝更新）
         from agent.secret_scanner import find_secrets_in
         secret_hits = find_secrets_in(name, description, summary, body)
@@ -790,7 +800,16 @@ class MemoryStore:
                 target["expected_valid_days"] = expected_valid_days
             if source_session_id is not None:
                 target["source_session_id"] = source_session_id
-            target["updated_at"] = _now_iso()
+            if state is not None:
+                target["state"] = state
+            # 只在有内容字段变更时刷新 updated_at（state-only 更新不刷新，
+            # 理由见 docstring——curator 年龄判定防翻转）
+            content_changed = any(v is not None for v in (
+                name, description, type, body, summary,
+                confidence, expected_valid_days, source_session_id,
+            ))
+            if content_changed:
+                target["updated_at"] = _now_iso()
             # 写回原区（即使改了 type 字段，仍写回条目所在的原区——不支持跨区移动）
             self._write_topic_rows(topic, rows, zone_dir=zone_dir)
             self._mark_index_dirty()

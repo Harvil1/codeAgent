@@ -349,7 +349,10 @@ class HookRegistry:
             "tool_name": tool_name,
             "args": args,
         }
-        result = dispatch_hook(hook, payload)
+        # R30b-A6：propagate_error=True——fail_closed hook 执行失败时异常
+        # 向上抛，让 run_pre_tool_use 的 except 分支转为 deny（此前
+        # dispatch_hook 内部吞掉一切异常，fail_closed 分支永不可达）
+        result = dispatch_hook(hook, payload, propagate_error=True)
         if result is None:
             return None
         action = result.get("action", "allow")

@@ -110,35 +110,32 @@ def apply_automatic_transitions(
                 except Exception as e:
                     logger.warning("归档记忆 %s 失败: %s", mem_id, e)
             elif age_days > threshold_stale:
-                # state=stale 标记需要 store.update() 支持 state 字段
-                # 当前 update() 不支持 state（只有 name/desc/type/body 等）
-                # 暂计入 marked_stale 但不写盘，避免破坏数据
-                counts["marked_stale"] += 1
-                logger.info(
-                    "记忆 %s 应标 stale(age=%.0f days > %d) [未写盘:store.update 不支持 state 字段]",
-                    mem_id, age_days, valid_days,
-                )
+                # R30b-A4：update() 已支持 state 字段，stale 标记真正落盘
+                # （此前是 no-op 只打日志——两阶段维护第 1 阶段形同虚设）。
+                # state-only 更新不刷新 updated_at（memory_store.update 语义），
+                # 年龄按内容年龄算，不会翻转。
+                try:
+                    store.update(mem_id, state="stale")
+                    counts["marked_stale"] += 1
+                    logger.info(
+                        "记忆 %s marked stale(age=%.0f days > %d)",
+                        mem_id, age_days, valid_days,
+                    )
+                except Exception as e:
+                    logger.warning("标记 stale 失败 %s: %s", mem_id, e)
             else:
                 if state == "stale":
-                    counts["reactivated"] += 1
-                    logger.info("记忆 %s reactivated(age=%.0f days ≤ %d)", mem_id, age_days, valid_days)
+                    # 年龄回落（内容被重新验证过）→ 恢复 active
+                    try:
+                        store.update(mem_id, state="active")
+                        counts["reactivated"] += 1
+                        logger.info("记忆 %s reactivated(age=%.0f days ≤ %d)", mem_id, age_days, valid_days)
+                    except Exception as e:
+                        logger.warning("恢复 active 失败 %s: %s", mem_id, e)
         except Exception as e:
             logger.warning("处理记忆条目 %s 失败: %s", getattr(entry, "id", "?"), e)
 
     return counts
-
-
-def _set_state_in_file(path, new_state, meta, body, now):
-    """原地改 frontmatter 的 state 字段 + last_reviewed_at。原子写。"""
-    from agent.memory_store import _format_frontmatter
-    from agent.atomic_io import atomic_write_text
-
-    meta["state"] = new_state
-    meta["last_reviewed_at"] = now.isoformat(timespec="seconds")
-    # state=active 时不写(保持老文件干净)
-    if new_state == "active":
-        meta.pop("state", None)
-    atomic_write_text(path, _format_frontmatter(meta) + body)
 
 
 # ---------------------------------------------------------------------------

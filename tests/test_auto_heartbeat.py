@@ -35,10 +35,10 @@ def test_maybe_heartbeat_writes_with_env(monkeypatch, tmp_path):
     store = TaskStore(omnimate_home=tmp_path)
     task = store.create(subject="X")
     monkeypatch.setenv("OMNIMATE_KANBAN_TASK", task["id"])
-    # 注意：maybe_heartbeat 用全局 task_store 单例，需要把 task 加到单例能找到的地方
-    # 测试里直接用 monkeypatch 替换 get_task_store
+    # maybe_heartbeat 走 get_task_store()（无参 = 键控缓存的 "" 槽位）
+    # R30b-A5：单例改为按 home 键控缓存，测试 patch "" 槽位
     import agent.task_store as ts_module
-    monkeypatch.setattr(ts_module, "_task_store", store)
+    monkeypatch.setitem(ts_module._task_stores, "", store)
     result = maybe_heartbeat()
     assert result is True
     refreshed = store.get(task["id"])
@@ -51,7 +51,7 @@ def test_maybe_heartbeat_rate_limit(monkeypatch, tmp_path):
     task = store.create(subject="X")
     monkeypatch.setenv("OMNIMATE_KANBAN_TASK", task["id"])
     import agent.task_store as ts_module
-    monkeypatch.setattr(ts_module, "_task_store", store)
+    monkeypatch.setitem(ts_module._task_stores, "", store)
 
     first = maybe_heartbeat()
     assert first is True
@@ -66,10 +66,9 @@ def test_maybe_heartbeat_rate_limit(monkeypatch, tmp_path):
 def test_maybe_heartbeat_silent_failure(monkeypatch, tmp_path):
     """store.heartbeat 抛异常 → maybe_heartbeat 返 False 不上抛。"""
     monkeypatch.setenv("OMNIMATE_KANBAN_TASK", "task_nonexistent")
-    # 全局单例为 None → get_task_store() 走默认路径，找不到 task 返 None
-    # maybe_heartbeat 应静默
+    # 空目录 store（键控缓存 "" 槽位）→ 找不到 task 返 None，maybe_heartbeat 应静默
     import agent.task_store as ts_module
-    monkeypatch.setattr(ts_module, "_task_store", None)
+    monkeypatch.setitem(ts_module._task_stores, "", TaskStore(omnimate_home=tmp_path))
     result = maybe_heartbeat()
     assert result is False  # 不抛
 

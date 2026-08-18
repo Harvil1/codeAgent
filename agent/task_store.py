@@ -16,7 +16,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -343,12 +343,17 @@ class TaskStore:
         return child
 
 
-# 全局单例
-_task_store: Optional[TaskStore] = None
+# R30b-A5：按 home 路径缓存的 store 池。
+# 旧实现"传了 omnimate_home 就覆盖全局单例"——任何带 home 的调用方
+# （测试、team coordinator）会污染后续所有无参调用（拿到别人的目录）。
+# 改为 keyed 缓存：同一 home 复用同一实例，不同 home 互不可见。
+_task_stores: Dict[str, TaskStore] = {}
 
 
 def get_task_store(omnimate_home=None) -> TaskStore:
-    global _task_store
-    if _task_store is None or omnimate_home is not None:
-        _task_store = TaskStore(omnimate_home)
-    return _task_store
+    key = str(Path(omnimate_home).resolve()) if omnimate_home else ""
+    store = _task_stores.get(key)
+    if store is None:
+        store = TaskStore(omnimate_home)
+        _task_stores[key] = store
+    return store

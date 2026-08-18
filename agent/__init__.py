@@ -28,7 +28,7 @@ import time
 from typing import Optional
 
 from agent.budget import IterationBudget
-from agent.context_pipeline import CompressionSessionState, strip_internal_fields, reset_offload_decisions
+from agent.context_pipeline import CompressionSessionState, strip_internal_fields
 from agent.context_compressor import reset_compact_circuit_breaker
 from agent.prompt_builder import build_system_prompt
 from tools.registry import registry
@@ -333,8 +333,12 @@ class AIAgent:
 
         # 上下文压缩会话状态（每实例一份，跨轮次追踪 L4 cooldown/计数）
         self._compress_session_state = CompressionSessionState()
-        # 改造点 ①：新会话清空落盘决策（避免跨会话泄漏，保护 prompt cache）
-        reset_offload_decisions()
+        # R30b-A1：不再调 reset_offload_decisions()——模块级决策表是同进程内
+        # 所有 agent（主代理 + 并发子代理）共享的，__init__ 里清空会把正在
+        # 运行的其他 agent 的冻结决策一起清掉，下一轮 tool result 被还原成
+        # 全文重新落盘，破坏 byte-identical 重放（打穿 prompt cache）。
+        # tool_call_id 由 provider 随机生成（call_xxx），跨会话不碰撞；
+        # 内存上限由 _OFFLOAD_DECISIONS_LIMIT LRU 兜住。
         # 改造点 ②：新会话重置摘要熔断器（避免跨会话污染失败计数）
         reset_compact_circuit_breaker()
         # CCAR15 Task 4：新会话重置 LLM 观察器熔断/调用计数（避免跨会话污染）
@@ -2154,12 +2158,25 @@ class AIAgent:
     def _merge_continuation_response(
         truncated_response, last_response, content, *, finished: bool,
     ):
-        """续写恢复的响应合并：拼接内容 + 最后一轮 usage（对齐截断响应结构）。"""
+        """续写恢复的响应合并：拼接内容 + 最后一轮 usage（对齐截断响应结构）。
+
+        R30b-A2：最后一轮续写响应若带 tool_calls，保留之且 finish_reason
+        用 "tool_calls"（主循环按 message.tool_calls 分发）——此前硬编码
+        tool_calls=None + 强制 "stop"，模型明确要调工具的意图被吞掉且
+        伪装成正常完成。未完成（仍截断）维持 "length"。
+        """
         from types import SimpleNamespace
         src_msg = truncated_response.choices[0].message
+        last_msg = None
+        if last_response is not None:
+            try:
+                last_msg = last_response.choices[0].message
+            except (IndexError, AttributeError):
+                last_msg = None
+        tool_calls = getattr(last_msg, "tool_calls", None) if last_msg else None
         merged = SimpleNamespace(
             content=content if content else None,
-            tool_calls=None,
+            tool_calls=tool_calls,
             reasoning_content=getattr(src_msg, "reasoning_content", None),
             thinking_signature=getattr(src_msg, "thinking_signature", None),
         )
@@ -2168,10 +2185,14 @@ class AIAgent:
             if last_response is not None
             else getattr(truncated_response, "usage", None)
         )
+        if not finished:
+            finish_reason = "length"
+        else:
+            finish_reason = "tool_calls" if tool_calls else "stop"
         return SimpleNamespace(
             choices=[SimpleNamespace(
                 message=merged,
-                finish_reason="stop" if finished else "length",
+                finish_reason=finish_reason,
             )],
             usage=usage,
         )
