@@ -172,7 +172,10 @@ def _fail_closed_or_none(hook, reason: str) -> None:
     return None
 
 
-def dispatch_hook(hook, payload: dict, *, propagate_error: bool = False) -> Optional[dict]:
+def dispatch_hook(
+    hook, payload: dict, *, propagate_error: bool = False,
+    timeout_cap: float = None,
+) -> Optional[dict]:
     """按 hook.script.handler_type 分发到对应执行器。
 
     所有执行器异常都被吞掉返回 None（fail-open），与原 run_script_hook 一致。
@@ -180,6 +183,9 @@ def dispatch_hook(hook, payload: dict, *, propagate_error: bool = False) -> Opti
     R30b-A6：propagate_error=True（仅 pre_tool_use 路径用）且 hook.fail_closed
     时，异常向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远不可达
     （声明式 hook 配了 fail_closed: true 出错仍是 fail-open 放行）。
+
+    R30g-M8：timeout_cap 非空时钳制执行器超时（取 min；SessionEnd 用 1.5s
+    防 teardown 被慢 hook 卡死）。仅对有超时语义的 command/http 生效。
 
     P3.2: http / mcp_tool / agent 三种 handler 受 feature flag 门控。
     flag 未开启时直接返回 None（视为 skip），不调对应执行器。
@@ -196,10 +202,12 @@ def dispatch_hook(hook, payload: dict, *, propagate_error: bool = False) -> Opti
         )
         return None
     try:
+        # R30g-M8：仅在 cap 存在时传参（保持旧两参调用/测试 mock 兼容）
+        _tkw = {"timeout_cap": timeout_cap} if timeout_cap is not None else {}
         if ht == "command":
-            return run_script_hook(hook, payload)
+            return run_script_hook(hook, payload, **_tkw)
         if ht == "http":
-            return run_http_hook(hook, payload)
+            return run_http_hook(hook, payload, **_tkw)
         if ht == "mcp_tool":
             return run_mcp_tool_hook(hook, payload)
         if ht == "prompt":
@@ -220,12 +228,13 @@ def dispatch_hook(hook, payload: dict, *, propagate_error: bool = False) -> Opti
 # ============================================================================
 
 
-def run_script_hook(hook, payload: dict) -> Optional[dict]:
+def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
     """在子进程中执行声明式 hook。
 
     参数：
         hook: Hook 实例（kind="declarative"，script 非 None）
         payload: 要传给子进程的 dict（含 event/session_id/timestamp/事件字段）
+        timeout_cap: R30g-M8 可选超时钳制（取 min；SessionEnd 用 1.5s）
 
     返回：
         解析后的 dict（可能为空 dict 表示 allow），或 None（任何故障）
@@ -252,6 +261,10 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
     # 改用 terminal 同款 build_safe_env（洗掉密钥类）+ hook 自身声明的 env 覆盖
     from agent.sandbox_env import build_safe_env
     env = {**build_safe_env(), **(hook.script.env or {})}
+    # R30g-M8：超时钳制（cap 更小则用 cap）
+    effective_timeout = hook.script.timeout
+    if timeout_cap is not None:
+        effective_timeout = min(effective_timeout, float(timeout_cap))
 
     # P3.8: 可选 sandbox 包装
     argv = hook.script.command
@@ -286,7 +299,7 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
             result = run_with_job_object(
                 argv,
                 shell=False,
-                timeout=hook.script.timeout,
+                timeout=effective_timeout,
                 env=env,
                 input=payload_json,
             )
@@ -294,7 +307,7 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
             return _fail_closed_or_none(hook, f"hook {hook.name} 启动失败: {e}")
         except subprocess.TimeoutExpired:
-            logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
+            logger.warning("hook %s 超时 (%.1fs)", hook.name, effective_timeout)
             return _fail_closed_or_none(hook, f"hook {hook.name} 超时")
         stdout = result.stdout
         stderr = result.stderr
@@ -308,11 +321,11 @@ def run_script_hook(hook, payload: dict) -> Optional[dict]:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                timeout=hook.script.timeout,
+                timeout=effective_timeout,
                 env=env,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("hook %s 超时 (%.1fs)", hook.name, hook.script.timeout)
+            logger.warning("hook %s 超时 (%.1fs)", hook.name, effective_timeout)
             return _fail_closed_or_none(hook, f"hook {hook.name} 超时")
         except OSError as e:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
@@ -385,7 +398,7 @@ def interpolate_env_vars(value: str, allowed: list) -> str:
     return out
 
 
-def run_http_hook(hook, payload: dict) -> Optional[dict]:
+def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
     """POST JSON payload 到 hook.script.url，解析响应 JSON dict。
 
     R16 #4 SSRF 防护（agent/ssrf_guard.py）：
@@ -435,7 +448,10 @@ def run_http_hook(hook, payload: dict) -> Optional[dict]:
         url,
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=hook.script.timeout,
+        timeout=(
+            min(hook.script.timeout, float(timeout_cap))
+            if timeout_cap is not None else hook.script.timeout
+        ),  # R30g-M8：SessionEnd 等场景钳制
         allow_redirects=False,  # R16 #4: 重定向可绕过预检
     )
     # R30d-H1：响应体大小上限（防恶意/异常 server 用超大 body 打爆内存；

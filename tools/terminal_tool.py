@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 # 输出截断阈值（防止爆 context）
 MAX_OUTPUT_CHARS = 50000
 
+# R30g-H10：timeout 上限（LLM 可传 1e9——钳到可用最大值；config
+# security.max_terminal_timeout 可调，对齐 CC getMaxTimeoutMs 钳制）
+MAX_TIMEOUT_SECONDS = 600
+# R30g-H10：裸 sleep 拦截（对齐 CC——sleep 白占超时窗口零产出，引导 bg_task）
+_BARE_SLEEP_RE = re.compile(r"^\s*sleep\s+(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+
 # GUI 程序关键字（命中后 subprocess 不建管道，避免子进程继承管道卡死）
 _GUI_PROCESS_KEYWORDS = frozenset((
     "chrome.exe", "firefox.exe", "msedge.exe",
@@ -155,6 +161,29 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         timeout = float(args.get("timeout", 120) or 120)
     except (TypeError, ValueError):
         timeout = 120.0
+
+    # R30g-H10：拦截裸 sleep ≥2s（白占超时窗口零产出）
+    _sleep_m = _BARE_SLEEP_RE.match(command)
+    if _sleep_m and float(_sleep_m.group(1)) >= 2:
+        return json.dumps({
+            "error": (
+                f"裸 sleep {_sleep_m.group(1)}s 会占满超时窗口且无产出。"
+                f"等待/轮询类需求请用 bg_task 后台运行；短暂停顿用 sleep <2s。"
+            ),
+            "error_type": "bare_sleep",
+            "command": command,
+        }, ensure_ascii=False)
+
+    # R30g-H10：超时钳制（防 LLM 传 1e9 之类把会话挂死）
+    _cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
+    _max_timeout = float(
+        (_cfg.get("security") or {}).get("max_terminal_timeout")
+        or MAX_TIMEOUT_SECONDS
+    )
+    timeout_clamped = False
+    if timeout > _max_timeout:
+        timeout = _max_timeout
+        timeout_clamped = True
     cwd = args.get("cwd")
     if not cwd:
         # 并发子代理 workspace：优先读 ContextVar（线程隔离），fallback 到 os.getcwd()
@@ -350,10 +379,15 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             "stderr_offloaded": stderr_offloaded,
         }, ensure_ascii=False)
     except subprocess.TimeoutExpired:
+        # R30g-H10：超时引导 bg_task（terminal 超时会终止进程；长任务后台跑）
         return json.dumps({
-            "error": f"命令超时（{timeout}秒）",
+            "error": (
+                f"命令超时（{timeout}秒，进程已终止）。长时间任务请改用 bg_task "
+                f"后台运行（不阻塞对话、完成时通知），不要在 terminal 里等"
+            ),
             "command": command,
             "timeout": timeout,
+            "timeout_clamped": timeout_clamped,
         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({

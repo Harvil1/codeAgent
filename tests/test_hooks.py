@@ -107,7 +107,12 @@ def test_pre_tool_use_deny():
 
 
 def test_pre_tool_use_deny_short_circuits():
-    """首个 deny 胜出，后续不跑。"""
+    """首个 deny 胜出。
+
+    R30g-H5 语义更新：所有匹配 hook 都会执行（并行聚合，对齐 CCB——
+    一个 hook 的判决不应掩盖其他 hook 的判决/改参），deny 聚合后返回
+    首个（注册序）deny 的原因。旧"短路不跑后续"已被聚合取代。
+    """
     calls = []
     def h1(n, a): calls.append("h1"); return {"deny": "first"}
     def h2(n, a): calls.append("h2"); return None
@@ -116,7 +121,7 @@ def test_pre_tool_use_deny_short_circuits():
     reg.register_pre_tool_use(h2, name="h2")
     deny, _ = reg.run_pre_tool_use("t", {}, session_id="s")
     assert deny == "first"
-    assert calls == ["h1"]
+    assert calls == ["h1", "h2"], "聚合语义：所有 hook 都执行"
 
 
 def test_pre_tool_use_modify_args():

@@ -287,6 +287,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "dangerous_commands": [],
         "redact_secrets": True,
         "permission_mode": "default",    # "default" | "bypassPermissions" | "acceptEdits"
+        # R30g-H10：terminal 超时上限（秒）——LLM 传再大的 timeout 也钳到这里
+        "max_terminal_timeout": 600,
         # OS 沙箱（对齐 Claude Code /sandbox）
         "sandbox_mode": "off",           # "off" | "on"（启动时灌进 PermissionChecker）
         "sandbox_writable_roots": [],    # 额外允许写的目录（默认 cwd + ~/.OmniMate 已含）

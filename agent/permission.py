@@ -974,6 +974,36 @@ _REMOVAL_VERBS = frozenset({"rm", "rmdir", "del", "erase", "rd"})
 # 复合命令切段（与只读通道 _COMPOUND_SPLIT_RE 同款——R30b-B1：补 & 后台
 # 与 \r\n 换行，此前 "echo hi\nrm -rf /" 会被当成一段、verb=echo 漏过本闸门）
 _CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
+
+# R30g-M2：复合命令段数上限（DoS 防护，对齐 CCB MAX_SUBCOMMANDS=50——
+# 其注释记载超宽复合命令曾把安全检查拖到事件循环饿死）；超出直接升审批，
+# 不进任何解析路径
+_MAX_COMPOUND_SEGMENTS = 50
+
+
+def _has_cd_git_combo(command: str) -> bool:
+    """R30g-M3：复合命令里 cd 之后出现 git（含 xargs git）→ True。
+
+    cd 到攻击者可控目录再跑 git——恶意 bare repo 的 core.fsmonitor 等
+    配置注入可执行任意命令（CCB bashPermissions 同款闸门）。顺序敏感：
+    git 在 cd **之前**跑的是原目录，不构成该攻击面。
+    """
+    segs = _CMD_SEGMENT_SPLIT_RE.split(command)
+    if len(segs) < 2:
+        return False
+    saw_cd = False
+    for seg in segs:
+        toks = seg.split()
+        if not toks:
+            continue
+        verb = toks[0].lower().strip("\"'")
+        if verb == "cd":
+            saw_cd = True
+            continue
+        if verb == "git" or (verb == "xargs" and "git" in toks):
+            if saw_cd:
+                return True
+    return False
 # Windows del/rd 的斜杠 flag（/s /q）；不匹配 /usr 这类真路径
 _CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]?$")
 
@@ -1382,6 +1412,29 @@ class PermissionChecker:
                 auto_deny_reason=f"注入面: {injection}",
                 no_callback_message=f"命令含注入面形态需用户确认: {injection}",
                 gate="injection",
+            )
+
+        # === R30g-M2：复合命令段数上限（DoS 防护）===
+        # 超宽复合命令不进任何解析路径，直接升审批
+        if len(_CMD_SEGMENT_SPLIT_RE.split(command)) > _MAX_COMPOUND_SEGMENTS:
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason="复合命令段数超上限（>50），疑似 DoS/异常生成",
+                auto_deny_reason="复合命令段数超上限（>50）",
+                no_callback_message="复合命令段数超上限（>50），需用户确认",
+                gate="too_many_segments",
+            )
+
+        # === R30g-M3：cd+git 组合（bare-repo RCE 防护，对齐 CCB）===
+        if _has_cd_git_combo(command):
+            return self._approval_gate(
+                command,
+                effective_mode,
+                hook_reason="cd 后跟 git（bare-repo core.fsmonitor RCE 防护）",
+                auto_deny_reason="cd+git 组合需确认（bare-repo 攻击面）",
+                no_callback_message="cd 到目录后再跑 git 需用户确认（防恶意 repo 配置注入）",
+                gate="cd_git",
             )
 
         # === T7：只读快速通道（自动批，在破坏性审批与 LLM 分类器之前）===

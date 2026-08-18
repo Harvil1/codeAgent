@@ -294,45 +294,98 @@ class HookRegistry:
     # ---- 执行：PRE_TOOL_USE ----
     def run_pre_tool_use(self, tool_name: str, args: dict, *,
                          session_id: str):
-        """短路：首个 deny 胜出。返回 (deny_reason, modified_args)。
+        """R30g-H5：并行执行 + deny>ask>allow 聚合。返回 (deny_reason, modified_args)。
 
-        - deny: Optional[str]，非 None 时拒绝
-        - modified_args: Optional[dict]，非 None 时累计替换 args
+        - 所有匹配 hook 先跑完再聚合（声明式子进程 hook 用线程池并行——
+          一个慢 hook 不拖累其他 hook 与主循环；programmatic 是进程内快函数串行）
+        - 聚合优先级：deny > ask > allow/None；modify_args 按注册顺序叠加
+          （注意：并行下每个 hook 的判决基于**原始参数**计算——多 hook 同时
+          改参的链式语义与旧串行版略有差异，罕见场景）
+        - ask 档（对齐 CCB ask 语义）：本项目 pre_tool_use 无通用审批 UI，
+          ask 兑现为 fail-closed 拒绝，错误信息注明是 ask（用户可调整 hook）
+        - fail_closed hook 异常聚合为 deny（不再吞掉——R30c-A6 语义保留）
 
         P3.5: 声明式 hook 支持 if 条件过滤（permission rule 语法）。
         P3.6: 声明式 hook 支持 once（跑一次后消费）。
         """
-        deny_reason = None
-        modified_args = None
-        current_args = args
+        matched = []
         for hook in self._hooks[HookEvent.PRE_TOOL_USE]:
-            # P3.5/P3.6: 声明式 hook 的 if 条件 + once 消费检查
             if hook.kind == "declarative":
                 if self._is_consumed(hook):
                     continue
-                if not self._matches_if_condition(hook, tool_name, current_args):
+                if not self._matches_if_condition(hook, tool_name, args):
                     continue
+            matched.append(hook)
+        if not matched:
+            return None, None
+
+        def _run_one(hook, hook_args):
+            """单 hook 执行 → (hook, result 或 Exception)。"""
             try:
                 if hook.kind == "programmatic":
-                    result = hook.fn(tool_name, current_args)
-                else:
-                    # declarative hook
-                    result = self._invoke_declarative_pre_tool(hook, tool_name, current_args, session_id)
-                    self._mark_consumed_if_once(hook)
-                if result is None:
-                    continue
-                if "deny" in result:
-                    deny_reason = result["deny"]
-                    return deny_reason, modified_args  # 短路
-                if "modify_args" in result:
-                    current_args = result["modify_args"]
-                    modified_args = current_args
-            except Exception as e:
+                    return hook, hook.fn(tool_name, hook_args)
+                result = self._invoke_declarative_pre_tool(hook, tool_name, hook_args, session_id)
+                self._mark_consumed_if_once(hook)
+                return hook, result
+            except Exception as e:  # noqa: BLE001
+                return hook, e
+
+        # programmatic：进程内快函数——**串行链式**（后一个看到前一个的
+        # modify_args，保持旧语义）；declarative：子进程慢——并行执行
+        # （判决基于原始参数；modify_args 为罕见场景，按注册顺序替换叠加）
+        prog = [h for h in matched if h.kind == "programmatic"]
+        decl = [h for h in matched if h.kind != "programmatic"]
+        outcomes = []
+        current_args = args
+        for h in prog:
+            outcome = _run_one(h, current_args)
+            outcomes.append(outcome)
+            # 链式语义（同旧串行版）：后一个 hook 看到前一个的 modify_args
+            if (not isinstance(outcome[1], Exception)
+                    and isinstance(outcome[1], dict)
+                    and "modify_args" in outcome[1]):
+                current_args = outcome[1]["modify_args"]
+        if len(decl) == 1:
+            outcomes.append(_run_one(decl[0], args))
+        elif decl:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(decl)),
+                thread_name_prefix="pre-tool-hook",
+            ) as ex:
+                outcomes.extend(ex.map(lambda h: _run_one(h, args), decl))
+
+        denies = []   # [(hook_name, reason)]
+        asks = []     # [(hook_name, reason)]
+        modified_args = None
+        for hook, result in outcomes:
+            if isinstance(result, Exception):
                 if hook.fail_closed:
-                    logger.warning("hook %s fail_closed（视为拒绝）: %s", hook.name, e)
-                    return str(e), None
-                logger.warning("hook %s 异常（视为 None）: %s", hook.name, e)
-        return deny_reason, modified_args
+                    denies.append((hook.name, f"hook 异常（fail_closed）: {result}"))
+                else:
+                    logger.warning("hook %s 异常（视为 None）: %s", hook.name, result)
+                continue
+            if result is None:
+                continue
+            if "deny" in result:
+                denies.append((hook.name, result["deny"]))
+            if "ask" in result:
+                asks.append((hook.name, result.get("ask") or "unspecified"))
+            if "modify_args" in result:
+                modified_args = result["modify_args"]
+
+        if denies:
+            name, reason = denies[0]
+            if len(denies) > 1:
+                logger.info("pre_tool_use 聚合：%d 个 hook deny，取 %s", len(denies), name)
+            return reason, None
+        if asks:
+            name, reason = asks[0]
+            return (
+                f"hook {name} 要求人工确认（ask）: {reason}"
+                "（本环境未接入 hook 审批 UI，默认拒绝；如需放行请调整该 hook 的规则）"
+            ), None
+        return None, modified_args
 
     def _invoke_declarative_pre_tool(self, hook, tool_name, args, session_id):
         """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。
@@ -359,6 +412,9 @@ class HookRegistry:
         # P3.7: block（exit 2）转 deny
         if action in ("deny", "block"):
             return {"deny": result.get("reason", "unspecified")}
+        # R30g-H5: ask 档（升审批语义——run_pre_tool_use 聚合层兑现）
+        if action == "ask":
+            return {"ask": result.get("reason", "unspecified")}
         if action == "modify":
             return {"modify_args": result.get("args", args)}
         return None
@@ -448,13 +504,14 @@ class HookRegistry:
         return result.get("continue")
 
     def _invoke_declarative_script(self, hook, session_id: str, event: str,
-                                   **extra) -> Optional[dict]:
+                                   timeout_cap: float = None, **extra) -> Optional[dict]:
         """跑声明式 hook 子进程（统一入口）。返回 dispatch_hook 的 dict 或 None。
 
         声明式 hook 的 payload 统一含 event/session_id/timestamp/hook_name，
         事件特定字段通过 extra 传入（不传超大内容，只传元信息）。
         dispatch_hook 按 hook.script.handler_type 分发到对应执行器
         （command/http/mcp_tool/prompt/agent）。
+        R30g-M8：timeout_cap 非空时钳制 hook 超时（取 min，SessionEnd 用）。
         """
         from agent.hook_exec import dispatch_hook
         payload = {
@@ -464,7 +521,7 @@ class HookRegistry:
             "hook_name": hook.name,
         }
         payload.update(extra)
-        return dispatch_hook(hook, payload)
+        return dispatch_hook(hook, payload, timeout_cap=timeout_cap)
 
     # ---- batch2-T2: 执行 PRE_LLM_CALL / POST_LLM_CALL ----
     def run_pre_llm_call(self, messages: list, tools: Optional[list],
@@ -541,8 +598,16 @@ class HookRegistry:
                 logger.warning("SESSION_START hook %s 异常（忽略）: %s",
                                hook.name, e)
 
+    # R30g-M8：SessionEnd hook 独立短超时（对齐 CCB 默认 1500ms）——
+    # teardown 不能被慢 hook 卡死（退出等 10s 体验极差）
+    SESSION_END_TIMEOUT_CAP = 1.5
+
     def run_session_end(self, payload: dict) -> None:
-        """通知型：所有 SESSION_END hook 都被调。失败 fail-open。"""
+        """通知型：所有 SESSION_END hook 都被调。失败 fail-open。
+
+        R30g-M8：声明式 hook 超时钳制到 SESSION_END_TIMEOUT_CAP
+        （hook 自配更短则尊重更短值）。
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SESSION_END]:
             try:
@@ -552,6 +617,7 @@ class HookRegistry:
                     self._invoke_declarative_script(
                         hook, session_id, "session_end",
                         message_count=payload.get("message_count", 0),
+                        timeout_cap=self.SESSION_END_TIMEOUT_CAP,
                     )
             except Exception as e:
                 logger.warning("SESSION_END hook %s 异常（忽略）: %s",
