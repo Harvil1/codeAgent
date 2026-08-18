@@ -333,6 +333,14 @@ class AIAgent:
 
         # 上下文压缩会话状态（每实例一份，跨轮次追踪 L4 cooldown/计数）
         self._compress_session_state = CompressionSessionState()
+        # R30c-C1：本 agent 专属的委托完成队列（async 子代理结果定向回流）。
+        # 此前是模块级全局单例，同进程多个 AIAgent（team worker 等）会互相
+        # drain 走对方的子代理结果。惰性导入防循环（delegate_tool 依赖 agent 包）。
+        try:
+            from tools.delegate_tool import DelegationCompletionQueue
+            self._delegation_queue = DelegationCompletionQueue()
+        except Exception:
+            self._delegation_queue = None
         # R30b-A1：不再调 reset_offload_decisions()——模块级决策表是同进程内
         # 所有 agent（主代理 + 并发子代理）共享的，__init__ 里清空会把正在
         # 运行的其他 agent 的冻结决策一起清掉，下一轮 tool result 被还原成
@@ -656,9 +664,13 @@ class AIAgent:
             lines = []
             while True:
                 try:
-                    lines.append(input_queue.get_nowait())
+                    item = input_queue.get_nowait()
                 except Exception:
                     break
+                # R30c-C6：跳过非 str 项（cli 输入线程的 EOF/中断用对象哨兵，
+                # 用户字面输入的任何字符串都不可能与之碰撞）
+                if isinstance(item, str):
+                    lines.append(item)
             if not lines:
                 return
             joined = "\n".join(l for l in lines if l and l.strip())
@@ -1498,10 +1510,14 @@ class AIAgent:
 
         # async 子代理完成通知（CCAR5 留的漏点 fix：原代码只 push 不 drain）
         # fail-open：queue 异常不崩主循环
+        # R30c-C1：读自家实例队列（delegate push 侧已定向到 agent_ref）；
+        # 实例队列缺失（异常兜底）时回落全局队列
         delegation_results = []
         try:
-            from tools.delegate_tool import get_delegation_queue
-            queue = get_delegation_queue()
+            queue = getattr(self, "_delegation_queue", None)
+            if queue is None:
+                from tools.delegate_tool import get_delegation_queue
+                queue = get_delegation_queue()
             if queue.has_pending():
                 delegation_results = queue.drain()
         except Exception as e:

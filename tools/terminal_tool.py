@@ -24,11 +24,35 @@ logger = logging.getLogger(__name__)
 MAX_OUTPUT_CHARS = 50000
 
 # GUI 程序关键字（命中后 subprocess 不建管道，避免子进程继承管道卡死）
-_GUI_PROCESS_KEYWORDS = (
+_GUI_PROCESS_KEYWORDS = frozenset((
     "chrome.exe", "firefox.exe", "msedge.exe",
     "notepad.exe", "explorer.exe",
-)
+))
 _GUI_LAUNCH_RE = re.compile(r"^\s*start\s", re.IGNORECASE)
+
+
+_GUI_SEG_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+
+
+def _is_gui_launch(command: str) -> bool:
+    """GUI 启动判定（R30c-B5：每段首 token 级，不再子串匹配）。
+
+    此前 `kw in command` 子串匹配，`echo "chrome.exe"` / `grep chrome.exe log`
+    会被误判 GUI → DEVNULL 吞掉全部输出，模型拿到假结果。现在只认每个
+    复合段的**首 token**（剥包裹引号/尾标点，取路径 basename）是 GUI
+    可执行名——GUI 程序只能作为段的动词启动，出现在参数位的一律不算。
+    """
+    if _GUI_LAUNCH_RE.match(command):
+        return True
+    for seg in _GUI_SEG_SPLIT_RE.split(command):
+        toks = seg.strip().split()
+        if not toks:
+            continue
+        first = toks[0].strip("\"'").rstrip(",;.").lower()
+        base = first.replace("\\", "/").split("/")[-1]
+        if base in _GUI_PROCESS_KEYWORDS:
+            return True
+    return False
 
 
 def check_terminal_requirements() -> bool:
@@ -181,9 +205,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
     win_job_mode = False  # CCAR12: Windows Job Object 模式（命令不包装，启动后挂 job）
     if sandbox_mode == "on":
         # GUI 命令强制跳过 sandbox（GUI 程序在沙箱里启不来）
-        is_gui_launch = bool(_GUI_LAUNCH_RE.match(command)) or any(
-            kw in command.lower() for kw in _GUI_PROCESS_KEYWORDS
-        )
+        is_gui_launch = _is_gui_launch(command)  # R30c-B5：token 级判定
         if is_gui_launch:
             logger.warning("GUI 命令跳过 OS 沙箱: %s", command[:80])
         else:
@@ -235,9 +257,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 检测 GUI 程序启动命令(start / Chrome / 浏览器等)
         # GUI 程序不退出 → subprocess 管道永远等 → 卡死
         # 修复:不创建管道(DEVNULL),start 命令立即返回
-        is_gui_launch = bool(_GUI_LAUNCH_RE.match(command)) or any(
-            kw in command.lower() for kw in _GUI_PROCESS_KEYWORDS
-        )
+        is_gui_launch = _is_gui_launch(command)  # R30c-B5：token 级判定
 
         if is_gui_launch:
             # GUI 命令:不创建管道,避免子进程继承管道导致卡死
@@ -250,8 +270,9 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 cwd=cwd,
                 env=safe_env,
             )
+            # R30c-B5：如实告知输出未捕获（此前假装有结果 "(GUI 程序已启动)"）
             return json.dumps({
-                "stdout": "(GUI 程序已启动)",
+                "stdout": "(GUI 程序已启动；其 stdout/stderr 未捕获——不建管道防卡死，输出不可用)",
                 "stderr": "",
                 "exit_code": result.returncode,
                 "command": command,

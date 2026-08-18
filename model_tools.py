@@ -91,11 +91,13 @@ def get_tool_definitions(
 
     # T6（核心机制对齐第 6 项）：settings.json permissions.deny 规则
     # 在模型看到之前整类移除（精确名 / mcp__server__* / mcp__server 整服务器）
+    # R30c-B7：fail-open 保留（配置损坏就全拒会把 agent 整个砖死），但必须
+    # 显式 ERROR——此前静默 pass，规则加载失败这道防御纵深无声消失。
     try:
         from agent.tool_permissions import is_tool_denied
         tool_names = [n for n in tool_names if not is_tool_denied(n)]
-    except Exception:
-        pass  # fail-open：规则加载失败不影响工具可见性
+    except Exception as e:
+        logger.error("deny 规则加载失败，工具可见性过滤本调用失效（fail-open）: %s", e)
 
     global _last_resolved_tool_names
     _last_resolved_tool_names = tool_names

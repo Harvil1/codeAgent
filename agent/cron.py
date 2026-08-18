@@ -96,6 +96,10 @@ class CronScheduler:
 
         补跑只 push 一次（不重复），通知里标 catch_up=True 区分实时触发。
         扫描结果不影响 last_fired_at（下次正常 tick 才更新）。
+
+        R30c-C5 明确语义：**每个 job 每次启动只补 1 次**——停机 8 小时错过
+        8 次 @hourly 触发也只补 1 次（补跑是"提醒恢复"不是"重放历史"，
+        防通知风暴；missed_between 字段标注完整错过窗口）。
         """
         from datetime import timedelta
         catch_up_count = 0
@@ -157,11 +161,8 @@ class CronScheduler:
                     scan_start.isoformat(timespec="minutes"),
                     scan_end.isoformat(timespec="minutes"),
                 )
-
-        if catch_up_count:
-            # 持久化更新（虽然 last_fired_at 没变，但通知里需要标记，最好不持久化
-            # 因为 catch_up 不算"实际触发"。让下次正常 tick 更新 last_fired_at。）
-            pass
+        # 注：catch_up 后不持久化 last_fired_at（catch_up 不算"实际触发"，
+        # 让下次正常 tick 更新——原 R30c-C5 清理了这里的空 if 死代码）。
 
     def stop(self) -> None:
         """停止后台 thread。幂等。"""

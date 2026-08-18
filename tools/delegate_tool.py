@@ -62,7 +62,9 @@ class DelegationCompletionQueue:
             return len(self._queue) > 0
 
 
-# 全局单例（每个 agent 实例应该有自己的，这里简化）
+# 全局兜底队列（R30c-C1：仅作无 agent_ref 时的兜底——直接调用/测试路径；
+# 生产 dispatch 一定带 agent_ref，结果定向 push 到发起 agent 的实例队列，
+# 不再发生"agent A 的 async 子代理结果被 agent B drain 走"）
 _delegation_queue = DelegationCompletionQueue()
 
 
@@ -75,8 +77,15 @@ _async_tasks: Dict[str, dict] = {}
 
 
 def get_delegation_queue() -> DelegationCompletionQueue:
-    """获取全局委托完成队列。"""
+    """获取全局委托完成队列（兜底/测试用）。"""
     return _delegation_queue
+
+
+def _resolve_delegation_queue(kwargs) -> DelegationCompletionQueue:
+    """R30c-C1：结果队列定向——有 agent_ref（生产 dispatch 必有）用该 agent
+    的实例队列，否则兜底全局队列（直接调用/测试路径）。"""
+    return getattr(kwargs.get("agent_ref"), "_delegation_queue", None) \
+        or _delegation_queue
 
 
 def inline_mcp_spawn_allowed(agent_def, server_name: str, server_cfg: dict) -> bool:
@@ -369,6 +378,12 @@ def _delegate_async(
     """
     delegation_id = f"del_{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
 
+    # === R30c-C1：结果队列定向到发起 agent ===
+    # 有 agent_ref（生产 dispatch 必有）→ push 到该 agent 的实例队列，
+    # drain 侧（AIAgent._drain_injected_messages）只读自家队列；
+    # 无 agent_ref（直接调用/测试）→ 兜底全局队列。
+    _queue = _resolve_delegation_queue(kwargs)
+
     # === Task K: async 子代理也创建 cancel_event，注册到 _async_tasks ===
     # subagent_kill 工具可 set 此 event，让 async 子代理优雅退出
     cancel_event = threading.Event()
@@ -442,7 +457,7 @@ def _delegate_async(
     def _background():
         try:
             result = _run_child(goal, context, role, **kwargs)
-            _delegation_queue.push({
+            _queue.push({
                 "delegation_id": delegation_id,
                 "goal": goal,
                 "success": True,
@@ -450,7 +465,7 @@ def _delegate_async(
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
-            _delegation_queue.push({
+            _queue.push({
                 "delegation_id": delegation_id,
                 "goal": goal,
                 "success": False,

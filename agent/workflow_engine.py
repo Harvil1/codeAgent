@@ -28,19 +28,53 @@ class WorkflowBudgetExceeded(Exception):
 
 @dataclass
 class WorkflowBudget:
-    """共享 token 预算池（估算口径，蓝图 §1）。"""
+    """共享 token 预算池（估算口径，蓝图 §1）。
+
+    R30c-C3：事前预留 + 事后结算——此前纯事后记账（跑完才 spend），
+    一次远超剩余预算的调用会先真实花掉 token 才抛超限，且并发多路
+    agent 能同时通过"remaining>0"的 pre-check 各自超额。现在调用前先
+    reserve 一笔预留额度（并发路数受剩余额度约束），跑完 settle 实际
+    花费并归还差额。超支上限 ≈ 单次预留额度（输出成本无法事前精确预知，
+    这已是估算口径下的最紧约束）。
+    """
     total: int
-    spent: int = 0
+    spent: int = 0        # 已结算
+    reserved: int = 0     # 在途预留（已 reserve 未 settle）
 
     @property
     def remaining(self) -> int:
-        return max(0, self.total - self.spent)
+        return max(0, self.total - self.spent - self.reserved)
 
-    def spend(self, tokens: int) -> None:
-        self.spent += tokens
+    def reserve(self, tokens: int) -> int:
+        """事前预留：返回实际授予的额度（可能小于请求）。
+
+        剩余为 0 时抛 WorkflowBudgetExceeded（跑之前拒，不再先花后报）。
+        """
+        want = max(1, tokens)
+        avail = self.total - self.spent - self.reserved
+        if avail <= 0:
+            raise WorkflowBudgetExceeded(
+                f"预算耗尽：已花 {self.spent} + 在途 {self.reserved} / {self.total}")
+        granted = min(want, avail)
+        self.reserved += granted
+        return granted
+
+    def settle(self, granted: int, actual: int) -> None:
+        """事后结算：归还预留，记入实际花费。
+
+        实际超出预算时抛 WorkflowBudgetExceeded（钱已花，抛错让脚本停下
+        ——与原 spend() 语义一致）；调用方在 finally 路径用 actual=0 结算
+        不会误抛。
+        """
+        self.reserved = max(0, self.reserved - granted)
+        self.spent += max(0, actual)
         if self.spent > self.total:
             raise WorkflowBudgetExceeded(
                 f"预算耗尽：{self.spent}/{self.total}")
+
+    def spend(self, tokens: int) -> None:
+        """兼容入口（脚本/旧测试直调）：等价 settle(0, tokens)。"""
+        self.settle(0, tokens)
 
 
 # 受限 builtins（脚本可用；exec/eval/open/__import__ 等不在此列）
@@ -105,6 +139,7 @@ async def run_workflow(
     agent_runner: Callable[[str], Any],
     validator: Optional[Callable[[str], bool]] = None,
     budget_total: int = 500_000,
+    reserve_per_call: int = 50_000,   # R30c-C3：单次调用的事前预留额度
     max_concurrency: int = 5,
     journal=None,          # W2 接入：WorkflowJournal（None = 不持久化）
     cancel_event=None,     # run 级取消（kill action 触发）
@@ -139,8 +174,8 @@ async def run_workflow(
         if _cancelled():
             raise asyncio.CancelledError()
 
-        if budget.remaining <= 0:
-            raise WorkflowBudgetExceeded(f"预算耗尽：{budget.spent}/{budget.total}")
+        # R30c-C3：事前预留（耗尽在跑之前拒；并发路数受剩余额度约束）
+        granted = budget.reserve(reserve_per_call)
 
         # 结构化输出：schema JSON 拼进 prompt 尾部（蓝图 §5）
         if schema is not None:
@@ -152,23 +187,29 @@ async def run_workflow(
             full = prompt
             check = validator
 
-        async with sem:
-            out = await agent_runner(full)
-            if out is not None and check is not None and not check(out):
-                # 一次自动重试（重试不双计预算）
-                out2 = await agent_runner(full)
-                out = out2 if (out2 is not None and check(out2)) else None
+        try:
+            async with sem:
+                out = await agent_runner(full)
+                if out is not None and check is not None and not check(out):
+                    # 一次自动重试（重试不双计预算）
+                    out2 = await agent_runner(full)
+                    out = out2 if (out2 is not None and check(out2)) else None
+        except BaseException:
+            budget.settle(granted, 0)  # 异常/取消：归还预留（actual=0 不抛超限）
+            raise
 
         if _cancelled():  # runner 内部可能已请求取消（如 kill action 回调）
+            budget.settle(granted, 0)
             raise asyncio.CancelledError()
 
         if out is None:
+            budget.settle(granted, 0)
             stats["dead"] += 1
             if journal is not None:
                 journal.append(key, {"kind": "dead", "output": None})
             return None
         stats["calls"] += 1
-        budget.spend(max(1, len(out) // 4))
+        budget.settle(granted, max(1, len(out) // 4))
         if journal is not None:
             journal.append(key, {"kind": "ok", "output": out})
         return out

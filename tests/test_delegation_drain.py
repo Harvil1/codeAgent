@@ -56,7 +56,11 @@ def isolated_queue(monkeypatch):
 
 
 def test_drain_injected_messages_pulls_delegation(isolated_queue, tmp_path):
-    """_drain_injected_messages 真读 delegation_queue。"""
+    """_drain_injected_messages 真读 delegation_queue。
+
+    R30c-C1：drain 读 agent 实例队列（delegate push 侧定向到 agent_ref），
+    测试直接把实例队列换成 isolated_queue。
+    """
     from agent import AIAgent
 
     agent = AIAgent(
@@ -70,6 +74,7 @@ def test_drain_injected_messages_pulls_delegation(isolated_queue, tmp_path):
     agent.cron_scheduler = None
     agent.team_bus = None
     agent.team_name = None
+    agent._delegation_queue = isolated_queue
 
     isolated_queue.push({
         "delegation_id": "del_a",
@@ -127,12 +132,11 @@ def test_drain_injected_messages_fail_open(isolated_queue, tmp_path, monkeypatch
     agent.team_bus = None
     agent.team_name = None
 
-    # mock get_delegation_queue 抛异常
-    def _boom():
-        raise RuntimeError("queue 挂了")
-    monkeypatch.setattr(
-        "tools.delegate_tool.get_delegation_queue", _boom,
-    )
+    # mock 实例队列抛异常（R30c-C1：drain 读 agent 实例队列）
+    class _BoomQueue:
+        def has_pending(self):
+            raise RuntimeError("queue 挂了")
+    agent._delegation_queue = _BoomQueue()
 
     drained = agent._drain_injected_messages()
     assert drained["delegation_results"] == []
@@ -329,6 +333,7 @@ def test_end_to_end_drain_to_assemble(isolated_queue, tmp_path):
     agent.team_bus = None
     agent.team_name = None
     agent.conversation_history = []
+    agent._delegation_queue = isolated_queue  # R30c-C1：drain 读实例队列
 
     # step 1：push 两个 async 子代理完成
     isolated_queue.push({
@@ -382,6 +387,7 @@ def test_second_drain_after_first_consumed(isolated_queue, tmp_path):
     agent.team_bus = None
     agent.team_name = None
     agent.conversation_history = []
+    agent._delegation_queue = isolated_queue  # R30c-C1：drain 读实例队列
 
     isolated_queue.push({
         "delegation_id": "del_once",

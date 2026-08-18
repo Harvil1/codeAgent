@@ -105,6 +105,9 @@ class WorkflowJournal:
 
     # ---- meta ----
     def save_meta(self, data: dict) -> None:
+        """合并写 meta.json（R30c-C7：改 tmp+rename 原子写——此前裸 write_text，
+        进程中断会留下半截 JSON，resume 读 meta 直接失败）。"""
+        from agent.atomic_io import atomic_write_text
         p = self.run_dir / "meta.json"
         old = {}
         try:
@@ -112,7 +115,9 @@ class WorkflowJournal:
         except Exception:
             pass
         old.update(data)
-        p.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(
+            p, json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
 
     def load_meta(self) -> dict:
         try:

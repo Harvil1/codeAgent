@@ -211,13 +211,23 @@ class TaskStore:
     # ------------------------------------------------------------------
 
     def can_start(self, task_id: str) -> bool:
-        """检查任务的所有依赖是否已完成。"""
+        """检查任务的所有依赖是否已完成。
+
+        R30c-C4：依赖被删除（status=deleted）或文件缺失时视为已满足
+        （自动解链）——此前子任务会永久 blocked 且没有任何解除路径。
+        """
         task = self.get(task_id)
         if task is None:
             return False
         for dep_id in task.get("blocked_by", []):
             dep = self.get(dep_id)
-            if dep is None or dep.get("status") != "completed":
+            if dep is None or dep.get("status") == "deleted":
+                logger.info(
+                    "任务 %s 的依赖 %s 已删除/缺失，视为已满足（自动解链）",
+                    task_id, dep_id,
+                )
+                continue
+            if dep.get("status") != "completed":
                 return False
         return True
 

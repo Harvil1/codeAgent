@@ -268,7 +268,9 @@ class ToolRegistry:
 
         # T6（核心机制对齐第 6 项）：permissions.deny 防御纵深——
         # 可见性过滤（get_tool_definitions）之外，dispatch 也拒（手动构造的
-        # tool_call / schema 缓存滞后都拦得住）。fail-open：规则加载异常放行。
+        # tool_call / schema 缓存滞后都拦得住）。
+        # R30c-B7：fail-open 保留（配置损坏就全拒会把 agent 整个砖死），但必须
+        # 显式 ERROR——此前静默 pass，规则加载失败这道防御纵深无声消失。
         try:
             from agent.tool_permissions import is_tool_denied
             if is_tool_denied(name):
@@ -276,8 +278,8 @@ class ToolRegistry:
                     "error": f"工具 {name} 被 settings.json permissions.deny 规则拒绝",
                     "error_type": "permission_denied",
                 }, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("deny 规则加载失败，dispatch 层防御本调用失效（fail-open）: %s", e)
 
         handler = entry.handler
         try:

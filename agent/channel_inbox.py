@@ -80,7 +80,13 @@ class ChannelInbox:
         return msgs
 
     def mark_consumed(self, msg_ids: List[str]) -> int:
-        """批量删除已消费消息（已通过 user 消息呈现）。返回删除数。"""
+        """批量删除已消费消息（已通过 user 消息呈现）。返回删除数。
+
+        R30c-C7 消费语义（有意为之）：unconsumed 读文件列表 → 注入 user 消息
+        → mark_consumed 按 id 删除，两步之间**无原子性**。注入后、删除前进程
+        崩溃 → 下轮重复注入同批消息。这是 at-least-once 投递（重复好过丢失），
+        消息 id 带 uuid 去重由模型侧容忍；不做消费位点持久化（复杂度不值）。
+        """
         id_set = set(msg_ids)
         count = 0
         try:

@@ -5,6 +5,7 @@
 直接替代原 snapshot 全量索引注入（无 aux 时主循环降级回 snapshot）。
 """
 import logging
+from contextvars import ContextVar
 from typing import Optional
 
 from agent.memory_retriever import retrieve_relevant
@@ -12,34 +13,41 @@ from agent.memory_retriever import retrieve_relevant
 logger = logging.getLogger(__name__)
 
 # 同轮去重：上一个 (query, result) 缓存（LRU 1）
-_last_query: Optional[str] = None
-_last_result: Optional[Optional[dict]] = None
+# R30c-C1：模块级可变全局改 ContextVar——同进程并发 agent（asyncio task /
+# to_thread 子代理各持 context 副本）互相看不到对方的缓存，消除串味；
+# 主循环同 task 内顺序轮次语义不变。
+_last_query_var: ContextVar[Optional[str]] = ContextVar(
+    "memory_injection_last_query", default=None,
+)
+_last_result_var: ContextVar[Optional[Optional[dict]]] = ContextVar(
+    "memory_injection_last_result", default=None,
+)
 
 
 def reset_injection_cache() -> None:
-    """测试用：清空同轮缓存。"""
-    global _last_query, _last_result
-    _last_query, _last_result = None, None
+    """测试用：清空当前 context 的同轮缓存。"""
+    _last_query_var.set(None)
+    _last_result_var.set(None)
 
 
 async def build_relevant_memories_message(
     *, query: str, memory_store, aux_llm_router, max_results: int = 5,
 ) -> Optional[dict]:
     """检索相关记忆并构造 ephemeral 注入消息。None = 不注入。fail-open。"""
-    global _last_query, _last_result
     if not query or not query.strip():
         return None
     if memory_store is None or aux_llm_router is None:
         return None
     # 同轮去重（同 query 直接用上次结果）
-    if query == _last_query and _last_result is not None:
-        return _last_result
+    if query == _last_query_var.get() and _last_result_var.get() is not None:
+        return _last_result_var.get()
 
     try:
         # T4：带年龄标注（[age: Nd] + prompt 新记忆优先规则，防召回过期记忆）
         index_text = memory_store.full_index_text_with_age()
         if not index_text or not index_text.strip():
-            _last_query, _last_result = query, None
+            _last_query_var.set(query)
+            _last_result_var.set(None)
             return None
         memory_ids = await retrieve_relevant(
             query=query, index_text=index_text,
@@ -48,7 +56,8 @@ async def build_relevant_memories_message(
         )
     except Exception as e:
         logger.warning("检索式记忆注入失败（fail-open 不注入）: %s", e)
-        _last_query, _last_result = query, None
+        _last_query_var.set(query)
+        _last_result_var.set(None)
         return None
 
     lines = []
@@ -62,7 +71,8 @@ async def build_relevant_memories_message(
         body = (getattr(entry, "body", "") or "")[:500]
         lines.append(f"- [{entry.type}] {entry.name}: {body}")
     if not lines:
-        _last_query, _last_result = query, None
+        _last_query_var.set(query)
+        _last_result_var.set(None)
         return None
 
     msg = {
@@ -75,7 +85,8 @@ async def build_relevant_memories_message(
         ),
         "_ephemeral": True,
     }
-    _last_query, _last_result = query, msg
+    _last_query_var.set(query)
+    _last_result_var.set(msg)
     return msg
 
 

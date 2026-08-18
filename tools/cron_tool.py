@@ -43,7 +43,10 @@ CRON_CREATE_SCHEMA = {
             "catch_up": {
                 "type": "boolean",
                 "default": False,
-                "description": "True 时错过的一次触发会在启动时补跑（默认 False）",
+                "description": (
+                    "True 时启动会补跑错过的触发——每次启动每个任务只补 1 次"
+                    "（停机错过多次也只补最近一次，通知标 catch_up=True 与 missed_between 窗口）"
+                ),
             },
             "recurring": {
                 "type": "boolean",

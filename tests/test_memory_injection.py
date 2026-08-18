@@ -97,14 +97,22 @@ def test_retrieval_failure_failopen():
 
 
 def test_same_query_cached_within_round():
-    """同 query 第二次调用不再触发检索（一轮缓存）。"""
+    """同 query 第二次调用不再触发检索（一轮缓存）。
+
+    R30c-C1：缓存改 ContextVar 后，两次调用须在同一 task/context 内
+    （对齐生产形态——同一轮内）；asyncio.run 各自拷 context 测不到缓存。
+    """
     store = _make_store({"general#a": ("n", "user", "b")})
     mock_rr = AsyncMock(return_value=["general#a"])
+
+    async def _two_calls():
+        await build_relevant_memories_message(
+            query="same", memory_store=store, aux_llm_router=MagicMock())
+        await build_relevant_memories_message(
+            query="same", memory_store=store, aux_llm_router=MagicMock())
+
     with patch("agent.memory_injection.retrieve_relevant", new=mock_rr):
-        asyncio.run(build_relevant_memories_message(
-            query="same", memory_store=store, aux_llm_router=MagicMock()))
-        asyncio.run(build_relevant_memories_message(
-            query="same", memory_store=store, aux_llm_router=MagicMock()))
+        asyncio.run(_two_calls())
     assert mock_rr.await_count == 1
 
 

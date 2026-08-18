@@ -3179,6 +3179,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     import threading as _threading_mod
     _input_q = _queue_mod.Queue()
     _input_stop = _threading_mod.Event()
+    # R30c-C6：对象哨兵替代字符串哨兵——用户字面输入 "__EOF__" 不再误退出
+    _EOF_SENTINEL = object()
+    _INTERRUPT_SENTINEL = object()
 
     def _input_reader():
         """daemon 线程：持续读控制台输入入队（EOF/异常即停）。"""
@@ -3187,11 +3190,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 line = console.input("[bold cyan]你:[/bold cyan] ")
                 _input_q.put(line.strip())
             except EOFError:
-                _input_q.put("__EOF__")
+                _input_q.put(_EOF_SENTINEL)
                 return
             except KeyboardInterrupt:
                 # 对齐原语义：输入等待时 Ctrl+C = 退出（原 except 里打"再见"）
-                _input_q.put("__INTERRUPT__")
+                _input_q.put(_INTERRUPT_SENTINEL)
                 return
             except Exception:
                 return
@@ -3206,7 +3209,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     # 主循环
     while True:
         user_input = _input_q.get()
-        if user_input in ("__EOF__", "__INTERRUPT__"):
+        if user_input is _EOF_SENTINEL or user_input is _INTERRUPT_SENTINEL:
             console.print("\n再见！")
             break
 
@@ -3235,7 +3238,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
         # 1. 处理 slash 命令
         if user_input.startswith("/"):
-            # 先检查是否是技能束命令
+            # 先检查是否是技能束命令（R30c-C6：解析统一为 split()[0]，
+            # 与下方技能束/技能触发用同一规则）
             cmd_name = user_input.split()[0]
             if cmd_name in rt.bundle_commands:
                 pass  # 走技能束触发逻辑
@@ -3245,9 +3249,25 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 if rt.quit_requested:
                     break  # /quit 请求：走正常退出（rt.shutdown()）
                 continue
+            else:
+                # R30c-C6：未知 slash 命令——命令名形态（/word）时报错不发模型
+                # （此前 /sesion 这类敲错会整条静默发给 LLM）。路径形态
+                # （如 "/etc/passwd 是什么"）不拦，正常作为消息发送。
+                _name = cmd_name[1:]
+                _is_cmd_like = (
+                    _name
+                    and _name[0].isalpha()
+                    and all(c.isalnum() or c in "_-" for c in _name)
+                )
+                if _is_cmd_like:
+                    console.print(
+                        f"[yellow]未知命令 {cmd_name}（/help 查看命令列表；"
+                        "要作为消息发送请调整开头写法）[/yellow]"
+                    )
+                    continue
 
-        # 2. 检查是否触发技能束
-        cmd_name = user_input.split()[0] if " " in user_input else user_input
+        # 2. 检查是否触发技能束（cmd_name 解析与步骤 1 同规则——R30c-C6 统一）
+        cmd_name = user_input.split()[0]
         if cmd_name in rt.bundle_commands:
             bundle_info = rt.bundle_commands[cmd_name]
             rest_msg = user_input[len(cmd_name):].strip()

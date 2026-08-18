@@ -72,25 +72,30 @@ def _release_lock(fileobj):
         fcntl.flock(fileobj.fileno(), fcntl.LOCK_UN)
 
 
+class MessageBusLockTimeout(RuntimeError):
+    """消息总线文件锁超时（fail-closed：操作被拒绝，不无锁执行）。"""
+
+
 def _with_lock(lock_path: Path, fn):
     """获取 lock_path 的独占锁后执行 fn。
 
-    锁超时时 fail-open（log warning + 执行 fn 不持锁），
-    避免单进程死锁拖垮整个 agent。
+    R30c-C2：锁超时 fail-closed（抛 MessageBusLockTimeout）——此前 fail-open
+    无锁执行，read_inbox 的"读全量 + 清空"在无锁并发下会丢消息
+    （A 读到、B 也读到，A 清空后 B 再清空会把 C 新写入的消息一起清掉）。
+    对邮箱语义，丢消息比操作失败伤害更大；单进程死锁的防护由调用方
+    捕获本异常重试/降级（调用点均已有 try/except fail-open 包装）。
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as lf:
-        locked = False
         try:
             _acquire_lock(lf)
-            locked = True
-        except TimeoutError:
-            logger.warning("file lock 超时，fail-open: %s", lock_path)
+        except TimeoutError as e:
+            logger.error("file lock 超时，fail-closed 拒绝操作: %s", lock_path)
+            raise MessageBusLockTimeout(str(e)) from e
         try:
             return fn()
         finally:
-            if locked:
-                _release_lock(lf)
+            _release_lock(lf)
 
 
 # ---------------------------------------------------------------------------
