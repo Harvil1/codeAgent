@@ -30,9 +30,25 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _run_git(argv: List[str], cwd, timeout: float = 10) -> subprocess.CompletedProcess:
+    """git 子进程统一入口：utf-8 文本模式（Windows GBK 防乱码，坏字节 replace）。
+
+    本模块 + worktree_tool 共用（原先 10 处重复 subprocess 样板）。
+    """
+    return subprocess.run(
+        ["git", *argv],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -53,15 +69,7 @@ def has_worktree_changes(worktree_path: Path) -> bool:
 
     # 尝试 git status
     try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(wt),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-        )
+        result = _run_git(["status", "--porcelain"], wt)
         if result.returncode == 0:
             return bool(result.stdout.strip())
         # returncode != 0 可能不是 git 仓库 → fallback
@@ -99,12 +107,7 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
     repo_root = get_repo_root(wt)
     if repo_root is not None:
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(wt)],
-                cwd=str(repo_root),
-                capture_output=True,
-                timeout=10,
-            )
+            _run_git(["worktree", "remove", "--force", str(wt)], repo_root)
         except Exception as e:
             logger.debug("git worktree remove 失败: %s", e)
 
@@ -162,15 +165,7 @@ def is_git_repo(path=None) -> bool:
     """检查路径是否在 git 仓库内。"""
     path = Path(path) if path else Path.cwd()
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
+        result = _run_git(["rev-parse", "--is-inside-work-tree"], path, timeout=5)
         return result.returncode == 0 and result.stdout.strip() == "true"
     except Exception:
         return False
@@ -180,15 +175,7 @@ def get_repo_root(path=None) -> Optional[Path]:
     """获取 git 仓库根目录。"""
     path = Path(path) if path else Path.cwd()
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
+        result = _run_git(["rev-parse", "--show-toplevel"], path, timeout=5)
         if result.returncode == 0:
             return Path(result.stdout.strip())
     except Exception:
@@ -252,15 +239,8 @@ def _create_git_worktree(base: Path, name: str, *,
         "name": name,
     })
 
-    result = subprocess.run(
-        ["git", "worktree", "add", "-b", branch, str(worktree_dir)],
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-    )
+    result = _run_git(["worktree", "add", "-b", branch, str(worktree_dir)],
+                      repo_root, timeout=30)
     if result.returncode != 0:
         # 事件：create.failed
         _log_worktree_event(repo_root, "create.failed", {
@@ -318,18 +298,8 @@ def _create_git_worktree(base: Path, name: str, *,
             "worktree_dir": str(worktree_dir),
         })
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree_dir)],
-                cwd=str(repo_root),
-                capture_output=True,
-                timeout=10,
-            )
-            subprocess.run(
-                ["git", "branch", "-D", branch],
-                cwd=str(repo_root),
-                capture_output=True,
-                timeout=10,
-            )
+            _run_git(["worktree", "remove", "--force", str(worktree_dir)], repo_root)
+            _run_git(["branch", "-D", branch], repo_root)
             logger.info("已清理 worktree: %s", worktree_dir)
         except Exception as e:
             logger.debug("清理 worktree 失败: %s", e)
@@ -420,15 +390,7 @@ def list_worktrees(base_path=None) -> list:
     if not is_git_repo(base):
         return []
     try:
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
+        result = _run_git(["worktree", "list", "--porcelain"], base, timeout=5)
         if result.returncode != 0:
             return []
         worktrees = []

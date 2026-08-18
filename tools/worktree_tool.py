@@ -27,7 +27,6 @@ context 拷贝会导致 enter 静默失效 + exit reset 跨 context 抛 ValueErr
 import json
 import logging
 import re
-import subprocess
 import tempfile
 import time
 import uuid
@@ -41,6 +40,7 @@ from agent.workspace_context import (
 )
 from tools.registry import registry
 from tools.worktree import (
+    _run_git,
     cleanup_worktree_smart,
     get_repo_root,
     has_worktree_changes,
@@ -173,15 +173,8 @@ def _create_session_worktree(name: str):
 
             short_id = uuid.uuid4().hex[:8]
             branch = f"omnimate/{name}/{short_id}"
-            result = subprocess.run(
-                ["git", "worktree", "add", "-b", branch, str(wt_dir)],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
+            result = _run_git(["worktree", "add", "-b", branch, str(wt_dir)],
+                              repo_root, timeout=30)
             if result.returncode != 0:
                 raise RuntimeError(f"git worktree add 失败: {result.stderr.strip()}")
             logger.info("已创建会话 worktree: %s（分支 %s）", wt_dir, branch)
@@ -309,12 +302,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
         repo_root = wt.repo_root or get_repo_root(Path.cwd())
         if repo_root is not None:
             try:
-                subprocess.run(
-                    ["git", "branch", "-D", wt.branch],
-                    cwd=str(repo_root),
-                    capture_output=True,
-                    timeout=10,
-                )
+                _run_git(["branch", "-D", wt.branch], repo_root)
             except Exception as e:
                 logger.debug("删除分支 %s 失败: %s", wt.branch, e)
 
