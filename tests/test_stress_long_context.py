@@ -238,7 +238,7 @@ async def test_stress_compress_if_needed_extreme(tmp_path):
 
     state = CompressionSessionState()
     t0 = time.perf_counter()
-    new_msgs, changed = await compress_if_needed(
+    new_msgs, changed, _cp = await compress_if_needed(
         history,
         llm_client=None,   # 降级 rule-based（不烧 LLM）
         model=None,
@@ -280,7 +280,7 @@ async def test_stress_compress_repeated_10x(tmp_path):
 
     messages = history
     for round_n in range(10):
-        messages, changed = await compress_if_needed(
+        messages, changed, _cp = await compress_if_needed(
             messages,
             llm_client=None,
             model=None,

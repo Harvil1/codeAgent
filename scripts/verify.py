@@ -372,7 +372,7 @@ def check_context_compress():
     # 降低阈值确保 snip 触发
     ctx_cfg["snip_message_threshold"] = 50
     state = CompressionSessionState()
-    new_msgs, compressed = asyncio.run(compress_if_needed(
+    new_msgs, compressed, _compacted = asyncio.run(compress_if_needed(
         msgs,
         llm_client=client,
         model="deepseek-chat",

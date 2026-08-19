@@ -482,23 +482,53 @@ def test_maybe_auto_extract_gates():
     assert a2._auto_extract_task is None
     assert a2._auto_extract_cursor == 5  # 游标仍推进
 
-    # 第 3 回合：启动（需要 event loop——用 pytest-asyncio 提供的）
-    async def run():
-        a3 = _mk_extract_agent(cfg, aux=object(), turn_count=2)
-        a3._maybe_auto_extract()
-        assert a3._auto_extract_task is not None
-        # 清理后台任务（aux 是 object 会 fail-open 返回 0）
-        await a3._auto_extract_task
-    import asyncio
-    asyncio.run(run())
+    # 第 3 回合：启动（_spawn_detached 是 daemon 线程，无需 event loop）
+    a3 = _mk_extract_agent(cfg, aux=object(), turn_count=2)
+    a3._maybe_auto_extract()
+    assert a3._auto_extract_task is not None
+    # 等后台线程跑完（aux 是 object 会 fail-open 返回 0）
+    a3._auto_extract_task.join(timeout=5)
 
     # 互斥：本轮 LLM 写过记忆 → 跳过但游标推进
     a4 = _mk_extract_agent(cfg, aux=object(), touched=True, turn_count=2)
     a4.conversation_history = a4.conversation_history + [{"role": "user", "content": "y"}]
     a4._auto_extract_cursor = 5
+    import asyncio
     async def run4():
         a4._maybe_auto_extract()
         assert a4._auto_extract_task is None
         assert a4._auto_extract_cursor == 6  # 推进
         assert a4._memory_touched_this_turn is False  # 重置
     asyncio.run(run4())
+
+
+def test_auto_extract_survives_per_turn_loop_teardown(monkeypatch):
+    """R30 审计 High-2 回归：per-turn asyncio.run 销毁循环后提取仍要跑完。
+
+    CLI 每条用户消息 asyncio.run 新建/销毁一个事件循环（cli.py per-turn 模型）；
+    旧实现 create_task 在 run_conversation return 前一刻启动，asyncio.run 退出时
+    _cancel_all_tasks 把还没开跑的任务直接取消——auto_extract 静默死亡（无报错）。
+    新实现必须与主循环生命周期解耦（daemon 线程 + 自有事件循环）。
+    """
+    import threading
+    import agent.auto_extract as ax
+
+    ran = threading.Event()
+
+    async def fake_run(agent, start_idx):
+        # 必须有挂起点：真实提取要等 LLM 响应；无 await 的协程会在循环
+        # 停止前的最后一批回调里跑完，掩盖取消 bug
+        await asyncio.sleep(0.05)
+        ran.set()
+
+    monkeypatch.setattr(ax, "run_auto_extract", fake_run)
+
+    cfg = {"memory": {"auto_extract": {"enabled": True, "every_n_turns": 3}}}
+    a = _mk_extract_agent(cfg, aux=object(), turn_count=2)
+
+    async def one_turn():
+        a._maybe_auto_extract()  # 模拟 run_conversation 末尾调用
+    import asyncio
+    asyncio.run(one_turn())  # 循环立即销毁（模拟 CLI per-turn 模型）
+
+    assert ran.wait(timeout=5), "提取任务随 per-turn 事件循环一起被取消（High-2 回归）"

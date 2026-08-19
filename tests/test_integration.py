@@ -219,9 +219,48 @@ async def test_mock_conversation_with_memory_injection(tmp_path):
 
 
 async def test_interrupt_stops_conversation(tmp_path):
-    """中断标志能停止对话循环。"""
+    """运行中置位的中断标志能停止对话循环（下一轮 loop-top 消费并清除）。
+
+    R30 审计 High-3 契约更新：run_conversation 入口会清残留中断标志
+    （防上一回合的 Ctrl+C 吞掉下一条用户消息），所以"停止循环"的语义
+    是模型运行中置位 → 下一轮迭代开头退出。
+    """
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+    )
+
     async def fake_chat_completions(messages, *, tools=None, **kwargs):
-        msg = SimpleNamespace(content="response", tool_calls=None)
+        # 第一轮：带 tool_call（让循环活到第二轮）+ 模拟模型跑动中用户
+        # Ctrl+C（CLI 的 KeyboardInterrupt 处理器置位）
+        agent.interrupt()
+        msg = SimpleNamespace(
+            content="response",
+            tool_calls=[SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="fake_tool", arguments="{}"),
+            )],
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
+
+    response = await agent.chat("test")
+
+    # 第二轮 loop-top 消费中断标志 → 协作式退出（保留 partial result）
+    assert "中断" in response
+
+
+async def test_stale_interrupt_flag_cleared_on_new_message(tmp_path):
+    """R30 审计 High-3 回归：上一回合残留的中断标志不得吞掉新消息。
+
+    场景：Ctrl+C 异常退出 run（flag 已置位但 loop-top 未消费）→ 用户发
+    下一条消息 → 旧行为第一轮 loop-top 立即 break 回"[已被用户中断]"，
+    消息被吞；新行为在 run_conversation 入口清标志，正常处理。
+    """
+    async def fake_chat_completions(messages, *, tools=None, **kwargs):
+        msg = SimpleNamespace(content="正常响应", tool_calls=None)
         return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
 
     agent = AIAgent(
@@ -231,11 +270,12 @@ async def test_interrupt_stops_conversation(tmp_path):
     )
     agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
 
-    # 在循环前设置中断
-    agent.interrupt()
-    response = await agent.chat("test")
+    # 模拟上一回合 Ctrl+C 的残留（interrupt() 在 run 退出后被调用）
+    agent._interrupt_requested = True
+    response = await agent.chat("下一条消息")
 
-    assert "中断" in response
+    assert "正常响应" in response
+    assert "中断" not in response
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +388,7 @@ async def test_compress_if_needed_signature_matches_integration():
     msgs = [{"role": "system", "content": "s"}]
     msgs += [{"role": "user", "content": f"u{i}"} for i in range(60)]
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _cp = await compress_if_needed(
         msgs,
         llm_client=None,
         model=None,
@@ -568,7 +608,7 @@ async def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
     # 跑 5 轮压缩（模拟每轮 LLM 前调用）
     for turn in range(5):
         state.current_turn = turn
-        messages, _ = await compress_if_needed(
+        messages, _, _c = await compress_if_needed(
             messages,
             llm_client=llm,
             model="x",
@@ -2130,3 +2170,117 @@ class TestStreamFailureNoOrphan:
         agent._streaming_preset_results = {"stale_call": "半截结果"}
         agent._discard_partial_stream_state()
         assert agent._streaming_preset_results == {}
+
+
+async def test_reactive_retry_refunds_iteration_budget(tmp_path):
+    """R30 审计 L10：reactive_compact 重试轮不白扣迭代预算。
+
+    场景：预算 1，第一轮 LLM 调用遇 prompt_too_long → reactive_compact
+    扣留转压缩 → _REACTIVE_RETRY 重试。旧代码重试轮再扣 1 → 预算耗尽
+    BUDGET_EXHAUSTED，模型一次成功调用都没有就断线；重试是韧性恢复，
+    不是新的一轮——应退还预算。（防失控由 reactive 自身的冷却+次上限保证）
+    """
+    agent = AIAgent(
+        api_key="fake",
+        model="test",
+        enabled_toolsets=[],
+        max_iterations=1,
+    )
+
+    calls = {"n": 0}
+
+    async def fake_escalation(messages, tool_schemas, system_prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return agent._REACTIVE_RETRY  # 第一轮：PTL → reactive_compact → 重试
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="恢复后的正常响应", tool_calls=None),
+        )])
+
+    agent._call_llm_with_escalation = fake_escalation
+
+    response = await agent.chat("test")
+
+    assert calls["n"] == 2, "应有两次 LLM 调用（1 次被扣留 + 1 次重试成功）"
+    assert "恢复后的正常响应" in response, \
+        f"reactive 重试轮被 BUDGET_EXHAUSTED 吞掉（L10 回归）: {response!r}"
+
+
+async def test_dispatch_interrupts_mid_unsafe_batch(tmp_path):
+    """R30 审计 L11/L12：unsafe 批内逐工具检查中断，剩余合成 interrupted 结果。
+
+    旧代码中断粒度是"批"——Ctrl+C 后一批 unsafe 工具仍全部跑完；且异常
+    路径 DB 里 assistant(tool_calls) 无 result（孤儿，靠兜底修复）。新行为：
+    工具边界检测中断 → 剩余工具不再执行、合成 error_type=interrupted 的
+    result 保配对完整（对齐 CCB yieldMissingToolResultBlocks）。
+    """
+    import json as _json
+    agent = AIAgent(
+        api_key="fake", model="test",
+        enabled_toolsets=[], omnimate_home=Path(tmp_path),
+    )
+    tcs = [
+        SimpleNamespace(id="c1", function=SimpleNamespace(
+            name="fake_unsafe_a", arguments="{}")),
+        SimpleNamespace(id="c2", function=SimpleNamespace(
+            name="fake_unsafe_b", arguments="{}")),
+        SimpleNamespace(id="c3", function=SimpleNamespace(
+            name="fake_unsafe_c", arguments="{}")),
+    ]
+    assistant_msg = SimpleNamespace(content=None, tool_calls=tcs)
+
+    ran = []
+
+    async def fake_handle(name, args, **kw):
+        ran.append(name)
+        agent._interrupt_requested = True  # 第 1 个工具执行完即中断
+        return _json.dumps({"ok": name}, ensure_ascii=False)
+
+    await agent._dispatch_tool_calls(assistant_msg, fake_handle)
+
+    assert ran == ["fake_unsafe_a"], f"中断后剩余工具不应执行: {ran}"
+    tool_msgs = [m for m in agent.conversation_history if m.get("role") == "tool"]
+    assert len(tool_msgs) == 3, "每个 tool_call 都必须有配对 result"
+    assert _json.loads(tool_msgs[0]["content"])["ok"] == "fake_unsafe_a"
+    for m in tool_msgs[1:]:
+        parsed = _json.loads(m["content"])
+        assert parsed["error_type"] == "interrupted"
+
+
+async def test_cleanup_runtime_cascades_and_stops_bg(tmp_path):
+    """C2（CCB runAgent 清理清单）：子代理退出时清杀遗留运行态。
+
+    - interrupt 级联到 _children（async 孙代理线程经 loop-top 协作式退出）
+    - bg_manager.shutdown()（若子代理持有）
+    幂等 + fail-open（单项失败不影响其余）。
+    """
+    from agent import AIAgent
+
+    parent = AIAgent.__new__(AIAgent)
+    parent._interrupt_requested = False
+    parent._children = []
+    kid = AIAgent.__new__(AIAgent)
+    kid._interrupt_requested = False
+    kid._children = []
+    parent._children.append(kid)
+
+    class _FakeBG:
+        def __init__(self):
+            self.shutdown_called = False
+        def shutdown(self):
+            self.shutdown_called = True
+
+    bg = _FakeBG()
+    parent.bg_manager = bg
+
+    parent.cleanup_runtime()
+
+    assert kid._interrupt_requested is True, "应级联中断孙代理"
+    assert bg.shutdown_called is True, "应停掉子代理的后台任务管理器"
+
+
+def test_run_child_finally_wires_cleanup_runtime():
+    """C2 接线：_run_child 的 finally 必须调 cleanup_runtime（静态检查）。"""
+    from pathlib import Path as _P
+    src = _P("tools/delegate_tool.py").read_text(encoding="utf-8")
+    assert "cleanup_runtime()" in src, "_run_child 未接线清理清单"

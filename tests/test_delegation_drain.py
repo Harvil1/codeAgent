@@ -408,3 +408,45 @@ def test_second_drain_after_first_consumed(isolated_queue, tmp_path):
     msgs2 = agent._assemble_turn_messages("sys", injected2)
     assert not any("delegation_completion" in m.get("content", "")
                    for m in msgs2 if m["role"] == "user")
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 Medium-5：消费型注入必须带 _ephemeral
+# ---------------------------------------------------------------------------
+
+def test_assemble_consumable_injections_are_ephemeral(tmp_path):
+    """bg/cron/team/delegation/plan_mode_reminder/context_tip 注入须标 _ephemeral=True。
+
+    这些是"看完即弃"的注入（injected dict 原地清空、不进 conversation_history），
+    与同函数 channel/mailbox（带 _ephemeral）必须同一约定——否则本轮恰好
+    触发压缩时，_run_context_compression 的过滤器（保留非 ephemeral）会把
+    它们当成持久消息焊进 conversation_history，但 _persist_session_message
+    从未为它们落库 → 内存 history 与 session DB/resume 不一致。
+    """
+    agent = _build_agent(tmp_path)
+    agent.plan_mode = True
+    # 强制触发 context_tip（est >= threshold*0.7）
+    agent.config = {"context": {"llm_compact_token_threshold": 1}}
+    injected = {
+        "bg_notifications": [{
+            "task_id": "t1", "status": "done",
+            "exit_code": 0, "stdout": "ok",
+        }],
+        "cron_messages": [{"job_id": "j1", "message": "定时提醒"}],
+        "team_messages_text": "[teammate] hi",
+        "delegation_results": [{
+            "delegation_id": "d1", "goal": "g",
+            "success": True, "result": "r",
+        }],
+    }
+    msgs = agent._assemble_turn_messages(system_prompt="sys", injected=injected)
+
+    tags = (
+        "<task_notification>", "<scheduled_message>", "<team_messages>",
+        "<delegation_completion>", "<plan_mode_reminder>",
+        "<context_management_tip>",
+    )
+    for tag in tags:
+        hits = [m for m in msgs if tag in str(m.get("content", ""))]
+        assert hits, f"缺少注入 {tag}"
+        assert hits[0].get("_ephemeral") is True, f"{tag} 未标 _ephemeral"

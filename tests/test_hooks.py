@@ -591,3 +591,184 @@ def test_round3_hook_events_fail_open():
     reg.register_post_tool_use_failure(bad, name="bad")
     # 不应抛
     reg.run_post_tool_use_failure({"tool": "x"})
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 Medium-6：慢 hook 不得冻结事件循环
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pre_tool_use_slow_hook_does_not_block_event_loop():
+    """async 调用点的 hook 链必须移出事件循环线程执行。
+
+    旧实现：model_tools.handle_function_call（async）直调
+    hooks_registry.run_pre_tool_use（sync，内部等待声明式子进程 hook/
+    线程池结果）→ 事件循环线程被阻塞，流式输出与并发 safe 工具全部冻结，
+    与 hooks.py docstring "不拖累主循环" 的宣称不符（只对 hook 之间成立）。
+    修复：热点调用点（PRE/POST_TOOL_USE 等）经 asyncio.to_thread 执行。
+    """
+    import asyncio as _aio
+    import time as _time
+    import model_tools as mt
+    from agent.hooks import HookRegistry
+
+    reg = HookRegistry()
+
+    def slow_hook(name, args):
+        _time.sleep(0.4)  # 模拟慢 hook（子进程/慢回调同构）
+        return None
+
+    reg.register_pre_tool_use(slow_hook, name="slow")
+
+    ticks = []
+
+    async def ticker():
+        while True:
+            ticks.append(1)
+            await _aio.sleep(0.02)
+
+    tk = _aio.create_task(ticker())
+    await mt.handle_function_call(
+        "no_such_tool", "{}",
+        hooks_registry=reg, session_id="s-m6",
+    )
+    tk.cancel()
+    try:
+        await tk
+    except _aio.CancelledError:
+        pass
+    # 0.4s 慢 hook 期间 20ms 间隔的 ticker 应跳动 ~20 次；
+    # 旧实现循环被阻塞 → ticks 停在 1-2
+    assert len(ticks) >= 5, f"事件循环被慢 hook 阻塞（ticks={len(ticks)}）"
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 L14：并行 hook 的 modify_args 有序合并
+# ---------------------------------------------------------------------------
+
+def test_pre_tool_use_parallel_modify_args_merged(monkeypatch):
+    """多个 declarative hook 同时改参：按注册顺序叠加合并，不再后到整体替换。
+
+    并行路径每个 hook 基于**原始参数**计算（programmatic 串行链式天然带前序
+    修改，掩盖不了这个 bug）；旧聚合 modified_args = 后到者整体替换，先到
+    hook 的修改静默丢失。新语义：首个 hook 的返回为基底，后续按键覆盖叠加
+    （同键后到胜、异键并集），与 docstring "按注册顺序叠加" 一致。
+    """
+    from agent.hooks import HookRegistry, Hook, HookEvent, HookScriptConfig
+
+    reg = HookRegistry()
+    cfg = HookScriptConfig(handler_type="command", command=["echo"], timeout=1)
+    reg._hooks[HookEvent.PRE_TOOL_USE].extend([
+        Hook(name="h1", event=HookEvent.PRE_TOOL_USE, kind="declarative", script=cfg),
+        Hook(name="h2", event=HookEvent.PRE_TOOL_USE, kind="declarative", script=cfg),
+    ])
+
+    mods = {"h1": {"b": 1}, "h2": {"c": 2}}
+
+    def fake_invoke(self, hook, tool_name, args, session_id):
+        # 并行语义：各自基于原始 args 计算
+        return {"modify_args": {**args, **mods[hook.name]}}
+
+    monkeypatch.setattr(HookRegistry, "_invoke_declarative_pre_tool", fake_invoke)
+
+    deny, modified = reg.run_pre_tool_use("terminal", {"a": 0}, session_id="s")
+    assert deny is None
+    assert modified == {"a": 0, "b": 1, "c": 2}, \
+        f"先到 hook 的修改被整体替换丢失: {modified!r}"
+
+
+# ---------------------------------------------------------------------------
+# C4（CCB 借鉴）：async hook + asyncRewake + statusMessage
+# ---------------------------------------------------------------------------
+
+def test_async_command_hook_nonblocking_with_rewake():
+    """async hook 不阻塞（立即返回 None）；exit 2 + async_rewake → rewake 通知。
+
+    rewake 通知带 hook 名 + status_message，由 agent 的 _drain_injected_messages
+    消费为 ephemeral <task-notification>（模型下次轮看到可跟进）。
+    """
+    import sys as _sys
+    import time as _time
+    import agent.hook_exec as he
+    from agent.hooks import HookScriptConfig, Hook, HookEvent
+
+    he.drain_rewake_notifications()  # 清空
+
+    cfg = HookScriptConfig(
+        handler_type="command",
+        command=[_sys.executable, "-c", "import sys; sys.exit(2)"],
+        timeout=10, async_run=True, async_rewake=True,
+        status_message="后台合规检查中",
+    )
+    hook = Hook(name="slow_async", event=HookEvent.POST_TOOL_USE,
+                kind="declarative", script=cfg)
+
+    t0 = _time.monotonic()
+    out = he.dispatch_hook(hook, {"event": "post_tool_use"})
+    elapsed = _time.monotonic() - t0
+
+    assert out is None, "async hook 应立即返回 None（不阻塞）"
+    assert elapsed < 0.5, f"async hook 不应等待子进程（耗时 {elapsed:.2f}s）"
+
+    notes = _wait_rewake(he)
+    assert notes, "exit 2 + async_rewake 应推 rewake 通知"
+    note = notes[0]
+    assert note["hook"] == "slow_async"
+    assert note["status_message"] == "后台合规检查中"
+    assert note.get("reason")
+
+
+def test_async_hook_exit0_no_rewake():
+    """async hook 正常退出（exit 0）不打扰模型。"""
+    import sys as _sys
+    import agent.hook_exec as he
+    from agent.hooks import HookScriptConfig, Hook, HookEvent
+
+    he.drain_rewake_notifications()
+    cfg = HookScriptConfig(
+        handler_type="command",
+        command=[_sys.executable, "-c", "print('ok')"],
+        timeout=10, async_run=True, async_rewake=True,
+    )
+    hook = Hook(name="quiet_async", event=HookEvent.POST_TOOL_USE,
+                kind="declarative", script=cfg)
+    assert he.dispatch_hook(hook, {"event": "post_tool_use"}) is None
+    notes = _wait_rewake(he, expect=False)
+    assert notes == [], "exit 0 不应推 rewake"
+
+
+def _wait_rewake(he, expect=True, timeout=5.0):
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        notes = he.drain_rewake_notifications()
+        if notes:
+            return notes
+        if not expect:
+            _time.sleep(0.3)  # 给后台线程跑完的时间
+            return he.drain_rewake_notifications()
+        _time.sleep(0.05)
+    return []
+
+
+def test_drain_injected_messages_consumes_rewake(tmp_path):
+    """agent 侧：rewake 通知进 injected dict，组装为 ephemeral task-notification。"""
+    import json as _json
+    import agent.hook_exec as he
+    from agent import AIAgent
+
+    agent = AIAgent(api_key="fake", model="test",
+                    enabled_toolsets=[], omnimate_home=tmp_path)
+    he.drain_rewake_notifications()
+    he._push_rewake("hook_a", "发现问题 X", status_message="检查中")
+
+    injected = agent._drain_injected_messages()
+    assert injected.get("rewake_notifications"), "rewake 应被 drain 进 injected"
+    assert injected["rewake_notifications"][0]["hook"] == "hook_a"
+
+    msgs = agent._assemble_turn_messages(system_prompt="sys", injected=injected)
+    hits = [m for m in msgs if "rewake_notification" in str(m.get("content", ""))]
+    assert hits, "应注入 rewake 通知"
+    assert hits[0].get("_ephemeral") is True
+    assert "hook_a" in hits[0]["content"]
+    assert injected["rewake_notifications"] == []  # 消费后清空

@@ -311,7 +311,7 @@ async def test_e2e_recovery_injected_via_run_context_compression(tmp_path):
 
     # mock compress_if_needed 返回 changed=True
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     # 构造 messages（含 system + user）
     messages = [
@@ -354,7 +354,7 @@ async def test_e2e_recovery_not_injected_when_disabled(tmp_path):
     agent.config = {"context": {"post_compact_recovery_enabled": False}}
 
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -386,7 +386,7 @@ async def test_e2e_recovery_not_injected_when_empty_state(tmp_path):
     agent._recent_skills = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -426,7 +426,7 @@ async def test_e2e_full_run_conversation_with_recovery(tmp_path):
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -542,7 +542,7 @@ async def test_recovery_content_visible_in_first_round_after_compact(tmp_path):
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -597,7 +597,7 @@ async def test_recovery_content_lost_in_second_round_due_to_ephemeral_design(tmp
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True
+        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         call_count[0] += 1

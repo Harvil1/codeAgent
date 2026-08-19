@@ -1088,3 +1088,116 @@ def test_manage_whitelist_lists_and_removes_roots(tmp_path, monkeypatch, capsys)
     from agent.permission import list_extra_allowed_roots
     assert root_a not in list_extra_allowed_roots()
     assert root_b in list_extra_allowed_roots()
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 High-3：Ctrl+C 哨兵去重窗口
+# ---------------------------------------------------------------------------
+
+def test_interrupt_sentinel_dedup_window():
+    """输入线程的 Ctrl+C 哨兵与主线程回合内中断去重。
+
+    同一次 Ctrl+C 可能同时被两个消费者收到：主线程（KeyboardInterrupt →
+    agent.interrupt()，记录时间戳）与输入线程（console.input 抛
+    KeyboardInterrupt → _INTERRUPT_SENTINEL 入队）。窗口内到达的哨兵视为
+    同一次按键的重复消费（不退出 REPL）；空闲提示符下的 Ctrl+C（无近期
+    回合内中断）保持原退出语义。
+    """
+    from cli import _should_exit_on_interrupt_sentinel
+
+    now = 1000.0
+    # 空闲提示符下 Ctrl+C（近期无回合内中断）→ 退出
+    assert _should_exit_on_interrupt_sentinel(0.0, now) is True
+    # 0.3s 前刚发生过回合内中断 → 同一次按键的重复消费 → 不退出
+    assert _should_exit_on_interrupt_sentinel(now - 0.3, now) is False
+    # 超过窗口（1.5s 前的中断）→ 视为新的独立 Ctrl+C → 退出
+    assert _should_exit_on_interrupt_sentinel(now - 1.5, now) is True
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 Medium-8：审批回调的路径判定启发式
+# ---------------------------------------------------------------------------
+
+def test_is_path_item_heuristic():
+    """命令/路径判定：多 token 命令不再被误判为路径审批。
+
+    旧启发式 `"/" in item ...` 把 `del /s /q tmp`、`rm -rf build/` 这类
+    含斜杠的**命令**判成路径——提示语变成"即将写入路径"且出现
+    "a=总是允许并记住"选项（走的是命令分支，语义完全错位）；
+    另有三元优先级问题（len<3 时整体 False，"~" 单字符漏判）。
+    新规则：多 token 一律命令；~ 开头 / 盘符 / 单 token 含分隔符才算路径。
+    """
+    from cli import _is_path_item
+
+    # 命令形态（含 flag、含路径参数——都不是"路径审批"）
+    assert _is_path_item("del /s /q tmp") is False
+    assert _is_path_item("rm -rf build/") is False
+    assert _is_path_item("git reset --hard src/") is False
+    assert _is_path_item("rmdir /s /q build") is False
+    assert _is_path_item("git") is False
+    # 路径形态
+    assert _is_path_item("文件写入审批: D:" + chr(92) + "x") is True
+    assert _is_path_item("D:" + chr(92) + "project" + chr(92) + "x") is True
+    assert _is_path_item("C:/Users/a") is True
+    assert _is_path_item("~/.ssh/config") is True
+    assert _is_path_item("~") is True
+    assert _is_path_item("/tmp/data") is True
+    assert _is_path_item("src/lib") is True
+    assert _is_path_item("build" + chr(92) + "sub") is True
+    assert _is_path_item("") is False
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 Medium-7：/new 会话级状态清理
+# ---------------------------------------------------------------------------
+
+def test_new_session_resets_session_scoped_state(tmp_path, monkeypatch):
+    """/new 后会话级状态不得跨会话泄漏。
+
+    旧行为只做三件事（新 session_id + 清 history + invalidate prompt）：
+    - checkpoint_mgr 仍指向旧会话 → 此后快照全写进旧目录，/rewind 回滚错对象
+      （对照 resume_session 会重建——同文件内不对称，漏项）
+    - 压缩状态（cooldown/熔断计数）、auto_extract 游标（history 已清但游标
+      仍指旧长度）、记忆注入去重、context_tip、中断残留等全部继承
+    """
+    monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key-for-test")
+    from cli import RuntimeContext
+
+    rt = RuntimeContext()
+    rt.initialize()
+    old_session = rt.session_id
+    old_ckpt = rt.checkpoint_mgr
+
+    # 污染一批会话级状态（模拟旧会话积累）
+    rt.agent._context_tip_shown = True
+    rt.agent._auto_extract_cursor = 7
+    rt.agent._auto_extract_turn_count = 9
+    rt.agent._interrupt_requested = True
+    rt.agent._pending_ephemeral_messages = [{"role": "user", "content": "旧"}]
+    rt.agent._pending_tool_batch_summary = "旧摘要"
+    rt.agent._queued_cli_commands = ["/old"]
+    rt.agent._compress_session_state.llm_compact_failures = 3
+    rt.agent._compress_session_state.last_llm_compact_turn = 42
+    rt.agent._surfaced_memory_ids = {"old-mem"}
+    rt.agent.conversation_history = [{"role": "user", "content": "旧对话"}]
+
+    rt.new_session()
+
+    assert rt.session_id != old_session
+    assert rt.agent.session_id == rt.session_id
+    # checkpoint 绑定新会话
+    assert rt.checkpoint_mgr is not old_ckpt
+    assert rt.checkpoint_mgr._session_id == rt.session_id
+    # 会话级状态全部重置
+    assert rt.agent.conversation_history == []
+    assert rt.agent._context_tip_shown is False
+    assert rt.agent._auto_extract_cursor == 0
+    assert rt.agent._auto_extract_turn_count == 0
+    assert rt.agent._interrupt_requested is False
+    assert rt.agent._pending_ephemeral_messages == []
+    assert rt.agent._pending_tool_batch_summary is None
+    assert rt.agent._queued_cli_commands == []
+    assert rt.agent._surfaced_memory_ids == set()
+    assert rt.agent._compress_session_state.llm_compact_failures == 0
+    assert rt.agent._compress_session_state.last_llm_compact_turn == -10**6

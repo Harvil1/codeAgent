@@ -5,6 +5,7 @@
 - agent 调用 handle_function_call() 执行 LLM 返回的工具调用
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -164,7 +165,10 @@ async def handle_function_call(
     # === P2-T7 NEW: PRE_TOOL_USE hook ===
     hooks_enabled = (config or {}).get("hooks", {}).get("enabled", True)
     if hooks_registry and hooks_enabled:
-        deny_reason, modified_args = hooks_registry.run_pre_tool_use(
+        # R30 审计 Medium-6：hook 链（含声明式子进程等待）移出事件循环线程
+        # 执行——直调会阻塞循环，冻结流式输出与并发 safe 工具
+        deny_reason, modified_args = await asyncio.to_thread(
+            hooks_registry.run_pre_tool_use,
             function_name, function_args,
             session_id=session_id or "",
         )
@@ -198,7 +202,9 @@ async def handle_function_call(
 
     # === P2-T7 NEW: POST_TOOL_USE hook ===
     if hooks_registry and hooks_enabled:
-        result = hooks_registry.run_post_tool_use(
+        # Medium-6：同 PRE，移出事件循环线程（链式 hook 可能逐个跑子进程）
+        result = await asyncio.to_thread(
+            hooks_registry.run_post_tool_use,
             function_name, function_args, result,
             session_id=session_id or "",
         )
@@ -215,7 +221,7 @@ async def handle_function_call(
                     "tool": function_name,
                     "error": parsed.get("error", ""),
                     "error_type": parsed.get("error_type", ""),
-                })
+                })  # Medium-6：审计型 hook 保持直调（轻量、无子进程等待）
         except Exception:
             pass  # fail-open
 

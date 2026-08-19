@@ -98,6 +98,16 @@ class HookScriptConfig:
     env: Optional[dict] = None
     # P3.5 NEW: 条件过滤（permission rule 语法，None/空 = 无条件匹配）
     if_condition: Optional[str] = None
+    # C4（CCB 借鉴）：async hook（仅 command 类型）
+    # - async_run: 后台线程跑，dispatch 立即返回 None 不阻塞主流程
+    #   （⚠ gating 语义失效：async 的 PRE_TOOL_USE deny 来不及拦——
+    #   async 只该用于通知/审计型 hook）
+    # - async_rewake: 后台跑完 exit 2（block）时推 rewake 通知，
+    #   agent 下一轮 drain 为 ephemeral <rewake_notification> 让模型跟进
+    # - status_message: 展示文案（rewake 通知附带；日志/UI 用）
+    async_run: bool = False
+    async_rewake: bool = False
+    status_message: Optional[str] = None
 
 
 @dataclass
@@ -372,7 +382,17 @@ class HookRegistry:
             if "ask" in result:
                 asks.append((hook.name, result.get("ask") or "unspecified"))
             if "modify_args" in result:
-                modified_args = result["modify_args"]
+                mod = result["modify_args"]
+                if not isinstance(mod, dict):
+                    logger.warning("hook %s modify_args 非 dict，忽略", hook.name)
+                    continue
+                # R30 审计 L14：按注册顺序叠加合并（outcomes 本身按注册序）——
+                # 旧实现后到者整体替换，先到 hook 的修改静默丢失。合并语义：
+                # 首个 hook 的完整返回为基底，后续按键覆盖（同键后到胜、异键并集）
+                if modified_args is None:
+                    modified_args = dict(mod)
+                else:
+                    modified_args.update(mod)
 
         if denies:
             name, reason = denies[0]

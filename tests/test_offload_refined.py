@@ -344,7 +344,7 @@ async def test_e2e_offload_refined_full_chain(tmp_path):
         micro_keep_recent_results=3,        # 保护最近 3 条，前 2 条会落盘
     )
     state = CompressionSessionState()
-    messages_after_c1, c1 = await compress_if_needed(
+    messages_after_c1, c1, _cp1 = await compress_if_needed(
         messages_turn1,
         llm_client=_FakeLLM(),
         model="test",
@@ -378,7 +378,7 @@ async def test_e2e_offload_refined_full_chain(tmp_path):
     agent.conversation_history = messages_stripped_1[1:]  # 跳过 system
     messages_turn2 = agent._assemble_turn_messages(system_prompt="sys", injected={})
 
-    messages_after_c2, c2 = await compress_if_needed(
+    messages_after_c2, c2, _cp2 = await compress_if_needed(
         messages_turn2,
         llm_client=_FakeLLM(),
         model="test",
@@ -499,7 +499,7 @@ async def test_e2e_per_message_budget_runs_in_production(tmp_path):
         tool_result_total_budget=10 ** 9,   # 禁 L2.6（只测 per-message）
     )
     state = CompressionSessionState()
-    messages_after, changed = await compress_if_needed(
+    messages_after, changed, _cp = await compress_if_needed(
         messages,
         llm_client=_FakeLLM(),
         model="test",
@@ -592,7 +592,7 @@ async def test_e2e_per_message_respects_user_boundary_in_production(tmp_path):
         tool_result_total_budget=10 ** 9,    # 禁 L2.6 全局预算
     )
     state = CompressionSessionState()
-    messages_after, changed = await compress_if_needed(
+    messages_after, changed, _cp = await compress_if_needed(
         messages,
         llm_client=_FakeLLM(),
         model="test",

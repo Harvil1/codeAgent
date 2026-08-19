@@ -35,6 +35,11 @@ _config_version = 1
 DEFAULT_CONFIG: Dict[str, Any] = {
     "_config_version": _config_version,
 
+    # C6（CCB outputStyles）：输出风格名（None=关闭）。
+    # 消费点：AIAgent._get_system_prompt → resolve_output_style（真实读取点，
+    # 非 dead key）；/output-style 命令写入。
+    "output_style": None,
+
     # 模型配置（默认 DeepSeek，可切换到 OpenAI/OpenRouter/Anthropic 等）
     "model": {
         "provider": "deepseek",

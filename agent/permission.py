@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -222,7 +223,14 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
         if not tok:
             continue
         try:
-            p = Path(tok)
+            # R30 审计 High-1：shell 会展开 ~ / $HOME 等，Python 侧判定必须
+            # 同样展开——否则 Path("~/x") 算相对路径落在 <cwd>/~/x 下被自动批，
+            # 实际执行目标却是家目录（acceptEdits 下无审批删家目录）。
+            # 展开后仍含 $（未定义变量，shell 展开结果不可预知）→ 保守不自动批。
+            expanded = os.path.expandvars(os.path.expanduser(tok))
+            if "$" in expanded:
+                return False
+            p = Path(expanded)
             resolved = p.resolve() if p.is_absolute() else (cwd_path / p).resolve()
             resolved.relative_to(cwd_path)  # 不在 cwd 下会抛 ValueError
         except (ValueError, OSError, RuntimeError):
@@ -1095,6 +1103,9 @@ class PermissionChecker:
                            PERMISSION_DENIED 审计事件。fail-open：hook 异常不影响权限判断。
         """
         self.approval_callback = approval_callback
+        # R30 审计 L13：白名单读改写/集合变更的锁（singleton checker 被主线程
+        # 审批与 async 子代理线程并发使用；RLock 因 _save_whitelist 在锁内被调）
+        self._wl_lock = threading.RLock()
         self._approved = set()  # 会话内缓存（命令）
         # CCAR14 Task 3: 会话级写入根目录审批缓存（check_path 闸门 3 白名单外，
         # 用户批准一次后父目录进缓存，同目录后续写入不再询问）
@@ -1189,22 +1200,25 @@ class PermissionChecker:
             logger.debug("加载白名单失败: %s", e)
 
     def _save_whitelist(self):
-        """保存持久化白名单（原子写）。"""
+        """保存持久化白名单（原子写；L13：快照+写盘整段加锁）。
+
+        只锁快照不够：rename 顺序可以晚于更早的快照（T 先快照、慢慢写盘，
+        Y 加条目后先 rename，T 的旧快照再 rename 覆盖 → Y 丢更新）。
+        锁住快照到 rename 的整段，save 之间全序，后写者快照必含全部前序 add。
+        """
         if not self._whitelist_file:
             return
         try:
-            path = Path(self._whitelist_file)
-            atomic_write_text(
-                path,
-                json.dumps(
+            with self._wl_lock:
+                payload = json.dumps(
                     {
                         "commands": sorted(self._persistent_whitelist),
                         "prefixes": sorted(self._persistent_prefixes),
                     },
                     ensure_ascii=False,
                     indent=2,
-                ),
-            )
+                )
+                atomic_write_text(Path(self._whitelist_file), payload)
         except Exception as e:
             logger.debug("保存白名单失败: %s", e)
 
@@ -1310,18 +1324,20 @@ class PermissionChecker:
         if not approved:
             return self._deny(command, "用户拒绝", "approval")
 
-        # 批准：加入会话缓存 + 持久化白名单
-        self._approved.add(cmd_key)
-        self._persistent_whitelist.add(cmd_key)
-        # R25 #2：curated 表可泛化 → 额外存前缀规则（同类测试命令不再询问）
-        from agent.command_prefix import derive_approved_prefix
-        try:
-            prefix = derive_approved_prefix(cmd_key)
-        except Exception:
-            prefix = None
-        if prefix and prefix not in self._persistent_prefixes:
-            self._persistent_prefixes.add(prefix)
-            logger.info("已存前缀规则: %s（同前缀命令不再询问）", prefix)
+        # 批准：加入会话缓存 + 持久化白名单（L13：整段加锁，防并发审批下
+        # 前缀/命令交错写入不一致）
+        with self._wl_lock:
+            self._approved.add(cmd_key)
+            self._persistent_whitelist.add(cmd_key)
+            # R25 #2：curated 表可泛化 → 额外存前缀规则（同类测试命令不再询问）
+            from agent.command_prefix import derive_approved_prefix
+            try:
+                prefix = derive_approved_prefix(cmd_key)
+            except Exception:
+                prefix = None
+            if prefix and prefix not in self._persistent_prefixes:
+                self._persistent_prefixes.add(prefix)
+                logger.info("已存前缀规则: %s（同前缀命令不再询问）", prefix)
         self._save_whitelist()
         return PermissionResult(True, "已批准", "approval")
 
@@ -1544,10 +1560,25 @@ class PermissionChecker:
         try:
             verdict = asyncio.run(_classify_bash_command(command, aux_llm))
         except RuntimeError as e:
-            # asyncio.run 在已有事件循环的上下文里会抛 RuntimeError。
-            # PermissionChecker.check 通常在工具执行线程（无事件循环），但保险起见处理。
-            logger.warning("bash_llm_classifier: asyncio.run 失败（fail-open）: %s", e)
-            return None
+            # R30 审计 Medium-9：async 上下文（已有事件循环）直调 check 时
+            # asyncio.run 抛 RuntimeError——此前直接 fail-open 跳过分类，安全层
+            # 在该执行路径无声消失。降级为工作线程独立事件循环执行（阻塞等待，
+            # 保持 check() 的同步契约）；仍失败才 fail-open。
+            logger.warning(
+                "bash_llm_classifier: 事件循环线程直调，转工作线程执行: %s", e,
+            )
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=1) as _ex:
+                    verdict = _ex.submit(
+                        asyncio.run,
+                        _classify_bash_command(command, aux_llm),
+                    ).result()
+            except Exception as e2:
+                logger.warning(
+                    "bash_llm_classifier: 线程降级仍失败（fail-open）: %s", e2,
+                )
+                return None
         except Exception as e:
             logger.warning("bash_llm_classifier: 分类调用异常（fail-open）: %s", e)
             return None
@@ -1739,7 +1770,8 @@ class PermissionChecker:
             if decision == "always":
                 parent = resolved.parent
                 # 会话缓存 + 运行时白名单（本进程内立即生效，含其他 checker 实例）
-                self._approved_write_roots.add(parent)
+                with self._wl_lock:  # L13：并发审批一致性
+                    self._approved_write_roots.add(parent)
                 try:
                     add_extra_allowed_root(parent)
                 except Exception:
@@ -1760,7 +1792,8 @@ class PermissionChecker:
             approved = bool(decision)
             if approved:
                 # 批准：父目录进会话缓存，同目录后续写入不再询问
-                self._approved_write_roots.add(resolved.parent)
+                with self._wl_lock:  # L13
+                    self._approved_write_roots.add(resolved.parent)
                 return PermissionResult(True, "已批准（写入根目录）", "approval")
             return self._deny(str(path), "用户拒绝", "approval")
 
@@ -1773,14 +1806,17 @@ class PermissionChecker:
 
     def add_to_whitelist(self, command: str):
         """手动加入持久化白名单。"""
-        self._persistent_whitelist.add(command.strip())
+        with self._wl_lock:
+            self._persistent_whitelist.add(command.strip())
         self._save_whitelist()
 
     def remove_from_whitelist(self, command: str) -> bool:
         """从持久化白名单移除。返回是否找到并移除。"""
-        before = len(self._persistent_whitelist)
-        self._persistent_whitelist.discard(command.strip())
-        if len(self._persistent_whitelist) < before:
+        with self._wl_lock:
+            before = len(self._persistent_whitelist)
+            self._persistent_whitelist.discard(command.strip())
+            removed = len(self._persistent_whitelist) < before
+        if removed:
             self._save_whitelist()
             return True
         return False

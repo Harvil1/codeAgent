@@ -102,7 +102,7 @@ async def test_l4_triggers_early_with_growth(tmp_path):
     )
     # est ≈ 90+ 一点 < 100；growth ≈ 90 → 90+90 >= 100 → 提前触发
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -119,7 +119,7 @@ async def test_l4_not_triggered_when_low_growth(tmp_path):
     )
     # est ~10 tokens，growth ~2 → 12 < 100 不触发
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",

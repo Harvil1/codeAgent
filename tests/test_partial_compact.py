@@ -401,7 +401,7 @@ async def test_e2e_compress_if_needed_full_compat(tmp_path):
         "transcript_enabled": False,
     }
 
-    out, changed = await compress_if_needed(
+    out, changed, _cp = await compress_if_needed(
         msgs, llm_client=mock_client, model="test-model",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="e2e-partial",

@@ -340,7 +340,7 @@ async def test_stress_huge_user_message_1mb(tmp_path):
 
     state = CompressionSessionState()
     t0 = time.perf_counter()
-    new_msgs, changed = await compress_if_needed(
+    new_msgs, changed, _cp = await compress_if_needed(
         messages,
         llm_client=None,
         model=None,

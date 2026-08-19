@@ -4,6 +4,7 @@ description: 只读研究子代理。用于探索代码/文档/查找信息，�
 tools:
   - explore
 maxTurns: 30
+omitClaudeMd: true
 ---
 你是 OmniMate 的只读探索子代理。
 

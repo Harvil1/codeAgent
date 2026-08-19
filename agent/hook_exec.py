@@ -18,6 +18,7 @@
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 from typing import Optional
@@ -172,6 +173,63 @@ def _fail_closed_or_none(hook, reason: str) -> None:
     return None
 
 
+# ============================================================================
+# C4（CCB 借鉴）：async hook 的 rewake 通知队列
+# ============================================================================
+# async hook 后台跑完 exit 2（block）且 async_rewake=True 时推入；
+# agent 的 _drain_injected_messages 每轮消费为 ephemeral <rewake_notification>。
+_REWAKE_QUEUE: "queue.Queue" = queue.Queue()
+
+
+def _push_rewake(hook_name: str, reason: str, status_message: str = "") -> None:
+    """推一条 rewake 通知（线程安全）。"""
+    import time as _time
+    _REWAKE_QUEUE.put({
+        "hook": hook_name,
+        "reason": reason,
+        "status_message": status_message or "",
+        "pushed_at": _time.time(),
+    })
+
+
+def drain_rewake_notifications() -> list:
+    """取出并清空全部 rewake 通知（agent 每轮 drain）。"""
+    notes = []
+    while True:
+        try:
+            notes.append(_REWAKE_QUEUE.get_nowait())
+        except Exception:
+            return notes
+
+
+def _run_async_hook(hook, payload: dict, timeout_cap: float = None) -> None:
+    """C4：async command hook——后台线程跑，dispatch 立即返回。
+
+    exit 2 + async_rewake → 推 rewake 通知（模型下轮看到可跟进）。
+    其余结果丢弃（async 的语义就是"不等待判决"——gating 类 hook 别用 async）。
+    """
+    def _bg():
+        try:
+            result = run_script_hook(
+                hook, payload,
+                **({"timeout_cap": timeout_cap} if timeout_cap is not None else {}),
+            )
+            if (isinstance(result, dict) and result.get("action") == "block"
+                    and hook.script.async_rewake):
+                _push_rewake(
+                    hook.name,
+                    result.get("reason") or "async hook blocked (exit 2)",
+                    status_message=hook.script.status_message or "",
+                )
+        except Exception as e:
+            logger.warning("async hook %s 后台执行失败: %s", hook.name, e)
+
+    import threading as _threading
+    _threading.Thread(
+        target=_bg, daemon=True, name=f"hook-async-{hook.name}",
+    ).start()
+
+
 def dispatch_hook(
     hook, payload: dict, *, propagate_error: bool = False,
     timeout_cap: float = None,
@@ -194,6 +252,11 @@ def dispatch_hook(
     if hook.script is None:
         return None
     ht = getattr(hook.script, "handler_type", "command") or "command"
+    # C4：async command hook——后台跑不阻塞，立即返回 None
+    if (ht == "command"
+            and getattr(hook.script, "async_run", False)):
+        _run_async_hook(hook, payload, timeout_cap)
+        return None
     # P3.2: flag 门控
     if not _is_handler_allowed(ht):
         logger.info(

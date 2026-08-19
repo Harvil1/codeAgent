@@ -203,3 +203,115 @@ class TestResumeBudgetCumulative:
             {"action": "resume", "run_id": out1["run_id"]}, config={}))
         assert out2["ok"] is False
         assert out2["error_type"] == "budget_exceeded"
+
+    async def test_run_detached_returns_immediately_and_killable(
+            self, monkeypatch, tmp_path):
+        """C3（CCB detached launch）：wait=false 立即返回 run_id 不阻塞主循环。
+
+        - 返回 detached=true + running 状态（引擎还在跑）
+        - 同会话可 kill（此前前台 run 阻塞主循环，kill 只能靠另一会话）
+        - 完成后 meta 落盘 + 后台通知送达（delegation 队列）
+        """
+        import asyncio
+        import json
+        import time
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        from tools import workflow_tool as WT
+        import agent.workflow_engine as WE
+
+        release = asyncio.Event()  # 引擎侧挂起点（fake loop 跑在后台线程的 loop 里）
+
+        async def fake_runner(p):
+            await asyncio.sleep(3600)  # 永不主动完成，等 kill
+            return "never"
+
+        # fake run_workflow：挂起直到 cancel_event 置位（模拟长任务）
+        async def fake_run_workflow(source, **kw):
+            cancel = kw.get("cancel_event")
+            while not (cancel is not None and cancel.is_set()):
+                await asyncio.sleep(0.05)
+            return {"ok": False, "error": "cancelled", "stats": {}}
+
+        monkeypatch.setattr(WE, "make_agent_runner", lambda kw: fake_runner)
+        monkeypatch.setattr(WE, "run_workflow", fake_run_workflow)
+        # 清空 delegation 队列（通知断言用）
+        from tools.delegate_tool import get_delegation_queue
+        dq = get_delegation_queue()
+        dq.drain()
+
+        t0 = time.monotonic()
+        out = json.loads(await WT._handle_workflow(
+            {"action": "run", "script": "async def main():\n    return 1\n",
+             "wait": False}, config={}))
+        elapsed = time.monotonic() - t0
+
+        assert out["ok"] is True
+        assert out["detached"] is True
+        assert out["run_id"]
+        assert elapsed < 1.0, "detached run 不应等待引擎完成"
+
+        # 同会话 kill（detached run 的取消通道跨线程可用）
+        kill = json.loads(await WT._handle_workflow(
+            {"action": "kill", "run_id": out["run_id"]}, config={}))
+        assert kill.get("killed") is True, "detached run 应可被 kill"
+
+        # 等 meta 反映终态（create 时就有 running 态 meta，须轮询内容）
+        from constants import get_omnimate_home
+        meta_path = get_omnimate_home() / ".workflows" / out["run_id"] / "meta.json"
+        meta = {}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+                if meta.get("status") not in (None, "running"):
+                    break
+            await asyncio.sleep(0.05)
+        assert meta.get("status") == "failed", \
+            f"kill 后应为 failed 终态: {meta.get('status')}"
+
+        deadline = time.monotonic() + 10
+        notes = []
+        while time.monotonic() < deadline:
+            notes = dq.drain()
+            if notes:
+                break
+            await asyncio.sleep(0.05)
+        assert notes, "detached run 完成应推后台通知"
+        assert notes[0]["delegation_id"] == out["run_id"]
+
+    async def test_run_dir_cleanup_lru_cap(self, monkeypatch, tmp_path):
+        """C3（CCB KEEP_MAX_RUNS）：run 目录超 50 个按 LRU 清理最旧（跳过活跃）。"""
+        import json
+        import os
+        import time
+        monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path / "home"))
+        from tools import workflow_tool as WT
+        from constants import get_omnimate_home
+        import agent.workflow_engine as WE
+
+        async def fake_runner(p):
+            return "r"
+        monkeypatch.setattr(WE, "make_agent_runner", lambda kw: fake_runner)
+
+        base = get_omnimate_home() / ".workflows"
+        base.mkdir(parents=True, exist_ok=True)
+        for i in range(55):
+            d = base / f"old_{i:03d}"
+            d.mkdir()
+            (d / "meta.json").write_text("{}", encoding="utf-8")
+            # mtime 递增（os.utime 秒级精度不够，用不同时间戳拉开）
+            os.utime(d, (1_000_000 + i * 100, 1_000_000 + i * 100))
+
+        out = json.loads(await WT._handle_workflow(
+            {"action": "run", "script": "async def main():\n    return 1\n"},
+            config={}))
+        assert out["ok"] is True
+        remaining = [d.name for d in base.iterdir() if d.is_dir()]
+        # 总量（含新 run）恰好 ≤ 50；最旧 6 个被清（old_000..old_005）
+        assert len(remaining) == 50, f"应剩 50 个目录: {len(remaining)}"
+        assert out["run_id"] in remaining  # 新 run 保留
+        assert "old_000" not in remaining and "old_005" not in remaining
+        assert "old_006" in remaining  # 最新那批保留

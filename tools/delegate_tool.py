@@ -1287,6 +1287,14 @@ def _run_child(
 
         return result
     finally:
+        # === C2（CCB runAgent 清理清单）：清杀子代理遗留运行态 ===
+        # 级联中断孙代理（async 线程不再给已死父代理推结果）+ 停 bg 任务；
+        # 幂等 fail-open，放在清理链最前（后续步骤不再依赖子代理活体）
+        try:
+            child.cleanup_runtime()
+        except Exception:
+            pass  # fail-open：清理失败不阻塞其余清理步骤
+
         # === R24 #38：断开内联临时 MCP server（不残留全局连接）===
         if _inline_mcp_connected:
             try:

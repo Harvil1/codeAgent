@@ -34,7 +34,9 @@ def test_finalize_response_uses_reasoning_when_content_empty():
         thinking_signature=None,
     )
 
-    result = agent._finalize_response(assistant_msg, "继续做坦克大战")
+    import asyncio as _aio
+    # Medium-6：_finalize_response 已改 async（STOP hook 移出事件循环线程）
+    result = _aio.run(agent._finalize_response(assistant_msg, "继续做坦克大战"))
     # 应该用 reasoning_content 作为回复（不返回空串）
     assert result, f"回复不应为空（reasoning 有值时应作为回复），实际: {result!r}"
     assert "坦克大战" in result or "阶段" in result, (
@@ -62,7 +64,9 @@ def test_finalize_response_friendly_fallback_when_all_empty():
         thinking_signature=None,
     )
 
-    result = agent._finalize_response(assistant_msg, "继续做坦克大战")
+    import asyncio as _aio
+    # Medium-6：_finalize_response 已改 async（STOP hook 移出事件循环线程）
+    result = _aio.run(agent._finalize_response(assistant_msg, "继续做坦克大战"))
     # 应返回友好兜底消息（不空）
     assert result, f"完全空响应时应返回友好兜底，不应是空串，实际: {result!r}"
     # 应含明确提示（"重试"/"空响应"/"网络"等关键词）
@@ -87,7 +91,9 @@ def test_finalize_response_normal_content_unchanged():
         thinking_signature=None,
     )
 
-    result = agent._finalize_response(assistant_msg, "继续做坦克大战")
+    import asyncio as _aio
+    # Medium-6：_finalize_response 已改 async（STOP hook 移出事件循环线程）
+    result = _aio.run(agent._finalize_response(assistant_msg, "继续做坦克大战"))
     assert result == "我读了 level.js，下一步要写 game.js"
 
 
@@ -107,7 +113,9 @@ def test_finalize_response_empty_string_content_triggers_fallback():
         thinking_signature=None,
     )
 
-    result = agent._finalize_response(assistant_msg, "继续做坦克大战")
+    import asyncio as _aio
+    # Medium-6：_finalize_response 已改 async（STOP hook 移出事件循环线程）
+    result = _aio.run(agent._finalize_response(assistant_msg, "继续做坦克大战"))
     assert result, f"空串 content 也应触发兜底，实际: {result!r}"
 
 

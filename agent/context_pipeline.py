@@ -5,6 +5,7 @@
 设计详见 docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3。
 Task P1.1（spec §7.1）补 L3.5 contextCollapse：按 token 占用比折叠早期段，不动 system prompt。
 """
+import asyncio
 import json
 import logging
 import time
@@ -982,12 +983,17 @@ async def compress_if_needed(
     hooks_registry=None,
     tools: Optional[list] = None,
     authoritative_tokens: Optional[tuple] = None,
-) -> Tuple[list, bool]:
-    """分层压缩编排器。返回 (新消息, 是否发生变化)（async：L4 llm_compact 已改 async）。
+) -> Tuple[list, bool, bool]:
+    """分层压缩编排器。返回 (新消息, 是否发生变化, 是否 LLM 摘要级压缩)（async）。
 
     顺序：L1 snip → L2 micro（per-tool）→ L2.5 per-message 聚合 → L2.6 总量预算
     → **L3.5 contextCollapse** → L4 llm。
     每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
+
+    R30 审计 Medium-4：changed（任一层改了 messages，含无损层）与 compacted
+    （仅 L4 llm_compact——LLM 摘要有损替换）分离。调用方据此区分：
+    changed 只须同步 conversation_history；compacted 才做重建 prompt /
+    [COMPACT_BOUNDARY] / <post_compress_brief> 等全套副作用。
 
     L3.5（Task P1.1，spec §7.1）：``features.context_collapse.enabled=True`` 时，
     按 ``est_tokens / context_window > threshold_ratio`` 触发，折叠早期段为占位
@@ -1004,13 +1010,17 @@ async def compress_if_needed(
     # PRE_COMPACT hook（可 abort）
     if hooks_registry is not None:
         try:
-            abort = hooks_registry.run_pre_compact({
-                "session_id": session_id,
-                "layer": "orchestrator",
-            })
+            # Medium-6：hook 链移出事件循环线程（慢声明式 hook 不冻结流式输出）
+            abort = await asyncio.to_thread(
+                hooks_registry.run_pre_compact,
+                {
+                    "session_id": session_id,
+                    "layer": "orchestrator",
+                },
+            )
             if abort.get("abort"):
                 logger.info("PRE_COMPACT hook 请求 abort，跳过压缩")
-                return messages, False
+                return messages, False, False
         except Exception as e:
             logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
 
@@ -1286,11 +1296,15 @@ async def compress_if_needed(
     # POST_COMPACT hook（通知压缩完成）
     if hooks_registry is not None:
         try:
-            hooks_registry.run_post_compact({
-                "session_id": session_id,
-                "layer": "orchestrator",
-            })
+            # Medium-6：移出事件循环线程
+            await asyncio.to_thread(
+                hooks_registry.run_post_compact,
+                {
+                    "session_id": session_id,
+                    "layer": "orchestrator",
+                },
+            )
         except Exception as e:
             logger.warning("POST_COMPACT hook 触发异常（忽略）: %s", e)
 
-    return messages, changed
+    return messages, changed, c4

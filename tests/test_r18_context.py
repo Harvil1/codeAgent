@@ -131,7 +131,7 @@ async def test_l4_trigger_circuit_breaker(monkeypatch):
     monkeypatch.setattr(cc, "_compact_circuit_open", False)
 
     for i in range(MAX_CONSECUTIVE_L4_FAILURES):
-        _, changed = await compress_if_needed(
+        _, changed, _cp = await compress_if_needed(
             list(msgs), llm_client=_FailClient(), model="m",
             config=dict(config), session_state=state,
             agent_home=None, session_id="t",
@@ -425,9 +425,47 @@ async def test_tool_batch_summary_gate_disabled():
         [],
     )
     assert a._tool_summary_task is not None
-    await a._tool_summary_task
+    a._tool_summary_task.join(timeout=5)  # daemon 线程（_spawn_detached）
     assert started == [1]
     assert a._pending_tool_batch_summary == "x"
+
+
+def test_tool_batch_summary_survives_loop_teardown(monkeypatch):
+    """R30 审计 High-2 回归：批间摘要任务不随 per-turn 事件循环销毁被取消。
+
+    CLI per-turn asyncio.run 模型下，最后一批工具的摘要 create_task 在循环
+    销毁时被取消 → 下一回合永远注入不了该摘要。新实现须与主循环生命周期解耦。
+    （旧实现在无活循环处调用还会因 create_task 抛 RuntimeError 被 fail-open 吞掉。）
+    """
+    import threading
+    from agent import AIAgent
+
+    ran = threading.Event()
+
+    async def fake_gen(self, items):
+        # 必须有挂起点：真实摘要要等 aux LLM 响应（任务在 await 处被取消才是 bug）
+        await asyncio.sleep(0.05)
+        ran.set()
+
+    monkeypatch.setattr(AIAgent, "_generate_tool_batch_summary", fake_gen)
+
+    a = AIAgent.__new__(AIAgent)
+    a.aux_llm_router = object()
+    a.config = {"context": {"tool_batch_summary_enabled": True}}
+    a.spawn_depth = 0
+    a._pending_tool_batch_summary = None
+    a._tool_summary_task = None
+
+    async def one_turn():
+        # 还原真实时序：任务在 run_conversation（活循环）内启动，turn 立即结束
+        a._maybe_start_tool_batch_summary(
+            [SimpleNamespace(function=SimpleNamespace(name="read_file"))],
+            [(SimpleNamespace(function=SimpleNamespace(name="read_file")), "{}")],
+            [],
+        )
+
+    asyncio.run(one_turn())  # 循环立即销毁（模拟 CLI per-turn 模型）
+    assert ran.wait(timeout=5), "批间摘要任务随 per-turn 事件循环一起被取消（High-2 回归）"
 
 
 def test_tool_batch_summary_config_default():

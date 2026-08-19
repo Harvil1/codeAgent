@@ -305,7 +305,7 @@ async def test_e2e_9section_prompt_via_compress_if_needed(tmp_path):
         "transcript_enabled": False,
     }
 
-    out, changed = await compress_if_needed(
+    out, changed, _cp = await compress_if_needed(
         msgs, llm_client=client, model="test-model",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="e2e-test",
@@ -363,7 +363,7 @@ async def test_e2e_circuit_breaker_via_compress_if_needed(tmp_path):
     # 第 4 次：熔断器应已开，LLM 不应被调用
     call_count_before = client.chat_completions.call_count
     state4 = CompressionSessionState()
-    out4, changed4 = await compress_if_needed(
+    out4, changed4, _cp4 = await compress_if_needed(
         _mk_big_msgs(), llm_client=client, model="test-model",
         config=cfg, session_state=state4,
         agent_home=tmp_path, session_id="e2e-fail-4",

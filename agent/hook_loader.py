@@ -141,7 +141,11 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
             logger.warning("hook '%s' 缺 command（或非 list），跳过", name)
             return None
         script = HookScriptConfig(handler_type="command", command=command, timeout=timeout,
-                                  env=h_cfg.get("env"), if_condition=if_cond)
+                                  env=h_cfg.get("env"), if_condition=if_cond,
+                                  # C4：async hook（后台跑 + exit 2 rewake）
+                                  async_run=bool(h_cfg.get("async", False)),
+                                  async_rewake=bool(h_cfg.get("async_rewake", False)),
+                                  status_message=h_cfg.get("status_message"))
     elif ht == "http":
         url = h_cfg.get("url")
         if not url:

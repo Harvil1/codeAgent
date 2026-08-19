@@ -650,7 +650,7 @@ async def test_compress_runs_l1_only_for_medium_conv(tmp_path):
     """50 < 消息数 < 100 时只跑 L1+L2，不触发 L4。"""
     msgs = _mk_msgs(40)  # 81 条，触发 L1，不触发 L4
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -667,7 +667,7 @@ async def test_compress_runs_l4_for_huge_conv(tmp_path):
            "snip_message_threshold": 10**9}
     msgs = _mk_msgs(80)  # 161 条
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -683,7 +683,7 @@ async def test_compress_no_total_attempt_cap_r30d(tmp_path):
     state = CompressionSessionState()
     state.llm_compact_count = 3  # 旧语义下已达上限
     cfg = {**_DEFAULT_CFG, "llm_compact_token_threshold": 1}
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -705,7 +705,7 @@ async def test_compress_respects_cooldown(tmp_path):
     state.record_llm_compact()  # turn=10 触发
     state.current_turn = 12      # 只过了 2 轮 < 5
 
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -718,7 +718,7 @@ async def test_compress_respects_cooldown(tmp_path):
 async def test_compress_no_change_when_small(tmp_path):
     msgs = _mk_msgs(10)
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -765,7 +765,7 @@ async def test_compress_triggers_l4_with_default_config_after_l1(tmp_path):
     """
     msgs = _mk_big_msgs(60, chars_per_msg=8000)  # 1 + 120 = 121 条
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=_DEFAULT_CFG, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -906,7 +906,7 @@ async def test_compress_runs_offload_before_micro(tmp_path):
     cfg = {**_DEFAULT_CFG, "output_offload_threshold": 30000,
            "snip_message_threshold": 10**9}
     state = CompressionSessionState()
-    out, changed = await compress_if_needed(
+    out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
         config=cfg, session_state=state,
         agent_home=tmp_path, session_id="s",
@@ -941,7 +941,7 @@ async def test_l4_not_triggered_below_msg_threshold():
     # token 阈值设很大,只看 msg 阈值
     config = {"llm_compact_token_threshold": 10**9, "llm_compact_message_threshold": 500,
               "snip_message_threshold": 10**9}
-    out, changed = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
+    out, changed, _ = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
                                       config=config, session_state=state,
                                       agent_home=".", session_id="t")
     assert not changed, "150 条消息不应触发 L4（msg 阈值已放宽到 500）"
@@ -956,7 +956,7 @@ async def test_l4_triggered_above_token():
     state = CompressionSessionState()
     config = {"llm_compact_token_threshold": 100, "llm_compact_message_threshold": 500,
               "snip_message_threshold": 10**9}
-    out, changed = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
+    out, changed, _ = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
                                       config=config, session_state=state,
                                       agent_home=".", session_id="t")
     assert changed, "token 超阈值应触发 L4"
@@ -970,7 +970,7 @@ async def test_l4_keep_recent_30():
     state = CompressionSessionState()
     config = {"llm_compact_token_threshold": 100, "llm_compact_message_threshold": 500,
               "llm_compact_keep_recent": 30, "snip_message_threshold": 10**9}
-    out, changed = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
+    out, changed, _ = await compress_if_needed(msgs, llm_client=None, model="deepseek-chat",
                                       config=config, session_state=state,
                                       agent_home=".", session_id="t")
     assert changed
@@ -987,7 +987,7 @@ async def test_l4_1m_model_msg_threshold_relaxed():
     state = CompressionSessionState()
     config = {"llm_compact_token_threshold": 10**9, "llm_compact_message_threshold": 500,
               "snip_message_threshold": 10**9}
-    out, changed = await compress_if_needed(msgs, llm_client=None, model="deepseek-v4-pro[1m]",
+    out, changed, _ = await compress_if_needed(msgs, llm_client=None, model="deepseek-v4-pro[1m]",
                                       config=config, session_state=state,
                                       agent_home=".", session_id="t")
     # L1 snip 可能触发（1500>200），但 L4 不应触发（msg 放宽到 2000）
@@ -1152,7 +1152,7 @@ def test_context_collapse_flag_off_no_op():
             },
             "context_collapse_context_window": 1000,  # 即便窗口小也不应触发
         }
-        out, changed = await compress_if_needed(
+        out, changed, _ = await compress_if_needed(
             msgs, llm_client=None, model="x",
             config=cfg, session_state=state,
             agent_home=".", session_id="t",
@@ -1182,7 +1182,7 @@ def test_context_collapse_flag_on_integrates_via_compress_if_needed():
             },
             "context_collapse_context_window": 1000,  # 强制触发
         }
-        out, changed = await compress_if_needed(
+        out, changed, _ = await compress_if_needed(
             msgs, llm_client=None, model="x",
             config=cfg, session_state=state,
             agent_home=".", session_id="t",
@@ -1242,3 +1242,156 @@ class TestCompressNotifyCompaction:
             session_id="test-notify",
         )
         assert called == [1]
+
+
+# ---------------------------------------------------------------------------
+# R30 审计 Medium-4：changed（有变化）与 compacted（LLM 摘要级）分离
+# ---------------------------------------------------------------------------
+
+async def test_compress_if_needed_distinguishes_lossless_from_compact(tmp_path):
+    """无损层（L2 offload）触发时 changed=True 但 compacted=False。
+
+    只有 L4 llm_compact（LLM 摘要，有损）才算 compacted；此前 changed 语义
+    过宽——一次大工具结果落盘也会让 _run_context_compression 执行全套
+    "压缩仪式"（invalidate prompt cache / [COMPACT_BOUNDARY] /
+    <post_compress_brief>"历史已被总结"），误导模型且白白打穿缓存。
+    """
+    msgs = _mk_msgs_with_big_tool_results([50000] * 5)
+    cfg = {
+        **_DEFAULT_CFG,
+        "output_offload_threshold": 30000,
+        "snip_message_threshold": 10**9,       # 禁 L1，单独看 L2
+        "llm_compact_token_threshold": 10**9,  # 禁 L4（本次只测无损层）
+        "message_offload_threshold": 0,        # 禁 L2.5（默认 200K 也不会触发，显式关）
+        "tool_result_total_budget": 10**9,     # 禁 L2.6
+    }
+    state = CompressionSessionState()
+    result = await compress_if_needed(
+        msgs, llm_client=_FakeLLM(), model="deepseek-chat",
+        config=cfg, session_state=state,
+        agent_home=tmp_path, session_id="s-m4",
+    )
+    assert len(result) == 3, "新契约：(messages, changed, compacted)"
+    out, changed, compacted = result
+    assert changed is True, "L2 落盘确实改写了 content"
+    assert compacted is False, "无损折叠不等于 LLM 摘要压缩"
+    # 验证确实是 L2 落盘路径（content 变为 JSON 含 truncated 字段）
+    import json as _json
+    offloaded = [
+        m for m in out if m.get("role") == "tool"
+        and _is_offloaded_content(m.get("content", ""))
+    ]
+    assert offloaded, "应有 tool 消息被落盘"
+
+
+def _is_offloaded_content(content):
+    import json as _json
+    try:
+        return bool(_json.loads(content).get("truncated"))
+    except (ValueError, TypeError):
+        return False
+
+
+async def test_run_context_compression_lossless_no_ceremony(tmp_path, monkeypatch):
+    """agent 侧：无损层只同步 history——不 invalidate prompt、不注入 brief。"""
+    from agent import AIAgent
+    import agent.context_pipeline as cp
+
+    a = AIAgent.__new__(AIAgent)
+    a.compression_enabled = True
+    a.config = {"context": {}}
+    a.llm_client = None
+    a.model = "deepseek-chat"
+    a._compress_session_state = cp.CompressionSessionState()
+    a.omnimate_home = tmp_path
+    a.session_id = "s1"
+    a.hooks_registry = None
+    a._last_tool_schemas = None
+    a._last_usage_anchor = None
+    a.memory_manager = None
+    a.plan_mode = False
+    a._compression_attempts = 0
+    a._recent_read_files = []
+    a._recent_skills = []
+    a.conversation_history = [{"role": "user", "content": "hi"}]
+    a._persist_session_message = lambda *args, **kw: None
+    invalidated = []
+    a.invalidate_system_prompt = lambda: invalidated.append(1)
+
+    folded = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "function": {"name": "t", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "name": "t",
+         "content": '{"truncated": true, "preview": "..."}'},
+    ]
+
+    async def fake_cin(messages, **kw):
+        return folded, True, False  # 无损层 changed、未 compact
+
+    monkeypatch.setattr(cp, "compress_if_needed", fake_cin)
+
+    out_msgs, _sp, compressed = await a._run_context_compression(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+        "sys-prompt",
+    )
+    assert compressed is False
+    assert invalidated == [], "无损变化不应重建 system prompt（保 cache）"
+    assert not any(
+        "post_compress_brief" in str(m.get("content", "")) for m in out_msgs
+    ), "无损变化不应注入'你刚经历了上下文压缩'"
+    # history 必须同步为折叠后版本（否则下轮又把原始 content 塞回来）
+    assert any(m.get("role") == "tool" for m in a.conversation_history)
+    assert all(m.get("role") != "system" for m in a.conversation_history)
+
+
+async def test_run_context_compression_compacted_keeps_ceremony(tmp_path, monkeypatch):
+    """agent 侧回归保护：真 LLM 摘要压缩仍走全套仪式（invalidate + brief）。"""
+    from agent import AIAgent
+    import agent.context_pipeline as cp
+
+    a = AIAgent.__new__(AIAgent)
+    a.compression_enabled = True
+    a.config = {"context": {}}
+    a.llm_client = None
+    a.model = "deepseek-chat"
+    a._compress_session_state = cp.CompressionSessionState()
+    a.omnimate_home = tmp_path
+    a.session_id = "s1"
+    a.hooks_registry = None
+    a._last_tool_schemas = None
+    a._last_usage_anchor = None
+    a.memory_manager = None
+    a.plan_mode = False
+    a._compression_attempts = 0
+    a._recent_read_files = []
+    a._recent_skills = []
+    a.conversation_history = [{"role": "user", "content": "hi"}]
+    a._persist_session_message = lambda *args, **kw: None
+    invalidated = []
+    a.invalidate_system_prompt = lambda: invalidated.append(1)
+    a._get_system_prompt = lambda: "sys-prompt-rebuilt"
+
+    compacted_msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "[之前的对话已自动总结]\n总结内容"},
+    ]
+
+    async def fake_cin(messages, **kw):
+        return compacted_msgs, True, True  # L4 摘要压缩
+
+    monkeypatch.setattr(cp, "compress_if_needed", fake_cin)
+
+    out_msgs, sp, compressed = await a._run_context_compression(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+        "sys-prompt",
+    )
+    assert compressed is True
+    assert invalidated == [1], "真压缩必须重建 system prompt"
+    assert sp == "sys-prompt-rebuilt"
+    assert any(
+        "post_compress_brief" in str(m.get("content", "")) for m in out_msgs
+    ), "真压缩必须注入恢复 brief"
+    assert a._compression_attempts == 1

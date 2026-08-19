@@ -147,6 +147,8 @@ def build_system_prompt_layers(
     reminder: Optional[str] = None,
     # === Task N NEW: 自定义子代理可跳过项目 OMNIMATE.md（省 token）===
     omit_project_memory: bool = False,
+    # === C6（CCB outputStyles）：输出风格节文本（context 层注入；空=未启用）===
+    output_style_text: str = "",
 ) -> SystemPromptLayers:
     """构建三层 system prompt（05）。
 
@@ -262,6 +264,9 @@ def build_system_prompt_layers(
                     context_parts.append(f"## 上下文文件: {cf.name}\n{content}")
                 except Exception as e:
                     logger.warning("读取上下文文件失败 %s: %s", cf, e)
+    # C6：输出风格（context 层末尾；fail-open——空文本不注入）
+    if output_style_text:
+        context_parts.append(output_style_text)
     context = "\n\n".join(context_parts)
 
     # ---- volatile 层 ----
@@ -290,6 +295,7 @@ def build_system_prompt(
     context_files: Optional[List[Path]] = None,
     extra_instructions: str = "",
     include_guidance: bool = True,
+    output_style_text: str = "",
 ) -> str:
     """组装 system prompt（向后兼容旧接口）。
 
@@ -304,6 +310,7 @@ def build_system_prompt(
         context_files=context_files,
         extra_instructions=extra_instructions,
         include_guidance=include_guidance,
+        output_style_text=output_style_text,
     )
     return layers.render_flat()
 

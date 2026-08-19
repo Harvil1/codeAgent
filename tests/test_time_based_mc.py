@@ -428,7 +428,7 @@ async def test_compress_if_needed_skips_when_disabled(tmp_path):
     messages = _mk_paired_tool_chain(8, tool_ts=now - 100 * 60, asst_ts=now - 70 * 60)
     cfg = _orch_cfg(enabled=False, keep_recent=5)
     state = CompressionSessionState()
-    out, _ = await compress_if_needed(
+    out, _, _cp = await compress_if_needed(
         messages,
         llm_client=_FakeLLM(),
         model="test",
@@ -456,7 +456,7 @@ async def test_compress_if_needed_clears_when_enabled_and_overdue(tmp_path):
     messages = _mk_paired_tool_chain(8, tool_ts=now - 100 * 60, asst_ts=now - 70 * 60)
     cfg = _orch_cfg(enabled=True, keep_recent=5)
     state = CompressionSessionState()
-    out, _ = await compress_if_needed(
+    out, _, _cp = await compress_if_needed(
         messages,
         llm_client=_FakeLLM(),
         model="test",
@@ -528,7 +528,7 @@ async def test_e2e_assemble_compress_strip_chained(tmp_path):
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
     ctx_cfg = dict(_orch_cfg(enabled=True, keep_recent=5))
     state = CompressionSessionState()
-    messages, compressed = await compress_if_needed(
+    messages, compressed, _cp = await compress_if_needed(
         messages,
         llm_client=_FakeLLM(),
         model="test",

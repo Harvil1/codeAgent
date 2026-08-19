@@ -21,9 +21,11 @@
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -34,6 +36,31 @@ from agent.prompt_builder import build_system_prompt
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
+
+
+def _spawn_detached(coro, name: str):
+    """在独立 daemon 线程 + 独立事件循环里跑后台协程（真 fire-and-forget）。
+
+    R30 审计 High-2：CLI 是 per-turn asyncio.run 模型（cli.py 每条用户消息
+    新建并销毁一个事件循环）。run_conversation return 前一刻 create_task 的
+    任务会被 asyncio.run 的 _cancel_all_tasks 取消——任务在第一个挂起点就死，
+    auto_extract / 批间摘要因此静默失效（无报错）。daemon 线程自带事件循环，
+    生命周期与主循环解耦；contextvars 复制调用方上下文（workspace cwd 等
+    contextvar 在线程内可用）。
+
+    返回 Thread（调用方可 join/引用保活，与旧 task 引用语义对齐）。
+    """
+    ctx = contextvars.copy_context()
+
+    def _runner():
+        try:
+            ctx.run(asyncio.run, coro)
+        except Exception as e:  # fail-open：后台任务异常不影响主对话
+            logger.debug("%s 后台任务失败（fail-open）: %s", name, e)
+
+    t = threading.Thread(target=_runner, daemon=True, name=name)
+    t.start()
+    return t
 
 
 # ============================================================================
@@ -606,6 +633,26 @@ class AIAgent:
             except Exception as e:
                 logger.warning("子 agent 中断失败: %s", e)
 
+    def cleanup_runtime(self) -> None:
+        """C2（CCB runAgent 清理清单）：子代理退出时清杀遗留运行态。
+
+        幂等 + fail-open（逐项清理，单项失败不影响其余）：
+        - interrupt 级联到 _children（async 孙代理线程经 loop-top 协作式退出，
+          不再给已死父代理的 delegation 队列推结果）
+        - bg_manager.shutdown()（若持有——防御性，当前子代理默认不配 bg）
+        由 delegate_tool._run_child 的 finally 调用；主代理由 RuntimeContext
+        .shutdown 走自己的清理链。
+        """
+        try:
+            self.interrupt()  # 含 _children 级联
+        except Exception as e:
+            logger.debug("cleanup_runtime 中断级联失败: %s", e)
+        if getattr(self, "bg_manager", None) is not None:
+            try:
+                self.bg_manager.shutdown()
+            except Exception as e:
+                logger.debug("cleanup_runtime bg shutdown 失败: %s", e)
+
     def _record_llm_usage(self, response, sent_message_count: int = None) -> None:
         """记录一次 LLM 调用的 token 用量（batch1-T2）。
 
@@ -1148,11 +1195,30 @@ class AIAgent:
         """
         if not self._system_prompt_built:
             from agent.prompt_builder import build_system_prompt_layers
+            # C6：输出风格解析（fail-open；context 层注入）
+            style_text = ""
+            try:
+                from agent.output_styles import (
+                    resolve_output_style, render_style_section,
+                )
+                try:
+                    from agent.workspace_context import get_workspace_cwd
+                    _cwd = get_workspace_cwd()
+                except Exception:
+                    _cwd = os.getcwd()
+                _style = resolve_output_style(
+                    self.config, _cwd, self.omnimate_home,
+                )
+                if _style is not None:
+                    style_text = render_style_section(_style)
+            except Exception as e:
+                logger.debug("输出风格解析失败（fail-open）: %s", e)
             layers = build_system_prompt_layers(
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
                 enabled_toolsets=self.enabled_toolsets,
                 omit_project_memory=self.omit_project_memory,
+                output_style_text=style_text,
             )
             # stable + context 缓存，volatile 即时取
             self._stable_prompt = layers.stable
@@ -1205,6 +1271,10 @@ class AIAgent:
         # 同一 agent 实例在 autonomous lifecycle 多个 WORK 周期复用时，
         # 上一次 idle 请求不应泄漏到下一次调用。
         self._idle_requested = False
+        # R30 审计 High-3：清上一回合残留的中断标志——Ctrl+C 异常退出 run 时
+        # flag 已置位但 loop-top 未消费，不清则用户下一条消息第一轮就被吞
+        # （直接回"[已被用户中断]"）。
+        self._interrupt_requested = False
         # 每条用户消息重置迭代预算：预算只限制"这条消息"的循环轮数，
         # 避免长会话（多轮用户消息累计消耗）中途耗尽后静默断开
         # （曾导致：tool 调用后 consume() 返回 False → break → 无提示回"你:"）。
@@ -1224,7 +1294,10 @@ class AIAgent:
         self._sl_turn_start = len(self.conversation_history)
 
         # ---------- 循环前准备 ----------
-        user_message = self._run_prompt_submit_hook(user_message)
+        # Medium-6：hook 链移出事件循环线程（慢声明式 hook 不冻结流式输出）
+        user_message = await asyncio.to_thread(
+            self._run_prompt_submit_hook, user_message,
+        )
         # S9 fix: 不在此 drain（每轮 while 内重新 drain，避免多轮 tool_calls 中途消息收不到）
 
         # Task 2.5: 旧 _initial_memory_recall 已删除——记忆注入统一走 CCAR10
@@ -1311,10 +1384,12 @@ class AIAgent:
                 logger.debug("prevent_sleep fail-open: %s", e)
 
             # 消耗预算（grace call 不消耗）
+            consumed_this_iter = False
             if not self._budget_grace_call:
                 if not self.iteration_budget.consume():
                     turn_exit_reason = LoopExitReason.BUDGET_EXHAUSTED  # R17 #14
                     break
+                consumed_this_iter = True
             else:
                 # S8 fix: grace call 跑完后清标志（防无限循环）
                 # 之前 _budget_grace_call 永远是 False（死代码），现在 dispatch 后会置 True，
@@ -1365,6 +1440,12 @@ class AIAgent:
                 messages, tool_schemas, system_prompt,
             )
             if response is self._REACTIVE_RETRY:
+                # R30 审计 L10：reactive 重试是韧性恢复不是新一轮——本轮没有
+                # 成功的 LLM 产出，退还预算（grace 轮没消费则不退，防多退）。
+                # 连续 PTL 白扣会提前 BUDGET_EXHAUSTED；失控由 reactive 自身
+                # 的冷却 + 次上限兜底，refund 不会造无限循环。
+                if consumed_this_iter:
+                    self.iteration_budget.refund()
                 system_prompt = self._get_system_prompt()
                 continue  # reactive_compact 已修改 history，重试本轮
             if response is None:
@@ -1418,7 +1499,7 @@ class AIAgent:
                 continue
 
             # 无 tool_calls = 最终响应
-            final_content = self._finalize_response(assistant_msg, user_message)
+            final_content = await self._finalize_response(assistant_msg, user_message)
             if self._stop_hook_forced:
                 # STOP hook 注入了 force_msg，跳回 while 让 LLM 再跑一轮
                 continue
@@ -1608,11 +1689,20 @@ class AIAgent:
         except Exception as e:
             logger.warning("delegation_queue drain 异常: %s", e)
 
+        # C4（CCB asyncRewake）：async hook 后台跑完 exit 2 的 rewake 通知
+        rewake_notifications = []
+        try:
+            from agent.hook_exec import drain_rewake_notifications
+            rewake_notifications = drain_rewake_notifications()
+        except Exception as e:
+            logger.debug("rewake drain 失败（fail-open）: %s", e)
+
         return {
             "bg_notifications": bg_notifications,
             "cron_messages": cron_messages,
             "team_messages_text": team_messages_text,
             "delegation_results": delegation_results,
+            "rewake_notifications": rewake_notifications,
         }
 
     async def _consume_memory_prefetch(self, messages: list) -> list:
@@ -1680,6 +1770,10 @@ class AIAgent:
             messages.append({
                 "role": "user",
                 "content": f"<task_notification>\n{notif_text}\n</task_notification>",
+                # Medium-5：消费型注入一律 ephemeral（对齐 channel/mailbox 约定；
+                # 压缩过滤器只保留非 ephemeral，未标记会被焊进持久 history 但
+                # 从未落 session 库 → resume 不一致）
+                "_ephemeral": True,
             })
             injected["bg_notifications"] = []
 
@@ -1693,6 +1787,7 @@ class AIAgent:
             messages.append({
                 "role": "user",
                 "content": f"<scheduled_message>\n{sched_text}\n</scheduled_message>",
+                "_ephemeral": True,  # Medium-5：消费型注入（同上）
             })
             injected["cron_messages"] = []
 
@@ -1702,6 +1797,7 @@ class AIAgent:
             messages.append({
                 "role": "user",
                 "content": f"<team_messages>\n{team_text}\n</team_messages>",
+                "_ephemeral": True,  # Medium-5：消费型注入（同上）
             })
             injected["team_messages_text"] = ""
 
@@ -1734,11 +1830,34 @@ class AIAgent:
                 messages.append({
                     "role": "user",
                     "content": f"<delegation_completion>\n{text}\n</delegation_completion>",
+                    "_ephemeral": True,  # Medium-5：消费型注入（同上）
                 })
             except Exception as e:
                 logger.warning("delegation_results 注入异常: %s", e)
         if delegation_results:
             injected["delegation_results"] = []
+
+        # C4（CCB asyncRewake）：async hook 的 block 通知（消费型，ephemeral）
+        rewakes = injected.get("rewake_notifications") or []
+        for note in rewakes:
+            try:
+                status = note.get("status_message") or ""
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<rewake_notification>（异步 hook 跑完发现阻断性问题，"
+                        "请评估是否跟进处理）\n"
+                        f"[hook {note.get('hook', '?')}] "
+                        f"原因: {note.get('reason', '')}"
+                        + (f"（{status}）" if status else "")
+                        + "\n</rewake_notification>"
+                    ),
+                    "_ephemeral": True,  # 消费型注入（同上）
+                })
+            except Exception as e:
+                logger.warning("rewake 注入异常: %s", e)
+        if rewakes:
+            injected["rewake_notifications"] = []
 
         # Plan mode reminder（每轮重算）
         if self.plan_mode:
@@ -1751,6 +1870,7 @@ class AIAgent:
                     "计划要包含：要改什么文件、为什么、步骤、风险点。\n"
                     "</plan_mode_reminder>"
                 ),
+                "_ephemeral": True,  # Medium-5：每轮重算的临时注入（同上）
             })
 
         # 上下文管理提示（接近上限时建议主动 /compact /new）
@@ -1811,6 +1931,7 @@ class AIAgent:
                         "3. 大文件读取 → 用 subagent 委托子代理，只带摘要回主上下文\n"
                         "</context_management_tip>"
                     ),
+                    "_ephemeral": True,  # Medium-5：一次性管理提示（同上）
                 })
         except Exception as e:
             logger.debug("上下文管理提示注入失败（忽略）: %s", e)
@@ -1819,7 +1940,10 @@ class AIAgent:
         """接近 token 上限时压缩上下文（async：compress_if_needed 已改 async）。
 
         返回 (messages, system_prompt, compressed: bool)。
-        压缩后会重建 system prompt 并注入 <post_compress_brief>。
+        - 无损层变化（L2 落盘 / time-MC / collapse）：只同步 history，
+          返回 compressed=False（不做重建 prompt / brief 等仪式，保 cache）
+        - L4 LLM 摘要压缩：重建 system prompt 并注入 <post_compress_brief>，
+          返回 compressed=True
 
         Task D4 fix: 改 async + await compress_if_needed。
         """
@@ -1828,7 +1952,7 @@ class AIAgent:
 
         from agent.context_pipeline import compress_if_needed
         ctx_cfg = self.config.get("context", {})
-        messages, compressed = await compress_if_needed(
+        messages, changed, compacted = await compress_if_needed(
             messages,
             llm_client=self.llm_client,
             model=self.model,
@@ -1840,7 +1964,24 @@ class AIAgent:
             tools=self._last_tool_schemas,  # R18 #15：fork 摘要前缀复用
             authoritative_tokens=self._last_usage_anchor,  # R18 #17：混合计数
         )
-        if not compressed:
+        if not changed:
+            return messages, system_prompt, False
+
+        # 任一层改了 messages → 同步 history（time-MC 不同步下轮会把原始
+        # content 塞回来；fold/offload 同理）
+        # CCAR8 Task 11：strip ephemeral 消息（保护持久化——ephemeral 不应进 history）
+        # R30d-D3：不再裸切 messages[1:]——system 缺失时会静默丢第一条真实
+        # 消息；只在 [0] 确实是 system 时才剥
+        self.conversation_history = [
+            m for m in _drop_leading_system(messages) if not m.get("_ephemeral")
+        ]
+
+        if not compacted:
+            # R30 审计 Medium-4：无损变化（L2 落盘 / time-MC / L3.5 collapse 等）
+            # 到此为止——invalidate prompt cache / [COMPACT_BOUNDARY] /
+            # <post_compress_brief>"历史已被总结"这些仪式只在真 LLM 摘要压缩时
+            # 才有意义。此前 changed 语义过宽，一次大工具结果落盘就触发全套
+            # 仪式（误导模型 + 白白打穿缓存）。
             return messages, system_prompt, False
 
         # batch2-T1: 压缩前调 memory_manager.on_pre_compress 提取事实
@@ -1850,13 +1991,6 @@ class AIAgent:
             except Exception as e:
                 logger.warning("on_pre_compress 编排异常: %s", e)
 
-        # 压缩修改了历史，同步并重建 system prompt
-        # CCAR8 Task 11：strip ephemeral 消息（保护持久化——ephemeral 不应进 history）
-        # R30d-D3：不再裸切 messages[1:]——system 缺失时会静默丢第一条真实
-        # 消息；只在 [0] 确实是 system 时才剥
-        self.conversation_history = [
-            m for m in _drop_leading_system(messages) if not m.get("_ephemeral")
-        ]
         self.invalidate_system_prompt()
         system_prompt = self._get_system_prompt()
         self._compression_attempts += 1
@@ -1957,8 +2091,11 @@ class AIAgent:
         if (self.hooks_registry
                 and self.config.get("hooks", {}).get("enabled", True)):
             try:
-                messages, tool_schemas = self.hooks_registry.run_pre_llm_call(
-                    messages, tool_schemas, session_id=self.session_id or "",
+                # Medium-6：移出事件循环线程
+                messages, tool_schemas = await asyncio.to_thread(
+                    self.hooks_registry.run_pre_llm_call,
+                    messages, tool_schemas,
+                    session_id=self.session_id or "",
                 )
             except Exception as e:
                 logger.warning("PRE_LLM_CALL hook 编排异常: %s", e)
@@ -2395,8 +2532,9 @@ class AIAgent:
         仅主代理（spawn_depth==0，子代理有独立记忆目录不走这条链）。
         互斥（对齐 CC）：本轮 LLM 调过 memory save/update → 跳过并推进游标
         （主 agent 已写过，不重复抢写）。
-        fire-and-forget：create_task 跑 run_auto_extract（aux 单轮提取），
-        任务引用保活；fail-open。
+        fire-and-forget：_spawn_detached 跑 run_auto_extract（aux 单轮提取；
+        daemon 线程 + 自有事件循环——per-turn asyncio.run 模型下 create_task
+        会在循环销毁时被取消，R30 审计 High-2），任务引用保活；fail-open。
         """
         try:
             cfg = (self.config or {}).get("memory", {}).get("auto_extract", {})
@@ -2419,8 +2557,8 @@ class AIAgent:
             if not should_run:
                 return
             from agent.auto_extract import run_auto_extract
-            self._auto_extract_task = asyncio.create_task(
-                run_auto_extract(self, start_idx)
+            self._auto_extract_task = _spawn_detached(
+                run_auto_extract(self, start_idx), "auto-extract",
             )
         except Exception as e:
             logger.debug("auto_extract 启动失败（fail-open）: %s", e)
@@ -2575,7 +2713,26 @@ class AIAgent:
 
         # ---- unsafe 组：串行 await，保留 plan_approval / 失败统计等完整逻辑 ----
         unsafe_results = []
-        for tc in unsafe_calls:
+        for idx, tc in enumerate(unsafe_calls):
+            # R30 审计 L11：批内协作式中断——每个工具边界检查中断标志。
+            # 中断后剩余工具不再执行、合成 error_type=interrupted 的 result
+            # 保 tool 配对完整（对齐 CCB yieldMissingToolResultBlocks；旧代码
+            # 一批 unsafe 全部跑完才退出，且异常路径 DB 留孤儿 tool_calls）。
+            # getattr 防御：测试用 __new__ 构造的轻量 agent 无该属性（同
+            # _drain_queued_input 先例）
+            if getattr(self, "_interrupt_requested", False):
+                logger.info(
+                    "批内中断：unsafe 工具 %s 及后续 %d 个不再执行",
+                    tc.function.name, len(unsafe_calls) - idx,
+                )
+                unsafe_results.extend(
+                    json.dumps({
+                        "error": "interrupted by user",
+                        "error_type": "interrupted",
+                    }, ensure_ascii=False)
+                    for _ in unsafe_calls[idx:]
+                )
+                break
             tool_content = await self._run_unsafe_tool_call(tc, handle_function_call)
             unsafe_results.append(tool_content)
 
@@ -2648,8 +2805,10 @@ class AIAgent:
             if not items:
                 return
             # 上一批的任务还没跑完 → 覆盖（旧摘要被新批取代，符合最新语义）
-            self._tool_summary_task = asyncio.create_task(
-                self._generate_tool_batch_summary(items)
+            # _spawn_detached：per-turn asyncio.run 模型下最后一批的摘要任务
+            # 会在循环销毁时被取消（R30 审计 High-2）——daemon 线程解耦生命周期
+            self._tool_summary_task = _spawn_detached(
+                self._generate_tool_batch_summary(items), "tool-batch-summary",
             )
         except Exception as e:
             logger.debug("批间摘要启动失败（fail-open）: %s", e)
@@ -2941,9 +3100,10 @@ class AIAgent:
                 "tool", content, tool_call_id=tc.id, name=tc.function.name,
             )
 
-    def _finalize_response(self, assistant_msg, user_message: str) -> str:
+    async def _finalize_response(self, assistant_msg, user_message: str) -> str:
         """处理无 tool_calls 的最终响应：保存历史 + STOP hook + reflection。
 
+        R30 审计 Medium-6：改 async——STOP hook 链移出事件循环线程执行。
         如果 STOP hook 触发 force_msg，会设置 self._stop_hook_forced = True，
         主循环看到这个标志应 continue（而非 return）。
 
@@ -3000,7 +3160,9 @@ class AIAgent:
                 and self._stop_fire_count < self.config.get(
                     "hooks", {}).get("stop_hook_max_fires", 3)):
             try:
-                force_msg = self.hooks_registry.run_stop(
+                # Medium-6：移出事件循环线程
+                force_msg = await asyncio.to_thread(
+                    self.hooks_registry.run_stop,
                     session_id=self.session_id or "",
                     max_fires=self.config.get("hooks", {}).get(
                         "stop_hook_max_fires", 3),

@@ -4,6 +4,7 @@ description: 计划子代理。只做调研 + 出实施计划，不执行修改�
 tools:
   - plan
 maxTurns: 30
+omitClaudeMd: true
 ---
 你是 OmniMate 的计划子代理。
 

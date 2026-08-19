@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -912,15 +913,57 @@ class RuntimeContext:
         t.start()
 
     def new_session(self):
-        """开始新会话。"""
+        """开始新会话。
+
+        R30 审计 Medium-7：补齐会话级状态清理——
+        - checkpoint_mgr 重建绑定新会话（旧代码指向旧会话，此后快照全写进
+          旧目录、/rewind 回滚错对象；对照 resume_session 会重建，漏项）
+        - 压缩状态 / auto_extract 游标 / 记忆注入去重 / context_tip /
+          中断残留 / ephemeral 队列等全部重置
+        裁决：审批缓存（PermissionChecker._approved）**不清**——docstring
+        称会话内缓存，但用户批过的命令跨 /new 反复询问弊大于利
+        （用户意图优先于算法，见 CLAUDE.md 设计原则 4）。
+        """
         if self.session_store:
             self.session_id = self.session_store.create_session(
                 model=self.config["model"]["name"],
                 provider=self.config["model"]["provider"],
             )
             self.agent.session_id = self.session_id
-        self.agent.conversation_history = []
-        self.agent.invalidate_system_prompt()
+        # checkpoint 重建（对齐 resume_session 的做法）
+        try:
+            from agent.checkpoint import CheckpointManager
+            ckpt_root = Path(self.home) / ".checkpoints"
+            self.checkpoint_mgr = CheckpointManager(
+                ckpt_root, self.session_id,
+                max_snapshots=self.config.get("checkpoint", {}).get(
+                    "max_snapshots", 100,
+                ),
+            )
+        except Exception as e:
+            logger.warning("checkpoint 重建失败: %s", e)
+        # 会话级 agent 状态重置
+        a = self.agent
+        a.conversation_history = []
+        try:
+            from agent.context_pipeline import CompressionSessionState
+            a._compress_session_state = CompressionSessionState()
+        except Exception as e:
+            logger.debug("压缩状态重置失败（忽略）: %s", e)
+        a._interrupt_requested = False
+        a._auto_extract_cursor = 0
+        a._auto_extract_turn_count = 0
+        a._context_tip_shown = False
+        a._pending_ephemeral_messages = []
+        a._pending_tool_batch_summary = None
+        a._queued_cli_commands = []
+        a._surfaced_memory_ids = set()
+        try:
+            from agent.memory_injection import reset_injection_cache
+            reset_injection_cache()
+        except Exception as e:
+            logger.debug("记忆注入缓存重置失败（忽略）: %s", e)
+        a.invalidate_system_prompt()
 
     def resume_session(self, session_id: str) -> bool:
         """恢复历史会话：加载消息到 agent.conversation_history。
@@ -1078,12 +1121,10 @@ def _make_approval_callback(aux_provider=None):
             console.print(f"[dim]（解释失败: {e}）[/dim]")
 
     def callback(item: str):
-        # 启发式判断:含路径分隔符或 ~ 开头 → 路径,否则 → 命令
-        is_path = (
-            "/" in item or "\\" in item or item.startswith("~")
-            or item[1:3] == ":\\" if len(item) >= 3 else False
-        )
-        if is_path:
+        # R30 审计 Medium-8：命令/路径判定提取为 _is_path_item
+        #（旧启发式把 del /s /q tmp 误判成路径审批；check_path 恒带
+        # "文件写入审批: "前缀，优先识别该契约）
+        if _is_path_item(item):
             console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
             console.print(f"[bold]{item}[/bold]")
             try:
@@ -1751,6 +1792,8 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return _handle_goal_command(args, rt)
     if name == "/poor":
         return _handle_poor_command(args, rt)
+    if name == "/output-style":
+        return _handle_output_style_command(args, rt)
     if name == "/trace":
         return _handle_trace_command(args, rt)
     if name == "/history":
@@ -2253,6 +2296,67 @@ def _handle_goal_command(args: str, rt) -> bool:
         return True
     _start_new_goal(rt, objective)
     return True
+
+
+def _handle_output_style_command(args: str, rt) -> bool:
+    """C6（CCB outputStyles）：/output-style 列表 / 切换 / off。
+
+    风格目录：`<项目>/.omnimate/output-styles/`（覆盖）+ `~/.OmniMate/output-styles/`。
+    切换写 settings.json 顶层 output_style + invalidate prompt（下一条消息生效）。
+    """
+    from agent.output_styles import discover_output_styles
+
+    cwd = os.getcwd()
+    styles = discover_output_styles(cwd, rt.home)
+    current = (rt.config or {}).get("output_style")
+
+    arg = args.strip() if args else ""
+    if not arg:
+        if not styles:
+            console.print(
+                "[dim]暂无输出风格。创建：~/.OmniMate/output-styles/<名>.md"
+                " 或 .omnimate/output-styles/<名>.md（正文即提示词）[/dim]"
+            )
+            return True
+        lines = []
+        for name in sorted(styles):
+            mark = " [cyan](当前)[/cyan]" if name == current else ""
+            desc = f" — {styles[name].description}" if styles[name].description else ""
+            lines.append(f"- {name}{desc}{mark}")
+        console.print(Panel.fit("\n".join(lines), title=f"输出风格（当前: {current or '默认'}）"))
+        return True
+
+    if arg == "off":
+        _set_output_style(rt, None)
+        console.print("[green]输出风格已关闭（默认输出）[/green]")
+        return True
+
+    if arg not in styles:
+        console.print(f"[red]没有找到输出风格: {arg}[/red]（可用: {sorted(styles)}）")
+        return True
+
+    _set_output_style(rt, arg)
+    console.print(
+        f"[green]输出风格已切换: {arg}[/green] "
+        "[dim]（下一条消息生效；system prompt 已重建）[/dim]"
+    )
+    return True
+
+
+def _set_output_style(rt, value):
+    """写 settings.json + 运行时 config + invalidate prompt。fail-open 持久化。"""
+    from agent.settings import load_settings, save_settings
+    rt.config["output_style"] = value
+    try:
+        data = load_settings()
+        data["output_style"] = value
+        save_settings(data)
+    except Exception as e:
+        logger.warning("output_style 持久化失败（会话内仍生效）: %s", e)
+    try:
+        rt.agent.invalidate_system_prompt()
+    except Exception:
+        pass
 
 
 def _handle_poor_command(args: str, rt) -> bool:
@@ -3160,6 +3264,47 @@ def _render_statusline(rt, agent) -> str:
         return ""
 
 
+def _is_path_item(item: str) -> bool:
+    """R30 审计 Medium-8：审批回调的命令/路径判定（保守——误判成路径的
+    命令会拿到"即将写入路径"文案和"总是允许并记住"的错误语义）。
+
+    规则：多 token（含空格）一律命令形态（del /s /q tmp、rm -rf build/）；
+    ~ 开头 / Windows 盘符（C:\\ 或 C:/）/ 单 token 含分隔符（src/lib、/tmp）
+    才算路径形态。旧启发式 `"/" in item` + 三元优先级 bug（len<3 整体 False）
+    已废弃。
+    """
+    s = (item or "").strip()
+    if not s:
+        return False
+    # permission.check_path 的既有契约：路径审批恒带"文件写入审批: "前缀
+    # （permission.py:1740）——直接识别，不再猜
+    if s.startswith("文件写入审批"):
+        return True
+    if s.startswith("~"):
+        return True
+    if len(s) >= 3 and s[1] == ":" and s[2] in ("\\", "/"):
+        return True  # Windows 盘符
+    if " " in s:
+        return False  # 命令形态（含 flag / 路径参数——都不是"路径审批"）
+    # 单 token：含分隔符即路径形态（命令不可能是单 token 含 / 或 \）
+    return "/" in s or "\\" in s
+
+
+def _should_exit_on_interrupt_sentinel(
+    last_interrupt_ts: float, now: float, window: float = 1.0,
+) -> bool:
+    """R30 审计 High-3：输入线程的 Ctrl+C 哨兵是否应退出 REPL。
+
+    同一次 Ctrl+C 可能同时被两个消费者收到：主线程（asyncio.run 内
+    KeyboardInterrupt → agent.interrupt()，记录时间戳）与输入线程
+    （console.input 抛 KeyboardInterrupt → _INTERRUPT_SENTINEL 入队）。
+    若哨兵到达时窗口内刚发生过回合内中断，视为同一次按键的重复消费
+    （中断本轮，不退出）→ 返回 False；空闲提示符下的 Ctrl+C（无近期
+    回合内中断）保持原语义（退出）→ 返回 True。
+    """
+    return (now - last_interrupt_ts) > window
+
+
 def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     """启动交互式 CLI。
 
@@ -3206,6 +3351,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     # R30c-C6：对象哨兵替代字符串哨兵——用户字面输入 "__EOF__" 不再误退出
     _EOF_SENTINEL = object()
     _INTERRUPT_SENTINEL = object()
+    # R30 审计 High-3：最近一次"回合内中断"的时间戳（主线程 Ctrl+C 处理器
+    # 记录；输入线程的 _INTERRUPT_SENTINEL 消费时用来去重同一次按键）
+    _last_ctrl_c = 0.0
 
     def _input_reader():
         """daemon 线程：持续读控制台输入入队（EOF/异常即停）。"""
@@ -3239,9 +3387,17 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             user_input = _deferred.pop(0)
         else:
             user_input = _input_q.get()
-        if user_input is _EOF_SENTINEL or user_input is _INTERRUPT_SENTINEL:
+        if user_input is _EOF_SENTINEL:
             console.print("\n再见！")
             break
+        if user_input is _INTERRUPT_SENTINEL:
+            # R30 审计 High-3：同一次 Ctrl+C 可能同时被输入线程（本哨兵）与
+            # 主线程（回合内中断，记录 _last_ctrl_c）消费——窗口内到达的哨兵
+            # 是重复消费，吞掉不退出；空闲提示符下的 Ctrl+C 保持退出语义
+            if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
+                console.print("\n再见！")
+                break
+            continue
 
         if not user_input:
             continue
@@ -3402,6 +3558,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
         except KeyboardInterrupt:
             rt.agent.interrupt()
+            _last_ctrl_c = time.monotonic()  # High-3：哨兵去重窗口锚点
             console.print("[yellow]\n[已中断][/yellow]")
         except Exception as e:
             console.print(f"[red]错误: {e}[/red]")

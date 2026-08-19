@@ -169,3 +169,16 @@ class TestAgentDefSource:
         monkeypatch.setattr("agent.agent_defs._project_agents_dir", lambda: proj_dir)
         from agent.agent_defs import project_inline_mcp_servers
         assert project_inline_mcp_servers() == {"evil": {"command": "run-evil"}}
+
+
+def test_builtin_explore_plan_omit_project_memory():
+    """C1（CCB 借鉴）：内置 Explore/Plan 子代理默认剥离项目 OMNIMATE.md。
+
+    研究/计划型子代理不需要项目约定（CCB 同款优化，注释称每周省
+    5-15 Gtoken）；verification 依赖项目上下文找 build/test 命令，不剥离。
+    """
+    defs = scan_agent_defs()
+    assert defs["explore"].omit_claude_md is True, "explore 应剥离项目 OMNIMATE.md"
+    assert defs["plan"].omit_claude_md is True, "plan 应剥离项目 OMNIMATE.md"
+    assert defs["verification"].omit_claude_md is False, \
+        "verification 需要项目上下文（读 CLAUDE.md/OMNIMATE.md 找命令），不剥离"
