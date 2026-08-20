@@ -1,8 +1,12 @@
-"""检索式记忆注入（CCAR10，对标 CCB findRelevantMemories）。
+"""检索式记忆注入（CCAR10 轮次引入，对标 CCB findRelevantMemories）。
 
-每轮按用户 query 用 aux_llm 选 Top N 相关记忆，构造 ephemeral user
-消息注入（不进 system prompt / history，保护 prompt cache）。
-直接替代原 snapshot 全量索引注入（无 aux 时主循环降级回 snapshot）。
+记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）怎么送到 LLM 面前？
+旧做法是把整个记忆目录塞进 system prompt——但中途改 system prompt 会让
+前缀缓存失效、成本翻倍。本文件的做法是：每一轮按当前用户问题，用便宜的
+辅助模型（aux_llm）挑出最相关的几条记忆，拼成一条"阅后即焚"的 user 消息
+注入（ephemeral：只在本次 API 请求出现，不进 system prompt 也不进对话
+历史，缓存毫发无伤）。它直接替代了旧的 snapshot 全量注入；用户没配辅助
+模型时降级回 snapshot 模式（见文件末尾的降级函数）。
 """
 import logging
 from contextvars import ContextVar
@@ -12,10 +16,11 @@ from agent.memory_retriever import retrieve_relevant
 
 logger = logging.getLogger(__name__)
 
-# 同轮去重：上一个 (query, result) 缓存（LRU 1）
-# R30c-C1：模块级可变全局改 ContextVar——同进程并发 agent（asyncio task /
-# to_thread 子代理各持 context 副本）互相看不到对方的缓存，消除串味；
-# 主循环同 task 内顺序轮次语义不变。
+# 同一轮的去重缓存：只记住上一次 (query, 结果) 这一对（相当于容量为 1 的缓存）
+# R30c-C1 历史踩坑：原来是模块级全局变量，同进程里并发的多个 agent
+# （asyncio task / to_thread 里的子代理）会互相看到对方的缓存，串味。
+# 改成 ContextVar 后各并发上下文各持一份副本，互不可见；
+# 主循环自己在同一个 task 里顺序轮次，行为不变。
 _last_query_var: ContextVar[Optional[str]] = ContextVar(
     "memory_injection_last_query", default=None,
 )
@@ -25,7 +30,7 @@ _last_result_var: ContextVar[Optional[Optional[dict]]] = ContextVar(
 
 
 def reset_injection_cache() -> None:
-    """测试用：清空当前 context 的同轮缓存。"""
+    """清空当前上下文的同轮缓存（主要给测试用，避免用例间串味）。"""
     _last_query_var.set(None)
     _last_result_var.set(None)
 
@@ -34,24 +39,34 @@ async def build_relevant_memories_message(
     *, query: str, memory_store, aux_llm_router, max_results: int = 5,
     active_tools=None, surfaced: set = None,
 ) -> Optional[dict]:
-    """检索相关记忆并构造 ephemeral 注入消息。None = 不注入。fail-open。
+    """检索相关记忆并拼出一条 ephemeral 注入消息。返回 None 表示本轮不注入。
 
-    R30f-H9：
-      - active_tools：当前对话正在使用的工具名（反噪音——用法文档类不召回）
-      - surfaced：调用方持有的"已注入记忆 id"集合。双重作用：作为 exclude
-        传入检索（跨轮去重，已注入的不占槽位），并把本轮新选中的 id 收进去
-        （调用方跨轮持有）。
+    背景：这是检索式记忆注入的主入口，主循环每轮调用一次。
+
+    参数：
+    - query：当前用户消息（检索依据）
+    - memory_store：记忆库（提供索引和按 ID 取条目）
+    - aux_llm_router：辅助 LLM 路由（做检索挑选）
+    - max_results：最多注入几条（默认 5）
+    - active_tools：当前对话正在使用的工具名（R30f-H9 反噪音——
+      这些工具的"用法文档"类记忆不召回）
+    - surfaced：调用方持有的"已注入记忆 ID"集合，一物两用：传给检索层
+      做跨轮去重（已注入的不占名额），同时本轮新选中的 ID 也会收进去
+      （调用方拿着它跨轮累积）
+
+    返回：拼好的 ephemeral user 消息 dict；失败/无相关记忆返回 None
+    （fail-open：任何异常都不注入，绝不影响主对话）。
     """
     if not query or not query.strip():
         return None
     if memory_store is None or aux_llm_router is None:
         return None
-    # 同轮去重（同 query 直接用上次结果）
+    # 同一个 query 刚检索过，直接复用上次结果（省一次 LLM 调用）
     if query == _last_query_var.get() and _last_result_var.get() is not None:
         return _last_result_var.get()
 
     try:
-        # T4：带年龄标注（[age: Nd] + prompt 新记忆优先规则，防召回过期记忆）
+        # T4 特性：索引带年龄标注（[age: Nd] + prompt 里"新记忆优先"规则），防召回过期信息
         index_text = memory_store.full_index_text_with_age()
         if not index_text or not index_text.strip():
             _last_query_var.set(query)
@@ -82,8 +97,8 @@ async def build_relevant_memories_message(
         if entry is None:
             continue
         body = (getattr(entry, "body", "") or "")[:500]
-        # R30f-H9：过期警示（对齐 CCB staleness caveat）——老记忆里的
-        # file:line 引用会让错误断言显得权威，>1 天的标注"须核对"
+        # R30f-H9（对齐 CCB staleness caveat）：超过 1 天的记忆里 file:line
+        # 引用很可能已过时——旧引用会让错误断言显得有凭有据，必须提示核对
         stale_note = ""
         updated = getattr(entry, "updated_at", None)
         if isinstance(updated, datetime) and updated.tzinfo is not None:
@@ -119,11 +134,16 @@ async def build_relevant_memories_message(
 
 
 def _fallback_snapshot_message(memory_store) -> Optional[dict]:
-    """无 aux_llm_router 时的降级：退回 snapshot 索引注入。
+    """降级方案：没配辅助模型时，退回把整个记忆索引注入一次。
 
-    直接替代决策的保底链——用户没配 aux 模型时记忆功能不丢。
-    返回 ephemeral user 消息（同轮注入后即弃）。
-    fail-open：任何异常返回 None。
+    背景：本模块的主路径（检索式注入）依赖 aux_llm_router；用户没配时
+    不能让记忆功能整个消失——这是"直接替代 snapshot"决策的保底链。
+
+    参数：
+    - memory_store：记忆库（提供 snapshot_for_prompt 索引快照）
+
+    返回：ephemeral user 消息 dict（注入当轮后即弃）；任何异常或快照
+    为空返回 None（fail-open）。
     """
     try:
         snap = memory_store.snapshot_for_prompt()

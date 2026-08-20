@@ -1,12 +1,18 @@
-"""相关记忆检索器：每轮主 LLM 调用前调一次。
+"""相关记忆检索器：每次调主 LLM 之前跑一次。
 
-输入：当前 user message + memory 索引
-输出：top-N 最相关的 memory_id 列表
+记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）不能全塞给 LLM，
+得先挑出和当前问题最相关的几条。本文件就是那个"挑"的环节：
 
-失败 fail-open：任何异常（LLM 超时/坏 JSON/空响应）返回空 list。
+输入：当前用户消息 + 记忆索引（MEMORY.md 目录）
+输出：最相关的 N 个记忆 ID 列表
 
-R30f-H9：支持 active_tools 反噪音（正在用的工具不召回其用法文档类记忆，
-坑/警告类仍召回）与 exclude_ids 跨轮去重（已注入过的不再占槽位）。
+失败策略是 fail-open（出了问题就当没有）：LLM 超时、返回坏 JSON、
+空响应等任何异常都返回空列表，绝不影响主对话。
+
+R30f-H9 借鉴的两个反噪音设计：
+- active_tools（正在使用的工具）：不召回这些工具的"用法文档"类记忆
+  （用户正在用，不需要教程）；"坑/警告"类仍然召回
+- exclude_ids（跨轮去重）：之前轮次已注入过的记忆不再占名额
 """
 import json
 import logging
@@ -37,9 +43,9 @@ RETRIEVAL_PROMPT_TEMPLATE = """你是记忆检索助手。当前用户消息：
 新记忆优先，旧记忆只作历史背景（例如"用户在用 React 16"是旧信息，"已升到 React 19"是新信息，应返回后者）。
 """
 
-# R30f-H9：正在使用的工具——不召回其"用法/操作指南"类记忆（用户正在用，
-# 不需要教用法；防 query 含工具名 + description 含工具名的关键词假阳性），
-# 但"坑/警告/注意事项"类记忆仍可召回。对齐 CCB recentTools 反噪音。
+# R30f-H9 设计取舍：用户正在用的工具，不需要再教用法；而且查询里带工具名 +
+# 记忆描述里也带工具名，纯关键词匹配会假阳性（看着相关其实没用）。
+# 但"这工具有坑"的记忆此时反而最有价值，所以要保留。"坑/警告"类放行。
 _ACTIVE_TOOLS_RULE = """
 
 当前对话正在使用这些工具：{tools}
@@ -47,7 +53,7 @@ _ACTIVE_TOOLS_RULE = """
 这些工具的「坑/警告/注意事项/已知问题」类记忆**仍然可选**。
 """
 
-# R30f-H9：已注入过的记忆不再占槽位（对齐 CCB alreadySurfaced）
+# R30f-H9 设计取舍：同一批记忆反复注入只是浪费上下文名额（对齐 CCB alreadySurfaced）
 _EXCLUDE_RULE = """
 
 以下记忆 ID 已在之前轮次注入过对话，不要重复选择（除非 query 与之强相关
@@ -57,14 +63,18 @@ _EXCLUDE_RULE = """
 
 
 def annotate_index_with_age(index_text: str, link_age_days: dict) -> str:
-    """给索引行末尾附年龄标注 `[age: Nd]`（T4，防召回过期记忆）。
+    """给索引的每一行末尾加上年龄标注 `[age: Nd]`（T4 特性，防召回过期记忆）。
 
-    Args:
-        index_text: 完整索引文本（MEMORY.md 正文同构）
-        link_age_days: markdown 链接路径 → 年龄天数（None/查不到 = unknown）
+    背景：LLM 看不出哪条记忆是三年前的哪条是今天的，得把"这记忆几天没更新了"
+    写在行尾让它自己判断新旧。
 
-    纯 prompt 层改造：不改存储格式、不改 Top5 语义。
-    无链接的行（标题等）原样返回；fail-open——任何解析问题只是不标注。
+    参数：
+    - index_text：完整的索引文本（和 MEMORY.md 正文同构，每行一条记忆）
+    - link_age_days：markdown 链接路径 → 年龄天数的映射（查不到或值为 None
+      就标 unknown）
+
+    返回：加了年龄标注的索引文本。纯 prompt 层改造——不改存储格式；
+    没有链接的行（如标题）原样保留。任何解析问题只是不标注（fail-open）。
     """
     out_lines = []
     for line in index_text.splitlines():
@@ -88,14 +98,25 @@ async def retrieve_relevant(
     active_tools: Optional[List[str]] = None,
     exclude_ids: Optional[Set[str]] = None,
 ) -> List[str]:
-    """调 LLM 选 top-N 相关 memory_id。失败返回 []（async：LLMClient.chat_completions 已改 async）。
+    """让 LLM 从索引里挑出最相关的 N 个记忆 ID。失败返回空列表。
 
-    Task D4 fix: 改 async + await chat_completions。之前 sync 调 async 方法
-    返回 coroutine，被 except 捕获 TypeError 后返回空 list（记忆检索静默失效）。
+    历史踩坑（Task D4 修复）：本函数必须是 async 并 await 底层调用。
+    之前用同步方式调一个 async 方法，拿到的是 coroutine 对象，
+    被 except 当 TypeError 捕获后静默返回空列表——记忆检索看起来
+    正常其实一直没工作。
 
-    R30f-H9：
-      - active_tools 非空 → prompt 注入反噪音规则（用法文档类不选）
-      - exclude_ids 非空 → prompt 提示 + **确定性后过滤**（LLM 不听话也滤掉）
+    参数：
+    - query：当前用户消息（检索的依据）
+    - index_text：记忆索引全文
+    - llm_client：LLM 客户端（chat_completions 已是 async）
+    - model：检索用的模型名
+    - max_results：最多返回几个 ID（默认 5）
+    - active_tools：当前对话正在使用的工具名列表（R30f-H9 反噪音：
+      非空时 prompt 注入"用法文档类不选"规则）
+    - exclude_ids：已注入过的记忆 ID 集合（R30f-H9：prompt 提示之外
+      还做**确定性后过滤**——LLM 不听话也能滤掉）
+
+    返回：记忆 ID 字符串列表；失败或无相关返回 []。
     """
     if not query.strip() or not index_text.strip():
         return []
@@ -112,8 +133,8 @@ async def retrieve_relevant(
         )
 
     prompt = RETRIEVAL_PROMPT_TEMPLATE.format(
-        query=query[:1000],  # 防止 query 太长
-        index_text=index_text[:25000],  # 检索 index 上限对齐 25KB（记忆多时检索更完整）
+        query=query[:1000],  # 防查询过长撑爆 prompt
+        index_text=index_text[:25000],  # 检索索引上限对齐 25KB：记忆多时检索更完整
         max_results=max_results,
         active_tools_rule=tools_rule,
         exclude_rule=exclude_rule,
@@ -129,12 +150,12 @@ async def retrieve_relevant(
         logger.warning("memory retrieval LLM 调用失败（fail-open）: %s", e)
         return []
 
-    # 提取 JSON 数组（容忍模型输出多余文本）
+    # 解析 JSON（模型常在 JSON 外多说话，要容错）
     try:
-        # 尝试直接 parse
+        # 先试整段直接解析
         result = json.loads(content)
     except json.JSONDecodeError:
-        # 尝试提取 [ ... ] 子串
+        # 退而求其次：正则抠出 [ ... ] 再解析
         match = re.search(r'\[.*?\]', content, re.DOTALL)
         if not match:
             logger.warning("memory retrieval 输出非合法 JSON: %s", content[:200])
@@ -146,7 +167,7 @@ async def retrieve_relevant(
 
     if not isinstance(result, list):
         return []
-    # 只保留字符串元素 + R30f-H9 确定性排除已注入过的 + 截断到 max_results
+    # 只留字符串元素；R30f-H9：确定性排除已注入过的（不信任 LLM 会听话）；最后掐到上限
     picked = [str(x) for x in result if isinstance(x, str)]
     if exclude_ids:
         picked = [x for x in picked if x not in exclude_ids]

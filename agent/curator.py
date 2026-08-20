@@ -1,18 +1,17 @@
-"""Curator：后台技能维护系统。
+"""Curator：技能（沉淀成 Markdown 的"怎么做"经验）的后台维护工。
 
-不是 cron 定时，而是在 agent 启动时检查 should_run_now()。
-如果距离上次运行超过 interval_hours（默认 7 天），则触发。
+触发方式：不是定时器，而是 agent 启动时问一句 should_run_now()——
+距上次运行超过 interval_hours（默认 7 天）才触发。
 
-第一运行不立即跑，而是种子 last_run_at，等一个完整周期。
-（避免刚安装就大改技能库）
+第一次运行不马上干活，只记一个起始时间（种子化 last_run_at），
+等满一个完整周期再跑（防止刚装好就大改技能库）。
 
-两阶段：
-  第 1 阶段：确定性状态转换（纯时间规则，无 LLM）
-  第 2 阶段：LLM 合并审查（可选，默认关闭）
-
-第 3 步（R26 #14，可选）：跨会话 transcript 整理 consolidate_transcripts——
-从最近 5 个会话的原始轨迹提炼跨会话共性经验（对齐 CC /dream），与上面
-"整理已有技能/记忆"的动作互补（这里是从原始会话挖**新**知识）。
+干活分三步：
+  第 1 步：确定性状态转换（纯时间规则，不调 LLM）
+  第 2 步：LLM 合并审查（可选，默认关闭）
+  第 3 步（R26 #14，可选）：跨会话记录整理 consolidate_transcripts——
+      从最近 5 个会话的原始轨迹里提炼跨会话的共性经验（对齐 CC /dream）。
+      和前两步互补：前两步整理"已有"的技能/记忆，这一步从原始会话里挖"新"知识。
 
 手动触发：omnimate curator run [--dry-run]
 """
@@ -31,17 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 配置（从 config.yaml 读取，这里提供默认值）
+# 配置（实际值从 config.yaml 读，这里只是兜底默认值）
 # ---------------------------------------------------------------------------
 
-DEFAULT_INTERVAL_HOURS = 24 * 7        # 7 天跑一次
-DEFAULT_STALE_AFTER_DAYS = 30          # 30 天无活动 → stale
-DEFAULT_ARCHIVE_AFTER_DAYS = 90        # 90 天无活动 → archived
-DEFAULT_MIN_IDLE_HOURS = 1             # agent 至少空闲 1 小时才跑
+DEFAULT_INTERVAL_HOURS = 24 * 7        # 每 7 天跑一次
+DEFAULT_STALE_AFTER_DAYS = 30          # 30 天没动静 → 标 stale（疑似过时）
+DEFAULT_ARCHIVE_AFTER_DAYS = 90        # 90 天没动静 → 归档
+DEFAULT_MIN_IDLE_HOURS = 1             # agent 至少空闲 1 小时才跑（防打扰）
 
 
 def is_enabled() -> bool:
-    """curator 是否启用（从 config 读）。"""
+    """curator 的开关是否打开（从配置读；读不到默认开）。"""
     try:
         from config import load_config
         return bool(load_config().get("curator", {}).get("enabled", True))
@@ -50,7 +49,11 @@ def is_enabled() -> bool:
 
 
 def is_paused(skills_dir: Path = None) -> bool:
-    """是否被手动暂停。"""
+    """判断是否被用户手动暂停。
+
+    参数：
+    - skills_dir：技能目录（状态文件在它的上级目录）；不传直接返回"未暂停"
+    """
     if skills_dir is None:
         return False
     state = load_state(skills_dir)
@@ -58,28 +61,35 @@ def is_paused(skills_dir: Path = None) -> bool:
 
 
 def get_interval_hours() -> int:
+    """返回运行间隔（小时）。"""
     return DEFAULT_INTERVAL_HOURS
 
 
 def get_stale_after_days() -> int:
+    """返回"多少天没动静标 stale"的天数。"""
     return DEFAULT_STALE_AFTER_DAYS
 
 
 def get_archive_after_days() -> int:
+    """返回"多少天没动静归档"的天数。"""
     return DEFAULT_ARCHIVE_AFTER_DAYS
 
 
 # ---------------------------------------------------------------------------
-# 状态文件：记录上次运行时间
+# 状态文件：记上次运行时间，判断周期到没到
 # ---------------------------------------------------------------------------
 
 def _state_file(skills_dir: Path) -> Path:
-    # skills_dir 的 parent 是 agent_home（~/.OmniMate）
+    # skills_dir 的上一级就是 agent_home（~/.OmniMate），状态文件放那里
     return Path(skills_dir).parent / ".curator_state.json"
 
 
 def load_state(skills_dir: Path) -> dict:
-    """加载 curator 状态（上次运行时间等）。"""
+    """读 curator 状态（上次运行时间等）。文件不存在或读坏返回空 dict。
+
+    参数：
+    - skills_dir：技能目录
+    """
     path = _state_file(skills_dir)
     if not path.exists():
         return {}
@@ -90,34 +100,38 @@ def load_state(skills_dir: Path) -> dict:
 
 
 def save_state(skills_dir: Path, state: dict) -> None:
-    """保存 curator 状态（原子写）。"""
+    """保存 curator 状态（原子写，写一半断电也不会写坏文件）。"""
     from agent.atomic_io import atomic_write_text
     path = _state_file(skills_dir)
     atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _parse_iso(value) -> Optional[datetime]:
-    """解析 ISO 时间戳(委托给 agent.utils.parse_iso,保留 None 兜底)。"""
+    """解析 ISO 时间戳（转手调 agent.utils.parse_iso，失败返回 None）。"""
     from agent.utils import parse_iso
     return parse_iso(value, on_failure=None)
 
 
 # ---------------------------------------------------------------------------
-# 触发判断
+# 触发判断：现在到底该不该跑
 # ---------------------------------------------------------------------------
 
 def should_run_now(
     skills_dir: Path,
     now: Optional[datetime] = None,
 ) -> bool:
-    """判断 curator 是否应该立即运行。
+    """判断 curator 现在是否应该立即运行。
 
-    门控：
-      - 必须启用
-      - 未暂停
-      - 距离上次运行超过 interval_hours
+    三道门，全过才跑：
+      - 配置里开了
+      - 没被暂停
+      - 距上次运行超过 interval_hours
 
-    首次运行：不立即跑，种子 last_run_at，延后一个周期。
+    从没跑过的话：只记下当前时间当起点（种子化 last_run_at），等满一个周期。
+
+    参数：
+    - skills_dir：技能目录
+    - now：当前时间（不传用系统时间）
     """
     if not is_enabled():
         return False
@@ -131,7 +145,7 @@ def should_run_now(
     last = _parse_iso(state.get("last_run_at"))
 
     if last is None:
-        # 从未运行过：种子 last_run_at，等一个周期
+        # 从没跑过：播下种子（记当前时间），等满一个周期
         state["last_run_at"] = now.isoformat()
         state["last_run_summary"] = (
             "首次运行已推迟——curator 已种子化，"
@@ -145,17 +159,25 @@ def should_run_now(
 
 
 # ---------------------------------------------------------------------------
-# 第 1 阶段：确定性状态转换（纯函数，无 LLM）
+# 第 1 步：确定性状态转换（纯规则，不调 LLM）
 # ---------------------------------------------------------------------------
 
 def apply_automatic_transitions(
     skills_dir: Path,
     now: Optional[datetime] = None,
 ) -> Dict[str, int]:
-    """遍历所有 curator 管理的技能，根据活动时间戳转换状态。
+    """遍历所有 curator 管的技能，按最后活动时间转换状态。
 
-    Pinned 技能永不被碰。
-    返回计数 dict。
+    规则（活动时间 = 使用/查看/修补里最新的一次；从没活动过用创建时间）：
+      90 天没动静 → 归档（挪 .archive/）
+      30 天没动静 → 标 stale
+      又被用了   → 恢复 active
+    用户钉住（pinned）的技能永远不碰；只管 agent 自己创建的技能。
+
+    参数：
+    - skills_dir：技能目录
+    - now：当前时间（不传用系统时间）
+    返回：计数 dict。
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -173,33 +195,33 @@ def apply_automatic_transitions(
     usage = _u.load_usage(skills_dir)
 
     for name, rec in usage.items():
-        # 只管 agent 创建的技能
+        # 只管 agent 自己创建的技能（用户手建的不能动）
         if rec.get("created_by") != "agent":
             continue
 
-        # Pinned 免疫一切
+        # 被钉住（pinned）的技能免疫一切操作
         if rec.get("pinned"):
             continue
 
         counts["checked"] += 1
 
-        # 计算最后活动时间（use/view/patch 中最新的）
+        # 算最后活动时间（使用/查看/修补里最新的）
         last_activity = _latest_activity(rec)
-        # 如果从未活动，用创建时间作为锚点
+        # 从没活动过，就拿创建时间当锚点
         anchor = last_activity or _parse_iso(rec.get("created_at")) or now
 
         current = rec.get("state", _u.STATE_ACTIVE)
 
-        # 从未使用的技能给予宽限期
+        # 从没用过的技能给宽限期
         never_used = int(rec.get("use_count", 0) or 0) == 0
         if never_used and anchor > stale_cutoff:
-            # 还年轻，可能只是触发场景还没出现
+            # 还年轻——可能只是触发场景还没出现
             if current == _u.STATE_STALE:
                 _u.set_state(skills_dir, name, _u.STATE_ACTIVE)
                 counts["reactivated"] += 1
             continue
 
-        # 状态转换
+        # 状态转换（30/90 天两道线）
         if anchor <= archive_cutoff and current != _u.STATE_ARCHIVED:
             ok, _msg = _u.archive_skill(skills_dir, name)
             if ok:
@@ -216,7 +238,12 @@ def apply_automatic_transitions(
 
 
 def _latest_activity(rec: dict) -> Optional[datetime]:
-    """获取记录的最新活动时间（use/view/patch 中最新的）。"""
+    """取这条技能记录的最新活动时间（使用/查看/修补三个时间里最晚的）。
+
+    参数：
+    - rec：单条技能的使用记录 dict
+    返回：最新活动时间；三个都没有返回 None。
+    """
     candidates = [
         _parse_iso(rec.get("last_used_at")),
         _parse_iso(rec.get("last_viewed_at")),
@@ -227,7 +254,7 @@ def _latest_activity(rec: dict) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
-# 第 2 阶段：LLM 合并审查
+# 第 2 步：LLM 合并审查（下面的 CURATOR_REVIEW_PROMPT 是发给 LLM 的提示词）
 # ---------------------------------------------------------------------------
 
 CURATOR_REVIEW_PROMPT = (
@@ -288,18 +315,21 @@ def run_curator_review(
     memory_store=None,
     llm=None,
 ) -> Dict:
-    """执行一次 curator 审查。
+    """跑一次完整的 curator 审查（三步走）。
 
     第 1 步：确定性状态转换（总是跑）
-    第 2 步：LLM 合并审查（可选）
-    第 3 步：跨会话 transcript 整理（可选，R26 #14）——session_store/memory_store/
-        llm 传入时启用；门控 ≥24h + ≥5 新会话（should_consolidate），
-        状态键 last_consolidate_at / sessions_seen 随本次运行落盘
+    第 2 步：LLM 合并审查（可选，agent_factory 传入且非 dry_run 才跑）
+    第 3 步：跨会话记录整理（可选，R26 #14）——session_store/memory_store/llm
+        都传入才启用；门控是"距上次 ≥24 小时 + 新增 ≥5 个会话"（should_consolidate），
+        门控状态（last_consolidate_at / sessions_seen）随本次运行一起落盘
 
-    agent_factory：创建后台 agent 的工厂函数，签名：
+    参数：
+    - skills_dir：技能目录
+    - agent_factory：造后台 agent 的工厂，签名
         agent_factory(enabled_toolsets=[...], is_background_review=True) -> AIAgent
-
-    返回运行报告。
+    - dry_run：True 只统计不动手
+    - session_store / memory_store / llm：第 3 步需要的组件（不传就跳过第 3 步）
+    返回：运行报告 dict。
     """
     now = datetime.now(timezone.utc)
     start = now
@@ -310,10 +340,10 @@ def run_curator_review(
     else:
         counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0}
 
-    # 第 2 步：LLM 合并审查
+    # 第 2 步：LLM 合并审查（有工厂且非 dry_run 才跑）
     consolidation_result = {"consolidations": [], "prunings": []}
     if agent_factory and not dry_run:
-        # 检查是否有 agent 创建的技能
+        # 看看有没有 agent 自己创建的技能
         usage = _u.load_usage(skills_dir)
         agent_skills = [
             n for n, r in usage.items()
@@ -321,24 +351,24 @@ def run_curator_review(
         ]
 
         if agent_skills:
-            # 构造候选列表
+            # 拼候选清单
             candidate_list = _render_candidate_list(skills_dir, agent_skills)
 
-            # 构造完整 prompt
+            # 拼完整 prompt
             prompt = f"{CURATOR_REVIEW_PROMPT}\n\n{candidate_list}"
 
-            # 启动后台 agent 执行
+            # 起一个后台 agent 来干活
             try:
                 review_agent = agent_factory(
-                    enabled_toolsets=["core"],  # 给技能管理工具
+                    enabled_toolsets=["core"],  # core 工具集里有技能管理工具
                     is_background_review=True,
                 )
-                # Task D4 fix: AIAgent.chat 已改 async。run_curator_review 是 sync 函数，
-                # 可能由 threading 后台或 CLI sync 调用 → asyncio.run 驱动。
+                # 历史适配（Task D4 修复）：AIAgent.chat 已改成 async，本函数是 sync 的
+                # （可能在后台线程或 CLI 里被同步调用）→ 用 asyncio.run 驱动
                 import asyncio
                 raw_output = asyncio.run(review_agent.chat(prompt))
 
-                # 解析结构化输出
+                # 解析 LLM 输出里的结构化块
                 consolidation_result = _parse_consolidation_output(raw_output)
             except Exception as e:
                 logger.warning("curator LLM 审查失败: %s", e)
@@ -353,8 +383,8 @@ def run_curator_review(
     state = load_state(skills_dir)
     state["last_run_at"] = now.isoformat()
 
-    # R26 #14：跨会话 transcript 整理（可选第 3 步）。门控状态就地写进 state，
-    # 与 last_run_at 一起随下面的 save_state 落盘。
+    # 历史功能（R26 #14）：跨会话记录整理（可选第 3 步）。门控状态直接写进 state，
+    # 和 last_run_at 一起随下面的 save_state 落盘
     consolidated = _maybe_consolidate_transcripts(
         state,
         session_store=session_store, memory_store=memory_store, llm=llm,
@@ -379,7 +409,12 @@ def run_curator_review(
 
 
 def _render_candidate_list(skills_dir: Path, skill_names: list) -> str:
-    """渲染候选技能列表给 LLM 看。"""
+    """把候选技能清单拼成文本给 LLM 看。
+
+    参数：
+    - skills_dir：技能目录
+    - skill_names：候选技能名列表
+    """
     usage = _u.load_usage(skills_dir)
     lines = ["# 候选技能列表（curator 管理范围）\n"]
 
@@ -396,8 +431,13 @@ def _render_candidate_list(skills_dir: Path, skill_names: list) -> str:
 
 
 def _parse_consolidation_output(output: str) -> dict:
-    """从 LLM 输出中解析结构化 YAML 块。"""
-    # 找 ```yaml ... ``` 块
+    """从 LLM 输出里抠出 ```yaml ... ``` 结构化块并解析。
+
+    参数：
+    - output：LLM 的原始输出
+    返回：{consolidations, prunings}；没找到块或解析失败就给空列表。
+    """
+    # 找 ```yaml ... ``` 代码块
     match = re.search(r"```yaml\n(.*?)```", output, re.DOTALL)
     if not match:
         return {"consolidations": [], "prunings": []}
@@ -416,7 +456,7 @@ def _parse_consolidation_output(output: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# R26 #14：跨会话 transcript 整理（第 3 步，可选）
+# 历史功能（R26 #14）：跨会话记录整理（第 3 步，可选）
 # ---------------------------------------------------------------------------
 
 CONSOLIDATE_MIN_HOURS = 24
@@ -437,8 +477,16 @@ CONSOLIDATE_PROMPT = """以下是最近 {n} 个会话的轨迹摘要。请提炼
 
 
 def should_consolidate(state: dict, *, now: float, new_sessions_since: int) -> bool:
-    """R26 #14：三重门（时间 ≥24h + 新会话 ≥5）。对齐 CC autoDream 门控（去跨进程锁——
-    OmniMate curator 本身就是单进程 cron 触发）。"""
+    """第 3 步的门控（R26 #14）：距上次 ≥24 小时 且 新增 ≥5 个会话才跑。
+
+    对齐 CC autoDream 的门控（去掉了跨进程锁——OmniMate 的 curator
+    本来就是单进程触发的，用不上）。
+
+    参数：
+    - state：curator 状态 dict（读 last_consolidate_at）
+    - now：当前 Unix 时间戳（秒）
+    - new_sessions_since：距上次整理新增的会话数
+    """
     last = float(state.get("last_consolidate_at") or 0)
     if (now - last) < CONSOLIDATE_MIN_HOURS * 3600:
         return False
@@ -446,14 +494,18 @@ def should_consolidate(state: dict, *, now: float, new_sessions_since: int) -> b
 
 
 def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
-    """R26 #14：跨会话 transcript 整理——从最近 N 个会话提炼长期记忆。
+    """跨会话记录整理（R26 #14）：从最近几个会话的轨迹里提炼值得长期记的经验。
 
-    对齐 CC /dream：把分散在多个会话的碎片经验沉淀成完整条目。
-    与 curator 其他动作的区别：那些整理**已有记忆**，这里从**原始会话**
-    挖新知识。fail-open 全吞；save 内置秘密扫描（命中拒绝单条）。
+    对齐 CC 的 /dream：把散落在多个会话里的碎片经验沉淀成完整记忆条目。
+    和 curator 其他动作的区别：那些整理"已有记忆"，这里从"原始会话"挖新知识。
+    整体 fail-open（出任何错吞掉返回 0）；save 自带秘密扫描（命中拒收单条）。
 
-    llm 需提供 chat_completions（LLMClient / AuxLLMRouter 均符合；现场均为
-    async 接口，此处用 asyncio.run 驱动——与 reflection.run_reflection 同模式）。
+    参数：
+    - session_store：会话库（取最近会话和消息）
+    - memory_store：记忆库（结果存这里）
+    - llm：LLM 句柄，要有 chat_completions（LLMClient / AuxLLMRouter 都行；
+        现场都是 async 接口，这里用 asyncio.run 驱动——和 reflection 同模式）
+    返回：成功沉淀的条数。
     """
     try:
         from agent.reflection import extract_trajectory
@@ -470,8 +522,8 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
             n=len(parts), max_items=5,
             trajectories="\n\n".join(parts)[:60000],
         )
-        # 现场适配（R26 #14）：现场 client.chat_completions 已是 async（Task D4），
-        # curator 在 daemon thread / CLI sync 上下文跑 → asyncio.run 驱动。
+        # 现场适配（R26 #14）：chat_completions 是 async 的（Task D4 改的），
+        # 而 curator 在后台线程 / CLI 的同步上下文里跑 → 用 asyncio.run 驱动
         import asyncio
         resp = asyncio.run(llm.chat_completions([{"role": "user", "content": prompt}]))
         content = resp.choices[0].message.content or ""
@@ -514,11 +566,17 @@ def _maybe_consolidate_transcripts(
     llm,
     dry_run: bool,
 ) -> int:
-    """R26 #14：consolidate 接线——门控（≥24h + ≥5 新会话）通过才跑。
+    """第 3 步的接线（R26 #14）：过了门控（≥24h + ≥5 新会话）才真正跑。
 
-    门控状态（last_consolidate_at / sessions_seen）就地写进 state dict，
-    由调用方（run_curator_review）统一 save_state。组件缺失 / 门控未过 /
-    dry_run 一律返回 0 且不动门控状态（缺 llm 时留待下次补跑）。
+    门控状态（last_consolidate_at / sessions_seen）直接写进 state dict，
+    由调用方（run_curator_review）统一落盘。组件缺失 / 门控没过 / dry_run
+    都返回 0 且不动门控状态（缺 llm 时留到下次补跑）。
+
+    参数：
+    - state：curator 状态 dict（门控的读和写都在它身上）
+    - session_store / memory_store / llm：第 3 步需要的组件
+    - dry_run：True 直接跳过
+    返回：沉淀条数。
     """
     if dry_run:
         return 0

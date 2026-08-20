@@ -1,6 +1,7 @@
-"""技能束（Skill Bundles）：一次加载多个技能。
+"""技能束（Skill Bundle）：把一组技能打包，一次全加载。
 
-配置文件 ~/.OmniMate/.skill-bundles.json：
+打个比方：技能是单曲，技能束是歌单——点一次歌单，里面所有歌一起放。
+配置文件在 ~/.OmniMate/.skill-bundles.json：
     {
       "bundles": {
         "python-dev": {
@@ -10,10 +11,13 @@
       }
     }
 
-通过 load_skill(name="bundle:python-dev") 一次性加载一组技能，
-合并所有技能正文返回。
+用法：load_skill(name="bundle:python-dev") 一次性加载一组技能，
+把所有技能正文合并成一段返回。
 
-设计动机：减少 LLM 多次 load_skill 调用（节省往返）。
+给谁用：agent 侧的 load_skill 工具和 cli 侧的 /bundle:<名字> 命令都走这里。
+
+为什么要有它：不用束的话 AI 得挨个 load_skill 三次、多跑三轮往返；
+打包后一次搞定，省 token 也省时间。
 """
 
 import json
@@ -27,16 +31,23 @@ logger = logging.getLogger(__name__)
 
 
 def bundles_config_path() -> Path:
-    """技能束配置文件路径。"""
+    """返回技能束配置文件的路径（~/.OmniMate/.skill-bundles.json）。
+
+    为什么做成函数而不是常量：agent home 可以被 OMNIMATE_HOME 环境变量
+    覆盖，得每次现场算，写死会在切换 profile 时指错地方。
+    """
     from constants import get_omnimate_home
     return get_omnimate_home() / ".skill-bundles.json"
 
 
 def load_bundles_config(config_path: Optional[Path] = None) -> Dict[str, dict]:
-    """加载技能束配置。
+    """读取技能束配置文件。
 
-    返回 {bundle_name: {skills: [...], description: "..."}}。
-    文件不存在时返回空字典。
+    参数：
+        config_path：配置文件路径。不传时用默认的 ~/.OmniMate/.skill-bundles.json。
+
+    返回：{束名: {"skills": [...], "description": "..."}}；
+    文件不存在或 JSON 坏了都返回空字典（fail-open，不打断调用方）。
     """
     if config_path is None:
         config_path = bundles_config_path()
@@ -61,23 +72,24 @@ def load_bundle(
     skills_dir: Path,
     config_path: Optional[Path] = None,
 ) -> dict:
-    """加载一个技能束里的所有技能，合并正文返回。
+    """加载一个技能束：把束里所有技能的正文读出来合并成一段。
 
     参数：
-        bundle_name: 技能束名
-        skills_dir: 技能根目录
-        config_path: 技能束配置文件（默认 ~/.OmniMate/.skill-bundles.json）
+        bundle_name：技能束名（配置文件里 bundles 下面的键）。
+        skills_dir：技能根目录，束里的技能名按 <skills_dir>/<技能名>/SKILL.md 找。
+        config_path：配置文件路径。不传时用默认的 ~/.OmniMate/.skill-bundles.json。
 
     返回：
         {
-            "bundle": "python-dev",
-            "description": "Python 开发全套",
-            "skills_loaded": ["pytest", "venv"],
-            "skills_missing": ["nope"],
-            "body": "合并的技能正文",
+            "bundle": "python-dev",              # 束名
+            "description": "Python 开发全套",    # 束描述
+            "skills_loaded": ["pytest", "venv"], # 成功加载的技能
+            "skills_missing": ["nope"],          # 没找到/读失败的技能
+            "body": "合并的技能正文",             # 各技能正文拼成的大段文本
         }
 
-    如果技能束不存在，返回 {"error": "..."}。
+    束名不存在时返回 {"error": "...", "available": [...可用的束名]}。
+    个别技能缺了不影响其他技能——缺的记进 skills_missing，不抛异常。
     """
     bundles = load_bundles_config(config_path)
 
@@ -124,7 +136,15 @@ def load_bundle(
 
 
 def list_bundles(config_path: Optional[Path] = None) -> Dict[str, dict]:
-    """列出所有配置的技能束（仅元信息，不含正文）。"""
+    """列出所有配置的技能束。
+
+    参数：
+        config_path：配置文件路径。不传时用默认路径。
+
+    返回：{束名: {"skills": [...], "description": "...", "skill_count": 数量}}。
+    只给元信息（名字/包含哪些技能/描述），不含技能正文——列表场景不需要
+    拖着大段文本跑。
+    """
     bundles = load_bundles_config(config_path)
     result = {}
     for name, cfg in bundles.items():

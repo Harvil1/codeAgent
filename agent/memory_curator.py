@@ -1,15 +1,17 @@
-"""MemoryCurator:后台记忆维护系统。
+"""记忆管理员（MemoryCurator）：后台自动维护记忆库的系统。
 
-两阶段:
-  第 1 阶段(本模块 apply_automatic_transitions):
-    纯函数,按 expected_valid_days 判断过期,转换 state。
-  第 2 阶段(run_memory_review,LLM 合并 + 矛盾检测):
-    LLM 在 type 桶内找重复/矛盾,改写 body + 归档。
+背景：记忆会越攒越多、越放越旧，需要有个"图书管理员"定期整理。分两个阶段：
 
-设计原则(沿用 OMNIMATE.md "完全可逆"):
-  - 永不物理删除
-  - archived 是终态,移到 .archive/
-  - 所有改动可回滚(.archive/ 完整保留)
+第 1 阶段（本模块的 apply_automatic_transitions）：
+  纯时间规则，不调 LLM——按 expected_valid_days（预期有效天数）
+  判断过期，转换状态（标旧/归档）。
+第 2 阶段（run_memory_review）：
+  调 LLM 在同类型记忆里找重复/矛盾，改写正文 + 归档。
+
+设计原则（沿用 OMNIMATE.md 的"完全可逆"）：
+  - 永不物理删除文件
+  - archived（归档）是终点状态，条目挪到 .archive/
+  - 所有改动都可回滚（.archive/ 里完整保留原文）
 """
 
 import datetime
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_iso(value) -> Optional[datetime.datetime]:
-    """解析 ISO 时间戳。失败返回 None。"""
+    """解析 ISO 格式的时间戳字符串。空值或解析失败返回 None。"""
     if not value:
         return None
     try:
@@ -37,18 +39,21 @@ def apply_automatic_transitions(
     *,
     store=None,
 ) -> Dict[str, int]:
-    """第 1 阶段:确定性状态转换。纯函数,无 LLM。
+    """第 1 阶段：按纯时间规则转换记忆状态，不调 LLM。
 
-    规则:
-      age > 2 * valid_days  → archived(移 .archive/)
-      age > valid_days      → stale
-      age ≤ valid_days + state==stale → active(reactivated)
-      archived 终态,不动
+    判断标准（年龄 = 现在减最后更新时间）：
+      年龄 > 2 × 有效天数 → 归档（挪 .archive/）
+      年龄 > 有效天数     → 标 stale（疑似过时）
+      年龄 ≤ 有效天数 且当前是 stale → 恢复 active（内容被重新验证过了）
+      已归档的是终点状态，不再动
 
-    memory_dir: ~/.OmniMate/.memory/
-    返回计数 dict。
+    参数：
+    - memory_dir：记忆目录（~/.OmniMate/.memory/）
+    - now：当前时间（不传用系统时间，测试可注入）
+    - store：MemoryStore 实例（不传就现建一个）
+    返回：各动作的计数 dict。
     """
-    # 延迟导入避免循环依赖
+    # 函数内 import，防止模块加载时互相依赖成环
     from agent.memory_store import MemoryStore
 
     if now is None:
@@ -60,15 +65,16 @@ def apply_automatic_transitions(
     if not memory_dir.exists():
         return counts
 
-    # 用 memory_dir 的 parent 当 omnimate_home
+    # 拿 memory_dir 的上一级当 omnimate_home
     omnimate_home = memory_dir.parent
-    # X1 fix: 优先用传入的 store（共享主 agent 实例，threading.Lock 跨线程互斥）
-    # 之前每次新建 MemoryStore，与主 agent 实例不同，并发写同一 topic.jsonl 会丢数据
+    # 历史踩坑（X1 修复）：优先用传进来的 store（和主 agent 共用一个实例，
+    # 锁才能跨线程互斥）。以前每次现建 MemoryStore，和主实例不是同一把锁，
+    # 并发写同一个 topic.jsonl 会丢数据
     if store is None:
         store = MemoryStore(omnimate_home=omnimate_home)
 
-    # S5 fix: 用标准接口 list_all() 拿所有条目，不再扫老 .md 文件（dead code）
-    # 之前直接读 markdown 文件但 MemoryStore 写 .jsonl + 索引 MEMORY.md，扫不到任何条目
+    # 历史踩坑（S5 修复）：用标准接口 list_all() 拿条目，不再扫老 .md 文件。
+    # 以前直接读 markdown，但 MemoryStore 实际写的是 .jsonl，根本扫不到东西（死代码）
     try:
         all_entries = store.list_all()
     except Exception as e:
@@ -77,22 +83,22 @@ def apply_automatic_transitions(
 
     for entry in all_entries:
         try:
-            # 跳过已 archived
+            # 已归档的直接跳过
             state = getattr(entry, "state", "active") or "active"
             if state == "archived":
-                continue  # 终态,不动
+                continue  # 终点状态，不再动
 
             counts["checked"] += 1
 
-            # 时间戳：MemoryEntry.updated_at 是 datetime 对象（或字符串，兼容）
+            # 时间戳：updated_at 可能是 datetime 对象也可能是字符串（两种都兼容）
             updated_at_raw = getattr(entry, "updated_at", None)
             if isinstance(updated_at_raw, str):
                 updated_at = _parse_iso(updated_at_raw)
             else:
                 updated_at = updated_at_raw  # datetime 对象
             if updated_at is None:
-                continue  # 时间戳损坏,跳过(保守)
-            # 确保 timezone-aware
+                continue  # 时间戳坏了就跳过这条（保守处理）
+            # 统一成带时区的时间
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
 
@@ -110,10 +116,10 @@ def apply_automatic_transitions(
                 except Exception as e:
                     logger.warning("归档记忆 %s 失败: %s", mem_id, e)
             elif age_days > threshold_stale:
-                # R30b-A4：update() 已支持 state 字段，stale 标记真正落盘
-                # （此前是 no-op 只打日志——两阶段维护第 1 阶段形同虚设）。
-                # state-only 更新不刷新 updated_at（memory_store.update 语义），
-                # 年龄按内容年龄算，不会翻转。
+                # 历史修复（R30b-A4）：update() 支持了 state 字段，标 stale
+                # 才真正落盘（以前只打日志不生效——第 1 阶段形同虚设）。
+                # 只改 state 不刷新 updated_at（memory_store.update 的语义），
+                # 年龄按内容年龄算，不会 stale↔active 反复翻转。
                 try:
                     store.update(mem_id, state="stale")
                     counts["marked_stale"] += 1
@@ -139,16 +145,16 @@ def apply_automatic_transitions(
 
 
 # ---------------------------------------------------------------------------
-# 状态文件 + 门控(照搬 skill Curator 模式)
+# 状态文件 + 运行门控（照搬技能 Curator 的模式）
 # ---------------------------------------------------------------------------
 
 def _state_file_path(memory_dir: Path) -> Path:
-    """状态文件路径:~/.OmniMate/.memory/.curator_state.json"""
+    """状态文件路径：~/.OmniMate/.memory/.curator_state.json（记上次运行时间等）。"""
     return Path(memory_dir) / ".curator_state.json"
 
 
 def load_memory_curator_state(memory_dir: Path) -> Dict:
-    """加载状态文件。不存在返回空 dict。"""
+    """读状态文件。文件不存在或读失败返回空 dict。"""
     path = _state_file_path(memory_dir)
     if not path.exists():
         return {}
@@ -161,7 +167,7 @@ def load_memory_curator_state(memory_dir: Path) -> Dict:
 
 
 def save_memory_curator_state(memory_dir: Path, state: Dict) -> None:
-    """原子写状态文件。"""
+    """原子写状态文件（先写临时文件再改名，中途断电不会写坏）。"""
     import json
     from agent.atomic_io import atomic_write_text
     path = _state_file_path(memory_dir)
@@ -175,19 +181,24 @@ def should_run_now_memory(
     interval_hours: int = 168,
     config: Optional[Dict] = None,
 ) -> bool:
-    """门控:enabled + not paused + 距上次 ≥ interval_hours + 首次种子化。
+    """判断现在该不该跑 memory curator：开了 + 没暂停 + 距上次 ≥ 间隔 + 首次只播种。
 
-    config 参数(Optional):
-      config["memory"]["curator"]["enabled"] = False  → 整个 memory curator 关闭
-      config["memory"]["curator"]["interval_hours"]   → 覆盖默认 168(7 天)
-    缺省/老 config 无此段时按默认值跑(向后兼容)。
+    参数：
+    - memory_dir：记忆目录
+    - now：当前时间（不传用系统时间）
+    - interval_hours：间隔小时数，默认 168（7 天）
+    - config：配置字典（可选）。读 config["memory"]["curator"]：
+      - enabled = False → 整个 memory curator 关掉
+      - interval_hours → 覆盖默认 168
+      老配置没有这一段时按默认跑（向后兼容）。
+    返回：该跑 True / 不该跑 False。
     """
-    # config 门控:enabled=False 直接拒绝
+    # 配置门控：enabled=False 直接不跑
     if config is not None:
         cur_cfg = config.get("memory", {}).get("curator", {})
         if not cur_cfg.get("enabled", True):
             return False
-        # config 覆盖 interval_hours
+        # 配置覆盖间隔时长
         interval_hours = cur_cfg.get("interval_hours", interval_hours)
 
     if now is None:
@@ -199,7 +210,7 @@ def should_run_now_memory(
 
     last_str = state.get("last_run_at")
     if not last_str:
-        # 首次运行:种子化,等一个周期
+        # 首次运行：只播下种子（记下当前时间），等满一个周期再跑
         state["last_run_at"] = now.isoformat()
         state["last_run_summary"] = "首次运行已推迟——curator 已种子化,等一个周期"
         state["paused"] = False
@@ -208,7 +219,7 @@ def should_run_now_memory(
 
     last = _parse_iso(last_str)
     if last is None:
-        # 时间戳损坏,重置
+        # 时间戳坏了，重置重新计时
         state["last_run_at"] = now.isoformat()
         save_memory_curator_state(memory_dir, state)
         return False
@@ -221,7 +232,7 @@ def should_run_now_memory(
 
 
 # ---------------------------------------------------------------------------
-# 第 2 阶段:候选收集 + 分桶 + 分批
+# 第 2 阶段：收集候选 + 按类型分桶 + 切批
 # ---------------------------------------------------------------------------
 
 MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同一个分类(type={type_name})下的 {n} 条记忆。
@@ -272,10 +283,13 @@ MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同
 
 
 def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
-    """收集 state=active 的记忆,按 type 分桶。
+    """收集所有 state=active 的记忆，按 type 分桶。
 
-    返回 dict:{type_name: [MemoryEntry, ...]}
-    只保留 2+ 条的桶(单条不可能重复/矛盾)。
+    只保留有 2 条以上的桶——单独一条不可能和自己重复/矛盾。
+
+    参数：
+    - memory_dir：记忆目录
+    返回：{类型名: [记忆条目, ...]}
     """
     from agent.memory_store import MemoryStore
     store = MemoryStore(omnimate_home=Path(memory_dir).parent)
@@ -285,26 +299,34 @@ def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
         if entry.state != "active":
             continue
         buckets.setdefault(entry.type, []).append(entry)
-    # 只保留 2+ 条
+    # 只留 2 条以上的桶
     return {k: v for k, v in buckets.items() if len(v) >= 2}
 
 
 def chunk_batch(entries: List, size: int = 30) -> Iterator[List]:
-    """把列表切成 size 大小的批。"""
+    """把列表切成每批最多 size 条（防止一次发给 LLM 的内容太多）。
+
+    参数：
+    - entries：条目列表
+    - size：每批大小，默认 30
+    """
     for i in range(0, len(entries), size):
         yield entries[i:i + size]
 
 
 # ---------------------------------------------------------------------------
-# Task 7: YAML 解析 + action 执行 + 改写备份
+# YAML 解析 + action 执行 + 改写前备份
 # ---------------------------------------------------------------------------
 
 
 def parse_yaml_actions(raw: str) -> List[Dict]:
-    """从 LLM 输出解析 YAML action 列表。
+    """从 LLM 输出里解析出 YAML 格式的 action 列表。
 
-    支持格式:包含 ```yaml ... ``` 代码块。
-    损坏/无块返回空列表。
+    认的格式：```yaml ... ``` 代码块。没有代码块或解析失败返回空列表
+    （LLM 输出不可信，坏了就当没有这批）。
+
+    参数：
+    - raw：LLM 的原始输出文本
     """
     match = re.search(r"```yaml\n(.*?)```", raw, re.DOTALL)
     if not match:
@@ -321,11 +343,17 @@ def parse_yaml_actions(raw: str) -> List[Dict]:
 
 
 def safe_rewrite_body(store, entry_id: str, new_body: str, archive_root: Path) -> Path:
-    """改写 body 前备份原文到 .archive/memory-rewrites-{ts}/。
+    """改写记忆正文前，先把原文备份到 .archive/memory-rewrites-{时间戳}/。
 
-    返回备份文件路径。
-    R19 #24：new_body 是 LLM 重写产物——秘密扫描命中则拒绝改写保留原文
-    （返回 None 表示拒绝，调用方无需感知差异）。
+    返回备份文件路径；条目不存在抛 KeyError。
+    历史安全项（R19 #24）：新正文是 LLM 重写的产物——疑似含密钥就拒绝改写、
+    保留原文（返回 None 表示拒绝，调用方不用区分这种情况）。
+
+    参数：
+    - store：MemoryStore 实例
+    - entry_id：记忆完整 id
+    - new_body：要写入的新正文
+    - archive_root：归档根目录（.archive/）
     """
     from agent.secret_scanner import find_secrets_in
     if find_secrets_in(new_body):
@@ -354,14 +382,19 @@ def safe_rewrite_body(store, entry_id: str, new_body: str, archive_root: Path) -
 
 
 def execute_action(action: Dict, store, archive_root: Path) -> str:
-    """执行单个 curator action。返回结果描述(用于日志/报告)。
+    """执行一条 curator 动作。返回结果描述（写日志/报告用）。
 
-    支持:
-      merge_duplicate {keep, archive: [ids]}
-      resolve_contradiction {update_id, new_body, archive}
-      delete_falsified {archive, evidence}          R19 #22：删除被证伪事实
-      normalize_dates {update_id, new_body}         R19 #22：相对日期转绝对日期
-    未知 action 跳过。
+    支持：
+      merge_duplicate {keep, archive: [ids]}        合并重复：留一条，归档其余
+      resolve_contradiction {update_id, new_body, archive}  矛盾解决：改旧条目并归档新条目
+      delete_falsified {archive, evidence}          删除被证伪事实（R19 #22）
+      normalize_dates {update_id, new_body}         相对日期转绝对日期（R19 #22）
+    不认识的 action 跳过。
+
+    参数：
+    - action：LLM 输出的一条动作（dict）
+    - store：MemoryStore 实例
+    - archive_root：归档根目录
     """
     act_type = action.get("action")
 
@@ -392,7 +425,7 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
         return f"resolve_contradiction: updated={update_id}, archived={archive_id}"
 
     if act_type == "delete_falsified":
-        # R19 #22：被证伪事实——软删除（archive，完全可逆，对齐设计原则 3）
+        # 被证伪的事实（R19 #22）——软删除到归档，完全可逆，对齐设计原则 3
         archive_id = action.get("archive")
         evidence = action.get("evidence", "")
         if archive_id:
@@ -403,7 +436,7 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
         return f"delete_falsified: archived={archive_id} ({evidence[:60]})"
 
     if act_type == "normalize_dates":
-        # R19 #22：相对日期转绝对日期（只改 body，原文经 safe_rewrite_body 备份）
+        # 相对日期转绝对日期（R19 #22）——只改正文，原文经 safe_rewrite_body 备份过
         update_id = action.get("update_id")
         new_body = action.get("new_body", "")
         if update_id and new_body:
@@ -415,7 +448,7 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task 8: run_memory_review 主入口(第 2 阶段 LLM 合并 + 矛盾检测)
+# 第 2 阶段主入口：LLM 合并 + 矛盾检测
 # ---------------------------------------------------------------------------
 
 
@@ -427,36 +460,31 @@ def run_memory_review(
     max_batch_size: int = 30,
     config: Optional[Dict] = None,
 ) -> Dict:
-    """第 2 阶段:LLM 合并 + 矛盾检测。
+    """第 2 阶段主入口：调 LLM 做记忆合并 + 矛盾检测。
 
-    agent_factory: () -> AIAgent(主模型后台 agent),每次调用只构造一次
-    dry_run: True 时只统计候选,不调 LLM(避免成本)
-    max_batch_size: 每批发给 LLM 的最大记忆条数
-    config: Optional 配置字典。读取 config["memory"]["curator"]:
-      - llm_review_enabled = False → 直接跳过第 2 阶段,不构造 agent
-      - max_batch_size            → 覆盖默认 30
-    缺省/老 config 无此段时按默认值跑(向后兼容)。
+    流程：
+      1. collect_review_candidates 按类型分桶
+      2. dry_run=True → 只统计候选数，不调 LLM（省成本）
+      3. 否则构造一次后台 agent，遍历每桶每批
+      4. 每批拼 prompt → agent.chat() → parse_yaml_actions → execute_action
+      5. LLM 失败该批跳过（errors+1），单个 action 失败也 errors+1
 
-    流程:
-      1. collect_review_candidates 按 type 分桶
-      2. dry_run → 直接返回候选统计,不构造 agent
-      3. 否则构造一次 agent,遍历每桶每批
-      4. 每批构造 prompt → agent.chat() → parse_yaml_actions → execute_action
-      5. LLM 失败该批跳过(errors+1),action 执行失败也 errors+1
-
-    返回报告 dict:
-      {
-        "dry_run": bool,
-        "buckets_reviewed": int,   # 实际跑过 LLM 的批数
-        "candidates_found": int,   # 候选总数(2+ 条的桶)
-        "executed_actions": int,
-        "errors": int,
-      }
+    参数：
+    - memory_dir：记忆目录
+    - agent_factory：造后台 agent 的工厂，() -> AIAgent（整个流程只造一次）
+    - dry_run：True 只统计不调 LLM
+    - max_batch_size：每批发给 LLM 的最大条数
+    - config：配置字典（可选），读 config["memory"]["curator"]：
+      - llm_review_enabled = False → 跳过整个第 2 阶段（不造 agent，省成本）
+      - max_batch_size → 覆盖默认 30
+      老配置没有这一段时按默认跑（向后兼容）。
+    返回：报告 dict（dry_run / buckets_reviewed（实际跑过 LLM 的批数）/
+      candidates_found（候选总数）/ executed_actions / errors）。
     """
     memory_dir = Path(memory_dir)
     archive_root = memory_dir.parent / ".archive"
 
-    # config 门控:llm_review_enabled=False 直接跳过(避免 LLM 成本)
+    # 配置门控：llm_review_enabled=False 直接跳过（省 LLM 成本）
     if config is not None:
         cur_cfg = config.get("memory", {}).get("curator", {})
         if not cur_cfg.get("llm_review_enabled", True):
@@ -471,7 +499,7 @@ def run_memory_review(
             }
         max_batch_size = cur_cfg.get("max_batch_size", max_batch_size)
 
-    # dry_run 短路:不构造 agent,避免 LLM 成本
+    # dry_run 短路：不造 agent，不花 LLM 的钱
     if dry_run:
         buckets = collect_review_candidates(memory_dir)
         return {
@@ -490,7 +518,7 @@ def run_memory_review(
     errors = 0
     buckets_reviewed = 0
 
-    # 复用一个 agent 实例(避免每个批都重新构造)
+    # 全程复用一个 agent（省得每批都重新构造一遍）
     try:
         review_agent = agent_factory()
     except Exception as e:
@@ -505,7 +533,7 @@ def run_memory_review(
     for type_name, entries in buckets.items():
         for batch in chunk_batch(entries, size=max_batch_size):
             buckets_reviewed += 1
-            # 构造 prompt:把 batch 序列化成 JSON
+            # 拼 prompt：把这一批条目序列化成 JSON
             entries_json = json.dumps([
                 {
                     "id": e.id, "name": e.name, "description": e.description,
@@ -519,9 +547,9 @@ def run_memory_review(
                 type_name=type_name, n=len(batch), entries_json=entries_json,
             )
 
-            # LLM 调用单批 try/except —— 一批失败不污染其他批
+            # 每批单独 try/except——一批失败不连累其他批
             try:
-                # Task D4 fix: AIAgent.chat 已改 async。run_memory_review 是 sync 函数。
+                # 历史适配（Task D4 修复）：AIAgent.chat 已改成 async，本函数是 sync 的，用 asyncio.run 驱动
                 import asyncio
                 raw_output = asyncio.run(review_agent.chat(prompt))
             except Exception as e:
@@ -531,8 +559,8 @@ def run_memory_review(
 
             actions = parse_yaml_actions(raw_output)
             for action in actions:
-                # execute_action 内部已对 store.delete/rewrite 做了 try/except
-                # 这里再兜一层,确保任何异常都不中断主循环
+                # execute_action 内部已对删除/改写做了异常兜底；
+                # 这里再包一层，保证任何异常都打不断主循环
                 try:
                     result = execute_action(action, store, archive_root)
                     total_actions += 1

@@ -1,17 +1,19 @@
-"""任务级反思引擎（CCALS-P0-2）。
+"""任务级反思引擎（CCALS-P0-2 引入）。
 
-每个 run_conversation 结束后调一次，用 aux_llm（便宜模型）从对话轨迹中提炼
-4 类经验，自动 memory_save 写入对应分类：
-  - user 维度：新偏好、习惯、输出要求
-  - feedback 维度：有效策略、需避开的坑、工具组合技巧
-  - project 维度：项目规则、技术栈决策、业务逻辑
-  - reference 维度：外部系统指针（Linear/Slack/GitHub/URL/共享路径）
+每次 run_conversation（一轮完整对话任务）结束后调一次，用辅助模型
+（aux_llm，便宜模型）把对话轨迹复盘一遍，提炼出 4 类长期经验，
+自动写进记忆库（memory_save）：
+  - user：关于用户本人——新偏好、习惯、对输出格式的要求
+  - feedback：关于怎么干活——有效策略、要避开的坑、工具组合技巧
+  - project：关于这个项目——项目规则、技术栈决策、业务逻辑
+  - reference：外部资源的"地址簿"——Linear 工单 ID / Slack 频道 /
+    GitHub repo / 文档 URL / 共享路径
 
-设计：
-- aux_llm 不可用 → no-op（fail-open，不影响主流程）
+设计要点：
+- 辅助模型不可用 → 什么都不做（fail-open，绝不影响主流程）
 - LLM 输出 JSON 数组，每项 {type, name, description, summary, body}
-- 已有同类记忆时跳过（按 name + type 去重）
-- 异步触发（不阻塞用户拿到响应）—— 调用方决定同步还是异步
+- 已有同类记忆（name + type 相同）就跳过，防重复堆积
+- 异步触发（不拖慢用户拿响应）——同步还是异步由调用方决定
 """
 import json
 import logging
@@ -80,16 +82,25 @@ REFLECTION_PROMPT_TEMPLATE = """你是经验提炼助手。从以下对话轨迹
 
 
 def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
-    """把 messages 列表压缩成供反思用的轨迹文本。
+    """把消息列表压缩成给反思引擎看的"轨迹文本"（纯文本流水账）。
 
-    策略：
-    - 取最近 N 条（不超过 max_chars 字符）
-    - 跳过 system / tool 长结果（只留 role+短 content）
-    - 工具调用记一行"调用 X 工具"
+    背景：完整对话太长也太杂，反思只需要"谁说了什么、调了什么工具"
+    的梗概。
+
+    压缩策略：
+    - 从最新往回取，累计不超过 max_chars 个字符
+    - 跳过 system 消息和 tool 的长结果（只留角色 + 截短的内容）
+    - 有工具调用的记一行"调用了 X 工具"
+
+    参数：
+    - messages：对话历史（OpenAI 消息格式）
+    - max_chars：轨迹文本的字符上限（默认 4000）
+
+    返回：逐行拼接的轨迹文本；没消息返回空串。
     """
     if not messages:
         return ""
-    # 倒序取，超 max_chars 截断
+    # 倒序遍历（优先保留最近的内容），超预算就停
     lines = []
     total = 0
     for m in reversed(messages):
@@ -99,7 +110,7 @@ def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
             content = json.dumps(content, ensure_ascii=False)[:200]
         else:
             content = str(content)[:300]
-        # 工具调用单独标记
+        # 工具调用单独标记一行，方便 LLM 看出动作序列
         tool_calls = m.get("tool_calls")
         if tool_calls:
             names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
@@ -113,10 +124,15 @@ def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
 
 
 def build_memory_manifest(memory_store) -> str:
-    """CCAR9 Task 5 / R19 #21 公共：已有记忆清单（防重复存储）。
+    """已有记忆的清单文本（给 LLM 看，防止它重复存储）。
 
-    读 memory_store.list_all() 前 100 条拼 manifest，让 LLM 生成新条目前
-    先看到已有内容。fail-open：读取失败返回空串。
+    背景（CCAR9 Task 5 / R19 #21 抽出的公共函数，auto_extract 也用）：
+    LLM 在生成新记忆前先看到"已经有什么"，才知道别写重复的。
+
+    参数：
+    - memory_store：记忆库（读 list_all）
+
+    返回：清单文本（取前 100 条拼成）；读取失败返回空串（fail-open）。
     """
     try:
         if memory_store is None:
@@ -145,16 +161,22 @@ def run_reflection(
     llm_client,
     model: Optional[str] = None,
 ) -> List[dict]:
-    """跑一次反思，返回提炼出的经验列表。
+    """跑一次反思：让 LLM 从对话里提炼经验，返回提炼结果（先不落盘）。
 
-    每项格式：{type, name, description, summary, body}
-    失败（LLM 异常/坏 JSON/空响应）返回空 list（fail-open）。
+    参数：
+    - messages：对话历史（会被压缩成轨迹）
+    - memory_store：记忆库（用来读已有记忆清单防重复；可传 None）
+    - llm_client：LLM 客户端（chat_completions 是 async 的）
+    - model：模型名（None 走客户端默认）
+
+    返回：经验字典列表，每项 {type, name, description, summary, body}；
+    任何失败（LLM 异常/坏 JSON/空响应）返回空列表（fail-open）。
     """
     trajectory = extract_trajectory(messages)
     if not trajectory.strip():
         return []
 
-    # CCAR9 Task 5: 预注入已有记忆清单（R19 #21 抽公共 build_memory_manifest）
+    # CCAR9 Task 5：预注入已有记忆清单（R19 #21 时抽成公共 build_memory_manifest）
     manifest = build_memory_manifest(memory_store)
 
     prompt = REFLECTION_PROMPT_TEMPLATE.format(
@@ -165,9 +187,9 @@ def run_reflection(
         kwargs = {}
         if model:
             kwargs["model"] = model
-        # Task D4 follow-up: llm_client.chat_completions 已改 async。
-        # run_reflection 经 apply_reflection 在 _bg() daemon thread 里跑（无事件循环），
-        # 用 asyncio.run 驱动；与 agent/user_profile.py:build_and_save_profile 同模式。
+        # 历史踩坑（Task D4 follow-up）：llm_client.chat_completions 已改 async，
+        # 而本函数经 apply_reflection 在 _bg() 守护线程里跑（那里没有事件循环），
+        # 所以要用 asyncio.run 驱动；和 agent/user_profile.py 的做法同款。
         import asyncio
         response = asyncio.run(llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
@@ -178,7 +200,7 @@ def run_reflection(
         logger.warning("反思 LLM 调用失败（fail-open）: %s", e)
         return []
 
-    # 解析 JSON 数组（容忍模型输出多余文本）
+    # 解析 JSON（模型常在 JSON 外多说话，先整段试，再抠 [...] 片段）
     try:
         result = json.loads(content)
     except json.JSONDecodeError:
@@ -194,7 +216,7 @@ def run_reflection(
     if not isinstance(result, list):
         return []
 
-    # 过滤+规范化每条
+    # 逐条过滤 + 规范化（类型非法或必需字段缺失的丢弃）
     valid = []
     valid_types = {"user", "feedback", "project", "reference"}
     for item in result:
@@ -204,10 +226,10 @@ def run_reflection(
         name = item.get("name", "").strip()
         desc = item.get("description", "").strip()
         if t not in valid_types or not name or not desc:
-            continue  # 必需字段缺失跳过
+            continue  # 必需字段缺失，跳过
         valid.append({
             "type": t,
-            "name": name[:60],  # 防止 LLM 给太长
+            "name": name[:60],  # 防 LLM 给超长标题
             "description": desc[:80],
             "summary": (item.get("summary") or "").strip()[:200],
             "body": (item.get("body") or "").strip(),
@@ -223,9 +245,18 @@ def apply_reflection(
     model: Optional[str] = None,
     session_id: str = "",
 ) -> int:
-    """端到端：跑反思 + 写入 memory_store。返回写入条数。
+    """端到端：跑反思 + 把结果写进记忆库。返回实际写入条数。
 
-    去重：同 type 下 name 已存在则跳过（避免重复堆积）。
+    参数：
+    - messages：对话历史
+    - memory_store：目标记忆库
+    - llm_client：LLM 客户端
+    - model：模型名（可选）
+    - session_id：会话 ID（记进来源字段，追溯哪次会话写的）
+
+    返回：成功写入的条数（int）。
+
+    去重规则：同 type 下 name 已存在的跳过（防重复堆积）。
     """
     if memory_store is None or llm_client is None:
         return 0
@@ -236,15 +267,16 @@ def apply_reflection(
     if not insights:
         return 0
 
-    # 已有记忆 name 集合（按 type 分组）
+    # 已有记忆的 (type, name) 集合，用来去重
     existing = memory_store.list_all()
     existing_keys = {(e.type, e.name) for e in existing}
 
-    # X14 fix: 两阶段——先全部 save，再统一处理 supersedes。
-    # 之前在 save 循环内 supersede，导致"批内新写入"不在 existing 快照里，
-    # 同批后写入的 insight 想 supersede 同批刚写入的会失效。
+    # 历史踩坑（X14 修复）：必须两阶段——先把整批全部 save 完，再统一处理
+    # supersedes（推翻旧记忆）。之前在 save 循环里边写边 supersede，
+    # 导致"同批刚写入的"不在 existing 快照里——同批后写入的经验想推翻
+    # 同批刚写入的会失效。
     written = 0
-    written_records = []  # [(ins, mem_id)] 记录写入的，用于阶段 2 supersede
+    written_records = []  # [(经验, 记忆ID)]：记下本批写入的，阶段 2 推翻时要用
     for ins in insights:
         key = (ins["type"], ins["name"])
         if key in existing_keys:
@@ -265,21 +297,21 @@ def apply_reflection(
         except Exception as e:
             logger.warning("反思写入 memory 失败（跳过）: %s", e)
 
-    # 阶段 2：处理 supersedes（X5 fix: 加 type 一致性 + X14 fix: 含批内新写入）
+    # 阶段 2：处理 supersedes（X5 修复：加 type 一致性校验；X14 修复：也要在批内新写入里找）
     for ins, _ in written_records:
         supersedes = ins.get("supersedes")
         if not supersedes or supersedes == ins["name"]:
             continue
         target_id = None
         target_body = ""
-        # 先在 existing（旧记忆）找，X5 fix: 必须 name + type 都匹配
+        # 先在旧记忆里找；X5 修复：必须 name + type 都匹配（同名不同类不算）
         for old_entry in existing:
             if (old_entry.name == supersedes
                     and old_entry.type == ins["type"]):
                 target_id = old_entry.id
                 target_body = old_entry.body or ""
                 break
-        # X14 fix: 再在批内新写入里找（同批刚 save 的也能被 supersede）
+        # X14 修复：旧记忆里没有，再在本批刚写入的里找（同批之间也能推翻）
         if target_id is None:
             for other_ins, other_id in written_records:
                 if (other_ins["name"] == supersedes

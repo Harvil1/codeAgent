@@ -1,7 +1,10 @@
-"""技能隔离执行（context: fork）。
+"""技能隔离执行（frontmatter 里写 context: fork 的技能走这条路）。
 
-frontmatter context: fork 的技能在独立子代理上下文跑，不污染主 agent。
-同步等待：主 agent 等子代理跑完，结果作为新 user 消息注入主循环。
+这类技能不在主对话里跑，而是临时开一个「分身」（独立子代理实例）去干，
+干完把结果带回。好处是技能跑得再乱也不污染主 agent 的对话历史和状态。
+
+主 agent 同步等：期间什么都不干，等子代理跑完，把结果作为一条新的
+user 消息注入主循环继续对话。
 """
 
 import logging
@@ -18,15 +21,24 @@ def run_skill_in_fork(
     agent_ref,
     **kwargs,
 ) -> str:
-    """在隔离子代理里跑一个技能（context: fork）。
+    """在隔离子代理里跑一个 context: fork 技能。
 
-    构造一个独立 AIAgent 实例，system_prompt = 技能正文，goal = 用户 query。
-    同步等子代理完成，返回子代理最终回复（str）。
+    做法：现造一个独立 AIAgent 实例——技能正文当它的 system prompt
+    （给它的角色说明书），用户问题当它的任务。主 agent 停下来等它干完。
 
-    fail-open：子代理构造/运行失败时返回错误消息字符串（不抛）。
+    参数：
+        skill_name：技能名（用在提示词和审计日志里）。
+        skill_body：技能正文文本。
+        user_query：用户的原始问题。
+        agent_ref：主 agent 实例（fork 它的 LLM 配置等，见下）。
+        **kwargs：兼容调用方多传的参数，本函数不用。
+
+    返回：子代理的最终回复文本（字符串）。
+    fail-open：子代理构造或运行失败时返回错误提示字符串，不抛异常。
     """
     try:
-        # 继承父 agent 的 LLM 配置 + 工具集（leaf 角色，minimal 工具集）
+        # 子代理直接抄主 agent 的 LLM 连接配置；工具只给最小集（leaf 角色，
+        # 不再派生下级，防递归开分身）
         _hooks = getattr(agent_ref, "hooks_registry", None)
         child = AIAgent(
             base_url=agent_ref.base_url,
@@ -47,7 +59,8 @@ def run_skill_in_fork(
             effort_level=getattr(agent_ref, "effort_level", None),
             hooks_registry=_hooks,
         )
-        # round4 NEW: fork 子代理也进 SUBAGENT 审计（不走 _run_child，需手动触发）
+        # 历史轮次（round4）补的：fork 子代理不走 delegate_tool 的 _run_child 通道，
+        # 那边会自动发的 subagent 审计事件这里得手动补发，否则 hook 看不见这次派生
         _fork_success = False
         if _hooks is not None:
             try:
@@ -58,8 +71,9 @@ def run_skill_in_fork(
             except Exception:
                 pass
         try:
-            # Task D4 fix: AIAgent.chat 已改 async。run_skill_in_fork 是 sync 函数，
-            # 从 cli.py 同步调用（无事件循环）→ asyncio.run 驱动。
+            # 历史踩坑（Task D4 修复）：AIAgent.chat 已改成 async，而本函数是
+            # 同步的、从 cli.py 直接调（那里没有事件循环）——漏了 asyncio.run
+            # 驱动会直接拿到协程对象而不是结果，等于白跑。
             import asyncio
             result = asyncio.run(child.chat(user_query))
             _fork_success = True
