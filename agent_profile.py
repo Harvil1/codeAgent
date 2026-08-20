@@ -1,17 +1,20 @@
-"""Profile 系统：支持多个隔离的 agent 实例。
+"""Profile（画像）系统：让一个 agent 能开多个互相隔离的"分身账号"。
 
-每个 profile 有自己的：
-  - config.yaml
-  - .env
-  - MEMORY.md / USER.md
-  - sessions.db
-  - skills/
-  - logs/
+背景：有时想要两套互不干扰的 agent（比如一个工作用、一个生活用）。
+每个 profile（分身账号）都有自己独立的一套家当：
+  - config.yaml（配置）
+  - .env（密钥等环境变量）
+  - MEMORY.md / USER.md（记忆）
+  - sessions.db（会话数据库）
+  - skills/（技能库）
+  - logs/（日志）
 
-通过 OMNIMATE_HOME 环境变量实现隔离。
+隔离靠 OMNIMATE_HOME 环境变量实现——把"家目录"指到不同文件夹，
+数据自然互不可见。本模块是最底层的地基，CLI 启动最先调它。
 
 ⚠️ apply_profile 必须在任何 import 之前调用！
-   因为 get_omnimate_home() 在模块加载时可能被读取。
+   因为 agent 家目录的取值函数（get_omnimate_home）在别的模块
+   加载时可能就已经被读了，晚了就换不回来了。
 """
 
 import os
@@ -21,12 +24,18 @@ from typing import List
 
 
 def get_profiles_root() -> Path:
-    """所有 profile 的根目录。"""
+    """所有分身账号的存放根目录。
+
+    返回：~/.OmniMate/profiles（每个子文件夹就是一个账号）。
+    """
     return Path.home() / ".OmniMate" / "profiles"
 
 
 def list_profiles() -> List[str]:
-    """列出所有 profile 名。"""
+    """列出现有的所有账号名。
+
+    返回：账号名列表（按字母排序）；目录还不存在时返回空列表。
+    """
     root = get_profiles_root()
     if not root.exists():
         return []
@@ -34,12 +43,21 @@ def list_profiles() -> List[str]:
 
 
 def apply_profile(profile_name: str) -> None:
-    """应用 profile：设置 OMNIMATE_HOME 环境变量。
+    """切换到指定账号：把家目录环境变量指过去。
 
-    ⚠️ 必须在任何 import 之前调用！
+    背景：隔离的原理就是把 OMNIMATE_HOME 指到该账号的文件夹，
+    之后所有读写都落在它自己的地盘里。
+
+    ⚠️ 必须在任何 import 之前调用（晚了家目录就被别人读走了）！
+
+    参数：
+        profile_name: 账号名。"default" 表示用默认家目录 ~/.OmniMate。
+
+    返回：无。账号不存在时抛 ValueError。
     """
     if profile_name == "default":
-        # 默认不设置 OMNIMATE_HOME（用 ~/.OmniMate）
+        # 默认账号不需要设环境变量——不设就天然用 ~/.OmniMate；
+        # 反而要清掉可能残留的旧值，防止串号
         os.environ.pop("OMNIMATE_HOME", None)
         return
 
@@ -51,10 +69,16 @@ def apply_profile(profile_name: str) -> None:
 
 
 def create_profile(name: str, *, clone_from: str = None) -> Path:
-    """创建新 profile。
+    """新建一个分身账号（建好骨架目录）。
 
-    clone_from：从已有 profile 克隆配置（不影响源）。
-                可以是 "default" 或 profile 名。
+    背景：新账号要有基本目录结构（技能库、日志、.env）才能正常跑。
+
+    参数：
+        name: 新账号名。
+        clone_from: 可选。从哪个老账号抄一份配置过来（只抄 config.yaml，
+            不影响老账号）；可以是 "default" 或其他账号名。
+
+    返回：新账号的文件夹路径。账号已存在时抛 ValueError。
     """
     root = get_profiles_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -65,13 +89,13 @@ def create_profile(name: str, *, clone_from: str = None) -> Path:
 
     new_path.mkdir(parents=True)
 
-    # 创建必需的子目录
+    # 搭好必需的骨架：技能目录、日志目录、空的 .env 文件
     (new_path / "skills").mkdir()
     (new_path / "logs").mkdir()
     (new_path / ".env").touch()
 
     if clone_from:
-        # 从已有 profile 复制配置
+        # 从老账号把配置文件抄过来（只抄 config.yaml，有才抄）
         if clone_from == "default":
             source = Path.home() / ".OmniMate"
         else:
@@ -84,7 +108,13 @@ def create_profile(name: str, *, clone_from: str = None) -> Path:
 
 
 def delete_profile(name: str) -> None:
-    """删除 profile（不可恢复）。"""
+    """删掉一个分身账号（连文件夹带全部数据，救不回来）。
+
+    参数：
+        name: 要删的账号名。默认账号 "default" 不许删。
+
+    返回：无。账号不存在时抛 ValueError。
+    """
     if name == "default":
         raise ValueError("不能删除 default profile")
 
@@ -97,7 +127,11 @@ def delete_profile(name: str) -> None:
 
 
 def get_current_profile() -> str:
-    """当前 profile 名（根据 OMNIMATE_HOME 推断）。"""
+    """看现在用的是哪个账号（从家目录环境变量反推）。
+
+    返回：账号名。没设环境变量就是 "default"；设了但不在 profiles
+    目录下面（用户自己指的别处）就返回 "custom"。
+    """
     agent_home = os.environ.get("OMNIMATE_HOME")
     if not agent_home:
         return "default"
@@ -107,4 +141,5 @@ def get_current_profile() -> str:
     try:
         return path.relative_to(root).parts[0]
     except (ValueError, IndexError):
+        # 家目录不在 profiles 目录下 → 是用户自定义的路径
         return "custom"
