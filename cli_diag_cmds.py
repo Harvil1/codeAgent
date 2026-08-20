@@ -1,6 +1,9 @@
-"""诊断/状态命令簇（R30 从 cli.py 机械抽离，行为不变）。
+"""诊断/状态类命令集（R30 给 cli.py 瘦身时原样搬过来的，行为没变）。
 
-/status /doctor /context /compact /usage /stats 相关处理函数。
+这里放的是"给用户看病"的命令处理函数：/status 看当前状态、/doctor 自检
+环境、/context 看上下文占用、/compact 手动压缩上下文、/usage 看 token 花
+销、/stats 看跨会话统计。它们都被 cli.py 的主分发调用，输出统一走
+cli_ui 的共享 console。
 """
 import importlib
 import json
@@ -21,22 +24,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 2 NEW: /compact + /context
+# CCAR11 Task 2 新增：/compact + /context 两个命令
 # ---------------------------------------------------------------------------
 
 def _sync_history_after_compact(agent, new_messages: list) -> None:
-    """压缩后同步 agent.conversation_history + 失效 system prompt 缓存。
+    """压缩做完后，把新历史写回 agent 并作废 system prompt 缓存。
 
-    对齐 AIAgent._run_context_compression 的收尾逻辑：
-    - strip 头部 system（压缩函数输入是纯 history，正常无 system，防御性处理）
-    - strip ``_ephemeral`` 标记消息（ephemeral 不进持久化 history）
-    - invalidate_system_prompt（前缀已变，必须重建，否则下次发 LLM 的
-      system prompt 还是旧缓存）
+    背景：手动压缩后对话内容变了，但 agent 身上的旧历史和旧 prompt 缓存
+    还留着，不处理的话下一次调用 LLM 用的还是压缩前的旧东西。这里的收尾
+    动作和主循环里自动压缩（AIAgent._run_context_compression）保持一致：
+    - 去掉开头的 system 消息（压缩函数的输入本就不该含 system，这里是
+      防御性兜底）；
+    - 去掉带 ``_ephemeral`` 标记的消息（临时消息只活一轮，不能进持久历史）；
+    - 作废 system prompt 缓存（对话前缀变了，缓存已经不对了，必须重建，
+      否则下次发给 LLM 的 system prompt 还是旧缓存里的）。
+
+    参数：
+        agent：AIAgent 实例（要更新它的 conversation_history）
+        new_messages：压缩函数产出的新消息列表
+
+    返回：
+        无（直接改 agent 的字段）
     """
     msgs = list(new_messages or [])
     if msgs and msgs[0].get("role") == "system":
+        # 防御性兜底：正常压缩输入不含 system，万一有就去掉
         msgs = msgs[1:]
     agent.conversation_history = [m for m in msgs if not m.get("_ephemeral")]
+    # 用 getattr 探测而不是直接调：老版本 agent 可能还没有这个方法
     invalidate = getattr(agent, "invalidate_system_prompt", None)
     if callable(invalidate):
         try:
@@ -48,7 +63,16 @@ def _print_compact_delta(
     after_msgs: int, after_tokens: int,
     *, mode: str,
 ) -> None:
-    """打印压缩前后 token 对比。"""
+    """打印压缩前后的对比：消息数和 token 数各省了多少。
+
+    参数：
+        before_msgs / before_tokens：压缩前的消息条数 / 估算 token 数
+        after_msgs / after_tokens：压缩后的消息条数 / 估算 token 数
+        mode：压缩方式名（如 "llm_compact（L4 摘要）"），仅用于展示
+
+    返回：
+        无（直接打印到终端）
+    """
     saved = max(0, before_tokens - after_tokens)
     console.print(f"[green]压缩完成（{mode}）[/green]")
     console.print(
@@ -57,21 +81,32 @@ def _print_compact_delta(
         f"（节省 ~{saved}）"
     )
 def _handle_compact_cli(args: str, rt) -> bool:
-    """/compact 手动触发 L4 压缩（CCAR11 Task 2）。
+    """/compact 命令：用户手动触发一次上下文压缩（CCAR11 Task 2）。
 
-    - ``--yes`` 跳过确认，否则交互确认（EOF/输入异常视为拒绝）
-    - 正常路径：llm_compact 强制走 L4（token_threshold=0 绕过自动阈值判定，
-      手动压缩语义 = "现在就压"，与自动压缩的"接近窗口才压"不同）
-    - LLM 不可用（client None / 调用异常 / 事件循环冲突）→ 降级 snip_compact
-      （无损裁剪，threshold=0 强制）+ 提示
-    - 压缩后同步 agent 状态 + 记录 llm_compact_count（对齐自动压缩收尾）
+    背景：上下文（对话历史）太长会撑爆模型窗口、烧钱。平时是自动压缩，
+    这个命令让用户"现在就压"。三条路：
+    - ``--yes`` 参数跳过确认；不加就交互式问一句（EOF 或输入异常当作拒绝）；
+    - 正常路径用 llm_compact 走 L4（用 LLM 把早期对话总结成摘要），
+      token_threshold 传 0 绕过"够不够长才压"的自动判定——手动压缩的
+      意思就是无条件压，跟自动压缩的"快到窗口上限才压"不是一回事；
+    - LLM 不可用时（client 为空 / 调用报错 / 已在事件循环里跑不了）
+      降级用 snip_compact——它不调 LLM、无损地裁掉中段，同样强制执行；
+    - 压缩完同步 agent 状态并把本次记入 llm_compact_count（和自动压缩
+      的收尾完全一致）。
+
+    参数：
+        args：命令后跟的参数串（目前只认 --yes）
+        rt：RuntimeContext（cli.py 聚合的运行时上下文，取 agent 和 config 用）
+
+    返回：
+        bool —— True 表示命令已处理（保持统一的命令处理签名）
     """
     agent = getattr(rt, "agent", None)
     if agent is None:
         console.print("[yellow]Agent 未初始化，无法压缩[/yellow]")
         return True
 
-    # --yes 跳过确认，否则交互确认（EOF/异常视为拒绝）
+    # --yes 跳过确认，否则交互式问一句（输入异常当作拒绝，宁可不压）
     arg_parts = (args or "").split()
     if "--yes" not in arg_parts:
         try:
@@ -101,17 +136,18 @@ def _handle_compact_cli(args: str, rt) -> bool:
                 llm_client=llm_client,
                 model=getattr(agent, "model", None),
                 keep_recent=keep_recent,
-                token_threshold=0,  # 强制触发（手动压缩不受自动阈值限制）
-                precomputed_tokens=before_tokens,  # 空历史时 0>0 自然短路
+                token_threshold=0,  # 传 0 = 无条件压（绕过"够长才压"的判定）
+                precomputed_tokens=before_tokens,  # 复用已算好的 token 数；空历史时 0>0 自然短路
             ))
         except RuntimeError:
-            # 已在事件循环内（嵌入环境）——降级 snip（对齐 /init 的桥接模式）
+            # asyncio.run 在已有事件循环的嵌套环境里会抛 RuntimeError——
+            # 走不了 LLM 压缩就降级 snip（和 /init 的桥接做法一致）
             console.print("[yellow]事件循环冲突，降级为 snip_compact（无损裁剪）[/yellow]")
         except Exception as e:
             console.print(f"[red]LLM 压缩失败：[/red]{e}")
 
     if compacted:
-        # L4 成功：同步 agent 状态（对齐 _run_context_compression 收尾）
+        # L4 摘要成功：把新历史写回 agent（收尾动作和自动压缩一致）
         _sync_history_after_compact(agent, new_messages)
         state = getattr(agent, "_compress_session_state", None)
         if state is not None:
@@ -127,7 +163,7 @@ def _handle_compact_cli(args: str, rt) -> bool:
         )
         return True
 
-    # 降级路径：snip_compact（无损，threshold=0 强制触发）
+    # 降级路径：snip_compact 不调 LLM、无损裁剪中段，threshold=0 强制执行
     new_messages, snipped = snip_compact(
         history, keep_first=3, keep_last=10, threshold=0,
     )
@@ -144,13 +180,21 @@ def _handle_compact_cli(args: str, rt) -> bool:
     )
     return True
 def _handle_context_cli(args: str, rt) -> bool:
-    """/context 显示当前上下文 token 分布表（CCAR11 Task 2）。
+    """/context 命令：用一张表显示当前上下文（对话历史）的占用情况。
 
-    Rich Table 展示：
-    - role 分布（system/user/assistant/tool 计数）
-    - estimate_message_tokens 估算总量
-    - 压缩会话状态（current_turn / llm_compact_count / reactive_count）
-    - _pending_ephemeral_messages 长度（待注入的临时消息）
+    背景：用户想知道"现在上下文有多满、压缩发生了几次"，这张 Rich 表给
+    出全景：
+    - 消息按角色（system/user/assistant/tool）各有多少条；
+    - 用 estimate_message_tokens 估算的总 token 数；
+    - 压缩会话状态（当前第几轮 / LLM 压缩次数 / 被动压缩次数）；
+    - 待注入的临时消息（_pending_ephemeral_messages）还剩几条。
+
+    参数：
+        args：命令参数（本命令不使用，保持签名统一）
+        rt：RuntimeContext（取 agent 用）
+
+    返回：
+        bool —— True 表示命令已处理
     """
     from collections import Counter
 
@@ -192,25 +236,42 @@ def _handle_context_cli(args: str, rt) -> bool:
     console.print(table)
     return True
 # ---------------------------------------------------------------------------
-# CCAR11 Task 3 NEW: /status + /doctor + /diff
+# CCAR11 Task 3 新增：/status + /doctor + /diff 三个命令
 # ---------------------------------------------------------------------------
 
 def _status_row(label: str, fn):
-    """安全构建 /status 表格行：段内异常 → 显示"读取失败"，不影响其他段。"""
+    """给 /status 表格安全地造一行：这一格读挂了就显示"读取失败"，
+    不拖垮其他行。
+
+    参数：
+        label：行标题（如"主模型"）
+        fn：取值函数（调用它拿到要显示的内容）
+
+    返回：
+        (标题, 值) 二元组；fn 抛异常时值是红色的"读取失败：原因"。
+    """
     try:
         return (label, fn())
     except Exception as e:
         logger.debug("/status 段 %s 读取失败: %s", label, e)
         return (label, f"[red]读取失败：{e}[/red]")
 def _handle_status_cli(args: str, rt) -> bool:
-    """/status 状态一览（CCAR11 Task 3）。
+    """/status 命令：一张表看全当前运行状态（CCAR11 Task 3）。
 
-    Rich Table 展示（每段独立 try，一段挂了不影响其他段）：
-    - 主模型（rt.config model 段）/ aux LLM 有无
-    - goal（objective 前 30 字 + status + iteration）
-    - 当前项目记忆键（rt._statusline_project_key）
-    - MCP 各 server 连接状态（get_mcp_manager 遍历 _clients 的 is_connected）
-    - 工具总数（registry.list_all）
+    背景：排查问题时用户需要一眼看到"用的什么模型、MCP 连没连上"。这张
+    Rich 表逐项展示，每一项单独兜底——某一项读挂了只影响那一行：
+    - 主模型（rt.config 的 model 段）和 aux LLM（辅助小模型）配没配；
+    - goal（目标驱动状态：目标前 30 字 + 状态 + 迭代次数）；
+    - 当前项目的记忆键（rt._statusline_project_key，标识记忆隔离用的项目）；
+    - MCP 各 server 连接状态（逐个看已连接/断开）；
+    - 注册的工具总数。
+
+    参数：
+        args：命令参数（本命令不使用）
+        rt：RuntimeContext（取 config 和 agent 用）
+
+    返回：
+        bool —— True 表示命令已处理
     """
     cfg = getattr(rt, "config", None) or {}
     agent = getattr(rt, "agent", None)
@@ -269,20 +330,30 @@ def _handle_status_cli(args: str, rt) -> bool:
     console.print(table)
     return True
 def _handle_doctor_cli(args: str, rt) -> bool:
-    """/doctor 自诊断 6 项（CCAR11 Task 3，fail-open 每项独立）。
+    """/doctor 命令：给环境做 6 项体检，帮用户定位"为什么跑不起来"。
 
-    1. load_config() 成功
-    2. provider API key env 已设置（config model.api_key_env，默认 DEEPSEEK_API_KEY）
-    3. agent home 可写（tmp 文件写删）
-    4. .mcp.json 可解析（存在才查）
-    5. 关键依赖可 import（rich / httpx / openai）
-    6. sessions / skills 目录可用（自动创建也算 ✓）
+    背景：类似医生问诊，一项项查常见病因，每项独立判定（一项挂不影响
+    其他项继续查），最后给出通过/失败汇总：
+    1. 配置能正常加载（load_config 不抛错）；
+    2. 模型服务商的 API key 环境变量已设置（读 config 的
+       model.api_key_env，默认 DEEPSEEK_API_KEY）；
+    3. agent home 目录（~/.OmniMate）可写（写个临时文件再删掉试试）；
+    4. .mcp.json 能解析成 JSON（只在文件存在时才查）；
+    5. 关键依赖库装齐了没（rich / httpx / openai 逐个 import）；
+    6. sessions / skills 目录可用（顺手自动创建，创建了也算通过）。
+
+    参数：
+        args：命令参数（本命令不使用）
+        rt：RuntimeContext（取 config 和 home 路径用）
+
+    返回：
+        bool —— True 表示命令已处理
     """
     import importlib
 
     cfg = getattr(rt, "config", None) or {}
     home = Path(getattr(rt, "home", None) or get_omnimate_home())
-    results = []  # [(通过?, 标题, 详情)]
+    results = []  # 收集 6 项结果：[(是否通过, 标题, 详情)]
 
     # 1. config 可加载
     try:
@@ -355,11 +426,26 @@ def _handle_doctor_cli(args: str, rt) -> bool:
     )
     return True
 def _show_usage(rt: RuntimeContext):
+    """/usage 命令的展示体：当前会话的迭代预算、历史长度和 token 花销。
+
+    背景：用户想知道"这个会话烧了多少 token、多少钱"。逐块展示（都是
+    有数据才显示，出错只写 debug 日志不炸整个命令）：
+    - 迭代预算剩余（agent 还能跑几轮）和对话历史条数；
+    - LLM token 用量：调用次数、输入/输出/Cache 命中/Cache 写入 tokens；
+    - 按模型分账的用量和成本（usage_tracker 存在时才有）；
+    - 用价表估算的美元成本（pricing.py 没收录该模型则显示未知）。
+
+    参数：
+        rt：RuntimeContext（取 agent、config、session_store、session_id）
+
+    返回：
+        无（直接打印到终端）
+    """
     if rt.agent:
         console.print(f"迭代预算剩余: [bold]{rt.agent.iteration_budget.remaining}[/bold]"
                       f"/{rt.agent.iteration_budget.total}")
         console.print(f"对话历史长度: [bold]{len(rt.agent.conversation_history)}[/bold] 条消息")
-        # batch1-T2: LLM token 用量统计
+        # batch1-T2 加的：LLM token 用量统计
         stats = rt.agent.llm_usage_stats
         if stats["total_calls"] > 0:
             console.print(f"\n[bold]LLM Token 用量：[/bold]")
@@ -373,8 +459,8 @@ def _show_usage(rt: RuntimeContext):
                 hit_rate = stats["total_cache_read_tokens"] / total_in * 100
                 console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
 
-            # R30f-H8：per-model 用量 + 成本（tracker 注入时才有；aux 模型
-            # 与主模型分开计，金额复用 agent/pricing.py 价表）
+            # R30f-H8 加的：按模型分账的用量 + 成本。只在 usage_tracker
+            # 被注入时才有；辅助模型与主模型分开计，金额复用价表算
             tracker = getattr(rt, "usage_tracker", None)
             if tracker is not None:
                 try:
@@ -393,7 +479,7 @@ def _show_usage(rt: RuntimeContext):
                 except Exception as e:
                     logger.debug("per-model 用量展示失败（fail-open）: %s", e)
 
-            # 成本估算（批次 2：A3）
+            # 成本估算（批次 2 的 A3 项）：查价表折算成美元
             try:
                 from agent.pricing import estimate_cost_usd
                 model_cfg = rt.config.get("model", {})
@@ -428,7 +514,18 @@ def _show_usage(rt: RuntimeContext):
         if info:
             console.print(f"当前会话消息数: [bold]{info['message_count']}[/bold]")
 def _show_stats(rt: RuntimeContext):
-    """跨会话聚合统计：会话/消息/工具调用/角色分布 + 当前会话成本。"""
+    """/stats 命令的展示体：跨所有会话的汇总统计。
+
+    背景：单看一个会话不够，用户还想看"我总共聊了多少、哪个工具用得最勤"。
+    从 session_store 聚合出：会话/消息总数、时间跨度、消息角色分布、
+    最长会话 Top 5、工具调用 Top 10（带条形图），最后附当前会话成本估算。
+
+    参数：
+        rt：RuntimeContext（取 session_store、agent、config）
+
+    返回：
+        无（直接打印到终端；session_store 未初始化时提示后返回）
+    """
     if not rt.session_store:
         console.print("[yellow]session_store 未初始化[/yellow]")
         return
@@ -489,7 +586,7 @@ def _show_stats(rt: RuntimeContext):
     else:
         console.print(f"\n[dim]暂无工具调用记录[/dim]")
 
-    # === 当前会话成本（复用 pricing） ===
+    # === 当前会话成本（复用 pricing 价表估算） ===
     if rt.agent:
         agent_stats = rt.agent.llm_usage_stats
         if agent_stats.get("total_calls", 0) > 0:
@@ -513,16 +610,24 @@ def _show_stats(rt: RuntimeContext):
             except Exception as e:
                 logger.debug("stats 成本估算失败: %s", e)
 # ---------------------------------------------------------------------------
-# CCAR10 Task 3: statusline（每轮尾部状态行）
+# CCAR10 Task 3：statusline（每轮 AI 回答结束后在底部打的一行小状态）
 # ---------------------------------------------------------------------------
-# 设计：在每轮 AI 响应完全输出后（不是流式中）console.print 一行 dim。
-# 不用 rich.Live —— Windows + input() 冲突，且 Live 会刷掉滚动历史。
-# fail-open：_render_statusline 任何异常返回 ""，主循环 if line 才打印。
+# 设计取舍：等整轮 AI 响应完全输出完（而不是流式输出过程中）才用暗色打
+# 一行。不用 rich.Live 的原因：Windows 下 Live 和 input() 抢终端会打架，
+# 而且 Live 的"原地刷新"会把滚动历史刷掉。兜底策略：_render_statusline
+# 出任何异常都返回空串，主循环看到非空才打印（fail-open）。
 
 def _format_tokens(n: int) -> str:
-    """token 数格式化。12300 → '12.3K'；1234567 → '1.2M'；0 → '0'。
+    """把 token 数缩写成好读的形式：12300 → '12.3K'；1234567 → '1.2M'；0 → '0'。
 
-    1000 以下直接显示原数，避免 "0.9K" 这种短数过度缩写。
+    背景：statusline 地方小，几万几十万的数字太占宽度。
+
+    参数：
+        n：token 数（容错：传了不能转成 int 的东西就当 0）
+
+    返回：
+        缩写后的字符串。1000 以下直接显示原数——不然 900 会变成 "0.9K"，
+        反而更难读。
     """
     try:
         n = int(n)

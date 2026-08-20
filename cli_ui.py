@@ -1,7 +1,9 @@
-"""CLI 共享 UI 基元（R30 瘦身抽离）。
+"""CLI 的共享输出工具（R30 给 cli.py 瘦身时抽出来的）。
 
-console 必须全 CLI 唯一实例：cli.py 与各 cli_*_cmds 模块都从这里 import，
-保证测试 monkeypatch `cli.console.print` 对所有命令处理函数全局生效。
+为什么单独一个文件：Rich 的 Console（终端美化输出的对象）必须全局只有
+一份。cli.py 和各个 cli_*_cmds 命令模块都从这儿 import 同一个 console，
+这样测试里替换掉 `cli.console.print` 时，所有命令处理函数的输出都会被
+"截获"，测试才好断言。
 """
 
 import logging

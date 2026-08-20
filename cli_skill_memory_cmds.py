@@ -1,6 +1,8 @@
-"""技能/记忆命令簇（R30 从 cli.py 机械抽离，行为不变）。
+"""技能/记忆类命令集（R30 给 cli.py 瘦身时原样搬过来的，行为没变）。
 
-/skills /memory /skill-learning 相关处理函数。
+这里放的是"管理 agent 知识库"的命令处理函数：/skills 看技能列表打分推荐、
+/memory 看和编辑记忆、/skill-learning 管控行为学习管线。被 cli.py 的主
+分发调用，输出统一走 cli_ui 的共享 console。
 """
 import logging
 import os
@@ -19,13 +21,24 @@ logger = logging.getLogger(__name__)
 
 
 def _handle_skill_learning_command(args: str, rt) -> bool:
-    """/skill-learning status|start|stop|evolve|prune（CCAR15 Task 4）。
+    """/skill-learning 命令：管理 skillLearning 行为学习管线（CCAR15 Task 4）。
 
-    status：enabled/observer + instinct 总数 / global 簇数 / 已进化技能数
-    start/stop：翻 runtime config 的 skill_learning.enabled（重启失效；
-                提示走 config_set skill_learning.enabled 持久化）
-    evolve：手动触发簇达标演化（global scope，门槛读 config）
-    prune：清过期低置信 instinct（store.prune）
+    背景：skillLearning 是"agent 从使用中攒经验"的系统——平时观察用户行为
+    存成 instinct（本能条目），攒够一簇相似的就演化成正式技能。这个命令
+    管五个子命令：
+    - status：看开关状态 + instinct 总数 / global 簇数 / 已进化技能数；
+    - start/stop：开/关开关。注意只改内存里的配置，重启就失效；要长期
+      生效得用 config_set skill_learning.enabled 持久化（会提示用户）；
+    - evolve：手动触发一次"簇达标就演化"（只针对 global 范围，门槛值
+      从 config 读）；
+    - prune：清掉过期且置信度低的 instinct。
+
+    参数：
+        args：子命令串（status/start/stop/evolve/prune，空默认 status）
+        rt：RuntimeContext（取 home 路径、config 和 agent 用）
+
+    返回：
+        bool —— True 表示命令已处理
     """
     from agent.skill_learning.store import InstinctStore
 
@@ -37,8 +50,9 @@ def _handle_skill_learning_command(args: str, rt) -> bool:
     if sub in ("start", "stop"):
         enabled = (sub == "start")
         sl_cfg["enabled"] = enabled
-        # rt 与 agent 通常共享同一 config dict（cli initialize 传入）；
-        # 若 agent 持有独立 dict（测试/自定义装配）也同步一份
+        # rt 和 agent 通常是同一份 config dict（cli 初始化时传的就是同一个）；
+        # 但万一 agent 自己拿了一份独立的（测试或自定义装配的场景），
+        # 也要同步改一份，否则开关对 agent 不生效
         agent_cfg = getattr(getattr(rt, "agent", None), "config", None)
         if isinstance(agent_cfg, dict) and agent_cfg is not cfg:
             agent_cfg.setdefault("skill_learning", {})["enabled"] = enabled
@@ -106,7 +120,15 @@ def _handle_skill_learning_command(args: str, rt) -> bool:
     )
     return True
 def _handle_skills_command(rt: RuntimeContext, args: str):
-    """处理 /skills [list|rate|recommend] 子命令。"""
+    """/skills 命令分发器：按第一个词分发给 list / rate / recommend。
+
+    参数：
+        rt：RuntimeContext（传给子处理函数）
+        args：子命令串（空默认 list）
+
+    返回：
+        无
+    """
     parts = args.split(None, 1)
     sub = parts[0].lower() if parts else "list"
     rest = parts[1] if len(parts) > 1 else ""
@@ -125,6 +147,19 @@ def _handle_skills_command(rt: RuntimeContext, args: str):
 
     console.print(f"[yellow]未知子命令：{sub}（用 list / rate / recommend）[/yellow]")
 def _list_skills(rt: RuntimeContext):
+    """/skills list 列表体：用 Rich 表展示所有未归档的技能。
+
+    背景：技能是 agent 的"怎么做"知识（每个技能一个目录 + SKILL.md）。
+    这个表列出每个技能的命令名、描述、使用次数和用户评分；已归档的
+    （state=archived）不显示。
+
+    参数：
+        rt：RuntimeContext（本函数实际只用 skills_dir 的全局函数，
+        参数保持签名一致）
+
+    返回：
+        无（没技能时提示用 skill_manage 工具创建）
+    """
     sd = skills_dir()
     usage = load_usage(sd)
 
@@ -142,7 +177,7 @@ def _list_skills(rt: RuntimeContext):
             continue
         found = True
 
-        # 从 frontmatter 读描述
+        # 描述从 SKILL.md 头部的 frontmatter（--- 包住的元数据块）里读
         desc = ""
         try:
             content = skill_md.read_text(encoding="utf-8")
@@ -165,7 +200,18 @@ def _list_skills(rt: RuntimeContext):
     else:
         console.print("[yellow]暂无技能。用 skill_manage 工具创建。[/yellow]")
 def _rate_skill(rt: RuntimeContext, args: str):
-    """/skills rate <name> <1-5>"""
+    """/skills rate 子命令：给某个技能打 1-5 星的评分。
+
+    背景：用户的评价是最直接的信号（pinned 的技能也免疫自动归档），
+    评分会记进使用统计，参与推荐排序。
+
+    参数：
+        rt：RuntimeContext（保持签名一致）
+        args："<技能名> <1-5>" 形式的参数串
+
+    返回：
+        无（成功/失败都直接打印提示）
+    """
     parts = args.split()
     if len(parts) != 2:
         console.print("[yellow]用法：/skills rate <技能名> <1-5>[/yellow]")
@@ -185,7 +231,17 @@ def _rate_skill(rt: RuntimeContext, args: str):
     else:
         console.print(f"[red]{msg}[/red]")
 def _recommend_skills(rt: RuntimeContext):
-    """/skills recommend — 基于使用次数 + 评分的综合推荐。"""
+    """/skills recommend 子命令：按综合分推荐 Top 5 技能。
+
+    背景：综合分 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1（置顶
+    pinned 的技能额外 +10），帮用户发现值得用/值得信的技能。
+
+    参数：
+        rt：RuntimeContext（保持签名一致，实际数据从使用统计读）
+
+    返回：
+        无（没有可推荐的技能时提示一句）
+    """
     from tools.skill_usage import get_recommendations
 
     recs = get_recommendations(skills_dir(), limit=5)
@@ -221,12 +277,26 @@ def _recommend_skills(rt: RuntimeContext):
         )
     console.print(table)
 def _show_memory(rt: RuntimeContext):
+    """/memory 命令主体：展示记忆条目 + 提供编辑入口。
+
+    背景：记忆分两摊展示——agent 笔记（MEMORY.md 相关，project/reference
+    等类型）和用户画像（USER.md 相关，user/feedback 类型）。看完后弹出
+    小菜单：按 m 编辑 MEMORY.md、按 u 编辑 USER.md，对齐 Claude Code 的
+    /memory 体验。
+
+    参数：
+        rt：RuntimeContext（取 memory_store 用）
+
+    返回：
+        无（记忆系统未启用时提示后返回）
+    """
     if not rt.memory_store:
         console.print("[yellow]记忆系统未启用[/yellow]")
         return
 
-    # 修复（2026-08-17）：原实现访问不存在的 memory_entries/user_entries 属性
-    # （/memory 必崩 AttributeError 的既有 bug）。改用 list_all() 按类型分组。
+    # 历史踩坑（2026-08-17 修复）：原实现访问了根本不存在的
+    # memory_entries/user_entries 属性，/memory 一跑必崩 AttributeError。
+    # 现在改成 list_all() 拿全量再按类型自己分组。
     entries = rt.memory_store.list_all()
     agent_entries = [e for e in entries if e.type not in ("user", "feedback")]
     user_entries = [e for e in entries if e.type in ("user", "feedback")]
@@ -245,7 +315,7 @@ def _show_memory(rt: RuntimeContext):
     if not user_entries:
         console.print("  [dim]（空）[/dim]")
 
-    # 菜单：编辑 MEMORY.md / USER.md（对齐 Claude Code /memory 命令体验）
+    # 菜单：让用户直接打开 MEMORY.md / USER.md 编辑（体验对齐 Claude Code）
     console.print(
         "\n[dim]输入 [cyan]m[/cyan] 编辑 MEMORY.md，[cyan]u[/cyan] 编辑 USER.md，"
         "其他键返回[/dim]"
@@ -258,7 +328,15 @@ def _show_memory(rt: RuntimeContext):
 
 
 def _open_in_editor(path: Path) -> None:
-    """用 $EDITOR（Windows fallback notepad）打开文件。"""
+    """用系统编辑器打开一个文件：优先 $EDITOR 环境变量，Windows 上没设
+    就用记事本，其他系统用 vi。
+
+    参数：
+        path：要打开的文件路径
+
+    返回：
+        无（编辑器是后台拉起的，不等它关；打不开就提示手动路径）
+    """
     import subprocess
     editor = os.environ.get("EDITOR") or ("notepad" if sys.platform == "win32" else "vi")
     try:
@@ -269,9 +347,17 @@ def _open_in_editor(path: Path) -> None:
         console.print(f"[red]打开编辑器失败: {e}[/red]")
         console.print(f"[yellow]手动编辑：{path}[/yellow]")
 def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
-    """`#` 快捷写记忆：弹菜单选类型，直接调 MemoryStore.save。
+    """输入以 `#` 开头时的快捷存记忆：弹菜单选类型，直接存 MemoryStore。
 
-    对齐 Claude Code 的 `#` shortcut 体验。
+    背景：对齐 Claude Code 的 `#` 快捷键体验——用户一句话就能存，不用
+    等模型来调工具。
+
+    参数：
+        rt：RuntimeContext（取 memory_store 用）
+        text：`#` 后面跟的正文（就是要存的内容）
+
+    返回：
+        无（存完/失败都打印提示）
     """
     if not rt.memory_store:
         console.print("[yellow]记忆系统未启用，无法保存[/yellow]")
@@ -291,7 +377,7 @@ def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
         "4": "reference", "5": "other",
     }
     mtype = type_map.get(choice, "other")
-    # name 用前 30 字符（同 topic 同 name 会更新而非新建）
+    # 条目名取前 30 字：同 topic 同名会走"更新"而不是重复新建
     name = text[:30].replace("\n", " ")
     try:
         entry_id = rt.memory_store.save(
