@@ -1,15 +1,21 @@
-"""cron 工具（CCAR12 Task 3）：LLM 可自主创建/列出/删除定时任务。
+"""定时任务（cron）工具：让 AI 能自己创建/查看/删除定时任务。
 
-包装既有 CronScheduler（agent/cron.py），调度本身（后台线程 tick + drain_due
-注入主循环）不变——这里只补上此前缺失的 LLM 操作入口（之前 jobs.json 只能手编）。
+打个比方：这是给 AI 一个「闹钟遥控器」。闹钟本体（CronScheduler，在
+agent/cron.py 里，靠后台线程每秒看一眼到没到点，到点就把提醒塞进主对话）
+早就有了，但以前想设闹钟只能手工编辑 jobs.json 文件——本文件补上了这
+个缺失的操作入口，让 LLM（AI 模型）用工具调用的方式管理闹钟。
 
-接线：scheduler 从 dispatch_kwargs["agent_ref"].cron_scheduler 拿。
-agent/__init__.py 构造时已挂 self.cron_scheduler（cli.py 注入），无需新接线；
-为 None（config cron.enabled=False 或启动失败）时返回 not_configured。
+怎么拿到闹钟本体：工具被调用时，框架会把 agent 实例放在
+dispatch_kwargs["agent_ref"] 里，从它的 cron_scheduler 字段取调度器
+（agent/__init__.py 构造时已挂好，cli.py 注入，这里不用再接线）。
+如果取出来是 None（配置里 cron.enabled=False，或者调度器启动失败），
+工具统一返回 not_configured 错误。
 
-三工具全 isConcurrencySafe=False（写 jobs.json + 影响调度行为，串行），
-且 cron_create/cron_delete 进 ASYNC_AGENT_DISALLOWED_TOOLS（后台子代理不应
-注册/删定时任务——对齐该集合既有注释意图）。
+并发分类（决定工具能不能同时跑）：三个工具都标了
+isConcurrencySafe=False（要写 jobs.json 文件 + 会改变调度行为，
+同时跑会互相踩，必须排队串行）。另外 cron_create/cron_delete 列入了
+ASYNC_AGENT_DISALLOWED_TOOLS（后台子代理——主对话派出去的分身——
+不该偷偷注册或删定时任务）。
 """
 import json
 import logging
@@ -60,8 +66,8 @@ CRON_CREATE_SCHEMA = {
                 ),
             },
         },
-        # template 模式下 cron/message 可省略（取模板值），不再硬性 required；
-        # 全缺时由 handler 兜底校验（invalid_args）。
+        # 用模板时 cron/message 可以不传（从模板取值），所以不写死在 required 里；
+        # 两个都没给时由 handler 里再兜底校验（返回 invalid_args 错误）。
         "required": [],
     },
 }
@@ -92,7 +98,17 @@ CRON_DELETE_SCHEMA = {
 
 
 def _get_scheduler(dispatch_kwargs: dict):
-    """从 dispatch 上下文取 cron_scheduler。拿不到返回 None（不抛）。"""
+    """从工具调用的上下文里把 cron 调度器（闹钟本体）取出来。
+
+    背景：handler 被调用时框架传来的 dispatch_kwargs 里带着 agent 实例，
+    调度器就挂在它的 cron_scheduler 字段上。
+
+    参数：
+    - dispatch_kwargs：框架透传的上下文字典，里面有 "agent_ref"。
+
+    返回：CronScheduler 实例；取不到就返回 None（不抛异常，让调用方
+    自己决定怎么提示用户）。
+    """
     agent_ref = dispatch_kwargs.get("agent_ref")
     if agent_ref is None:
         return None
@@ -100,6 +116,13 @@ def _get_scheduler(dispatch_kwargs: dict):
 
 
 def _not_configured(tool_name: str) -> str:
+    """拼一个「调度器没配置」的标准错误 JSON。
+
+    参数：
+    - tool_name：当前工具名（如 cron_create），放进错误里方便排查。
+
+    返回：JSON 字符串（error_type=not_configured）。
+    """
     return json.dumps(
         {
             "error": "cron 调度器未配置（config cron.enabled=False 或启动失败）",
@@ -111,10 +134,21 @@ def _not_configured(tool_name: str) -> str:
 
 
 def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
-    """创建定时任务。
+    """创建一个定时任务（帮 AI 设闹钟）。
 
-    流程：参数校验 → cron 表达式校验（cron_match 不抛才算合法）→
-    scheduler.add_job → 返回 job_id。
+    流程：先看有没有指定模板（模板里带默认的 cron/消息等值）→
+    校验 cron 表达式合法性（拿 cron_match 试跑一次，不抛异常才算合法）→
+    交给 scheduler.add_job 落盘 → 把 job_id 返回给 AI。
+
+    参数：
+    - args：工具参数，可含 cron（5 字段 cron 表达式）、message（到点要
+      提醒的内容）、catch_up（是否补跑停机期间错过的触发）、recurring
+      （是否循环，false 表示一次性）、template（任务模板名，给了就用
+      模板里的默认值）。
+    - dispatch_kwargs：框架透传的上下文，用来取 agent_ref 再拿调度器。
+
+    返回：JSON 字符串，成功时含 job_id/cron/message；失败时是
+    {"error": ..., "error_type": ...} 格式的错误。
     """
     template_name = str(args.get("template") or "").strip()
     if template_name:
@@ -126,11 +160,12 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
                 "error_type": "invalid_template",
                 "available": sorted(load_task_templates().keys()),
             }, ensure_ascii=False)
-        # 显式参数优先模板值
+        # AI 明确传了的参数压过模板默认值（就高不就低）
         cron = str(args.get("cron") or "").strip() or tpl["cron"]
         message = str(args.get("message") or "").strip() or tpl["message"]
         catch_up = bool(args.get("catch_up", tpl["catch_up"]))
-        # R26 #18 review：模板 recurring 透传（false=一次性），显式参数覆盖模板值
+        # 历史踩坑（R26 #18 复审发现）：以前模板的 recurring 没透传，
+        # 一次性任务会被当循环任务。现在模板值生效，显式参数可覆盖。
         recurring = bool(args.get("recurring", tpl["recurring"]))
     else:
         cron = (args.get("cron") or "").strip()
@@ -143,7 +178,8 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    # 表达式校验：cron_match 非法时抛 ValueError（5 字段/范围/语法）
+    # 先验合法性再入库：cron_match 遇到非法表达式（字段数不对/超出范围/
+    # 语法错误）会抛 ValueError，这里提前拦住
     try:
         cron_match(cron, datetime.now())
     except ValueError as e:
@@ -167,7 +203,8 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
     except ValueError as e:
-        # add_job 的 job_id 冲突等（当前工具层不传 id，防御性兜底）
+        # add_job 自己抛的 ValueError（如 job_id 撞号；当前工具层不传 id，
+        # 纯属防御性兜底，正常走不到这）
         return json.dumps(
             {"error": str(e), "error_type": "invalid_args"},
             ensure_ascii=False,
@@ -181,7 +218,14 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
 
 
 def _handle_cron_list(args: dict, **dispatch_kwargs) -> str:
-    """列出所有定时任务。"""
+    """列出当前所有的定时任务（把闹钟清单念给 AI 听）。
+
+    参数：
+    - args：工具参数（本工具不需要参数）。
+    - dispatch_kwargs：框架透传的上下文，用来取调度器。
+
+    返回：JSON 字符串，含 jobs 列表和 count 总数；出错时是错误 JSON。
+    """
     scheduler = _get_scheduler(dispatch_kwargs)
     if scheduler is None:
         return _not_configured("cron_list")
@@ -199,7 +243,15 @@ def _handle_cron_list(args: dict, **dispatch_kwargs) -> str:
 
 
 def _handle_cron_delete(args: dict, **dispatch_kwargs) -> str:
-    """按 job_id 删除定时任务。"""
+    """按任务 ID 删除一个定时任务（取消闹钟）。
+
+    参数：
+    - args：工具参数，job_id 必填（cron_list 返回里的那个 id）。
+    - dispatch_kwargs：框架透传的上下文，用来取调度器。
+
+    返回：JSON 字符串，成功含 deleted=True；任务不存在时返回
+    not_found 错误。
+    """
     job_id = (args.get("job_id") or "").strip()
     if not job_id:
         return json.dumps(
@@ -232,14 +284,14 @@ def _handle_cron_delete(args: dict, **dispatch_kwargs) -> str:
         )
 
 
-# 模块级注册（import 时自动执行）
+# 模块级注册：本文件被 import 的那一刻就把三个工具登记进中央注册表
 registry.register(
     name="cron_create",
     toolset="core",
     schema=CRON_CREATE_SCHEMA,
     handler=_handle_cron_create,
     emoji="⏰",
-    isConcurrencySafe=False,  # 写 jobs.json + 影响调度行为
+    isConcurrencySafe=False,  # 要写 jobs.json 还会改调度行为，不能并发
 )
 registry.register(
     name="cron_list",
@@ -247,7 +299,7 @@ registry.register(
     schema=CRON_LIST_SCHEMA,
     handler=_handle_cron_list,
     emoji="⏰",
-    isConcurrencySafe=False,  # 按 brief 归 UNSAFE（与 create/delete 同组管理）
+    isConcurrencySafe=False,  # 按需求归为不安全（跟 create/delete 一组管理）
 )
 registry.register(
     name="cron_delete",
@@ -255,5 +307,5 @@ registry.register(
     schema=CRON_DELETE_SCHEMA,
     handler=_handle_cron_delete,
     emoji="⏰",
-    isConcurrencySafe=False,  # 写 jobs.json + 影响调度行为
+    isConcurrencySafe=False,  # 要写 jobs.json 还会改调度行为，不能并发
 )

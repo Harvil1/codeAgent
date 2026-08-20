@@ -1,9 +1,11 @@
-"""把 MCP server 的工具注册到 OmniMate 的 registry。
+"""把 MCP server（外挂工具服务）的工具登记进 OmniMate 的工具注册表。
 
-启动时调用 register_mcp_tools()，把所有连接的 MCP server 的工具
-以 mcp__<server>__<tool> 前缀注册到 registry，让 LLM 能调用。
+背景：MCP 是接外部工具的标准协议。程序启动时会调 register_mcp_tools()，
+把所有已连接的 MCP server 提供的工具按 mcp__<server>__<tool> 的命名
+登记到 registry（中央工具注册表），LLM 就能像调内置工具一样调用它们。
 
-check_fn：只在 MCP server 连接时才暴露工具（动态门控）。
+check_fn（运行时门控函数）负责动态可见性：只有对应 server 还连着，
+工具才出现在 LLM 面前；server 一断开就自动隐藏。
 """
 
 import json
@@ -18,9 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 def _make_server_check(mgr: MCPManager, sname: str):
-    """构造 per-server 连接门控 check_fn（闭包捕获 manager + server 名）。
+    """造一个"这个 server 还连着吗"的检查函数（闭包记住 manager 和 server 名）。
 
-    对应 server 的 client 存在且 connected 时才暴露工具（server 断开自动隐藏）。
+    背景：registry 的 check_fn 机制用它在运行时决定工具显不显——
+    对应 server 的 client 存在且已连接才返回 True（server 断开时工具自动隐藏）。
     """
     def check():
         with mgr._lock:
@@ -30,10 +33,17 @@ def _make_server_check(mgr: MCPManager, sname: str):
 
 
 def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
-    """把 MCP server 的工具注册到 registry。
+    """把 MCP server 的工具批量登记进 registry。
 
-    servers=None 注册全部；否则只注册指定 server 列表（R24 #38 内联临时
-    server 用——只暴露 agent 声明的那些）。返回注册的工具数量。
+    背景：启动时全量登记；但 R24 #38 的内联临时 server 只需要暴露
+    agent 声明的那几个，所以加了 servers 过滤参数。
+
+    参数：
+        manager: MCP 管理器（None 时自动取全局单例）
+        servers: 只登记这些名字的 server（None = 全部登记）
+
+    返回：
+        成功登记的工具数量
     """
     if manager is None:
         manager = get_mcp_manager()
@@ -61,14 +71,14 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
             },
         }
 
-        # 闭包捕获 manager 和 full_name
+        # 闭包包住 manager 和 full_name（防循环变量晚绑定串号）
         def make_handler(mgr, fname):
             def handler(args: dict, **kwargs) -> str:
                 result = mgr.call(fname, args or {})
                 return json.dumps(result, ensure_ascii=False)
             return handler
 
-        # check_fn：对应 server 连接时才暴露
+        # check_fn 门控：对应 server 连着才暴露
         try:
             registry.register(
                 name=full_name,
@@ -77,16 +87,17 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
                 handler=make_handler(manager, full_name),
                 check_fn=_make_server_check(manager, server_name),
                 emoji="🔌",
-                # MCP 工具保守标 False：不知道具体副作用（可能是写文件/发请求），
-                # 安全默认 > 事后补救，让它们走串行路径
+                # MCP 工具一律保守标 False：外部工具的副作用我们看不见
+                # （可能写文件、发网络请求），安全默认 > 事后补救，
+                # 让它们排队串行执行
                 isConcurrencySafe=False,
             )
             count += 1
         except Exception as e:
             logger.warning("注册 MCP 工具 %s 失败: %s", full_name, e)
 
-    # CCAR12 Task 5：每个连接中的 server 额外注册 resources 协议工具
-    # （命名对齐 mcp__<server>__<tool> 动态模式，check_fn 同款 per-server 门控）
+    # CCAR12 Task 5：给每个连着的 server 追加 resources（资源清单）协议工具，
+    # 命名对齐 mcp__<server>__<tool> 动态模式，check_fn 用同款 per-server 门控
     count += _register_resource_tools(manager)
 
     if count:
@@ -95,14 +106,21 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
 
 
 def _register_resource_tools(manager: MCPManager) -> int:
-    """为每个连接中的 MCP server 注册 list/read resources 两工具。
+    """给每个连着的 MCP server 配上"列资源/读资源"两个工具。
 
-    注册名：mcp__<server>__list_resources / mcp__<server>__read_resource，
-    走 registry 的 mcp__ 动态命名空间（model_tools 自动发现 + catalog 精简条目
-    + mcp_server_filter 过滤都天然生效，不发明新机制）。
+    背景：MCP server 除了工具还能提供 resources（静态资源，比如一份文档）。
+    注册名是 mcp__<server>__list_resources / mcp__<server>__read_resource，
+    走 registry 现成的 mcp__ 动态命名空间——model_tools 自动发现、
+    catalog 精简条目、mcp_server_filter 过滤全都天然生效，不用发明新机制。
 
-    server 不支持 resources 协议时工具仍注册（调用时返回友好错误，
-    而不是启动时探测一次就永久隐藏——能力探测留 follow-up）。
+    注意：server 不支持 resources 协议时工具照样注册（调用时会返回
+    友好错误），而不是启动时探测一次就永久藏起来——能力探测留作 follow-up。
+
+    参数：
+        manager: MCP 管理器
+
+    返回：
+        成功登记的工具数量
     """
     with manager._lock:
         clients = {
@@ -129,7 +147,7 @@ def _register_resource_tools(manager: MCPManager) -> int:
                 return json.dumps(result, ensure_ascii=False)
             return handler
 
-        # ---- mcp__<server>__read_resource（uri 参数）----
+        # ---- mcp__<server>__read_resource（按 uri 读）----
         read_schema = {
             "name": f"mcp__{server_name}__read_resource",
             "description": (
@@ -155,7 +173,7 @@ def _register_resource_tools(manager: MCPManager) -> int:
                 return json.dumps(result, ensure_ascii=False)
             return handler
 
-        # check_fn 复用现有 per-server 门控
+        # check_fn 直接复用现有的 per-server 门控
         for name, schema, handler in (
             (list_schema["name"], list_schema, make_list_handler(manager, server_name)),
             (read_schema["name"], read_schema, make_read_handler(manager, server_name)),
@@ -168,8 +186,8 @@ def _register_resource_tools(manager: MCPManager) -> int:
                     handler=handler,
                     check_fn=_make_server_check(manager, server_name),
                     emoji="🔌",
-                    # resources 读取理论上只读，但走外部进程/网络，
-                    # 与其他 MCP 工具一致保守标 False（串行）
+                    # 读资源理论上只读，但毕竟走外部进程/网络，
+                    # 跟其他 MCP 工具一致保守标 False（串行）
                     isConcurrencySafe=False,
                 )
                 registered += 1
@@ -180,18 +198,24 @@ def _register_resource_tools(manager: MCPManager) -> int:
 
 
 def initialize_mcp(approval_callback=None) -> int:
-    """启动时调用：加载配置、连接 server、注册工具。
+    """启动时的总入口：加载配置 → 连接 server → 登记工具。
 
-    approval_callback: fn(name, desc) -> bool。项目级 .mcp.json 的 server
-    首次连接前必须获批（R25 #3，对齐 CC mcpServerApproval）；未批准/无
-    callback → fail-closed 跳过。用户级 ~/.OmniMate/.mcp.json 是用户直接
-    编辑的，不需要审批。
+    背景：审批只针对"项目级"配置——用户级 ~/.OmniMate/.mcp.json 是用户
+    自己手写的，天然可信；但项目里的 .mcp.json 可能是 clone 陌生仓库
+    带进来的，所以每个 server 第一次连接前必须先过审批（R25 #3，
+    对齐 Claude Code 的 mcpServerApproval）。没批准、或者压根没有
+    approval_callback（非交互场景）→ fail-closed 直接跳过不连。
 
-    返回注册的工具数量。
+    参数：
+        approval_callback: 审批函数 fn(name, desc) -> bool，
+            返回 True 表示用户同意连接这个 server；None 表示没人可问
+
+    返回：
+        登记的工具数量（初始化失败返回 0）
     """
     manager = get_mcp_manager()
     try:
-        # 用户级（受用户直接控制）
+        # 用户级配置（用户直接控制，直接连）
         manager.connect_all()
 
         # R25 #3：项目级 .mcp.json 首连审批
@@ -201,7 +225,7 @@ def initialize_mcp(approval_callback=None) -> int:
         proj_path, proj_servers = load_project_mcp_config()
         user_cfg = load_mcp_config()
         if proj_path and proj_servers:
-            # 路径小写归一（Windows 盘符大小写不敏感）
+            # 路径转小写归一（Windows 盘符大小写不敏感，避免同路径判成两个项目）
             proj_key = str(proj_path.parent.resolve()).lower()
             approved_now: Dict[str, dict] = {}
             for name, cfg in proj_servers.items():
@@ -233,8 +257,8 @@ def initialize_mcp(approval_callback=None) -> int:
             if approved_now:
                 manager.connect_all(approved_now)
 
-        # R29 #2：项目级 agent .md 的内联 MCP server 同款首连审批
-        # （威胁模型与项目 .mcp.json 相同：clone 陌生 repo 带入）
+        # R29 #2：项目级 agent .md 里内联声明的 MCP server 走同款首连审批
+        # （威胁模型跟项目 .mcp.json 一样：clone 陌生 repo 可能带进恶意配置）
         try:
             from agent.agent_defs import project_inline_mcp_servers
             inline_servers = project_inline_mcp_servers()
@@ -242,8 +266,9 @@ def initialize_mcp(approval_callback=None) -> int:
             inline_servers = {}
         if inline_servers:
             from agent.settings import mcp_approval_key
-            # proj_key 统一用 workspace cwd resolve lower（项目可能只有
-            # agent 内联没有 .mcp.json——与 delegate spawn 校验处必须同源）
+            # proj_key 统一取 workspace cwd resolve 后转小写——项目可能只有
+            # agent 内联而没有 .mcp.json，这里必须跟 delegate spawn 校验处
+            # 同源，否则两边算出不同的 key 会对不上
             from agent.workspace_context import get_workspace_cwd
             try:
                 inline_proj_key = str(Path(get_workspace_cwd()).resolve()).lower()
@@ -274,7 +299,7 @@ def initialize_mcp(approval_callback=None) -> int:
                         continue
                     persist_project_mcp_approval(key)
                 inline_approved[name] = cfg
-            # 内联 server 不在此连接（spawn 时临时连）——审批只管放行名单
+            # 内联 server 不在这里连接（等 spawn 时临时连）——审批只管放行名单
             if inline_approved:
                 logger.info("项目 agent 内联 MCP 已批准: %s", sorted(inline_approved))
         return register_mcp_tools(manager)

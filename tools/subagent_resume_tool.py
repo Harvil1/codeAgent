@@ -1,20 +1,24 @@
-"""subagent_resume 工具：恢复中断的子代理继续干（CCAR10 Task 4，补 CCAR5-I Phase 2）。
+"""subagent_resume 工具：让中断的子代理（主对话派出去帮忙干活的分身）从断点继续干活。
 
-CCAR5-I 把子代理对话落盘（~/.OmniMate/.agent-sessions/<agent_id>.jsonl），
-但只做了持久化半边；本 task 补恢复入口：
-- load_transcript 读历史消息
-- 用 initial_messages 重启 AIAgent 子代理（继承父深度+1、minimal 工具集、关闭摘要）
-- 续写同一 transcript 文件（append_message 复用同一 agent_id）
-- 完成后 mark_completed
+背景：CCAR5-I 那一轮已经把子代理的对话记录写到磁盘
+（~/.OmniMate/.agent-sessions/<agent_id>.jsonl），但只做了"存"这一半；
+CCAR10 Task 4 补上"取"的入口，整体流程是：
+- load_transcript 把历史消息读回来
+- 用 initial_messages 重新启动一个 AIAgent 子代理
+  （深度 = 父深度+1、只给 minimal 最小工具集、关掉摘要压缩）
+- 继续往同一个 transcript 文件追加记录（append_message 复用同一 agent_id）
+- 跑完后 mark_completed 标记完成
 
-恢复的是"对话历史"（role/content 消息），不是内部内存状态——
-内存重建代价过高且 transcript 已经够用。
+注意：恢复的只是"对话历史"（一条条 role/content 消息），不是内存里的
+运行时状态——重建内存代价太高，对话记录已经够用了。
 
-设计要点：
-- **handler 签名 (args, **dispatch_kwargs)**（CCAR8 教训防 silent-dead-code）
-- **fail-open**：load/append/mark 失败一律不崩，返错误 JSON
-- **重资源串行**：spawn AIAgent 重启，isConcurrencySafe=False
-- **接缝 _spawn_resumed_agent**：生产真跑子代理，测试 patch 隔离
+设计要点（历史踩坑，别丢）：
+- **handler 签名必须是 (args, **dispatch_kwargs)**——CCAR8 踩过坑：
+  签名不符时 dispatch 静默不调用，代码成了摆设（silent-dead-code）
+- **fail-open**：读文件/追加/标记完成任何一步失败都不崩，返回错误 JSON
+- **重资源要串行**：要重启一个 AIAgent，所以 isConcurrencySafe=False
+- **留了 _spawn_resumed_agent 这个接缝**：生产代码跑真子代理，测试时
+  patch 掉它做隔离
 """
 import json
 import logging
@@ -26,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 接缝：构造子代理跑续命任务（被测试 patch 隔离）
+# 接缝：真正构造子代理跑续命任务的地方（测试会 patch 掉它来隔离）
 # ---------------------------------------------------------------------------
 
 def _spawn_resumed_agent(
@@ -42,33 +46,38 @@ def _spawn_resumed_agent(
     config: Optional[dict] = None,
     memory_store=None,
 ) -> str:
-    """构造子代理跑续命任务。被测试 patch 的接缝。
+    """构造一个子代理，把续命任务跑完，返回最终回答。专门留的测试接缝。
 
-    生产实现：参考 tools/delegate_tool.py:_run_child 的子代理构造模式——
-    - spawn_depth+1（从 agent_ref 取父深度，防递归）
-    - minimal 工具集（对齐 leaf 子代理，避免乱 spawn）
-    - summary_only 关闭（resume 要完整结果，不要 300 字摘要）
-    - 同步执行（asyncio.run 驱动 child.chat）
-    - memory_store 透传（Task 5 follow-up：让续跑子代理复用父记忆库）
+    背景：生产实现参考 tools/delegate_tool.py:_run_child 的子代理构造套路——
+    - spawn_depth+1（从 agent_ref 拿父深度再 +1，防止子代理套子代理无限递归）
+    - 只给 minimal 最小工具集（跟 leaf 叶子子代理对齐，免得它乱派活）
+    - 关掉 summary_only（resume 要的是完整结果，不是 300 字摘要）
+    - 同步执行（用 asyncio.run 驱动 child.chat 这个 async 方法）
+    - memory_store 透传（Task 5 follow-up：历史踩坑——漏传的话续跑子代理
+      用不上父对话的记忆库，等于失忆）
 
-    Args:
-        messages: 续跑历史（load_transcript 读出的 + 末尾追加的 user 指令）
-        instruction: 本次续命指令
-        agent_ref: 父 AIAgent 引用（取 spawn_depth + LLM 配置 fallback）
-        base_url/api_key/auth_token/model/model_format: LLM 配置透传
-        config: 配置 dict（参考 _run_child 的 LLM 配置 fallback 链）
-        memory_store: 父记忆库（可选，None 则 child 自建默认 store）
+    参数：
+        messages: 续跑用的历史消息（load_transcript 读出并清洗过的）
+        instruction: 这次让它继续干活的指令
+        agent_ref: 父 AIAgent 的引用（用来取 spawn_depth 和 LLM 配置兜底）
+        base_url: LLM 服务地址，能传就透传
+        api_key: LLM 的 API key，能传就透传
+        auth_token: LLM 的认证 token，能传就透传
+        model: 模型名，能传就透传
+        model_format: 模型消息格式，能传就透传
+        config: 配置 dict（LLM 配置兜底链会用到，参考 _run_child）
+        memory_store: 父对话的记忆库（可选；None 时子代理自己建默认的）
 
-    Returns:
-        子代理最终响应文本
+    返回：
+        子代理的最终响应文本
     """
     from agent import AIAgent
 
-    # spawn_depth：父+1（防递归），fail-open 取不到就用 1
+    # spawn_depth 取父深度 +1（防递归）；万一取不到就保守用 1
     parent_depth = getattr(agent_ref, "spawn_depth", 0) if agent_ref else 0
     child_spawn_depth = parent_depth + 1
 
-    # LLM 配置：透传优先，其次从 config 取（对齐 _run_child fallback 链）
+    # LLM 配置的取值顺序：显式传参优先，缺了再从 config 兜底（跟 _run_child 同款链）
     if not (api_key or auth_token) or not model:
         try:
             from config import load_config
@@ -86,7 +95,7 @@ def _spawn_resumed_agent(
         except Exception as e:
             raise RuntimeError(f"subagent_resume 无法获取 LLM 配置: {e}")
 
-    # system_prompt：明确告诉子代理这是续命场景，要参考前面的历史
+    # system prompt 明说这是续命场景，让它参考前面的历史接着干，别重来一遍
     system_prompt = (
         "你是一个子代理，正在恢复执行之前未完成的任务。\n"
         "下面对话历史是你上次的工作记录，请基于它继续完成用户的新指令。\n"
@@ -108,51 +117,49 @@ def _spawn_resumed_agent(
         spawn_depth=child_spawn_depth,
         permission_mode="default",
         config=config,
-        memory_store=memory_store,  # Task 5 follow-up：透传父记忆库
-        initial_messages=messages,  # 复用 CCAR5 的 initial_messages 机制
-        on_response=None,  # resume 不再递归落盘（主入口已 append）
+        memory_store=memory_store,  # 历史踩坑（Task 5 修复）：必须透传父记忆库
+        initial_messages=messages,  # 复用 CCAR5 的 initial_messages 机制带入历史
+        on_response=None,  # resume 不再递归落盘（主入口已经统一 append 了）
     )
 
-    # 同步跑（asyncio.run 驱动 async chat，跟 _run_child 同款桥接）
+    # 同步跑（asyncio.run 桥接 async chat，跟 _run_child 同款）
     import asyncio
-    # 最后一条是续命指令（_run_resume 追加的 user 消息），
-    # 用空 prompt 让 child 基于已有 history 继续跑
-    # —— 但 AIAgent.chat(first_msg) 是发起对话，需要给一条触发消息
-    # 这里用 instruction 触发（initial_messages 已含历史，这条 user 是新指令）
-    # 注意：initial_messages 末尾已经是 {"role":"user","content":instruction}，
-    # 所以 first_msg 给个最小确认即可（避免双重 user 消息）。
-    # 实际上 AIAgent.chat 会把 first_msg 作为新 user turn 追加，所以
-    # _run_resume 构造 messages 时不带末尾 instruction，由 chat 追加。
+    # 交接说明：AIAgent.chat(first_msg) 是"发起对话"，会把 first_msg 作为
+    # 新的 user 轮追加到 initial_messages 后面。所以 _run_resume 构造
+    # messages 时故意不带末尾的 instruction，由 chat 追加，避免出现
+    # 两条重复的 user 消息。
     result = asyncio.run(child.chat(instruction))
     return result
 
 
 # ---------------------------------------------------------------------------
-# 恢复入口（工具 + CLI 共用）
+# 恢复入口（工具 handler 和 Task 5 CLI 共用）
 # ---------------------------------------------------------------------------
 
 def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
-    """恢复入口（工具 handler 和 Task 5 CLI 共用）。
+    """恢复一个中断的子代理：读历史 → 起子代理续跑 → 续写记录 → 标记完成。
 
-    流程：
-    1. load_transcript(agent_id) → 历史消息
-    2. 构造续跑 messages = 历史 + 末尾 user 指令
-    3. _spawn_resumed_agent(messages, instruction) → 子代理跑完
-    4. transcript 续写（append_message 用同一 agent_id）
-    5. mark_completed
+    背景：这是工具 handler 和 Task 5 CLI 共用的入口，逻辑集中在一处免得
+    两边跑偏。流程：
+    1. load_transcript(agent_id) 读出历史消息
+    2. 组装续跑用的 messages = 历史 + 末尾的 user 指令
+    3. _spawn_resumed_agent 起子代理跑完
+    4. 继续写 transcript（append_message 用同一 agent_id）
+    5. mark_completed 标记完成
 
-    Args:
+    参数：
         agent_id: 要恢复的子代理 ID
-        instruction: 续跑指令
-        **dispatch_kwargs: 工具 dispatch 透传的上下文（agent_ref / config 等）
+        instruction: 这次续跑的指令
+        **dispatch_kwargs: 工具 dispatch 透传进来的上下文
+            （agent_ref / config / memory_store 等）
 
-    Returns:
-        JSON 字符串：{"agent_id": ..., "result": ...} 或
-        {"error": ..., "error_type": ...}
+    返回：
+        JSON 字符串：成功是 {"agent_id": ..., "result": ...}，
+        失败是 {"error": ..., "error_type": ...}
     """
     from agent import subagent_persistence as sp
 
-    # ① 加载 transcript（fail-open：异常/空都返错误 JSON）
+    # ① 读 transcript（fail-open：异常或空都返回错误 JSON，不崩）
     try:
         messages = sp.load_transcript(agent_id)
     except Exception as e:
@@ -172,7 +179,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    # ② 过滤掉 _ts 等内部字段（只保留 role + content + tool_calls 等对话语义字段）
+    # ② 把 _ts 这类内部记账字段滤掉，只留 role/content/tool_calls 等对话语义字段
     clean_msgs = []
     for m in messages:
         clean = {k: v for k, v in m.items()
@@ -188,12 +195,11 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    # ③ 续跑：把续命指令作为最后 user 消息追加到 initial_messages
-    # _spawn_resumed_agent → AIAgent.chat(instruction) 会把它作为 first turn 发出，
-    # 所以这里不在 initial_messages 里重复——_spawn_resumed_agent 内部用 chat(instruction)
-    # 触发对话，initial_messages 是"之前的历史"
-    # ④ 调 _spawn_resumed_agent（接缝，可能被测试 patch）
-    # Task 5 follow-up：从 agent_ref 取 memory_store 透传给续跑子代理（复用父记忆库）
+    # ③④ 起子代理续跑（接缝函数，测试可能 patch 掉）。
+    # instruction 不塞进 initial_messages：_spawn_resumed_agent 内部用
+    # chat(instruction) 触发对话，它会作为新 user 轮追加，塞了会重复。
+    # Task 5 follow-up（历史踩坑）：从 agent_ref 拿 memory_store 透传，
+    # 让续跑子代理复用父记忆库
     _agent_ref = dispatch_kwargs.get("agent_ref")
     _memory_store = dispatch_kwargs.get("memory_store")
     if _memory_store is None and _agent_ref is not None:
@@ -220,7 +226,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    # ⑤ transcript 续写（指令 + 结果），同一 agent_id 的 jsonl
+    # ⑤ 续写 transcript：这次的指令 + 结果，写进同一 agent_id 的 jsonl
     try:
         import time
         sp.append_message(agent_id, {
@@ -239,7 +245,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
             agent_id, e,
         )
 
-    # ⑥ mark_completed
+    # ⑥ 标记完成
     try:
         sp.mark_completed(agent_id, "completed")
     except Exception as e:
@@ -259,13 +265,12 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
 # ---------------------------------------------------------------------------
 
 def _handle_subagent_resume(args: dict, **dispatch_kwargs) -> str:
-    """工具 handler：恢复中断的子代理。
+    """工具 handler：LLM 调 subagent_resume 时进这里，校验参数后转 _run_resume。
 
-    Handler 签名严格遵循 dispatch 契约（CCAR8 教训）：
-    (args: dict, **dispatch_kwargs) → JSON 字符串
-
-    Args 通过 args 取（LLM 传入的字段），命名上下文（agent_ref / config 等）
-    通过 dispatch_kwargs 取。
+    背景：handler 签名必须严格是 (args: dict, **dispatch_kwargs) → JSON 字符串
+    （CCAR8 踩坑：签名不符时 dispatch 静默不调用，代码等于白写）。
+    LLM 传的字段从 args 取，命名上下文（agent_ref / config 等）从
+    dispatch_kwargs 取。
     """
     agent_id = (args.get("agent_id") or "").strip()
     if not agent_id:
@@ -326,5 +331,5 @@ registry.register(
     handler=_handle_subagent_resume,
     toolset="core",
     emoji="🔄",
-    isConcurrencySafe=False,  # 重资源：spawn AIAgent 重启，必须串行
+    isConcurrencySafe=False,  # 重资源（要重启一个 AIAgent），必须串行跑
 )

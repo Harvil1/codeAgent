@@ -1,6 +1,10 @@
-"""session_search 工具：让 agent 搜索过去的对话。
+"""会话搜索（session_search）工具：让 AI 反查以前聊过的天。
 
-通过 kwargs 接收 session_store（由 agent 在 dispatch 时注入）。
+打个比方：这是 AI 的「聊天记录搜索框」。用户说「我们上次讨论过 X」时，
+AI 不用装糊涂，用这个工具在历史会话库里搜关键词，把当时的上下文捞回来。
+
+依赖：搜索靠 session_store（会话存储库）完成，它由 agent 在分发工具时
+通过 kwargs 注入进来，本文件不自己创建。
 """
 
 import json
@@ -35,6 +39,20 @@ SESSION_SEARCH_SCHEMA = {
 
 
 def _handle_session_search(args: dict, **kwargs) -> str:
+    """在历史会话里按关键词搜聊天记录。
+
+    背景：AI 的对话上下文每次重开就清零，但用户可能记得以前聊过的内容；
+    这个工具把存在磁盘上的历史会话搜出来，避免用户重复交代。
+
+    参数：
+    - args：工具参数，query 必填（搜索关键词），limit 可选（最多返回
+      几条结果，默认 10）。
+    - kwargs：框架透传的上下文，取 session_store（会话存储库，真正
+      执行搜索；没注入则报「会话存储未初始化」）。
+
+    返回：JSON 字符串，含 results 列表（每条带会话标题/角色/时间/
+    内容片段/会话 ID）和 total 总数；没搜到时返回空列表加提示消息。
+    """
     query = (args.get("query") or "").strip()
     limit = args.get("limit", 10)
 
@@ -53,7 +71,7 @@ def _handle_session_search(args: dict, **kwargs) -> str:
             "message": "未找到匹配的对话",
         }, ensure_ascii=False)
 
-    # 格式化结果给 LLM
+    # 挑 AI 需要的字段重新组一遍（原始记录里还有别的字段，不全部塞回去）
     formatted = []
     for r in results:
         formatted.append({
@@ -70,11 +88,12 @@ def _handle_session_search(args: dict, **kwargs) -> str:
     }, ensure_ascii=False)
 
 
+# 模块级注册：import 本文件即自动登记进中央注册表
 registry.register(
     name="session_search",
     toolset="core",
     schema=SESSION_SEARCH_SCHEMA,
     handler=_handle_session_search,
     emoji="🔍",
-    isConcurrencySafe=True,  # 只读：搜历史对话（FTS 查询），无副作用，可并发
+    isConcurrencySafe=True,  # 只读：搜历史对话（全文检索查询），无副作用，可并发
 )
