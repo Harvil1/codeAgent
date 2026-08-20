@@ -1,7 +1,10 @@
-"""brief 工具：让 LLM 输出结构化简报。
+"""「简报」工具：让 AI 用固定格式说一句"我接下来要干啥"。
 
-与 Plan Mode 互补：Plan 详细，Brief 一句话总结"我接下来要干啥"。
-LLM 在重要操作前调用 brief 给用户预览。
+背景：和计划模式（Plan Mode）是一对——Plan 是详细方案，Brief 是
+一句话预告。模型在干重要事情之前调它，给用户一个快速预览，
+不用读长方案也知道要发生什么。
+
+本文件属于工具层（tools/），被 tools/registry.py 自动发现注册。
 """
 import json
 
@@ -45,11 +48,19 @@ BRIEF_SCHEMA = {
 
 
 def _handle_brief(args: dict, **kwargs) -> str:
-    """直接 echo args（格式化）——这是个输出格式约定工具。
+    """把模型给的简报字段原样整理成 JSON 回显——一个"定格式"工具，不干活。
 
-    签名对齐 registry.dispatch 契约：dispatch(args, **dispatch_kwargs)。
-    dispatch_kwargs 是命名上下文（memory_store / agent_ref 等），不是工具参数。
-    工具参数（headline / steps / risks / audience）从 args 取。
+    背景：这个工具的价值不在计算，而在于逼模型按统一字段
+    （标题/步骤/风险/受众）输出，界面侧就能稳定解析展示。
+
+    参数：
+    - args：工具参数字典。headline 是一句话标题；steps 是接下来的
+      关键步骤列表；risks 是已知风险列表；audience 区分给用户看
+      还是给审批流看。
+    - kwargs：运行时注入的命名上下文（本工具用不到，占位满足统一签名——
+      所有 handler 都必须是 (args, **kwargs) 形状，否则分发器叫不动它）。
+
+    返回：JSON 字符串，即整理后的简报内容。
     """
     return json.dumps(
         {
@@ -62,12 +73,12 @@ def _handle_brief(args: dict, **kwargs) -> str:
     )
 
 
-# 模块顶部注册（import 即生效）
+# import 本模块时顺手把工具登记进中央注册表（项目惯例：工具文件顶层自注册）
 registry.register(
     name="brief",
     schema=BRIEF_SCHEMA,
     handler=_handle_brief,
     toolset="core",
     emoji="📋",
-    isConcurrencySafe=True,  # CCAR8 fix: 纯 echo 无副作用，可并发
+    isConcurrencySafe=True,  # 纯回显没副作用（CCAR8 修复时定的分类），随便并发
 )

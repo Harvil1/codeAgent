@@ -1,14 +1,17 @@
-"""web_search 工具：网络搜索（Tavily API）。
+"""网络搜索工具：替模型上网查资料（背后调 Tavily 搜索服务的接口）。
 
-对齐 Claude Code WebSearch：返回结构化结果（标题/URL/摘要）。
-未配置 TAVILY_API_KEY 时工具自动隐藏（check_fn 返回 False）。
+做法对齐 Claude Code 的 WebSearch：返回结构化结果——每条含标题、网址、摘要。
+没配置 TAVILY_API_KEY 环境变量时，这个工具会自动"隐身"（check_fn 返回 False，
+模型根本看不到它，也就不会白调用然后报错）。
 """
 
 import json
 import logging
 import os
 
-import requests  # 顶层导入：测试需 patch tools.web_search_tool.requests.post
+# requests 必须在文件顶部导入而不能在函数里：测试要用
+# patch tools.web_search_tool.requests.post 来替换它，函数内导入会 patch 不中
+import requests
 
 from tools.registry import registry
 
@@ -18,7 +21,13 @@ TAVILY_URL = "https://api.tavily.com/search"
 
 
 def _check_tavily_configured() -> bool:
-    """check_fn：有 TAVILY_API_KEY 才暴露工具。"""
+    """开关函数（check_fn）：配置了 TAVILY_API_KEY 才把这个工具亮给模型看。
+
+    背景：注册表支持"登记了但不一定可见"——每次暴露工具列表前会调这个函数
+    决定显隐。没配 API key 时搜索必然失败，不如直接藏起来。
+
+    返回：True 表示已配置（显示工具），False 表示没配置（隐藏）。
+    """
     return bool(os.environ.get("TAVILY_API_KEY"))
 
 
@@ -46,6 +55,21 @@ WEB_SEARCH_SCHEMA = {
 
 
 def _handle_web_search(args: dict, **kwargs) -> str:
+    """上网搜索关键词，返回一组结构化结果（标题/网址/摘要）。
+
+    流程：校验关键词和 API key → 把搜索条数夹在 1~10 → 调 Tavily 接口 →
+    把结果挑拣成统一格式返回。
+
+    参数：
+        args：工具参数字典，来自模型——query（搜索关键词）、
+            max_results（要几条结果）、search_depth（basic 快而浅 /
+            advanced 慢而深）。
+        **kwargs：分发器注入的运行上下文（本函数未用到，签名保持
+            工具统一契约）。
+
+    返回：JSON 字符串，成功含 query / results（每条有 title、url、content）/
+        answer（Tavily 顺带给的总答案）；失败是 {"error": ..., "error_type": ...}。
+    """
     query = (args.get("query") or "").strip()
     if not query:
         return json.dumps({"error": "query 不能为空"}, ensure_ascii=False)
@@ -100,6 +124,7 @@ def _handle_web_search(args: dict, **kwargs) -> str:
     )
 
 
+# 模块级注册：这个文件一被 import 就自动登记进中央注册表
 registry.register(
     name="web_search",
     toolset="core",
@@ -107,5 +132,5 @@ registry.register(
     handler=_handle_web_search,
     check_fn=_check_tavily_configured,
     emoji="🔍",
-    isConcurrencySafe=False,  # 外部调用：调 Tavily API（消耗配额 + 耗时），串行更稳
+    isConcurrencySafe=False,  # 要调外部 Tavily 接口（费调用配额、耗时长），串行更稳
 )

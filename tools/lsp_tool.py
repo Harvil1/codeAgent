@@ -1,34 +1,43 @@
-"""LSP 工具：跳转定义 / 查引用（R26 #17）。
+"""「代码导航」工具：跳转到定义 / 查所有引用（R26 #17）。
 
-比 grep 准的地方：能分清重名（只返回真正的符号定义/引用点）。
-实现：subprocess 起 pylsp --stdio（shutil.which 探测，没装自动隐藏——
-check_fn 门控），JSON-RPC over stdin/stdout，单实例复用。
+背景：查"这个函数在哪定义、谁在用它"，用文本搜索（grep）会被重名坑
+（两个不同类都有 run 方法）。LSP（Language Server Protocol，代码编辑器
+背后那套"懂语法"的服务）能分清重名，只返回真正的定义点/引用点。
 
-窄腰裁决：核心工具 + check_fn 门控（pylsp 不进项目依赖，用户可选装
-`pipx install python-lsp-server`）。isConcurrencySafe=False——子进程
-stdin/stdout 有状态交互，串行保守。
+实现方式：用 subprocess 拉起一个 pylsp 进程（python-lsp-server，
+通过 stdio 通信），跟它说 JSON-RPC 协议问结果；进程全局只起一个反复用。
+用户没装 pylsp 时工具自动从模型可见列表里消失（check_fn 门控：注册了
+但按运行时条件决定显不显示）。
 
-相对任务简报的四处实现修正（语义不变，原因见各项）：
-1. rootUri 用顶部 `import pathlib` 常规化（简报内联 walrus + __import__
-   是演示性写法，任务指示要求清理）。
-2. server 启动 + initialize 握手收敛进 _ensure_ready()（持锁调用，返回
-   bool）：pylsp 不在 PATH 时返回 False 而非 raise——handler 据此跳过
-   didOpen，使「fake _rpc_request 注入」的测试无需真起 pylsp；真实路径
-   _rpc_request 里 False 会 raise，由 handler except 兜成 lsp_error。
-   顺带修正消息顺序为 initialize → didOpen → request（简报原实现 didOpen
-   先于 initialize 握手，违反 LSP 生命周期）。
-3. 子进程管道用二进制模式（简报 text=True + encoding）：Windows 上
-   TextIOWrapper(newline=None) 读侧把 \\r\\n 翻译成 \\n（header 定界
-   "\\r\\n\\r\\n" 永远匹配不上）、写侧把 \\n 翻译成 \\r\\n（帧头 "\\r\\n"
-   变 "\\r\\r\\n"），Content-Length 帧协议直接损坏。二进制 + 手工
-   encode/decode 与 Content-Length 的字节语义严格一致。
-4. _read 按响应 id 匹配、跳过通知帧：didOpen 必然触发 server 的
-   publishDiagnostics 通知（无 id），"读一帧就当响应"会错位拿到
-   通知的 result=None → 生产环境必然查不到结果。
+设计取舍（"核心是窄腰"裁决）：做成核心工具 + 门控显隐，而不是把
+pylsp 塞进项目依赖——想用的人自己 `pipx install python-lsp-server`。
+标记为不可并发：与子进程的 stdin/stdout 对话是有状态的，两个请求
+同时读写会把对话搅乱，保守排队执行。
 
-已知边界（接受）：server 挂死不吐字节时 stdout.read(1) 阻塞，10s
-deadline 只能兜"慢速滴流"和 EOF（server 崩溃）场景；完全不吐字节的
-挂死靠 handler 层的异常重建兜底。
+相对任务简报的四处实现修正（行为不变，原因逐条说明）：
+1. rootUri（工作区根目录）改用顶部 `import pathlib` 正规计算。
+   简报里在函数内临时 __import__ 加海象运算符的写法是演示代码，
+   按任务要求清理成常规写法。
+2. "起进程 + initialize 握手"合并进 _ensure_ready()（必须已持锁，
+   返回布尔）：pylsp 不在 PATH 时返回 False 而不是抛异常——handler
+   拿 False 就跳过 didOpen，这样测试里用假 _rpc_request 替身时不必
+   真的启动 pylsp；真实路径下 _rpc_request 遇到 False 会抛异常，
+   由 handler 的 except 统一兜成 lsp_error 错误返回。顺带修正了
+   消息顺序为 initialize → didOpen → request（简报的原实现把
+   didOpen 发在握手之前，违反 LSP 的生命周期规定）。
+3. 子进程管道用二进制模式（简报是 text=True + encoding）。历史踩坑：
+   Windows 的文本模式包装会把换行自动转换——读方向把 \\r\\n 变 \\n
+   （导致 "\\r\\n\\r\\n" 这个报头分界永远匹配不上），写方向把 \\n 变
+   \\r\\n（导致报头变 "\\r\\r\\n"），Content-Length 帧协议（按字节数
+   定界的通信格式）直接坏掉。二进制 + 手工 encode/decode 才和
+   Content-Length 的"按字节计数"语义严格一致。
+4. _read 按响应编号（id）对号入座、跳过通知帧。历史踩坑：didOpen 一发，
+   server 必然回一条 publishDiagnostics 通知（没有 id），如果"读一条
+   就当响应"会错拿到通知的空结果——生产环境必然查不到东西。
+
+已知边界（接受）：server 挂死且一个字节都不吐时，逐字节读会卡住，
+10 秒超时只能兜住"慢速滴流"和"进程崩了立刻 EOF"两种场景；
+彻底挂死的靠 handler 层"出错就重建进程"兜底。
 """
 import json
 import logging
@@ -49,11 +58,16 @@ _RPC_TIMEOUT = 10.0
 
 
 def _lsp_available() -> bool:
+    """看机器上装没装 pylsp（既给工具门控用，也是 handler 的前置检查）。"""
     return shutil.which("pylsp") is not None
 
 
 def _reset_server() -> None:
-    """关掉 server（check_fn 变 False / 测试用）。"""
+    """关掉 pylsp 子进程、清空就绪标记。
+
+    背景：怀疑进程状态不对（比如出过错）或测试需要干净环境时调用，
+    下次查询会自动重新拉起。
+    """
     with _SERVER["lock"]:
         proc = _SERVER.get("proc")
         if proc is not None and proc.poll() is None:
@@ -68,13 +82,18 @@ def _reset_server() -> None:
 
 
 def _ensure_server() -> bool:
-    """懒启动 pylsp --stdio（持锁调用）。返回 False = pylsp 不在 PATH。"""
+    """需要时才启动 pylsp 子进程（必须在已持锁时调用）。
+
+    返回：False 表示机器上没装 pylsp（PATH 里找不到）；True 表示进程可用
+    （原本活着或刚启动的）。
+    """
     if _SERVER["proc"] is not None and _SERVER["proc"].poll() is None:
         return True
     exe = shutil.which("pylsp")
     if exe is None:
         return False
-    # 二进制管道（不 text=True）：Windows 文本流 \r\n 翻译会损坏帧协议，见模块头 3
+    # 故意用二进制管道（不开 text=True）：Windows 文本模式会自动转换换行符
+    # 直接弄坏帧协议（历史踩坑详见模块头第 3 条）
     proc = subprocess.Popen(
         [exe, "--stdio"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -86,9 +105,12 @@ def _ensure_server() -> bool:
 
 
 def _ensure_ready() -> bool:
-    """确保 server 存在 + initialize 握手完成（持锁调用）。
+    """确保 pylsp 进程已启动且完成过"握手"（initialize，必须在已持锁时调用）。
 
-    返回 False = pylsp 不可用（不 raise，调用方降级处理）。
+    背景：LSP 协议规定先握手才能正经问事；握手只在第一次做，
+    之后靠 init 标记跳过。
+
+    返回：False = pylsp 不可用（不抛异常，调用方自己降级处理）。
     """
     if not _ensure_server():
         return False
@@ -106,10 +128,18 @@ def _ensure_ready() -> bool:
 
 
 def _rpc_request(method: str, params: dict) -> Optional[object]:
-    """同步 JSON-RPC 请求（Content-Length 帧）。测试可 monkeypatch 本函数。
+    """给 pylsp 发一条正式请求并等对应答案（同步、按字节帧收发）。
 
-    首次调用经 _ensure_ready 自动完成 server 启动 + initialize 握手
-    （workspace rootUri = cwd）。
+    背景：对外的主力入口——首次调用会自动完成进程启动和握手
+    （工作区根目录用当前目录）。测试时可以用替身换掉本函数，
+    不必真起 pylsp。
+
+    参数：
+    - method：LSP 方法名（如 "textDocument/definition"）
+    - params：随请求带的参数字典（文件、位置等）
+
+    返回：答案里的 result 字段；超时/连接断了返回 None；
+    pylsp 没装时抛 RuntimeError（由上层兜成错误 JSON）。
     """
     with _SERVER["lock"]:
         if not _ensure_ready():
@@ -122,17 +152,23 @@ def _rpc_request(method: str, params: dict) -> Optional[object]:
 
 
 def _send(proc, rid: int, method: str, params: dict) -> None:
+    """发一条带编号的请求（有编号，等会儿才能对号收答案）。"""
     body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
     _write_frame(proc, body)
 
 
 def _send_notification(proc, method: str, params: dict) -> None:
+    """发一条不用回信的通知（无编号，发了就完）。"""
     body = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
     _write_frame(proc, body)
 
 
 def _write_frame(proc, body: str) -> None:
-    """按 Content-Length 帧写一条消息（二进制，字节计数）。"""
+    """按 Content-Length 帧格式写一条消息。
+
+    背景：帧格式就是"报头写明正文有多少字节 + 正文"，
+    必须按 utf-8 编码后的字节数算，不能按字符数。
+    """
     payload = body.encode("utf-8")
     header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
     proc.stdin.write(header + payload)
@@ -140,18 +176,26 @@ def _write_frame(proc, body: str) -> None:
 
 
 def _read_frame(proc, deadline: float) -> Optional[bytes]:
-    """读一帧原始字节（按 Content-Length，二进制）。超时/EOF → None。"""
+    """收一帧完整的原始字节（先啃报头拿长度，再读定长的正文）。
+
+    参数：
+    - proc：pylsp 子进程
+    - deadline：放弃读取的最后期限（时间戳）
+
+    返回：正文的原始字节；超时或对方断线（EOF）返回 None。
+    """
     header = b""
-    # 逐字节读 header（pylsp 输出无行缓冲保证时的保守做法）
+    # 一个字节一个字节啃报头：因为没法保证 pylsp 会按行输出，
+    # 一次读多了会把正文混进报头里
     while time.time() < deadline:
         ch = proc.stdout.read(1)
         if not ch:
-            return None  # EOF：server 崩溃/退出
+            return None  # 读到 EOF：对面进程没了（崩溃/退出）
         header += ch
         if header.endswith(b"\r\n\r\n"):
             break
     else:
-        return None  # deadline 到了 header 仍不完整
+        return None  # 到点了报头还没凑齐，按超时处理
     try:
         length = int(
             next(line.split(b":", 1)[1] for line in header.strip().split(b"\r\n")
@@ -166,10 +210,18 @@ def _read_frame(proc, deadline: float) -> Optional[bytes]:
 
 
 def _read(proc, rid: int) -> Optional[object]:
-    """读到 id 匹配的响应帧并取 result（超时/EOF/格式错 → None）。
+    """一直收帧，直到等到编号对得上的那条答案，取出 result 字段。
 
-    跳过通知帧（window/logMessage、publishDiagnostics 无 id）和乱序旧响应，
-    只认 id == rid 的响应；错误响应 raise（由 handler 兜成 lsp_error）。
+    背景：server 会主动塞各种通知（logMessage、publishDiagnostics，
+    都没有编号），还可能有迟到的旧答案，必须对号入座——只认
+    id == rid 的那条。
+
+    参数：
+    - proc：pylsp 子进程
+    - rid：自己发请求时用的编号，用来认领答案
+
+    返回：答案的 result 字段；超时/断线/格式坏了返回 None；
+    答案本身报错则抛 RuntimeError（由 handler 兜成 lsp_error 返回）。
     """
     deadline = time.time() + _RPC_TIMEOUT
     while time.time() < deadline:
@@ -183,7 +235,7 @@ def _read(proc, rid: int) -> Optional[object]:
         if not isinstance(msg, dict):
             continue
         if msg.get("id") != rid:
-            continue  # 通知帧 / 乱序响应 → 丢弃继续等
+            continue  # 不是我要的那条（通知或迟到的旧答案）→ 扔掉接着等
         if "error" in msg:
             raise RuntimeError(f"LSP 错误响应: {msg['error']}")
         return msg.get("result")
@@ -191,7 +243,20 @@ def _read(proc, rid: int) -> Optional[object]:
 
 
 def _handle_lsp(args: dict, **kwargs) -> str:
-    """lsp 工具 handler：definitions / references 两动作。"""
+    """查某个符号的定义位置或所有引用点，返回 JSON。
+
+    背景：模型给出文件+行列位置，本函数先确认 pylsp 在、文件在，
+    再把文件内容同步给 server（didOpen）然后发查询。
+
+    参数：
+    - args：工具参数字典。action 二选一（definitions=跳定义 /
+      references=查引用）；path 是文件路径；line/character 是符号
+      所在行列（都从 0 数起）。
+    - kwargs：运行时注入的命名上下文（本工具不依赖，占位满足统一签名）。
+
+    返回：JSON 字符串，results 里每项含 uri/line/character（最多 50 项）；
+    pylsp 没装/文件不存在/查询出错时返回对应 error。
+    """
     if not _lsp_available():
         return json.dumps({
             "error": "pylsp 未安装（pipx install python-lsp-server 后重启会话）",
@@ -217,9 +282,10 @@ def _handle_lsp(args: dict, **kwargs) -> str:
         params["context"] = {"includeDeclaration": True}
     try:
         with _SERVER["lock"]:
-            # didOpen 让 server 拿到未落盘内容（也覆盖已落盘的）；
-            # _ensure_ready False（pylsp 不可用）时跳过——真实路径
-            # _rpc_request 会 raise 由 except 兜底，fake 注入路径直接返回结果
+            # didOpen 把文件当前内容喂给 server（以内存里的为准，可能比
+            # 磁盘上的新）；_ensure_ready 返回 False（没装 pylsp）就跳过
+            # 这步——真实路径下后面的 _rpc_request 会抛异常被 except 兜住；
+            # 测试用假请求替身时则能直接走到返回结果
             if _ensure_ready():
                 _send_notification(_SERVER["proc"], "textDocument/didOpen", {
                     "textDocument": {"uri": doc_uri, "languageId": "python",
@@ -236,10 +302,11 @@ def _handle_lsp(args: dict, **kwargs) -> str:
             ][:50],
         }, ensure_ascii=False)
     except Exception as e:
-        _reset_server()  # server 状态可疑 → 重建（对齐 CC discard 语义）
+        _reset_server()  # 出过错就不信任这个进程的状态，直接扔掉重建（对齐 Claude Code 的 discard 做法）
         return json.dumps({"error": f"LSP 调用失败: {e}", "error_type": "lsp_error"}, ensure_ascii=False)
 
 
+# import 本模块时顺手把工具登记进中央注册表（项目惯例：工具文件顶层自注册）
 registry.register(
     name="lsp",
     toolset="core",
@@ -265,5 +332,5 @@ registry.register(
     handler=_handle_lsp,
     check_fn=_lsp_available,
     emoji="🧭",
-    isConcurrencySafe=False,  # 子进程 stdin/stdout 有状态，串行保守
+    isConcurrencySafe=False,  # 和 pylsp 子进程的对话有先后状态，两个请求并发会搅乱对话，保守排队
 )

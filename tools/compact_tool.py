@@ -1,14 +1,14 @@
-"""compact 工具:让 LLM 主动触发上下文压缩。
+"""「压缩对话」工具：让 AI 自己判断"旧对话不需要细节了"并主动压缩。
 
-LLM 觉得对话太长、之前查的信息已经不需要细节时,调这个工具强制 L4 压缩。
-压缩后:之前的对话被 LLM 总结成摘要,保留最近 N 条消息。
+背景：长任务（做 PPT、写代码、多轮调试）里前期会翻大量文件查资料，
+查完之后那些细节就是死重量。这个工具让模型不等系统自动触发，
+自己动手把旧对话交给一次 LLM 摘要总结，只保留最近 N 条原文。
+（借鉴 learn-claude-code s08 的 compact 工具设计；本文件属于工具层，
+被 tools/registry.py 自动发现注册，底层压缩复用
+agent/context_pipeline.py 的 llm_compact。）
 
-借鉴 learn-claude-code s08 的 compact 工具设计。
-适合长任务场景(做 PPT、写代码、多轮调试)——LLM 自己管理 context,
-不用等被动阈值。
-
-⚠️ 调这个工具时不要同时调其他工具(压缩会丢弃大部分历史,
-其他工具的结果可能变孤儿被自动清理)。
+⚠️ 调它时别同时调其他工具：压缩会扔掉大部分历史，同批其他工具的
+结果消息会变成"没有对应的提问"的孤儿，被自动清理掉。
 """
 import json
 import logging
@@ -60,14 +60,22 @@ COMPACT_SCHEMA = {
 
 
 async def _handle_compact(args: dict, **kwargs) -> str:
-    """主动触发 L4 上下文压缩（Task C: 支持 partial from_idx/up_to_idx）。
+    """把（可选指定范围的）旧对话压缩成 LLM 摘要，返回结果 JSON。
 
-    通过 agent_ref 拿到 agent 实例,调 llm_compact 替换 conversation_history。
-    主循环下一轮会自动用新的(已压缩)history 调 LLM。
+    背景：模型觉得对话太重时调这个工具。支持两种模式：
+    全量压缩（旧对话全部变摘要，保留最近 30 条）和部分压缩
+    （只压指定下标之间的中段，开头结尾保留原文——适合
+    "早期查询做完了、中间细节可以扔"的场景）。
 
-    Task C: partial 模式（from_idx/up_to_idx 非默认值时启用）
-    - 只压 conv[from_idx:up_to_idx] 段，保留 head + tail 原文
-    - 适合"只压中段"场景（如早期查询已完成、中间段可丢弃细节）
+    参数：
+    - args：工具参数字典。focus 是可选的"摘要时重点保什么"提示；
+      from_idx/up_to_idx 可选，指定只压第 from_idx 条到第 up_to_idx 条
+      （默认 0/-1 表示全量）。
+    - kwargs：运行时注入的命名上下文，本函数只用到 agent_ref
+      （AIAgent 主实例，借它拿对话历史、模型客户端和配置）。
+
+    返回：JSON 字符串。success=True 带压缩前后条数；太短/没生效/出错
+    时 success=False 或 error 字段。
     """
     agent = kwargs.get("agent_ref")
     if agent is None:
@@ -81,7 +89,7 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     up_to_idx = args.get("up_to_idx", -1)
     is_partial = from_idx != 0 or up_to_idx != -1
 
-    # 太短不值得压（partial 模式放宽到 2 条）
+    # 太短的对话压了没意义；只压中段时门槛放宽到 2 条
     history_len = len(agent.conversation_history)
     min_threshold = 2 if is_partial else 10
     if history_len < min_threshold:
@@ -90,7 +98,7 @@ async def _handle_compact(args: dict, **kwargs) -> str:
             "reason": f"对话太短({history_len} 条 < {min_threshold}),不值得压缩",
         }, ensure_ascii=False)
 
-    # 构造完整 messages(system + conv)
+    # 压缩引擎要看到完整对话（系统提示 + 对话本体），这里拼一下
     try:
         system_prompt = agent._get_system_prompt()
     except Exception:
@@ -100,15 +108,16 @@ async def _handle_compact(args: dict, **kwargs) -> str:
         + list(agent.conversation_history)
     )
 
-    # 强制 L4 压缩(阈值设 0 让它必触发,绕过 over_threshold 检查)
+    # 压缩引擎自带"超过阈值才压"的检查，这里把阈值设成 0，
+    # 相当于"我让你压你就必须压"，跳过它的犹豫。
     from agent.context_pipeline import llm_compact
-    keep_recent = 30  # 对齐 L4：主动 compact 后保留更多最近，减少失忆
+    keep_recent = 30  # 比系统自动压缩保留更多近期消息，主动压缩后少失忆
     new_messages, changed = await llm_compact(
         full_messages,
         llm_client=agent.llm_client,
         model=getattr(agent, "model", None),
         keep_recent=keep_recent,
-        token_threshold=0,   # 0 = 强制触发(任何 > 0 都超 0)
+        token_threshold=0,   # 0 = 见上，逼它无条件触发
         msg_threshold=0,
         from_idx=from_idx,
         up_to_idx=up_to_idx,
@@ -120,9 +129,9 @@ async def _handle_compact(args: dict, **kwargs) -> str:
             "reason": "压缩未生效(可能 keep_recent >= 对话长度或 partial 段 < 2)",
         }, ensure_ascii=False)
 
-    # 替换 agent 状态:new_messages[0] 是 system,后面是 conv
+    # 换上新历史：返回的第一条是系统提示，后面才是对话本体
     agent.conversation_history = new_messages[1:]
-    # 让下轮重建 system prompt(虽然内容可能一样,但保险)
+    # 让下轮重建 system prompt（内容大概率没变，但保险起见走一遍失效流程）
     try:
         agent.invalidate_system_prompt()
     except Exception:
@@ -156,12 +165,12 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     }, ensure_ascii=False)
 
 
-# 模块级注册(import 时自动)
+# import 本模块时顺手把工具登记进中央注册表（项目惯例：工具文件顶层自注册）
 registry.register(
     name="compact",
     toolset="core",
     schema=COMPACT_SCHEMA,
     handler=_handle_compact,
     emoji="🗜️",
-    isConcurrencySafe=False,  # 副作用：触发 LLM 压缩上下文（改消息历史），必须串行
+    isConcurrencySafe=False,  # 会重写整个对话历史，并发跑会互相踩，只能排队执行
 )

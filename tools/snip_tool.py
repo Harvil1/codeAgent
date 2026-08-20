@@ -1,13 +1,16 @@
-"""LLM 主动 snip 工具（借鉴 Claude Code SnipTool）。
+"""「剪掉旧对话」工具：让 AI 自己决定什么时候裁剪历史（借鉴 Claude Code 的 SnipTool）。
 
-让 LLM 在任务边界（如"探索阶段结束"）主动调工具剪除早期历史，
-比纯自动阈值更智能。
+背景：对话越长，每次调模型的 token 账单越贵。项目里已有一套"超过阈值就
+自动压缩"的机制，但那是死板的水位线；这个工具让模型在自然的任务分界点
+（比如"代码结构摸清楚了，准备动手写"）自己动手剪掉前面对话的细节。
 
-与 compact 工具的区别：
-- compact = L4 LLM 摘要（有损，调 LLM 调用，慢）
-- snip = L1 占位裁剪（无损，原文落 transcript，占位提示，快）
+和 compact 工具的分工（一个快一个聪明）：
+- compact = 让模型把旧对话读一遍总结成摘要（有损、要再调一次模型、慢）
+- snip = 直接把旧消息换成一句占位提示（原文完整存进 transcript 备查，
+  算"无损"；不调模型、快）
 
-适合：探索阶段结束、长任务中段清理、对话变长想精简（不想等自动阈值）。
+本文件属于工具层（tools/），被 tools/registry.py 自动发现注册，
+底层裁剪逻辑复用 agent/context_pipeline.py 的 snip_compact。
 """
 import json
 import logging
@@ -53,11 +56,19 @@ SNIP_SCHEMA = {
 
 
 def _handle_snip(args: dict, **kwargs) -> str:
-    """handler：调 snip_compact 主动剪。
+    """把早期对话消息剪掉、换成占位提示，返回执行结果 JSON。
 
-    通过 kwargs 拿到 agent_ref（AIAgent 实例），直接调它的 conversation_history。
+    背景：模型主动调这个工具来瘦身对话历史。任何一步出问题都不能
+    把主对话搞崩（fail-open：出错就返回带 error 的 JSON，不抛异常）。
 
-    fail-open：任何异常返 error JSON，不崩主流程。
+    参数：
+    - args：工具参数字典。reason 是模型给的理由（只用于日志和返回信息）；
+      keep_recent 是"最近 N 条不许剪"的保护条数。
+    - kwargs：运行时注入的命名上下文，本函数只用到 agent_ref
+      （AIAgent 主实例，借它拿到对话历史、配置和主目录）。
+
+    返回：JSON 字符串。成功时 snipped=True 并带剪了多少条；
+    不用剪/出错时 snipped=False 或 error 字段。
     """
     try:
         agent = kwargs.get("agent_ref")
@@ -74,7 +85,7 @@ def _handle_snip(args: dict, **kwargs) -> str:
         history = agent.conversation_history
         before_count = len(history)
 
-        # 短历史不值得剪（< keep_recent * 2）
+        # 剪完至少还得剩下"保护条数"这么多消息，太短的对话剪了没意义还白折腾
         if before_count < keep_recent * 2:
             return json.dumps({
                 "snipped": False,
@@ -82,15 +93,15 @@ def _handle_snip(args: dict, **kwargs) -> str:
                 "messages_count": before_count,
             }, ensure_ascii=False)
 
-        # 读 snip 配置（snip_keep_first：保留前 N 条）
+        # 从配置读"开头几条也不许剪"（snip_keep_first，默认 3）
         config = getattr(agent, "config", {}) or {}
         ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
         keep_first = ctx_cfg.get("snip_keep_first", 3)
 
-        # snip 前主动落盘 transcript（force=True），让"无损"描述变真。
-        # compress_if_needed 只在 L4 llm_compact 前调 snapshot_if_needed；
-        # snip_tool 绕过 compress_if_needed 直接调 snip_compact，必须自己补这一步，
-        # 否则被裁掉的中间消息原文就真丢了。
+        # 历史踩坑（无损承诺兑现）：剪之前必须先把对话原文存档到 transcript
+        # （force=True 强制存）。项目里的自动压缩管线（compress_if_needed）
+        # 只在自己调 LLM 摘要前会存档；本工具走的是捷径、绕过了它，
+        # 所以必须自己补这一步——否则被剪掉的消息原文就真找不回来了。
         agent_home_raw = getattr(agent, "omnimate_home", None)
         session_id = getattr(agent, "session_id", None) or ""
         transcript_enabled = ctx_cfg.get("transcript_enabled", True)
@@ -107,18 +118,18 @@ def _handle_snip(args: dict, **kwargs) -> str:
                     retention=transcript_retention,
                 )
             except Exception as e:
-                # fail-open：snapshot 失败不阻塞 snip（但消息不可找回，已在 log 警告）
+                # 存档失败也不拦着剪（fail-open），代价是这批消息找不回来——记条警告日志
                 logger.warning("snip 前 transcript snapshot 失败（不阻塞 snip）: %s", e)
 
-        # snip_compact 签名：(messages, *, keep_first, keep_last, threshold=50)
-        # 我们主动调用：threshold 传 keep_first+keep_recent+2 让它一定过阈值检查
-        # （否则短对话会被 threshold=50 卡住）
-        # 返回 (new_messages, changed: bool)
+        # 底层函数 snip_compact 有个"消息太少就不剪"的自检门槛（threshold）。
+        # 这里是模型主动要剪，不该被默认门槛 50 拦住，所以把门槛算成
+        # "开头保护 + 结尾保护 + 2"，保证只要走到这就一定剪得动。
+        # 它返回 (新消息列表, 是否真的剪了)。
         new_history, changed = snip_compact(
             history,
             keep_first=keep_first,
             keep_last=keep_recent,
-            threshold=max(1, keep_first + keep_recent + 2),  # 让它一定过阈值
+            threshold=max(1, keep_first + keep_recent + 2),  # 见上：保证一定过门槛
         )
 
         if not changed:
@@ -128,19 +139,20 @@ def _handle_snip(args: dict, **kwargs) -> str:
                 "messages_count": before_count,
             }, ensure_ascii=False)
 
-        # 真剪了：计算剪了多少条
+        # 走到这说明真剪了：算一下剪掉多少条，写回给主循环下一轮用
         after_count = len(new_history)
         snipped_count = before_count - after_count
 
         # 写回 agent（主循环下一轮用新 history）
         agent.conversation_history = new_history
 
-        # 抑制下次 cache break 误报（snip 改 messages，cache 必然 break）
+        # 剪了消息等于把对话开头换了，模型侧的前缀缓存必然整体失效
+        # （cache break）。提前打声招呼，免得缓存监控下次误报"莫名失效"。
         try:
             from agent.cache_monitor import notify_compaction
             notify_compaction()
         except Exception:
-            pass  # fail-open，cache_monitor 不可用不崩
+            pass  # 打招呼失败就算了，不能为一个统计模块把主流程搞崩
 
         logger.info(
             "LLM 主动 snip: %s（剪了 %d 条，%d → %d）",
@@ -166,12 +178,12 @@ def _handle_snip(args: dict, **kwargs) -> str:
         )
 
 
-# 模块级注册（import 时自动）
+# import 本模块时顺手把工具登记进中央注册表（项目惯例：工具文件顶层自注册）
 registry.register(
     name="snip",
     toolset="core",
     schema=SNIP_SCHEMA,
     handler=_handle_snip,
     emoji="✂️",
-    isConcurrencySafe=False,  # 改 conversation_history，必须串行
+    isConcurrencySafe=False,  # 会直接改对话历史这种共享状态，和其他工具并发跑会互相踩，只能排队执行
 )

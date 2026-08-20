@@ -1,10 +1,11 @@
-"""WebFetch 工具：抓取 URL 内容并转纯文本（对齐 Claude Code WebFetch）。
+"""网页抓取工具：把一个网址（URL）的内容下载下来，去掉 HTML 标签只留文字（做法对齐 Claude Code 的 WebFetch）。
 
-用 httpx（已装）抓取，标准库 html.parser 转纯文本。
-- 超时 15s、follow redirects、User-Agent
-- 大小上限 500KB（超了截断）
-- 二进制/非文本 Content-Type 拒绝
-- 失败 fail-open：返回 error JSON，不阻塞 agent
+网络请求用 httpx 库（项目已装），HTML 转纯文本用 Python 自带的 html.parser。
+几条保命规则：
+- 15 秒超时；网站跳转（重定向）自动跟过去；带上 User-Agent 表明身份
+- 下载内容最多收 500KB，超了就砍掉
+- 图片、视频这类二进制内容直接拒绝（模型看不了，也防止误下载大文件）
+- 任何失败都不炸整个对话，只返回一段 error JSON 让模型自己想办法
 """
 
 import json
@@ -14,13 +15,23 @@ from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
-_MAX_BYTES = 500_000       # 500KB
-_MAX_TEXT_CHARS = 20000    # 返回文本上限
+_MAX_BYTES = 500_000       # 下载内容最多收 50 万字节（约 500KB）
+_MAX_TEXT_CHARS = 20000    # 最终返回给模型的文字最多 2 万字符
 _TIMEOUT = 15.0
 
 
 def _html_to_text(html: str, max_chars: int = _MAX_TEXT_CHARS) -> str:
-    """HTML → 纯文本（标准库 html.parser，跳过 script/style）。"""
+    """把 HTML 网页代码变成干净的纯文字——扔掉所有标签，跳过 script/style 里的代码和样式。
+
+    背景：模型不需要看 <div>、<a href> 这些标签，只要正文文字；脚本和样式
+    代码更是纯噪音，必须整段跳过。用 Python 标准库 html.parser 实现，不引第三方依赖。
+
+    参数：
+        html：网页的 HTML 源码字符串。
+        max_chars：最多保留多少字符（默认 2 万）。
+
+    返回：一行一段拼接的纯文本（超长部分砍掉）。
+    """
     from html.parser import HTMLParser
 
     class _TextExtractor(HTMLParser):
@@ -47,6 +58,20 @@ def _html_to_text(html: str, max_chars: int = _MAX_TEXT_CHARS) -> str:
 
 
 async def _handle_web_fetch(args: dict, **kwargs) -> str:
+    """下载指定网页并转成纯文本返回；带了"关注点"时还会让小模型先提炼一遍。
+
+    干什么：校验网址 → 用 httpx 下载 → 拒绝非文本内容 → HTML 转纯文本 →
+    （可选）小模型提炼 → 返回 JSON。
+
+    参数：
+        args：工具参数字典，来自模型——url（要抓的网址，必须是 http/https）、
+            prompt（关注点：抓回来想重点看什么，比如"这个库怎么安装"）。
+        **kwargs：分发器注入的运行上下文——重点用 agent_ref（主对话对象），
+            从它身上取 aux_llm_router（小模型路由器）来做提炼。
+
+    返回：JSON 字符串，成功时含 content（正文）、truncated（有没有被截断）、
+        refined（是不是经过提炼）等字段；失败时是 {"error": ..., "error_type": ...}。
+    """
     url = (args.get("url") or "").strip()
     prompt = (args.get("prompt") or "").strip()
 
@@ -90,7 +115,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
         body = body[:_MAX_BYTES]
         truncated = True
 
-    # 非文本内容拒绝（二进制/图片/视频等）
+    # 二进制内容（图片/视频/压缩包等）直接拒绝——模型看不了，也防误收大文件
     if not any(k in content_type for k in ("text/", "html", "json", "xml")) and content_type:
         return json.dumps({
             "error": f"非文本内容类型: {content_type}",
@@ -102,7 +127,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
     except Exception:
         text = body.decode("latin-1", errors="replace")
 
-    # HTML → 纯文本
+    # 是 HTML 网页（或长得像 HTML）就转成纯文本；本来就是纯文本就直接用
     if "html" in content_type or text.lstrip().startswith(("<", "<!doctype")):
         content = _html_to_text(text)
     else:
@@ -112,9 +137,10 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
         content = content[:_MAX_TEXT_CHARS]
         truncated = True
 
-    # === R20 #31：aux 小模型提炼（对齐 CC WebFetch——按 prompt 提炼再回主模型，
-    # 省主模型上下文）。有 prompt 且 agent_ref.aux_llm_router 可用时走提炼；
-    # aux 失败/无 aux 降级返回全文（fail-open）。===
+    # === 历史借鉴（R20 #31）：小模型提炼（对齐 Claude Code WebFetch——按关注点
+    # 先提炼再交回主模型，省主模型的上下文额度）。带了 prompt 且主对话身上有
+    # 小模型路由器（aux_llm_router）时走提炼；小模型失败或没配置就降级返回
+    # 全文（fail-open：宁可多花点上下文也不报错卡住）。===
     refined = False
     if prompt:
         aux = getattr(kwargs.get("agent_ref"), "aux_llm_router", None)
@@ -124,7 +150,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
                 if refined_text:
                     content = refined_text
                     refined = True
-                    truncated = False  # 提炼产物不再有截断语义
+                    truncated = False  # 提炼过的内容是完整产物，"截断"标记不再有意义
             except Exception as e:
                 logger.warning("web_fetch aux 提炼失败（降级全文）: %s", e)
 
@@ -140,7 +166,20 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
 
 
 async def _refine_with_aux(aux_router, url: str, prompt: str, content: str) -> str:
-    """aux 小模型按 prompt 提炼抓取内容（返回空串表示放弃）。"""
+    """让便宜的小模型按"关注点"从网页正文里挑出相关内容，压缩后返回。
+
+    背景：网页全文动辄上万字，直接塞给主模型太费上下文额度；让便宜的小模型
+    先筛一遍，只回跟关注点相关的部分，性价比高得多。
+
+    参数：
+        aux_router：小模型的路由器（有 chat_completions 方法可发对话请求）。
+        url：网页地址（写进提示词里，让小模型知道内容来源）。
+        prompt：关注点（模型想从这个网页里了解什么）。
+        content：网页正文的纯文本。
+
+    返回：提炼结果字符串；小模型输出异常时返回空串（表示放弃提炼，
+        调用方收到空串就退回用全文）。
+    """
     refine_prompt = (
         f"根据以下关注点，从网页内容中提炼与它相关的信息：\n"
         f"关注点：{prompt}\n\n"
@@ -180,11 +219,12 @@ WEB_FETCH_SCHEMA = {
 }
 
 
+# 模块级注册：这个文件一被 import 就自动登记进中央注册表
 registry.register(
     name="web_fetch",
     toolset="core",
     schema=WEB_FETCH_SCHEMA,
     handler=_handle_web_fetch,
     emoji="🌐",
-    isConcurrencySafe=False,  # 外部调用：抓 URL（消耗带宽 + 耗时 + 可能触发外部副作用），串行更稳
+    isConcurrencySafe=False,  # 要访问外部网络（费带宽、耗时长、外部网站可能有副作用），串行更稳
 )

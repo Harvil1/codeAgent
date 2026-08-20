@@ -1,17 +1,23 @@
-"""中央工具注册表。
+"""中央工具注册表——整个项目所有工具（LLM 能调用的能力）的"户口本"。
 
-依赖链（无循环）：
-    registry.py  (无依赖)
+打个比方：这里就像小区的物业登记处。每个工具入住时来登记（register），
+之后两件事都靠这本册子：(1) 告诉 LLM 这里有哪些工具可用、怎么用（schema 说明书）；
+(2) LLM 真的要用的时分发到对应干活的函数（handler）。
+
+依赖链（无循环，下层不知道上层存在）：
+    registry.py  (本文件，无依赖)
         ↑
-    tools/*.py   (每个文件 import registry，模块顶层 register())
+    tools/*.py   (每个工具文件 import registry，在模块顶层调 register() 自登记)
         ↑
-    model_tools.py  (import registry + 触发现)
+    model_tools.py  (import registry + 触发工具发现)
 
 设计要点：
-1. AST 检查自动发现：扫描 tools/ 目录，只 import 顶层调用 registry.register() 的模块
-2. check_fn 动态门控：工具可注册"可用性检查"（如 API key 是否配置），带 30s 缓存
-3. JSON 字符串契约：所有 handler 返回 JSON 字符串，统一序列化
-4. 线程安全：RLock 保护并发访问
+1. AST 自动发现：扫描 tools/ 目录，只 import 顶层真的调用了 registry.register() 的模块，
+   纯辅助模块不会被误当成工具拉进来
+2. check_fn 动态门控：工具登记时可以附带一个"我现在可用吗"的检查函数
+   （比如检查 API key 配没配），结果缓存 30 秒，不每次都真查
+3. JSON 字符串契约：所有 handler 统一返回 JSON 字符串，方便下游统一解析
+4. 线程安全：用可重入锁保护，多个线程同时登记/查询不打架
 """
 
 import ast
@@ -28,13 +34,14 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# AST 检查：判断模块是否调用了 registry.register()
+# AST（语法树）检查：判断一个模块有没有调用 registry.register()
 # ---------------------------------------------------------------------------
 
 def _is_registry_register_call(node: ast.AST) -> bool:
-    """判断 AST 节点是否是 registry.register(...) 调用。
+    """判断一个语法树节点是不是形如 `registry.register(...)` 的调用语句。
 
-    只识别形如 `registry.register(...)` 的模块级表达式。
+    只认模块顶层直接写的那种（像"物业登记表上一眼能看到的名字"），
+    函数体内部藏着的调用不算。
     """
     if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
         return False
@@ -48,9 +55,16 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 
 
 def _module_registers_tools(module_path: Path) -> bool:
-    """检查模块顶层是否包含 registry.register() 调用。
+    """检查一个 .py 文件的顶层有没有 registry.register() 调用。
 
-    只检查模块级语句，不检查函数内部，避免把辅助模块误判为工具模块。
+    背景：自动发现工具时要先"隔着门缝看一眼"，只把真正登记了工具的文件 import 进来，
+    免得把只是帮忙的辅助模块也误当成工具模块加载。
+
+    参数：
+        module_path: 要检查的 .py 文件路径。
+
+    返回：True 表示顶层有登记调用（是工具模块）；False 表示没有，
+    或者文件读不了/语法有错（一律当作"不是"处理，宁可漏不可错）。
     """
     try:
         source = module_path.read_text(encoding="utf-8")
@@ -61,11 +75,16 @@ def _module_registers_tools(module_path: Path) -> bool:
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
-    """导入所有自注册工具模块，返回模块名列表。
+    """把所有内置工具模块加载进来（它们 import 时会自动完成登记），返回加载成功的模块名列表。
 
-    扫描 tools/ 目录，对每个 .py 文件：
-    1. AST 检查是否有顶层 registry.register() 调用
-    2. 有则 import（触发模块级的 register 调用）
+    干的事：扫描 tools/ 目录，对每个 .py 文件先用语法树检查顶层有没有
+    registry.register() 调用；有才 import——import 这个动作本身就会触发
+    模块顶层的登记代码跑起来。某个模块加载失败只记一条警告，不影响其他模块。
+
+    参数：
+        tools_dir: 要扫描的目录；不传就用本文件所在的 tools/ 目录。
+
+    返回：成功 import 的模块名列表（形如 "tools.terminal_tool"）。
     """
     tools_path = Path(tools_dir) if tools_dir else Path(__file__).resolve().parent
     module_names = [
@@ -86,11 +105,11 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 工具条目
+# 工具档案（一个工具一条记录）
 # ---------------------------------------------------------------------------
 
 class ToolEntry:
-    """单个工具的元数据。"""
+    """一个工具的全部"档案信息"：叫什么、归哪组、说明书（schema）是什么、谁干活（handler）。"""
 
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
@@ -101,6 +120,7 @@ class ToolEntry:
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  schema_overrides_fn=None, isConcurrencySafe=False):
+        """建档案。各字段含义见 ToolRegistry.register 的参数说明，这里只负责存下来。"""
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -110,33 +130,44 @@ class ToolEntry:
         self.is_async = is_async
         self.description = description
         self.emoji = emoji
-        # 运行时 schema 覆盖函数：(schema_dict, runtime_ctx_dict) -> new_schema_dict
-        # 用于让 LLM 看到实时状态（剩余并发槽位、当前模式等）。
-        # None 时 schema 不变（向后兼容）。
+        # 运行时的 schema 覆盖函数：输入 (schema字典, 运行时上下文字典)，输出新 schema 字典。
+        # 用途：让 LLM 看到实时状态（比如还剩几个并发名额、当前是什么模式）。
+        # 为什么需要：schema 本身是静态的，但有些信息每刻都在变。
+        # 不传（None）时 schema 原样使用，老代码不受影响。
         self.schema_overrides_fn = schema_overrides_fn
-        # 工具是否可安全并发执行（Task F1/F2 用）。
-        # True：只读/无副作用工具（read_file/list_dir/grep 等），可 asyncio.gather 并发
-        # False：有副作用工具（write_file/terminal/memory_save 等），必须串行
-        # 默认 False（安全默认 > 事后补救）——未显式标注的工具一律串行
+        # 这个工具能不能和其他工具同时（并发）跑：
+        # True = 只读/无副作用的工具（read_file/list_dir/grep 这类"只是看看不动手"的），可以几个一起跑
+        # False = 有副作用的工具（write_file/terminal/memory_save 这类"真会改东西"的），必须排队一个一个来
+        # 默认 False——安全第一：没显式说明"可以并发"的一律当不能并发（宁可慢一点，也别出乱子）
         self.isConcurrencySafe = isConcurrencySafe
 
 
 # ---------------------------------------------------------------------------
-# check_fn 的 TTL 缓存
+# check_fn 的 TTL 缓存（TTL = 结果有效期，这里是 30 秒）
 # ---------------------------------------------------------------------------
-# check_fn 会探测外部状态（Docker 装了吗？API key 配置了吗？）
-# 这些状态变化慢，不需要每次都真调用。缓存 30 秒。
-# 瞬时失败（Docker daemon 繁忙）不缓存，避免误判工具不可用。
+# check_fn 探测的是外部状态（Docker 装了吗？API key 配了吗？）。
+# 这类状态不会秒变，没必要每次都真查——结果缓存 30 秒。
+# 偶发抖动（比如 Docker 服务正好忙一下）不算数：刚成功过的话，短时间内的
+# 失败按抖动处理，不缓存失败，避免把其实可用的工具误判成不可用。
 
 _CHECK_FN_TTL_SECONDS = 30.0
-_CHECK_FN_FAILURE_GRACE_SECONDS = 60.0  # 最近成功后的失败宽限期
+_CHECK_FN_FAILURE_GRACE_SECONDS = 60.0  # 失败宽限期：最近成功过之后的失败先当抖动看
 _check_fn_cache: Dict[Callable, tuple] = {}  # {fn: (timestamp, result)}
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
 
 
 def _check_fn_cached(fn: Callable) -> bool:
-    """带 TTL 缓存地调用 check_fn。"""
+    """带缓存地调一次可用性检查函数，返回"工具现在可用吗"。
+
+    背景：check_fn 查的都是慢变化的外部状态，每次真调太浪费；
+    而偶发失败又要宽容处理（刚成功过就当是抖动），所以走这个包装。
+
+    参数：
+        fn: 可用性检查函数；None 表示没有检查（永远算可用）。
+
+    返回：True 可用 / False 不可用。
+    """
     if fn is None:
         return True
 
@@ -157,26 +188,30 @@ def _check_fn_cached(fn: Callable) -> bool:
             _check_fn_cache[fn] = (now, True)
             return True
 
-        # 瞬时失败处理：如果最近成功过，当作抖动
+        # 走到这里说明这次调用失败了。如果最近成功过，就当是偶发抖动：
+        # 照样报"可用"，而且不把这次失败记进缓存
         last_good = _check_fn_last_good.get(fn)
         if last_good and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
-            return True  # 返回 last-good True，不缓存这次失败
+            return True  # 沿用上次的好结果，不缓存这次失败
 
         _check_fn_cache[fn] = (now, False)
         return False
 
 
 # ---------------------------------------------------------------------------
-# 注册表单例
+# 注册表本体
 # ---------------------------------------------------------------------------
 
 class ToolRegistry:
-    """单例注册表，收集所有工具的 schema 和 handler。"""
+    """工具注册表本体：所有工具的说明书（schema）和干活函数（handler）都收在这里。
+
+    全项目只有一个实例（文件底部的 `registry` 全局变量），像一本共享户口本。
+    """
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
         self._lock = threading.RLock()
-        self._generation: int = 0  # 每次变更递增，用于外部缓存失效
+        self._generation: int = 0  # 版本号：每次登记/注销都 +1，外面的缓存靠它判断"该刷新了"
 
     def register(
         self,
@@ -193,24 +228,26 @@ class ToolRegistry:
         schema_overrides_fn: Callable = None,
         isConcurrencySafe: bool = False,
     ):
-        """注册一个工具。通常在模块 import 时调用。
+        """登记一个新工具。通常在工具模块被 import 时（程序启动阶段）调用。
 
         参数：
-            name: 工具名（如 "terminal"）
-            toolset: 所属工具集（如 "core"）
-            schema: OpenAI function calling 格式的 schema
-            handler: 实际执行函数，签名 (args: dict, **kw) -> str
-            check_fn: 可用性检查函数，返回 bool。None 表示总是可用
-            requires_env: 依赖的环境变量列表（用于文档/UI 显示）
-            is_async: handler 是否是 async function（影响 dispatch 的处理路径）
-            override: 是否允许覆盖同名工具（插件场景）
-            schema_overrides_fn: 运行时 schema 覆盖函数
-                签名 (schema: dict, runtime_ctx: dict) -> dict | None
-                返回新 schema 或 None（不改）。失败会被 try/except，回退原 schema。
-            isConcurrencySafe: 工具是否可安全并发执行（Task F1/F2 用）。
-                True = 只读/无副作用（read_file/list_dir/grep），可 asyncio.gather 并发；
-                False = 有副作用（write_file/terminal/memory_save），必须串行。
-                默认 False（安全默认 > 事后补救）。
+            name: 工具名，LLM 调用时用的名字（如 "terminal"）
+            toolset: 属于哪个工具集（如 "core"），用于分组控制可见性
+            schema: OpenAI function calling 格式的说明书（名字、参数、描述），
+                LLM 靠它知道这个工具怎么用
+            handler: 真正干活的函数，签名固定是 (args: dict, **kw) -> str
+            check_fn: "我现在可用吗"检查函数，返回 True/False；None 表示总是可用
+                （比如没配 API key 时对应工具自动隐藏）
+            requires_env: 依赖的环境变量名字列表（只用来给文档/界面展示）
+            is_async: handler 是不是 async 函数（影响 dispatch 走哪条路径执行）
+            override: 遇到同名工具时允不允许覆盖；默认不允许（插件替换内置工具时才开）
+            schema_overrides_fn: 运行时改说明书的函数，签名
+                (schema: dict, runtime_ctx: dict) -> 新 schema 或 None（不改）。
+                出错会被兜住并回退用原 schema，不会炸
+            isConcurrencySafe: 能不能和其他工具同时跑。
+                True = 只读/无副作用（read_file/list_dir/grep 这类），可以并发；
+                False = 有副作用（write_file/terminal/memory_save 这类），必须排队。
+                默认 False——安全第一，没标注的一律串行。
         """
         with self._lock:
             existing = self._tools.get(name)
@@ -235,10 +272,16 @@ class ToolRegistry:
             self._generation += 1
 
     def unregister(self, name: str) -> bool:
-        """注销工具（R20：测试注册临时工具后的隔离清理用）。
+        """把一个工具从户口本上划掉（注销）。
 
-        返回 True 表示找到并移除，False 表示不存在。
-        生产代码不应用（工具注册是启动期行为）。
+        背景：R20 轮加了这个接口，主要是给测试用的——测试临时登记的工具
+        跑完要清掉，免得污染其他测试。生产代码不该用它（工具登记是启动期
+        一次性的事，运行中撤工具不是设计内的玩法）。
+
+        参数：
+            name: 工具名。
+
+        返回：True = 找到并移除了；False = 本来就没有这个工具。
         """
         with self._lock:
             if name in self._tools:
@@ -248,14 +291,25 @@ class ToolRegistry:
             return False
 
     async def dispatch(self, name: str, args: dict, **kwargs) -> str:
-        """async 分发工具调用，返回 JSON 字符串结果。
+        """把 LLM 发起的工具调用转交给对应的干活函数，返回 JSON 字符串结果。
 
-        改造说明（Task C1）：
-        - async handler（如 MCP / delegate 等）：直接 await（不走 to_thread）
-        - sync handler（全部内置 sync 工具）：用 anyio.to_thread.run_sync 包装，
-          丢线程池跑，不阻塞事件循环。handler 内部代码零改动。
+        背景（Task C1 改造）：主程序是异步的（async），但工具函数有同步有异步，
+        两种要都能跑而且不能卡住整个事件循环。
 
-        handler 返回值仍走 _normalize_result（JSON 字符串契约不变）。
+        怎么跑（Task C1）：
+        - async handler（如 MCP / delegate 这些）：直接 await
+        - 同步 handler（内置的同步工具）：丢到线程池里跑，不阻塞事件循环，
+          handler 内部代码一行都不用改
+
+        不管哪种，返回值最后都过 _normalize_result 统一成 JSON 字符串（契约不变）。
+
+        参数：
+            name: 工具名（LLM 说的要调谁）
+            args: 工具参数字典（LLM 按 schema 填的）
+            **kwargs: 命名上下文（如 memory_store、agent_ref 等，原样传给 handler）
+
+        返回：JSON 字符串——成功是工具自己的结果，失败是
+            {"error": ..., "error_type": ...} 格式的错误。
         """
         with self._lock:
             entry = self._tools.get(name)
@@ -266,11 +320,12 @@ class ToolRegistry:
                 "error_type": "unknown_tool",
             }, ensure_ascii=False)
 
-        # T6（核心机制对齐第 6 项）：permissions.deny 防御纵深——
-        # 可见性过滤（get_tool_definitions）之外，dispatch 也拒（手动构造的
-        # tool_call / schema 缓存滞后都拦得住）。
-        # R30c-B7：fail-open 保留（配置损坏就全拒会把 agent 整个砖死），但必须
-        # 显式 ERROR——此前静默 pass，规则加载失败这道防御纵深无声消失。
+        # T6（核心机制对齐第 6 项）：permissions.deny 的第二道防线——
+        # 第一道"眼不见为净"（get_tool_definitions 不把被拒工具发给 LLM）还不够：
+        # 手动构造的 tool_call、schema 缓存没来得及刷新的情况，都会绕过第一道，
+        # 所以真正执行前（dispatch 这里）还要再拒一次。
+        # R30c-B7：保留了 fail-open（配置坏了就全拒会把整个 agent 搞成砖），
+        # 但必须大声报 ERROR——以前是静默吞掉，规则加载失败时这道防线就无声消失了。
         try:
             from agent.tool_permissions import is_tool_denied
             if is_tool_denied(name):
@@ -288,10 +343,12 @@ class ToolRegistry:
                 result = await handler(args, **kwargs)
             else:
                 # 同步 handler：丢线程池跑。
-                # 用 asyncio.to_thread（不用 anyio.to_thread.run_sync）：asyncio.to_thread
-                # 自动 copy 当前 context 到 worker 线程（含 workspace_cwd 等 ContextVar）。
-                # 否则 isolated_workspace 子代理的工具拿到主进程 cwd 而不是 worktree。
-                # （anyio.to_thread.run_sync 默认 abandon context，且 4.x API 变了）
+                # 为什么用 asyncio.to_thread 而不是 anyio.to_thread.run_sync：
+                # asyncio.to_thread 会自动把当前的 context（上下文变量，比如
+                # workspace_cwd 这种"当前工作目录是哪"的记号）复制到工作线程里。
+                # 用错了库的话，跑在隔离工作区（worktree）里的子代理（主对话派出去
+                # 帮忙干活的分身）拿到的还是主进程的目录，而不是它自己的工作区目录。
+                # （anyio 的版本默认不带回 context，而且 4.x 连 API 都改了）
                 import asyncio as _asyncio
                 result = await _asyncio.to_thread(handler, args, **kwargs)
             return self._normalize_result(name, result)
@@ -305,7 +362,17 @@ class ToolRegistry:
 
     @staticmethod
     def _normalize_result(name: str, result) -> str:
-        """规范化 handler 返回值为 JSON 字符串。"""
+        """把 handler 的返回值统一整理成 JSON 字符串。
+
+        背景：契约要求所有工具返回 JSON 字符串，但难免有人返回 dict 或别的类型，
+        这里是兜底出口：字符串原样过，dict 帮你转 JSON，别的类型报契约错误。
+
+        参数：
+            name: 工具名（出错时写进错误信息里）
+            result: handler 的原始返回值
+
+        返回：JSON 字符串。
+        """
         if isinstance(result, str):
             return result
         if isinstance(result, dict):
@@ -317,10 +384,16 @@ class ToolRegistry:
         }, ensure_ascii=False)
 
     def get(self, name: str) -> Optional[ToolEntry]:
-        """按名取 ToolEntry；不存在返回 None。
+        """按工具名查档案；查不到返回 None。
 
-        供 Task C1 测试 + Task F1/F2 查 isConcurrencySafe 字段用。
-        加锁读取，返回的是 ToolEntry 引用（__slots__ 不可变字段安全）。
+        背景：Task C1 测试和 Task F1/F2（并发分组）需要直接拿到工具档案，
+        比如读"能不能并发跑"这个字段。
+
+        参数：
+            name: 工具名。
+
+        返回：ToolEntry（工具档案），没有这个工具就是 None。读取时加锁；
+        返回的是档案本身的引用（字段创建后不再改，多线程读是安全的）。
         """
         with self._lock:
             return self._tools.get(name)
@@ -332,16 +405,20 @@ class ToolRegistry:
         quiet: bool = False,
         runtime_ctx: Optional[Dict] = None,
     ) -> List[dict]:
-        """返回 OpenAI 格式的工具 schema 列表。
+        """整理一份发给 LLM 的工具说明书列表（OpenAI 格式）。
 
-        只返回：
-        1. 名字在 tool_names 中的工具
-        2. check_fn 通过的工具（有 API key 等）
+        只包含同时满足两个条件的工具：
+        1. 名字在 tool_names 名单里（本次对话允许它看见）
+        2. 可用性检查通过（比如需要的 API key 已配置）
 
         参数：
-            runtime_ctx: 运行时上下文 dict（如 {"agent": self}）。
-                schema_overrides_fn 会拿到它来动态改 schema。
-                None 时跳过覆盖（向后兼容，schema 不变）。
+            tool_names: 允许暴露的工具名列表。
+            quiet: True 时不打印"某某工具未注册"的调试日志。
+            runtime_ctx: 运行时上下文字典（如 {"agent": self}）。
+                交给 schema_overrides_fn 用来动态改说明书（比如填上实时状态）。
+                不传就跳过覆盖这步，说明书原样输出（老调用方式不受影响）。
+
+        返回：schema 字典列表，每项形如 {"type": "function", "function": {...}}。
         """
         definitions = []
         with self._lock:
@@ -352,11 +429,11 @@ class ToolRegistry:
                 if not quiet:
                     logger.debug("工具 %s 未注册（被忽略）", name)
                 continue
-            # check_fn 检查（带缓存）
+            # 可用性检查（结果有 30 秒缓存，见上文说明）
             if entry.check_fn and not _check_fn_cached(entry.check_fn):
-                continue  # 不可用，不暴露给 LLM
+                continue  # 不可用就不发给 LLM
 
-            # 浅拷贝 schema，避免污染原 schema
+            # 拷贝一份 schema 再改，别把登记时的原件改脏了
             schema = dict(entry.schema)
             # 运行时覆盖（如剩余并发槽位）
             if entry.schema_overrides_fn is not None and runtime_ctx:
@@ -378,22 +455,29 @@ class ToolRegistry:
         return definitions
 
     def get_catalog_entry(self, name: str) -> Optional[dict]:
-        """返回精简目录条目（name + 短描述 + hint），无详细 parameters。
+        """给某个工具出一张"名片"：名字 + 一句话简介 + 怎么查详情的提示。
 
-        用于 ToolSearch：LLM 看目录知道工具存在，需要时调 tool_search 取完整 schema。
-        与 get_definitions 的区别：
-        - get_definitions 返回完整 schema（含详细 parameters）— 用于 built-in 工具
-        - get_catalog_entry 返回精简条目（parameters 为空对象）— 用于 MCP 工具
+        背景：给 ToolSearch（工具搜索）用的。MCP 外部工具数量可能很多，
+        全部附上详细说明书太占 token。所以先只发名片——LLM 看目录知道有这号工具，
+        真需要时再调 tool_search 取完整说明书。
+        和 get_definitions 的分工：
+        - get_definitions 给全量说明书（含详细 parameters）—— 用于内置工具
+        - get_catalog_entry 只给名片（parameters 是空壳）—— 用于 MCP 工具
+
+        参数：
+            name: 工具名。
+
+        返回：精简条目字典；工具不存在或当前不可用时返回 None。
         """
         with self._lock:
             entry = self._tools.get(name)
         if entry is None:
             return None
-        # check_fn 过滤（不可用的不进目录）
+        # 可用性过滤：不可用的工具连目录都不进
         if entry.check_fn and not _check_fn_cached(entry.check_fn):
             return None
         desc = (entry.schema.get("description", "") or "")[:60]
-        # hint 里的关键字用工具短名（去掉 mcp__<server>__ 前缀）
+        # 提示语里的搜索关键词用短名（去掉 mcp__<server>__ 这种长前缀，好搜）
         short_name = name.split("__")[-1] if "__" in name else name
         return {
             "name": name,
@@ -402,7 +486,10 @@ class ToolRegistry:
         }
 
     def list_all(self) -> List[str]:
-        """返回所有已注册的工具名。"""
+        """列出户口本上所有工具的名字。
+
+        返回：工具名列表（拷贝，改它不影响登记表）。
+        """
         with self._lock:
             return list(self._tools.keys())
 
@@ -411,5 +498,5 @@ class ToolRegistry:
         return self._generation
 
 
-# 全局单例
+# 全局唯一实例——全项目都用这个 `registry` 存取工具
 registry = ToolRegistry()
