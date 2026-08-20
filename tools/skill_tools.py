@@ -1,7 +1,13 @@
-"""技能查看工具：skills_list + skill_view。
+"""技能查看工具包：skills_list（列技能/搜技能）+ skill_view（看某个技能全文）+ load_skill（LLM 按需取技能正文）。
 
-skills_list：列出所有可用技能
-skill_view：查看某技能的完整内容
+背景：技能（skill）是存在磁盘上的 Markdown 使用说明书，agent 干活时按需翻阅。
+本文件给 LLM 提供三个查询工具：
+- skills_list：列出所有可用技能；带 query 关键词时按相关性排序只返回最像的几条
+- skill_view：查看某个技能的完整原文（给用户视角看，含文件头元信息）
+- load_skill：LLM 主动加载技能正文来照着执行（system prompt 里只放目录省 token，详细内容用这个取）
+
+在项目里的位置：属于工具层（tools/），注册进中央工具注册表（registry）暴露给 LLM；
+读写统计委托给 tools/skill_usage.py，目录发现委托给 constants.py。
 """
 
 import json
@@ -44,10 +50,16 @@ SKILL_VIEW_SCHEMA = {
 
 
 def _get_skills_dirs(kwargs: dict):
-    """获取技能扫描目录列表（内置 + 用户 + 已启用插件）。
+    """收集要去哪些目录里找技能文件，返回目录路径列表。
 
-    顺序 = 优先级，后者覆盖前者（用户/插件可覆盖内置同名技能）。
-    自定义 omnimate_home 时用自定义用户目录替换默认用户目录。
+    背景：技能可能放在三个地方——软件自带的（内置）、用户自己的（~/.OmniMate/skills）、
+    插件带来的。列表顺序就是优先级：排后面的同名技能会覆盖排前面的（所以用户能改造内置技能）。
+
+    参数：
+    - kwargs：工具调用时传进来的上下文。这里只关心 omnimate_home（自定义的数据目录），
+      传了就用它下面的 skills 目录替换默认用户目录。
+
+    返回：目录路径列表，按「内置 → 用户 → 插件」排列。
     """
     from constants import all_skills_dirs, get_omnimate_home
     dirs = list(all_skills_dirs())
@@ -61,13 +73,30 @@ def _get_skills_dirs(kwargs: dict):
 
 
 def _get_usage_dir(kwargs: dict) -> Path:
-    """usage 统计写入的用户技能目录（第一个非内置目录）。"""
+    """决定把使用统计写到哪个目录：用户技能目录（列表里第一个非内置的）。
+
+    背景：使用统计（查看/使用次数）不该写进内置目录，写到用户自己的目录才合适。
+
+    参数：
+    - kwargs：工具调用上下文，用来算出技能目录列表。
+
+    返回：统计文件所在的目录路径。
+    """
     dirs = _get_skills_dirs(kwargs)
     return dirs[1] if len(dirs) > 1 else dirs[0]
 
 
 def _find_skill_md(name: str, dirs) -> Path:
-    """跨目录按名字找 SKILL.md（用户/插件优先）。找不到返回 None。"""
+    """按技能名在多个目录里找到它的 SKILL.md 文件（用户/插件的同名技能优先）。
+
+    背景：同一个技能名可能在多个目录都有，倒着遍历（从优先级高的开始）保证取到覆盖版。
+
+    参数：
+    - name：技能名（就是技能目录的文件夹名）
+    - dirs：要搜的目录列表
+
+    返回：找到的 SKILL.md 完整路径；全都找不到就返回 None。
+    """
     for d in reversed(dirs):
         p = Path(d) / name / "SKILL.md"
         if p.exists():
@@ -76,11 +105,14 @@ def _find_skill_md(name: str, dirs) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# R22 #27：TF-IDF 技能搜索（对齐 CC localSearch 的轻量版）
+# 历史出处（R22 第 27 项）：TF-IDF 技能搜索——借鉴 Claude Code localSearch 做的轻量版。
+# TF-IDF 是搜索排序的老办法：一个词在这份文档里出现越多（TF）、同时在别的文档里越少见（IDF），
+# 就越能代表这份文档，得分越高。
 # ---------------------------------------------------------------------------
 
-# 中文常用虚词 + 英文停用词（对齐 CC STOP_WORDS 精简版；中文按字切分时
-# 虚词高频无区分度，直接进停用表）
+# 停用词表（搜索时直接忽略的词）：中文虚词 + 英文常见功能词。
+# 为什么需要：「的」「如何」这类词到处都是，没有任何区分度，留着只会干扰打分。
+# （对齐 Claude Code 的 STOP_WORDS，取精简版）
 _SKILL_STOP_WORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of",
     "in", "for", "on", "at", "by", "with", "and", "or", "not", "no", "do",
@@ -98,15 +130,24 @@ _TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_\-]+|[\u4e00-\u9fff]")
 
 
 def _tokenize(text: str) -> list:
-    """分词：英文连字符词组整体 + 部件都收（release-notes → 3 tokens，
-    部件让子词查询可命中）；中文按单字（CJK 无空格，单字可匹配词首）。"""
+    """把一段文字切成一个个「词」（token），供搜索打分用。
+
+    背景：中文没有空格分不出词，所以按单个汉字切（这样查「登录」也能命中「登录页」）；
+    英文按单词切；带连字符的词组（如 release-notes）整体收一份、拆开的部件（release、notes）
+    也各收一份——这样用其中一个词去搜也能找到。
+
+    参数：
+    - text：要切分的文字，可以是空串。
+
+    返回：小写化的词列表（停用词已剔除）。
+    """
     tokens = []
     for m in _TOKEN_RE.finditer(text or ""):
         t = m.group(0).lower()
         if t in _SKILL_STOP_WORDS:
             continue
         tokens.append(t)
-        # 连字符词组拆部件（子词可查询）
+        # 连字符词组再补上拆开的部件，方便用半个词也能搜到
         if "-" in t:
             for part in t.split("-"):
                 if len(part) >= 2 and part not in _SKILL_STOP_WORDS:
@@ -115,21 +156,30 @@ def _tokenize(text: str) -> list:
 
 
 def _skill_search_rank(skills: dict, query: str, top_n: int = 10) -> list:
-    """TF-IDF 打分排序（query tokens 对技能 name/description 词频向量）。
+    """按相关性给技能打分排序，返回最匹配的前 N 个。
 
-    轻量版：TF（词频）× IDF（query 词在多少技能出现——稀有词权重高）；
-    name 命中加权 ×3（名字是最强信号）。无 query 或无命中返回空列表。
+    背景：技能多了以后 LLM 需要「按关键词找技能」而不是每次全量翻。
+    打分思路（轻量版 TF-IDF）：搜索词在技能的名字/描述里出现越多得分越高（TF），
+    且这个词越少见（在越少技能里出现）权重越大（IDF，稀有词更能说明相关性）；
+    名字里命中按 3 倍计——名字是最强的信号。
+
+    参数：
+    - skills：技能信息字典，键是技能名，值含 name/description 等字段
+    - query：用户的搜索关键词
+    - top_n：最多返回几个，默认 10
+
+    返回：按得分从高到低排的技能信息列表；query 为空、切不出词或没有任何命中时返回空列表。
     """
     q_tokens = _tokenize(query)
     if not q_tokens or not skills:
         return []
     items = list(skills.values())
-    # 每技能的 token 列表（name 加权 ×3）
+    # 每个技能的词表；名字里的词重复 3 遍 = 名字命中加权 3 倍
     docs = []
     for s in items:
         toks = _tokenize(s.get("name", "")) * 3 + _tokenize(s.get("description", ""))
         docs.append(toks)
-    # IDF：query token 的文档频率
+    # IDF：算每个搜索词出现在几个技能里（出现得越少越「稀有」，越值钱）
     n = len(docs)
     scores = []
     for i, toks in enumerate(docs):
@@ -141,8 +191,8 @@ def _skill_search_rank(skills: dict, query: str, top_n: int = 10) -> list:
             if qt not in tf_map:
                 continue
             df = sum(1 for d in docs if qt in d)
-            idf = 1.0 + (n - df) / n  # 稀有词 > 1，全文档命中 → 1
-            # 中文单字（len==1）TF 封顶 2——长描述里高频虚字/常用字会刷分
+            idf = 1.0 + (n - df) / n  # 稀有词权重 > 1；所有技能都有这个词时就只剩 1
+            # 单个汉字的词频封顶 2 次：防止长描述里反复出现的常用字刷高得分
             tf = min(tf_map[qt], 2) if len(qt) == 1 else tf_map[qt]
             score += tf * idf
         if score > 0:
@@ -152,21 +202,30 @@ def _skill_search_rank(skills: dict, query: str, top_n: int = 10) -> list:
 
 
 def _handle_skills_list(args: dict, **kwargs) -> str:
+    """skills_list 的实际处理函数：扫描技能目录拼出技能清单，支持按关键词过滤排序。
+
+    参数：
+    - args：LLM 传的工具参数，这里只看可选的 query（搜索关键词）
+    - kwargs：运行时上下文（omnimate_home 等），用来定位技能目录
+
+    返回：JSON 字符串。带 query 且有匹配时返回按相关性排序的结果；
+    有 query 但没匹配时返回空列表加提示；没 query 时返回全量列表。
+    """
     dirs = _get_skills_dirs(kwargs)
     usage = load_usage(_get_usage_dir(kwargs))
     skills = {}
-    for d in dirs:  # 顺序：内置 → 用户 → 插件，后者覆盖前者
+    for d in dirs:  # 顺序：内置 → 用户 → 插件；后扫到的同名技能覆盖先扫到的
         d = Path(d)
         if not d.exists():
             continue
         for skill_md in sorted(d.glob("*/SKILL.md")):
             name = skill_md.parent.name
             rec = usage.get(name, {})
-            # 跳过归档的
+            # 已归档的技能不出现在清单里
             if rec.get("state") == "archived":
                 continue
 
-            # 尝试从 frontmatter 读描述
+            # 统计里没存描述的话，就读 SKILL.md 头部的 frontmatter（--- 包住的元信息区）拿一份
             description = rec.get("description", "")
             if not description:
                 try:
@@ -184,7 +243,8 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
                 "state": rec.get("state", "active"),
             }
 
-    # R22 #27：query 参数 → TF-IDF 相关性排序（找得到才返回，找不到全量列）
+    # 历史出处（R22 第 27 项）：带 query 参数时按 TF-IDF 相关性排序——
+    # 搜得到就只返回匹配的；搜不到就返回提示让 LLM 去掉 query 看全量
     query = (args.get("query") or "").strip()
     if query:
         ranked = _skill_search_rank(skills, query)
@@ -207,6 +267,14 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
 
 
 def _handle_skill_view(args: dict, **kwargs) -> str:
+    """skill_view 的实际处理函数：读出指定技能 SKILL.md 的完整原文。
+
+    参数：
+    - args：LLM 传的工具参数，只看必填的 name（技能名）
+    - kwargs：运行时上下文（omnimate_home 等），用来定位技能目录
+
+    返回：JSON 字符串，含技能名、完整内容、文件路径；名字为空或技能不存在时返回 error。
+    """
     name = (args.get("name") or "").strip()
     if not name:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
@@ -216,7 +284,7 @@ def _handle_skill_view(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
     content = skill_md.read_text(encoding="utf-8")
-    bump_view(_get_usage_dir(kwargs), name)  # 查看计数 +1
+    bump_view(_get_usage_dir(kwargs), name)  # 顺手把「被查看次数」加一，供后续推荐/清理参考
 
     return json.dumps({
         "name": name,
@@ -231,7 +299,7 @@ registry.register(
     schema=SKILLS_LIST_SCHEMA,
     handler=_handle_skills_list,
     emoji="📋",
-    isConcurrencySafe=True,  # 只读：列技能目录，无副作用，可并发
+    isConcurrencySafe=True,  # 只读不改动任何东西，多个并发跑也安全
 )
 
 registry.register(
@@ -240,12 +308,12 @@ registry.register(
     schema=SKILL_VIEW_SCHEMA,
     handler=_handle_skill_view,
     emoji="👁️",
-    isConcurrencySafe=True,  # 只读：读技能正文（bump view 计数是小副作用，对并发不致命），可并发
+    isConcurrencySafe=True,  # 基本只读（只是顺手记一下查看计数，这个小副作用并发跑也无妨）
 )
 
 
 # ---------------------------------------------------------------------------
-# load_skill：LLM 主动按需加载技能正文
+# load_skill：LLM 主动按需加载技能正文（相当于「翻到这一页说明书照着做」）
 # ---------------------------------------------------------------------------
 
 LOAD_SKILL_SCHEMA = {
@@ -270,6 +338,19 @@ LOAD_SKILL_SCHEMA = {
 
 
 def _handle_load_skill(args: dict, **kwargs) -> str:
+    """load_skill 的实际处理函数：取出技能的指令正文交给 LLM 照着执行。
+
+    背景：system prompt 里只放了技能目录（省 token），LLM 判断需要某个技能时调这里取全文。
+    还顺带处理几种特殊情况：技能束（一次加载一组技能）、frontmatter 声明的附件文件、
+    context:fork 技能（要在隔离子代理（主对话派出去帮忙干活的分身）里跑）、
+    allowed-tools/disallowed-tools（技能触发的临时工具开关）。
+
+    参数：
+    - args：LLM 传的工具参数，只看必填的 name（技能名，可以是 "bundle:<束名>"）
+    - kwargs：运行时上下文（omnimate_home、config、agent_ref 等）
+
+    返回：JSON 字符串，含技能正文、路径、附件；名字为空或技能不存在时返回 error。
+    """
     name = (args.get("name") or "").strip()
     if not name:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
@@ -277,12 +358,12 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
     usage_dir = _get_usage_dir(kwargs)
     dirs = _get_skills_dirs(kwargs)
 
-    # batch1-T3: 支持 bundle:<name> 加载技能束
+    # 历史出处（batch1-T3）：支持传 bundle:<束名> 一次加载一整组技能
     if name.startswith("bundle:"):
         bundle_name = name[len("bundle:"):]
         from agent.skill_bundle import load_bundle
         result = load_bundle(bundle_name, usage_dir)
-        # 对成功加载的技能 bump view 计数
+        # 束里每个成功加载的技能也记一次查看
         for sname in result.get("skills_loaded", []):
             try:
                 bump_view(usage_dir, sname)
@@ -295,15 +376,15 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
     content = skill_md.read_text(encoding="utf-8")
-    # 去掉 frontmatter，只返回指令正文
+    # 把文件头元信息区（frontmatter）剥掉，只留指令正文
     frontmatter, body = parse_frontmatter(content)
 
-    # T3（核心机制对齐第 3 项）：frontmatter files: 参考文件附件
+    # 历史出处（T3，核心机制对齐第 3 项）：frontmatter 里写了 files: 时，把参考文件一起读进来当附件
     attachments = _load_skill_attachments(skill_md.parent, frontmatter.get("files"), kwargs)
 
-    bump_view(usage_dir, name)  # 加载也计入 view 计数
+    bump_view(usage_dir, name)  # 加载也算一次查看，进统计
 
-    # round3: context:fork 技能提示 LLM 用 subagent 跑
+    # 历史出处（round3）：声明了 context:fork 的技能不可以在主对话里直接跑，要派子代理去跑
     if frontmatter.get("context") == "fork":
         return json.dumps({
             "name": name,
@@ -315,7 +396,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
                      "请用 subagent 工具派生子代理，把上述技能正文作为子代理指令运行。"),
         }, ensure_ascii=False)
 
-    # allowed-tools / disallowed-tools：技能触发时临时调整可用工具集
+    # 技能可以通过 frontmatter 的 allowed-tools / disallowed-tools 临时收窄可用工具范围
     allowed = frontmatter.get("allowed-tools")
     disallowed = frontmatter.get("disallowed-tools")
     agent = kwargs.get("agent_ref")
@@ -334,7 +415,18 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
 
 
 def _load_skill_attachments(skill_dir, files, kwargs: dict) -> list:
-    """读技能附件（T3），max_chars 从 config skills.file_attachment_max_chars 取。"""
+    """读取技能声明的附件文件（参考文件），返回内容列表。
+
+    背景：技能除了说明书正文还可以带几个参考文件，加载技能时一起读进来。
+    历史出处：T3（核心机制对齐第 3 项）。
+
+    参数：
+    - skill_dir：技能所在目录（附件相对它找）
+    - files：frontmatter 里声明的文件列表；为空则没有附件
+    - kwargs：运行时上下文；从 config 的 skills.file_attachment_max_chars 读单文件最大字符数
+
+    返回：附件内容列表；读取出任何问题都返回空列表（附件是锦上添花，失败不报错）。
+    """
     from agent.skill_commands import read_skill_attachment_files, DEFAULT_ATTACHMENT_MAX_CHARS
     cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
     max_chars = (cfg.get("skills") or {}).get(
@@ -352,5 +444,5 @@ registry.register(
     schema=LOAD_SKILL_SCHEMA,
     handler=_handle_load_skill,
     emoji="📖",
-    isConcurrencySafe=False,  # 副作用：可能改 agent._skill_tool_scope（实例级状态），保守标 False
+    isConcurrencySafe=False,  # 有副作用：可能改动 agent 实例的工具开关状态，保守起见不许并发
 )

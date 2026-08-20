@@ -1,18 +1,25 @@
-"""config 工具（CCAR12 Task 7）：LLM 安全改配置（白名单 9 键精确匹配）。
+"""config 工具（CCAR12 第 7 任务）：让 LLM 能安全地改运行时配置。
 
-为什么需要白名单：配置里混着敏感键（llm.auth_token、security.* 等），
-LLM 直接改配置一旦被 prompt 注入就是灾难。白名单 frozenset 精确匹配
-（非前缀——"notifications" 不命中 "notifications.enabled"），
-白名单外一律 permission_denied。
+只开放白名单里的 9 个键，而且必须精确匹配。在项目里的位置：tools 层的
+core 工具，读写都走 agent/settings.py 的 load_settings/save_settings，
+并同步 agent_ref 上挂的运行时配置。
 
-config_set 三步走：
-  1. 读-改-写 settings.json（load_settings/save_settings，CCAR11 轨道）
-  2. runtime 生效：同步改 dispatch_kwargs["agent_ref"].config 同键
-     （嵌套路径 set——本会话立即生效，不用重启）
-  3. CONFIG_CHANGE hook（审计/缓存失效，fail-open）
+为什么非要白名单：配置里混着敏感键（比如 llm.auth_token、security.* 这类），
+如果 LLM 什么都能改，一旦提示词被恶意注入（prompt 注入攻击），后果不堪设想。
+所以用 frozenset（不可变集合）做精确匹配——不是前缀匹配，
+比如 "notifications" 不会误中 "notifications.enabled"；不在名单里的键一律拒绝
+（permission_denied）。
 
-value 类型：按现有值类型强转（现有 bool → bool(value)，int → int(value)），
-防 LLM 传 JSON 字符串数字落盘后类型漂移。
+config_set（改配置）分三步：
+  1. 读-改-写 settings.json（走 load_settings/save_settings，这是 CCAR11 定下的
+     唯一合法通道——config.yaml 那条老路已经断了，写了也读不回来）
+  2. 运行时立即生效：把 agent_ref.config 里的同一个键改掉
+     （按嵌套路径写入——本会话马上生效，不用重启）
+  3. 触发 CONFIG_CHANGE hook（钩子，供审计/缓存失效用；hook 出错也不影响写配置）
+
+新值的类型：按现有值的类型强转（现有是 bool 就转成 bool，是 int 就转成 int）。
+背景：LLM 有时会传 JSON 字符串形式的数字（"5" 而不是 5），不转的话落盘后
+类型就漂了，后面按 int 读会出错。
 """
 import json
 import logging
@@ -23,12 +30,13 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 
-# 白名单（模块级 frozenset，精确匹配）。只放"改坏了也只影响体验"的开关类键。
-# review 修正：换掉 2 个 dead key——trace.retention_days（trace.py 无 retention
-# 逻辑，全仓无读取点）和 context.reactive_compact_enabled（真实开关是
-# features.reactive_compact.enabled）——写黑洞还假报生效是 silent-dead-code。
-# 换入 context.reactive_compact_cooldown_seconds / max_per_session
-# （agent/__init__.py reactive_compact 分支有真实读取点）。
+# 白名单（模块级不可变集合，精确匹配）。只收「改坏了顶多影响体验」的开关类键。
+# 历史踩坑（review 修正）：换掉过 2 个"死键"——trace.retention_days（trace.py 里
+# 根本没有 retention 清理逻辑，全仓无人读它）和 context.reactive_compact_enabled
+# （真正的开关在 features.reactive_compact.enabled）——写进没人读的键还谎报
+# "已生效"，是最危险的静默失败（silent-dead-code）。
+# 换进来的是 context.reactive_compact_cooldown_seconds / max_per_session
+# （这两个在 agent/__init__.py 的 reactive_compact 分支里有真实的读取点）。
 _CONFIG_WHITELIST = frozenset({
     "notifications.enabled",
     "statusline.enabled",
@@ -44,15 +52,17 @@ _CONFIG_WHITELIST = frozenset({
     "skill_learning.observer",
 })
 
-# 这些键在 cli initialize 一次性装配（如 TraceSink），会话中改 config 不会重接线
-# ——runtime_applied 必须如实报 "next_session"，不能假报 True。
+# 这些键只在 CLI 启动装配阶段接线一次（比如 TraceSink 日志收集器），会话中途改
+# config 也不会重新接线——所以 runtime_applied 必须如实报 "next_session"（下次会话
+# 才生效），不能谎报 True。「假报生效」是本项目反复强调要防的坑。
 _NEXT_SESSION_KEYS = frozenset({
     "trace.enabled",
 })
 
-# 枚举键：值只允许列出的集合（大小写不敏感归一）。
-# CCAR15 T4 review 快修：observer 设 "LLM"/拼错会静默走启发式还假报
-# runtime_applied=True——"假报生效"教训的值级变体，在校验层拦掉。
+# 枚举键：值只能是列出来的那几个（统一转小写再比较）。
+# 历史踩坑（CCAR15 T4 review 快修）：observer 若被设成 "LLM" 或拼错单词，
+# 会静默回落到启发式，还谎报 runtime_applied=True——这就是"假报生效"在取值层面的
+# 变体，所以在校验这一层直接拦死。
 _ENUM_KEYS = {
     "skill_learning.observer": frozenset({"heuristic", "llm"}),
 }
@@ -120,12 +130,23 @@ CONFIG_SET_SCHEMA = {
 
 
 def _split_key(key: str) -> list:
-    """点分路径拆段。"""
+    """把 "a.b.c" 这种点分隔的配置键拆成 ["a", "b", "c"]。
+
+    参数：
+        key: 点分路径形式的配置键
+    返回：拆好的段列表（空段自动丢弃）。
+    """
     return [seg for seg in key.split(".") if seg]
 
 
 def _get_nested(d: dict, parts: list):
-    """按路径读嵌套值。中间层缺失/非 dict → None。"""
+    """按 ["a","b","c"] 这样的路径，从嵌套 dict 里一层层往下读值。
+
+    参数：
+        d: 要读的字典（可以是多层嵌套的）
+        parts: 路径段列表（_split_key 的产物）
+    返回：读到叶子上的值；中途某一层不存在或不是字典 → 返回 None。
+    """
     cur = d
     for seg in parts:
         if not isinstance(cur, dict) or seg not in cur:
@@ -135,7 +156,14 @@ def _get_nested(d: dict, parts: list):
 
 
 def _set_nested(d: dict, parts: list, value) -> None:
-    """按路径写嵌套值（中间层 setdefault 逐层创建）。"""
+    """按路径往嵌套 dict 里写值；中间层不存在就顺手建出来。
+
+    参数：
+        d: 要写入的字典
+        parts: 路径段列表
+        value: 要写的值
+    返回：无（直接原地修改 d）。
+    """
     cur = d
     for seg in parts[:-1]:
         cur = cur.setdefault(seg, {})
@@ -143,9 +171,17 @@ def _set_nested(d: dict, parts: list, value) -> None:
 
 
 def _coerce_value(value, current):
-    """按现有值类型强转。bool 先判（bool 是 int 的子类，顺序不能反）。
+    """按现有值的类型把新值"掰"成同类型。
 
-    不可转（int 键传 "abc"）抛 ValueError/TypeError，由调用方转 invalid_args。
+    背景：LLM 可能把数字传成字符串 "5"，不掰的话落盘后类型就乱了。
+    必须先判 bool 再判 int——因为 bool 是 int 的子类，顺序反了布尔值会被
+    误当成整数处理。
+
+    参数：
+        value: LLM 传来的新值
+        current: 现有值（用它的类型做参照）
+    返回：强转后的新值；转不动（比如 int 键传 "abc"）就抛
+    ValueError/TypeError，由调用方包装成 invalid_args 错误返回。
     """
     if isinstance(current, bool):
         return bool(value)
@@ -155,7 +191,14 @@ def _coerce_value(value, current):
 
 
 def _denied_json(key: str) -> str:
-    """白名单外拒绝（带白名单提示，LLM 可自行纠正到合法键）。"""
+    """拒绝白名单外的键，并在错误信息里列出所有合法键。
+
+    背景：把合法键直接告诉 LLM，它下次就能自己改对，不用用户再教。
+
+    参数：
+        key: 被拒绝的配置键
+    返回：JSON 字符串，error_type 为 permission_denied。
+    """
     return json.dumps(
         {
             "error": (
@@ -170,10 +213,13 @@ def _denied_json(key: str) -> str:
 
 
 def _handle_config_get(args: dict, **dispatch_kwargs) -> str:
-    """读配置项（只读）。
+    """config_get 的处理函数：查一个配置键当前的值（纯只读）。
 
-    优先读 agent_ref.config（运行时实际生效值），无 agent_ref 时读
-    settings.json。返回 JSON 字符串（统一契约）。
+    参数：
+        args: LLM 传来的参数，只用到 key（要查的配置键）
+        dispatch_kwargs: 命名上下文，用到 agent_ref（拿它身上的运行时配置）
+    返回：JSON 字符串（统一契约）。优先读 agent_ref.config——那是本会话
+    实际生效的值；拿不到 agent_ref 时才退回去读 settings.json 文件。
     """
     key = (args.get("key") or "").strip()
     if not key:
@@ -188,7 +234,7 @@ def _handle_config_get(args: dict, **dispatch_kwargs) -> str:
         parts = _split_key(key)
         agent_ref = dispatch_kwargs.get("agent_ref")
         runtime_cfg = getattr(agent_ref, "config", None)
-        # runtime 优先：反映本会话已生效的值（磁盘可能落后）
+        # 运行时值优先：反映本会话已生效的状态（磁盘文件可能还没跟上）
         if isinstance(runtime_cfg, dict):
             value = _get_nested(runtime_cfg, parts)
             if value is not None:
@@ -206,10 +252,18 @@ def _handle_config_get(args: dict, **dispatch_kwargs) -> str:
 
 
 def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
-    """改配置项（写盘 + runtime 生效 + hook）。
+    """config_set 的处理函数：改一个配置键（写盘 + 本会话生效 + 通知 hook）。
 
-    流程：白名单校验 → load_settings 读现有值（类型推断）→ 强转 →
-    save_settings 落盘 → 同步 agent_ref.config → CONFIG_CHANGE hook（fail-open）。
+    流程：白名单校验 → 读 settings.json 里的现有值（用来推断类型）→
+    把新值强转成同类型 → 写回 settings.json 落盘 → 同步改 agent_ref.config →
+    触发 CONFIG_CHANGE hook（hook 出错不影响配置写入）。
+
+    参数：
+        args: LLM 传来的参数——key（配置键）和 value（新值）
+        dispatch_kwargs: 命名上下文——agent_ref（运行时配置挂它身上）、
+                         hooks_registry（触发 hook 用）、session_id（hook 载荷）
+    返回：JSON 字符串，带 runtime_applied（本会话生效 / "next_session"）和
+    persisted（是否已写盘）。
     """
     key = (args.get("key") or "").strip()
     if not key:
@@ -232,7 +286,8 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
         parts = _split_key(key)
         settings = load_settings()
 
-        # 类型推断：settings 现有值优先，磁盘没有再参考 runtime（都无 → 原样存）
+        # 推断类型用哪个值当参照：磁盘 settings 里现有值优先，磁盘没有再看
+        # 运行时配置（两边都没有 → 不强转，按 LLM 传的原样存）
         current = _get_nested(settings, parts)
         if current is None and isinstance(runtime_cfg, dict):
             current = _get_nested(runtime_cfg, parts)
@@ -249,7 +304,7 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
                 ensure_ascii=False,
             )
 
-        # 枚举键校验：大小写归一 + 非法值拒绝（不落盘，错误消息列合法值）
+        # 枚举键校验：统一转小写再比；非法值直接拒绝（不落盘），错误消息里列出合法选项
         allowed = _ENUM_KEYS.get(key)
         if allowed is not None:
             normalized = str(coerced).strip().lower() if isinstance(
@@ -270,14 +325,15 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
 
         old_value = current
 
-        # 1. 读-改-写 settings.json（CCAR11 轨道）
+        # 第 1 步：读-改-写 settings.json（这是 CCAR11 定下的唯一合法持久化通道）
         _set_nested(settings, parts, coerced)
         save_settings(settings)
 
-        # 2. runtime 生效：同步 agent_ref.config 同键（嵌套路径 set）。
-        #    例外：_NEXT_SESSION_KEYS 在 cli initialize 一次性装配（如 TraceSink
-        #    接线），会话中改 config 不会重接线——值照常同步（下次会话生效），
-        #    但 runtime_applied 如实报 "next_session"，不假报本会话已生效。
+        # 第 2 步：让它在本会话立即生效——同步改 agent_ref.config 里的同一个键
+        #    （按嵌套路径写入）。例外：_NEXT_SESSION_KEYS 里的键（如 trace.enabled）
+        #    只在 CLI 启动装配阶段接线一次（比如 TraceSink），会话中途改了也不会
+        #    重新接线——值照样同步（下次会话读到），但 runtime_applied 要如实报
+        #    "next_session"，不能谎报本会话已生效。
         runtime_applied = False
         if isinstance(runtime_cfg, dict):
             _set_nested(runtime_cfg, parts, coerced)
@@ -286,7 +342,7 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
             else:
                 runtime_applied = True
 
-        # 3. CONFIG_CHANGE hook（fail-open：hook 异常不影响配置写入）
+        # 第 3 步：触发 CONFIG_CHANGE hook（供审计/缓存失效用；hook 崩了也不回滚配置）
         hooks_registry = dispatch_kwargs.get("hooks_registry")
         if hooks_registry is not None:
             try:
@@ -318,14 +374,14 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
         )
 
 
-# 模块级注册（import 时自动执行）
+# 模块级注册：本文件一被 import 就自动登记这两个工具
 registry.register(
     name="config_get",
     toolset="core",
     schema=CONFIG_GET_SCHEMA,
     handler=_handle_config_get,
     emoji="⚙️",
-    isConcurrencySafe=True,  # 只读：读配置值，无副作用
+    isConcurrencySafe=True,  # 只读：查配置值，没有副作用，并发跑也没事
 )
 registry.register(
     name="config_set",
@@ -333,5 +389,5 @@ registry.register(
     schema=CONFIG_SET_SCHEMA,
     handler=_handle_config_set,
     emoji="⚙️",
-    isConcurrencySafe=False,  # 写 settings.json + 改 runtime config + hook
+    isConcurrencySafe=False,  # 有写副作用：写 settings.json + 改运行时配置 + 触发 hook，须串行
 )

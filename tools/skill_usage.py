@@ -1,20 +1,25 @@
-"""技能使用统计 + provenance 追踪。
+"""技能使用统计和来龙去脉记录。
 
-存在 ~/.OmniMate/skills/.usage.json，键是技能名。
-计数器由 skill_view / skill_manage 工具触发。
-curator 读取活动时间戳决定生命周期转换。
+背景：agent 需要知道每个技能「多久没用、被看过/用过几次、是谁创建的」，才能决定
+哪些技能该归档、哪些值得推荐。这些数字单独存在 ~/.OmniMate/skills/.usage.json 里
+（键是技能名），不写进技能文件本身。
 
-设计原则：
-1. Sidecar 文件，不写进 SKILL.md（避免污染用户内容）
-2. 原子写入（tempfile + os.replace）
-3. 所有计数 best-effort，失败不影响工具调用
-4. 只有 created_by="agent" 的技能受 curator 管理
+谁来用：计数由 skill_view / skill_manage 等工具在干活时顺手触发；
+后台维护工人（curator，定期整理技能/记忆的程序）读活动时间戳来决定技能的生命周期转换。
 
-生命周期状态：
-    active   - 默认
-    stale    - 超过 stale_after_days（30天）无活动
-    archived - 超过 archive_after_days（90天）；移动到 .archive/
-    pinned   - 免疫自动转换（正交于 state 的布尔标志）
+设计原则（为什么做成这样）：
+1. 统计单独放一个「伴生文件」（sidecar），不写进 SKILL.md——技能正文是给用户/LLM 看的，
+   塞进计数会污染内容
+2. 写盘用原子写（先写临时文件再一步替换），断电/中断也不会留下半个坏文件
+3. 所有计数都是「尽力而为」：失败了只记日志，绝不影响工具本身的调用
+4. 只有 created_by="agent"（后台 curator 创建）的技能才受 curator 自动管理，
+   用户建的技能 curator 不动
+
+生命周期状态（像食品保质期一样随闲置时间流转）：
+    active   - 默认的健康状态
+    stale    - 超过 30 天（stale_after_days）没活动，标记为「陈旧」
+    archived - 超过 90 天（archive_after_days）没活动；目录挪到 .archive/ 下
+    pinned   - 用户手动钉住，免疫一切自动转换（跟 state 平行的一个独立开关）
 """
 
 import json
@@ -39,12 +44,19 @@ def _usage_file(skills_dir: Path) -> Path:
     return Path(skills_dir) / ".usage.json"
 
 
-# 内存缓存 + lazy flush(避免每次 bump 都全量读写 .usage.json)
+# 内存缓存 + 懒写盘：记数先攒在内存里，等收尾时一次性落盘。
+# 为什么：查看/使用很频繁，每次都全量读写 .usage.json 太浪费。
 _usage_cache: Dict[str, dict] = {}
 
 
 def load_usage(skills_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """加载使用统计(有内存缓存,首次加载后不再读盘)。"""
+    """读出某目录的全部使用统计。带内存缓存：第一次读盘之后就一直用内存里的副本。
+
+    参数：
+    - skills_dir：技能目录路径
+
+    返回：字典，键是技能名，值是该技能的统计记录；文件不存在或损坏时返回空字典。
+    """
     key = str(skills_dir)
     if key in _usage_cache:
         return _usage_cache[key]["data"]
@@ -61,14 +73,24 @@ def load_usage(skills_dir: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def save_usage(skills_dir: Path, data: Dict[str, Dict[str, Any]]) -> None:
-    """更新使用统计(写内存缓存 + 标记 dirty,不立即写盘)。"""
+    """把改过的统计存回缓存并打上「待写盘」标记（dirty），但不立刻写文件。
+
+    参数：
+    - skills_dir：技能目录路径
+    - data：完整的统计数据字典
+    """
     _usage_cache[str(skills_dir)] = {"data": data, "dirty": True}
 
 
 def flush_usage(skills_dir: Path = None) -> None:
-    """把脏数据写盘。skills_dir=None 时 flush 所有目录。
+    """把攒在内存里改过的统计真正写进磁盘文件。
 
-    在 agent shutdown / 每轮对话结束时调用。
+    背景：平时只动内存缓存，由本函数在收尾时机（agent 退出、每轮对话结束）统一落盘。
+
+    参数：
+    - skills_dir：只写这个目录的缓存；传 None 表示把所有目录的都写一遍
+
+    返回：无。写失败的只记 debug 日志，不抛错（统计是小事，不值得打断主流程）。
     """
     from agent.atomic_io import atomic_write_text
     for key, entry in _usage_cache.items():
@@ -85,7 +107,14 @@ def flush_usage(skills_dir: Path = None) -> None:
 
 
 def _ensure_record(data: Dict, skill_name: str) -> Dict:
-    """确保技能有使用记录，返回该记录。"""
+    """确保统计字典里有这个技能的记录（没有就补一条空白模板），并返回这条记录。
+
+    参数：
+    - data：全部统计数据的字典（会原地修改）
+    - skill_name：技能名
+
+    返回：该技能的统计记录字典。
+    """
     if skill_name not in data:
         data[skill_name] = {
             "created_by": "user",
@@ -104,7 +133,16 @@ def _ensure_record(data: Dict, skill_name: str) -> Dict:
 
 
 def bump_view(skills_dir: Path, skill_name: str) -> None:
-    """查看次数 +1。skill_view() 调用。"""
+    """把某技能的「被查看次数」加一，并记下这次查看的时间。
+
+    背景：skill_view 工具看技能时调用，给推荐排序和闲置判定提供数据。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：无。失败只记 debug 日志（尽力而为）。
+    """
     try:
         data = load_usage(skills_dir)
         rec = _ensure_record(data, skill_name)
@@ -116,7 +154,16 @@ def bump_view(skills_dir: Path, skill_name: str) -> None:
 
 
 def bump_use(skills_dir: Path, skill_name: str) -> None:
-    """使用次数 +1。技能作为 slash 命令被调用时。"""
+    """把某技能的「实际使用次数」加一，并记下这次使用的时间。
+
+    背景：技能被当成斜杠命令（在输入框里打 /技能名 触发）真正执行时调用。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：无。失败只记 debug 日志。
+    """
     try:
         data = load_usage(skills_dir)
         rec = _ensure_record(data, skill_name)
@@ -128,7 +175,16 @@ def bump_use(skills_dir: Path, skill_name: str) -> None:
 
 
 def bump_patch(skills_dir: Path, skill_name: str) -> None:
-    """修改次数 +1。skill_manage(patch/edit) 调用。"""
+    """把某技能的「被修改次数」加一，并记下这次修改的时间。
+
+    背景：skill_manage 工具做 patch（小修）或 edit（重写）后调用。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：无。失败只记 debug 日志。
+    """
     try:
         data = load_usage(skills_dir)
         rec = _ensure_record(data, skill_name)
@@ -140,10 +196,16 @@ def bump_patch(skills_dir: Path, skill_name: str) -> None:
 
 
 def mark_agent_created(skills_dir: Path, skill_name: str) -> None:
-    """标记技能为 agent 创建（使其受 curator 管理）。
+    """把技能标记为「agent 创建」，从此受后台维护工人（curator）自动管理。
 
-    关键：只有后台 curator 审查时创建的技能才标记。
-    用户手动让 agent 创建的不标记。
+    背景/关键区分：只有 curator 在后台自主审查时创建的技能才标记；
+    用户当面让 agent 建的不标记——用户亲手要的东西，后台不该自作主张去归档或改它。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：无。失败只记 debug 日志。
     """
     try:
         data = load_usage(skills_dir)
@@ -155,7 +217,15 @@ def mark_agent_created(skills_dir: Path, skill_name: str) -> None:
 
 
 def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
-    """设置生命周期状态。"""
+    """设置技能的生命周期状态（active/stale/archived）。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+    - state：目标状态；不在三个合法值里就直接忽略
+
+    返回：无。只管 agent 创建的技能；技能没有记录或出错时静默跳过。
+    """
     if state not in _VALID_STATES:
         return
     try:
@@ -163,7 +233,7 @@ def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
         if skill_name not in data:
             return
         rec = data[skill_name]
-        # 只管理 agent 创建的技能
+        # 只自动管理 agent 创建的技能；用户建的动状态属于越权
         if rec.get("created_by") != "agent":
             return
         rec["state"] = state
@@ -177,7 +247,17 @@ def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
 
 
 def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
-    """设置/取消 pin。pinned 技能免疫所有自动转换。"""
+    """给技能钉上/取消「钉住」（pinned）标记。被钉住的技能免疫所有自动转换。
+
+    背景：这是用户表达「这个技能我要留着，别动」的开关——用户的明确意图优先于算法。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+    - pinned：True 钉住 / False 取消
+
+    返回：无。同样只对 agent 创建的技能生效；出错静默跳过。
+    """
     try:
         data = load_usage(skills_dir)
         if skill_name not in data:
@@ -192,10 +272,16 @@ def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
 
 
 def archive_skill(skills_dir: Path, skill_name: str) -> tuple:
-    """把技能目录移动到 .archive/。
+    """把技能整个目录挪到 .archive/ 目录下（回收站式的「软删除」）。
 
-    返回 (是否成功, 消息)。
-    永不删除！归档是可恢复的。
+    背景：项目铁律「完全可逆」——永不真删除，归档的东西随时能捞回来。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：(是否成功, 给人看的消息) 二元组。
+    技能不存在、归档位置已被占用（同名冲突）或移动失败都会返回失败。
     """
     skill_dir = Path(skills_dir) / skill_name
     if not skill_dir.exists():
@@ -217,7 +303,14 @@ def archive_skill(skills_dir: Path, skill_name: str) -> tuple:
 
 
 def restore_skill(skills_dir: Path, skill_name: str) -> tuple:
-    """从 .archive/ 恢复技能。"""
+    """把技能从 .archive/ 挪回原位（撤销归档）。
+
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+
+    返回：(是否成功, 消息) 二元组。归档里没有它、原位置已被占用或移动失败都返回失败。
+    """
     archive_dir = Path(skills_dir) / ".archive"
     src = archive_dir / skill_name
     if not src.exists():
@@ -236,19 +329,23 @@ def restore_skill(skills_dir: Path, skill_name: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# B4 评分 + 推荐
+# 历史出处（B4）：技能评分 + 推荐功能
 # ---------------------------------------------------------------------------
 
 def set_rating(skills_dir: Path, skill_name: str, rating: int) -> tuple:
-    """给技能打分（1-5 星）。
+    """给技能打 1-5 星的评分（用户的喜好信号，喂给推荐排序用）。
 
-    返回 (是否成功, 消息)。
-    评分越界的拒绝；技能不存在的拒绝。
+    参数：
+    - skills_dir：技能目录路径
+    - skill_name：技能名
+    - rating：星数，必须是 1 到 5 的整数
+
+    返回：(是否成功, 消息) 二元组。评分不在 1-5 或技能文件不存在时拒绝。
     """
     if not isinstance(rating, int) or rating < 1 or rating > 5:
         return False, f"评分越界：{rating}（应为 1-5 整数）"
 
-    # 检查技能存在（不强制有使用记录）
+    # 只要求技能文件真实存在，不要求它已经有统计记录
     skill_path = Path(skills_dir) / skill_name / "SKILL.md"
     if not skill_path.exists():
         return False, f"技能不存在: {skill_name}"
@@ -265,13 +362,19 @@ def set_rating(skills_dir: Path, skill_name: str, rating: int) -> tuple:
 
 
 def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
-    """返回推荐技能列表（按综合分数倒序）。
+    """算出最值得推荐的技能，按综合分从高到低返回前几个。
 
-    综合分数 = use_count * 1.0 + rating * 2.0 + view_count * 0.1
+    背景：给「你现在可能用得上哪些技能」提供排序依据。
+    综合分公式 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1
+    （评分权重最大，因为那是用户的直接喜好；查看只值 0.1，看过不等于有用。）
 
-    pinned 技能优先；archived 技能排除。
+    参数：
+    - skills_dir：技能目录路径
+    - limit：最多返回几个，默认 5
 
-    返回 [{"name", "score", "use_count", "rating", "description"}, ...]
+    返回：列表，每项是 {"name", "score", "use_count", "rating", "view_count",
+    "pinned", "description"}。被钉住（pinned）的技能加 10 分强力置顶；
+    已归档的不参与。
     """
     data = load_usage(skills_dir)
     sd = Path(skills_dir)
@@ -281,7 +384,7 @@ def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
         name = skill_md.parent.name
         rec = data.get(name, {})
 
-        # 排除归档
+        # 归档的不推荐
         if rec.get("state") == STATE_ARCHIVED:
             continue
 
@@ -290,16 +393,16 @@ def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
         view_count = int(rec.get("view_count", 0))
         pinned = bool(rec.get("pinned", False))
 
-        # 综合分（pinned 加 10 分强 boost）
+        # 综合分；钉住的额外加 10 分，保证排在最前
         score = use_count * 1.0 + rating * 2.0 + view_count * 0.1
         if pinned:
             score += 10.0
 
-        # 描述
+        # 顺手取一份技能描述，推荐列表里展示用
         description = ""
         try:
             content = skill_md.read_text(encoding="utf-8")
-            # 简单提取 frontmatter description
+            # 用笨办法从文件头元信息区里抠出 description 那一行（这里不值得上完整解析器）
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 if len(parts) >= 2:
@@ -320,6 +423,6 @@ def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
             "description": description,
         })
 
-    # 按分数倒序
+    # 分高的排前面，只留前 limit 个
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates[:limit]

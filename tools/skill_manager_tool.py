@@ -1,14 +1,19 @@
-"""skill_manage 工具：agent 自己创建/修改/归档技能。
+"""skill_manage 工具：agent 自己动手创建、修改、归档技能。
 
-这是"自学习"的关键——agent 把学到的方法沉淀成文件。
+背景：技能（skill）是存在磁盘上的 Markdown 使用说明书。「越用越聪明」的关键一环
+就是 agent 干完活后把可复用的方法沉淀成技能文件，下次直接翻出来照着做——
+本文件就是干这个的工具端实现。
 
-action：
+一个工具七种用法（由 action 参数区分）：
   create      - 创建新技能
   edit        - 重写整个 SKILL.md
   patch       - 部分修改（查找替换）
-  delete      - 归档技能（永不真删除）
-  write_file  - 写附属文件（scripts/references/templates）
+  delete      - 归档技能（永不真删除，只挪到 .archive/ 目录，随时可恢复）
+  write_file  - 写附属文件（脚本/参考资料/模板等）
   remove_file - 删附属文件
+
+在项目里的位置：属于工具层（tools/），注册进中央工具注册表暴露给 LLM；
+使用统计委托给 tools/skill_usage.py。
 """
 
 import json
@@ -76,19 +81,35 @@ SKILL_MANAGE_SCHEMA = {
 
 
 def _get_skills_dir_from_context(kwargs: dict) -> Path:
-    """从工具调用上下文获取技能目录。
+    """算出本次操作该把技能写到哪个目录。
 
-    优先从 kwargs 获取 omnimate_home；否则回退到 constants 默认值。
+    背景：技能目录跟着数据主目录走，而主目录可以被自定义，所以每次都要现算。
+
+    参数：
+    - kwargs：工具调用上下文；优先取里面的 omnimate_home（自定义数据主目录）
+
+    返回：技能目录路径（<主目录>/skills）；没传 omnimate_home 就用 constants 里的默认值。
     """
     home = kwargs.get("omnimate_home")
     if home:
         return Path(home) / "skills"
-    # 回退到 constants 的默认 skills 目录
+    # 没传自定义主目录，就用全局默认的技能目录
     from constants import skills_dir as _skills_dir
     return _skills_dir()
 
 
 def _handle_skill_manage(args: dict, **kwargs) -> str:
+    """skill_manage 的实际处理函数：按 action 分发到对应的新建/改写/小修/归档/附属文件操作。
+
+    参数：
+    - args：LLM 传的工具参数——action（要做什么）、name（技能名）、
+      content（create/edit 时的全文）、old_string/new_string（patch 时的查找替换对）、
+      file_path/file_content（附属文件操作）、absorbed_into（归档时声明的合并去向）
+    - kwargs：运行时上下文；这里看 omnimate_home（定位技能目录）
+      和 is_background_review（是否后台维护工人创建的）
+
+    返回：JSON 字符串，成功带 success=True + 消息，失败带 error 说明原因。
+    """
     action = args.get("action")
     name = (args.get("name") or "").strip()
     if not name:
@@ -108,7 +129,8 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_md.write_text(content, encoding="utf-8")
 
-        # 标记为 agent 创建（如果是后台 curator 创建的）
+        # 只有后台维护工人（curator，定期整理技能/记忆的后台程序）创建的才标记为 agent 创建；
+        # 用户当面让 agent 建的不标记——区别在于前者会被 curator 自动管理生命周期
         is_background = kwargs.get("is_background_review", False)
         if is_background:
             mark_agent_created(skills_dir, name)
@@ -119,7 +141,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     elif action == "edit":
-        # 重写整个 SKILL.md
+        # 整篇重写（对比 patch 的小修小补）
         content = args.get("content", "")
         if not content.strip():
             return json.dumps({"error": "content 不能为空"}, ensure_ascii=False)
@@ -150,7 +172,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         new_content = content.replace(old_string, new_string, 1)
         skill_md.write_text(new_content, encoding="utf-8")
 
-        bump_patch(skills_dir, name)  # 修改计数 +1
+        bump_patch(skills_dir, name)  # 修改计数加一，进统计
 
         return json.dumps({
             "success": True,
@@ -158,7 +180,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     elif action == "delete":
-        # 永不真删除，只归档
+        # 设计铁律「完全可逆」：删除只是挪进 .archive/ 目录，永不真删，随时可恢复
         absorbed_into = args.get("absorbed_into", "")
         ok, msg = archive_skill(skills_dir, name)
         return json.dumps({
@@ -175,7 +197,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         if not skill_dir.exists():
             return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
-        # 安全：防止路径遍历
+        # 安全检查：解析后的最终路径必须还在技能目录里面，防止用 ../ 之类的写法逃出去写别的文件
         target = (skill_dir / file_path).resolve()
         if not str(target).startswith(str(skill_dir.resolve())):
             return json.dumps({"error": "路径越界"}, ensure_ascii=False)
@@ -194,6 +216,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
             return json.dumps({"error": "file_path 不能为空"}, ensure_ascii=False)
 
         target = (skill_dir / file_path).resolve()
+        # 同款防路径逃逸检查：最终路径不许跑出技能目录
         if not str(target).startswith(str(skill_dir.resolve())):
             return json.dumps({"error": "路径越界"}, ensure_ascii=False)
         if not target.exists():
@@ -215,5 +238,6 @@ registry.register(
     schema=SKILL_MANAGE_SCHEMA,
     handler=_handle_skill_manage,
     emoji="📚",
-    isConcurrencySafe=False,  # 副作用：创建/更新/归档/删除技能文件，必须串行
+    isConcurrencySafe=False,  # 有副作用（创建/更新/归档/删文件），必须一个一个来，不能并发
+
 )

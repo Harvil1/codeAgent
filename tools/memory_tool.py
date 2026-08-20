@@ -1,11 +1,14 @@
-"""记忆工具：管理持久化多文件记忆。
+"""记忆工具：让 LLM 自己增删改查长期记忆（跨会话保存的那种）。
 
-action:
-  - save: 创建新记忆（必需 name/description/type）
-  - update: 更新已有记忆字段
-  - delete: 软删除（移到 .archive/）
-  - load: 读 body
-  - list: 列出所有记忆
+在项目里的位置：tools 层的 core 工具，真正的存取逻辑在 agent/memory_store.py 的
+MemoryStore 里，本文件只负责把 LLM 的调用参数翻译成对 store 的操作。
+
+支持 5 种 action（动作）：
+  - save: 新建一条记忆（必填 name/description/type；同主题同名的会自动变成更新，不堆积）
+  - update: 改已有记忆的字段（必填 id）
+  - delete: 软删除——不真删，移到 .archive/ 归档目录，随时能找回
+  - load: 读某条记忆的完整正文
+  - list: 列出全部记忆的摘要
 """
 import json
 import logging
@@ -68,6 +71,18 @@ MEMORY_SCHEMA = {
 
 
 def _handle_memory(args: dict, **kwargs) -> str:
+    """memory 工具的总入口：按 action 分发到 store 的对应操作。
+
+    背景：所有工具 handler 都要遵守统一契约——参数从 args 拿，
+    命名上下文（这里是 memory_store）从 kwargs 拿，返回 JSON 字符串。
+
+    参数：
+        args: LLM 传来的工具参数，核心是 action（save/update/delete/load/list），
+              其余键（id/name/description/type/body/summary/topic）按 action 需要取用
+        kwargs: dispatch 透传的命名上下文，这里只用到 memory_store（记忆仓库实例）
+
+    返回：JSON 字符串。成功带 success=True 和结果；失败带 success=False 和 error。
+    """
     action = args.get("action")
     store = kwargs.get("memory_store")
 
@@ -80,9 +95,9 @@ def _handle_memory(args: dict, **kwargs) -> str:
         if action == "save":
             topic = args.get("topic", "general")
             name = args.get("name", "")
-            # 写入即维护：同 topic 同 name 已有 → 本次是更新（不堆积）
-            # R30d-D9：查重限定 save 会路由到的目标区（与 store.save 的
-            # 单区查重同语义，防标签谎报"已更新"实际却在别区新建）
+            # 「保存前先查重」：同 topic 同 name 已有 → 本次自动算更新，不会越存越多
+            # 历史踩坑（R30d-D9 修复）：查重必须限定在 save 实际会写入的那个分区，
+            # 否则可能出现「回复说已更新、实际却在另一个分区新建了一条」的谎报
             existing = store.find_by_topic_name(
                 topic, name, type=args.get("type", "other"),
             )
@@ -146,7 +161,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
                 "success": True, "id": mid,
                 "name": entry.name, "description": entry.description,
                 "type": entry.type, "body": entry.body,
-                "summary": entry.summary,  # CCALS-P0-1
+                "summary": entry.summary,  # summary 字段是 CCALS-P0-1 轮引入的，方便先看摘要再决定是否读全文
                 "created_at": entry.created_at.isoformat(timespec="seconds"),
                 "updated_at": entry.updated_at.isoformat(timespec="seconds"),
             }, ensure_ascii=False)
@@ -156,7 +171,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
             summaries = [
                 {
                     "id": e.id, "name": e.name, "description": e.description,
-                    "type": e.type, "summary": e.summary,  # CCALS-P0-1
+                    "type": e.type, "summary": e.summary,  # 列表也带 summary（CCALS-P0-1），一眼判断相关性
                 }
                 for e in entries
             ]
@@ -183,5 +198,5 @@ registry.register(
     schema=MEMORY_SCHEMA,
     handler=_handle_memory,
     emoji="🧠",
-    isConcurrencySafe=False,  # 混合 action：save/update/delete 有写副作用，load/list 虽只读但不能拆，整体串行
+    isConcurrencySafe=False,  # 一个工具混着读写动作：save/update/delete 会改数据，虽然 load/list 只读但没法拆开，所以整体按串行处理最安全
 )
