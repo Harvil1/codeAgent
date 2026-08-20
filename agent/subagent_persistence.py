@@ -1,24 +1,31 @@
-"""子代理 sidechain transcript 持久化（借鉴 claude-code-main）。
+"""子代理轨迹（transcript——谁在什么时候说了什么的过程记录）落盘持久化（借鉴 claude-code-main）。
 
-存储：
-- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 子代理轨迹（CCAR13 Task 3 起：user 指令 + 每轮 assistant 文本）
-- ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据（agent_id / agent_type / parent_session / status / created_at / updated_at）
+子代理在主对话之外独立跑（sidechain，旁路对话），跑挂了或中断后想恢复（resume）
+就得有轨迹可查。本模块负责把轨迹和元数据写到磁盘：
 
-agent_id 格式：sub-{parent_session_id 前 8 位}-{YYYYMMDD-HHMMSS}-{random8}
+- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 轨迹正文，一行一条消息
+  （CCAR13 Task 3 起的口径：user 指令 + 每轮 assistant 文本）
+- ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据
+  （agent_id / agent_type / parent_session / status / created_at / updated_at）
+
+agent_id 长这样：sub-{父会话id前8位}-{YYYYMMDD-HHMMSS}-{随机8位}
   例：sub-parent-s-20260811-143022-605d9a3a
 
-status：running / completed / failed / interrupted
+status 状态流：running（在跑）→ completed（完成）/ failed（失败）/ interrupted（被中断）
 
-CCAR13 Task 3（补 CCAR5-I Phase 2）：transcript 每轮 append——_run_child 给子代理
-挂独立 HookRegistry 的 POST_LLM_CALL 程序式 hook，每次 LLM 响应后落盘 assistant
-文本（旧版 on_response 只记最终响应，中断的子代理无轨迹可 resume）。
-语义：轨迹 = user 指令 + 每轮 assistant 文本；tool_calls / tool result 不落盘
-（无配对 result 会造孤儿消息 → API 400），resume 的 initial_messages 配对天然完整。
+历史踩坑（CCAR13 Task 3，补 CCAR5-I Phase 2）：旧版只在 on_response 回调里记
+最终响应——子代理中途被打断就一点轨迹都没有，没法 resume。修复后改为每轮追加：
+_run_child 给子代理挂一个独立 HookRegistry 的 POST_LLM_CALL 程序式 hook，
+LLM 每回一次话就立刻落盘该轮 assistant 文本。
+口径约束：轨迹只存 user 指令 + 每轮 assistant 文本；tool_calls / tool result
+绝不落盘——孤儿 tool_call 没有配对 result 会让 API 报 400，
+而只存文本的话，resume 时的 initial_messages 天然不会出现配对残缺。
 
-设计约定（CLAUDE.md）：
-- **fail-open 硬要求**：所有持久化操作 try/except，绝不让主流程崩
-- **encoding="utf-8"**：所有文件 I/O
-- **完全可逆**：transcript 可删可清（cleanup_old）
+设计约定（来自 CLAUDE.md）：
+- **fail-open 硬要求**：所有持久化操作都包 try/except，轨迹系统出任何错
+  都不能把主流程带崩
+- **encoding="utf-8"**：所有文件读写显式指定（Windows 默认编码会乱码）
+- **完全可逆**：轨迹可以删可以清（cleanup_old 定期清理）
 """
 
 import json
@@ -36,10 +43,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def generate_agent_id(parent_session_id: str = "") -> str:
-    """生成子代理 ID。
+    """给新起的子代理造一个全球不撞车的 ID。
 
-    格式：sub-{parent_session_id 前 8 位}-{YYYYMMDD-HHMMSS}-{random8}
-    parent_session_id 为空时用 "orphan" 占位。
+    参数：
+        parent_session_id：父会话的 session id（为空时用 "orphan" 占位——查日志一眼
+            就知道这个子代理没有挂靠的父会话）
+
+    返回：
+        形如 sub-{父id前8位}-{日期时间}-{随机8位} 的字符串。
     """
     ts = time.strftime("%Y%m%d-%H%M%S")
     rand = uuid.uuid4().hex[:8]
@@ -52,7 +63,7 @@ def generate_agent_id(parent_session_id: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def _sessions_dir() -> Path:
-    """获取 .agent-sessions 目录（不存在时创建）。"""
+    """拿到 .agent-sessions 存储目录的 Path（目录不存在就顺手创建）。"""
     from constants import get_omnimate_home
     d = get_omnimate_home() / ".agent-sessions"
     d.mkdir(parents=True, exist_ok=True)
@@ -64,10 +75,16 @@ def _sessions_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 def write_metadata(agent_id: str, meta: dict) -> None:
-    """写元数据（覆盖式，会自动追加 agent_id + updated_at）。fail-open。
+    """把子代理的元数据写到 <agent_id>.meta.json（整份覆盖，自动补 agent_id 和 updated_at）。
 
-    原子写：tempfile + os.replace（via atomic_write_text_lite），读者不会看到半截 JSON。
-    异常时 fail-open（元数据可能不更新，但 transcript 在 jsonl 仍可用）。
+    为什么用原子写（先写临时文件再替换，走 atomic_write_text_lite）：替换是一瞬间
+    完成的，并发读的人永远不会读到写了一半的 JSON。
+
+    参数：
+        agent_id：子代理 ID
+        meta：要写的元数据 dict
+
+    返回：无。写失败只打 warning（fail-open——元数据丢了轨迹 jsonl 还在，不至于崩）。
     """
     try:
         from agent.atomic_io import atomic_write_text_lite
@@ -88,7 +105,14 @@ def write_metadata(agent_id: str, meta: dict) -> None:
 
 
 def load_metadata(agent_id: str) -> Optional[dict]:
-    """读元数据。不存在或异常时返回 None。"""
+    """读某个子代理的元数据。
+
+    参数：
+        agent_id：子代理 ID
+
+    返回：
+        元数据 dict；文件不存在或读挂了返回 None（fail-open）。
+    """
     try:
         path = _sessions_dir() / f"{agent_id}.meta.json"
         if not path.exists():
@@ -104,7 +128,14 @@ def load_metadata(agent_id: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def append_message(agent_id: str, message: dict) -> None:
-    """流式追加一条 message 到 transcript。fail-open。"""
+    """往轨迹 jsonl 文件末尾追加一条消息（每轮 LLM 响应后调用）。
+
+    参数：
+        agent_id：子代理 ID
+        message：要落盘的消息 dict
+
+    返回：无。写失败只打 warning（fail-open，不打断子代理干活）。
+    """
     try:
         path = _sessions_dir() / f"{agent_id}.jsonl"
         with path.open("a", encoding="utf-8") as f:
@@ -114,7 +145,14 @@ def append_message(agent_id: str, message: dict) -> None:
 
 
 def load_transcript(agent_id: str) -> List[dict]:
-    """读完整 transcript。fail-open 返回空列表。"""
+    """把某个子代理的完整轨迹读回来（resume 时用）。
+
+    参数：
+        agent_id：子代理 ID
+
+    返回：
+        消息 dict 列表；文件不存在或读挂了返回空列表（fail-open）。
+    """
     try:
         path = _sessions_dir() / f"{agent_id}.jsonl"
         if not path.exists():
@@ -134,9 +172,13 @@ def load_transcript(agent_id: str) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 def list_resumable() -> List[dict]:
-    """列出所有 status=running 的子代理元数据。
+    """列出所有还标记为 running 的子代理元数据。
 
-    用于启动时清理 stale running（进程重启后这些记录都是僵尸）。
+    用途：程序重启后挨个检查这些记录——上个进程已经退了，它们其实都是
+    僵尸状态（stale running），要么标记 interrupted 要么供 resume 挑选。
+
+    返回：
+        元数据 dict 列表；目录读不了返回空列表（fail-open）。
     """
     try:
         result = []
@@ -154,9 +196,13 @@ def list_resumable() -> List[dict]:
 
 
 def mark_completed(agent_id: str, status: str = "completed") -> None:
-    """标记子代理完成/失败/中断。
+    """给子代理盖终态章（completed / failed / interrupted 三选一）。
 
-    读取现有 meta → 更新 status + completed_at → 写回。
+    参数：
+        agent_id：子代理 ID
+        status：终态名，默认 "completed"
+
+    返回：无。做法是读旧元数据 → 改 status 和 completed_at → 写回。
     """
     meta = load_metadata(agent_id) or {}
     meta["status"] = status
@@ -169,9 +215,14 @@ def mark_completed(agent_id: str, status: str = "completed") -> None:
 # ---------------------------------------------------------------------------
 
 def cleanup_old(days: int = 7) -> int:
-    """清理 N 天前已进入终态（completed/failed/interrupted）的子代理记录。
+    """删除 N 天前就已进入终态（completed/failed/interrupted）的子代理记录。
 
-    返回清理数量。只清终态，running 不删（防误删正在跑的）。
+    参数：
+        days：保留天数，默认 7
+
+    返回：
+        int——本次清理掉的数量。只动终态记录；running 状态的一律不删
+        （防止误删还在跑的子代理）。
     """
     cutoff = time.time() - days * 86400
     cleaned = 0
@@ -197,10 +248,13 @@ def cleanup_old(days: int = 7) -> int:
 
 
 def cleanup_stale_subagents() -> int:
-    """启动时清理 stale running 记录（标记为 interrupted）。
+    """程序启动时把僵尸记录扶正：所有 status=running 的改成 interrupted。
 
-    进程重启后所有 status=running 的记录都是僵尸（之前的进程已退出）。
-    返回清理数量。
+    为什么能一刀切：程序刚重启，此刻不可能有真正在跑的子代理——
+    上一批 running 记录对应的进程早随上个进程一起退出了。
+
+    返回：
+        int——处理掉的僵尸记录数。
     """
     cleaned = 0
     for meta in list_resumable():

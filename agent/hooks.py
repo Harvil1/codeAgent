@@ -1,17 +1,41 @@
-"""Hooks 系统：扩展 agent 主循环行为的注册表机制。
+"""Hooks 系统——给 agent 主循环装"外挂插件"的注册中心。
 
-27 种 event（核心 6 + P2-13 扩展 5 + round3 新增 7 + P3.3-P3.4 新增 3 + Task N 新增 6）：
-  核心 6 种：USER_PROMPT_SUBMIT / PRE_TOOL_USE / POST_TOOL_USE / STOP
-           + PRE_LLM_CALL / POST_LLM_CALL（batch2-T2）
-  新增 5 种（P2-13）：SESSION_START / SESSION_END
-           + PRE_COMPACT / POST_COMPACT + CONFIG_CHANGE
-  round3 新增 7 种：POST_TOOL_USE_FAILURE / SUBAGENT_START / SUBAGENT_STOP
-           + TASK_CREATED / TASK_COMPLETED + PERMISSION_REQUEST + PERMISSION_DENIED
-  P3.3-P3.4 新增 3 种：STOP_FAILURE + WORKTREE_CREATE + WORKTREE_REMOVE
-  Task N 新增 6 种：FILE_CHANGED / CWD_CHANGED / INSTRUCTIONS_LOADED
-           + SETUP / TEAMMATE_IDLE / ELICITATION_STARTED
-2 种注册：programmatic（Python 函数）/ declarative（子进程脚本）
-失败 fail-open 默认（log + 视为 None）；PreToolUse 可选 fail_closed。
+hook（钩子）是什么：在对话流程的固定节点上自动触发的外挂小程序，
+像电梯里的楼层按钮，到层就响。比如"每次用户提交问题前，先跑一遍敏感词过滤"。
+
+本文件在项目里的位置：agent 核心的横向扩展层。cli.py 组装 RuntimeContext 时
+创建 HookRegistry 实例注入 AIAgent；真正的执行细节（子进程/HTTP/沙箱）在
+agent/hook_exec.py，配置文件解析在 agent/hook_loader.py。本文件只管
+"有哪些 hook、什么时候触发、结果怎么合并"。
+
+一共 27 种事件（按加入批次分组）：
+  最早的核心 6 种：用户提交问题（USER_PROMPT_SUBMIT）、工具调用前
+    （PRE_TOOL_USE）、工具调用后（POST_TOOL_USE）、回答结束（STOP）、
+    LLM 调用前后（PRE_LLM_CALL / POST_LLM_CALL，batch2-T2 批次）
+  P2-13 批次加 5 种：会话开始/结束（SESSION_START / SESSION_END）、
+    上下文压缩前/后（PRE_COMPACT / POST_COMPACT）、配置变更（CONFIG_CHANGE）
+  round3 批次加 7 种：工具调用失败（POST_TOOL_USE_FAILURE）、子代理
+    开始/结束（SUBAGENT_START / SUBAGENT_STOP）、任务创建/完成
+    （TASK_CREATED / TASK_COMPLETED）、权限请求/拒绝
+    （PERMISSION_REQUEST / PERMISSION_DENIED）
+  P3.3-P3.4 批次加 3 种：回答异常结束（STOP_FAILURE）、worktree 隔离工作区
+    创建/清理（WORKTREE_CREATE / WORKTREE_REMOVE）
+  Task N 批次加 6 种：文件被改（FILE_CHANGED）、工作目录切换
+    （CWD_CHANGED）、项目说明文件加载完（INSTRUCTIONS_LOADED）、
+    启动一次性事件（SETUP）、队友空闲（TEAMMATE_IDLE）、
+    弹窗问用户前（ELICITATION_STARTED）
+
+hook 有两种注册方式：programmatic（直接给一个 Python 函数）和
+declarative（写配置，由子进程脚本/HTTP/MCP 工具/LLM 等执行）。
+
+两条核心语义（tests/test_hooks.py 有用例对着考）：
+1. hook 执行不拖累主循环——声明式子进程 hook 用线程池并行跑，
+   一个慢 hook 不会卡住其他 hook 和主循环。
+2. 多个 hook 都要改工具参数时，按注册顺序叠加（前一个的修改是后一个的
+   底，后一个按 key 覆盖），而不是后来者整体替换。
+
+失败处理默认 fail-open（出异常就记条日志、当作这个 hook 不存在）；
+只有 PreToolUse 可以配成 fail_closed（出错当作拒绝执行）。
 """
 import logging
 from dataclasses import dataclass
@@ -27,16 +51,16 @@ class HookEvent(Enum):
     PRE_TOOL_USE = "pre_tool_use"
     POST_TOOL_USE = "post_tool_use"
     STOP = "stop"
-    # batch2-T2: LLM 调用前后的 hook
+    # batch2-T2 批次加的：LLM 调用前后各触发一次
     PRE_LLM_CALL = "pre_llm_call"
     POST_LLM_CALL = "post_llm_call"
-    # P2-13 NEW: 会话/压缩/配置 5 个新事件
+    # P2-13 批次加的：会话/压缩/配置相关 5 个新事件
     SESSION_START = "session_start"
     SESSION_END = "session_end"
     PRE_COMPACT = "pre_compact"
     POST_COMPACT = "post_compact"
     CONFIG_CHANGE = "config_change"
-    # round3 NEW: 关键生命周期/审计事件
+    # round3 批次加的：关键生命周期/留痕审计事件
     POST_TOOL_USE_FAILURE = "post_tool_use_failure"
     SUBAGENT_START = "subagent_start"
     SUBAGENT_STOP = "subagent_stop"
@@ -44,67 +68,72 @@ class HookEvent(Enum):
     TASK_COMPLETED = "task_completed"
     PERMISSION_REQUEST = "permission_request"
     PERMISSION_DENIED = "permission_denied"
-    # P3.3 NEW: STOP 失败变体（主循环异常退出时触发）
+    # P3.3 批次加的：STOP 的失败变体（主循环异常退出时才触发，区别于正常结束）
     STOP_FAILURE = "stop_failure"
-    # P3.4 NEW: worktree 生命周期事件（隔离工作区创建/清理通知）
+    # P3.4 批次加的：worktree 隔离工作区创建/清理的通知事件
     WORKTREE_CREATE = "worktree_create"
     WORKTREE_REMOVE = "worktree_remove"
-    # === Task N 新增 6 种（借鉴 Claude Code）===
-    FILE_CHANGED = "file_changed"                   # 文件写后触发（IDE 集成基础）
-    CWD_CHANGED = "cwd_changed"                     # worktree 切换（workspace_context 配合）
-    INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/OMNIMATE.md 加载完
-    SETUP = "setup"                                 # 启动时一次（cli.py initialize）
-    TEAMMATE_IDLE = "teammate_idle"                 # team 成员进 idle
-    ELICITATION_STARTED = "elicitation_started"     # ask_user 弹窗前
+    # === Task N 批次加的 6 种（借鉴 Claude Code）===
+    FILE_CHANGED = "file_changed"                   # 文件写入成功后触发（做 IDE 集成的基础）
+    CWD_CHANGED = "cwd_changed"                     # worktree 切目录时（配合 workspace_context）
+    INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/OMNIMATE.md 加载完后
+    SETUP = "setup"                                 # 启动时触发一次（cli.py initialize）
+    TEAMMATE_IDLE = "teammate_idle"                 # 团队协作的成员进入空闲
+    ELICITATION_STARTED = "elicitation_started"     # ask_user 弹窗问用户之前
 
 
-# 程序式 hook 的签名
+# 程序式（直接给 Python 函数）hook 的函数签名
 UserPromptSubmitFn = Callable[[str], Optional[str]]
 PreToolUseFn = Callable[[str, dict], Optional[dict]]
 PostToolUseFn = Callable[[str, dict, str], Optional[str]]
 StopFn = Callable[[], Optional[str]]
-# batch2-T2: LLM hooks
+# batch2-T2 批次：LLM 调用前后两个事件的签名
 PreLLMCallFn = Callable[[list, Optional[list]], Optional[tuple]]
 PostLLMCallFn = Callable[[object], Optional[object]]
-# P2-13: 新事件用统一 payload 风格（dict 进，Optional[dict] 出）
-# - SESSION_START/END/POST_COMPACT/CONFIG_CHANGE: 纯通知型，返回值忽略
-# - PRE_COMPACT: 可返回 {"abort": True} 阻止该层压缩
+# P2-13 批次起的新事件统一用 dict 进、Optional[dict] 出的风格：
+# - SESSION_START/END、POST_COMPACT、CONFIG_CHANGE 是纯通知型，返回值直接忽略
+# - PRE_COMPACT 特殊：返回 {"abort": True} 可以阻止这一层压缩
 PayloadFn = Callable[[dict], Optional[dict]]
 
 
 @dataclass
 class HookScriptConfig:
-    """声明式 hook 配置（支持 5 种 handler 类型）。
+    """声明式 hook 的配置（一个 hook 可以由 5 种不同的"执行器"来跑）。
 
-    - command:  本地子进程（向后兼容，老 hook_loader 总会传它）
-    - http:     POST JSON 到 url，解析响应
-    - mcp_tool: 调 MCP 工具 mcp_server.mcp_tool
-    - prompt:   单轮 aux_llm 评估
-    - agent:    多轮子代理（delegate）评估
+    背景：声明式 hook 就是写在配置里的 hook，不用写 Python 代码。
+    具体怎么执行由 handler_type 决定，共 5 种：
+    - command:  起一个本地子进程跑（最老的方式，向后兼容——老的
+      hook_loader 加载配置时总会填这个字段）
+    - http:     往 url 发一个 POST JSON 请求，解析响应
+    - mcp_tool: 调一个 MCP 外部工具（mcp_server 服务器上的 mcp_tool）
+    - prompt:   让辅助小模型（aux_llm）单轮评估一次
+    - agent:    让子代理（多轮）评估
 
-    P3.5 新增字段：
-    - if_condition: 声明式条件过滤（permission rule 语法），
-      仅适用 PRE_TOOL_USE / POST_TOOL_USE / POST_TOOL_USE_FAILURE / PERMISSION_REQUEST。
-      不匹配时跳过该 hook（省资源）。格式："ToolName(arg_pattern)"，如 "terminal(git *)"。
+    P3.5 批次新增字段：
+    - if_condition: 声明式的条件过滤，写法沿用 permission rule 语法。
+      只对 PRE_TOOL_USE / POST_TOOL_USE / POST_TOOL_USE_FAILURE /
+      PERMISSION_REQUEST 这四种事件有意义；条件不匹配就跳过这个 hook
+      （省得每次都白跑一遍）。格式如 "terminal(git *)"——
+      意思是"只有 terminal 工具且参数以 git 开头才触发"。
     """
-    handler_type: str = "command"   # command | http | mcp_tool | prompt | agent
-    command: Optional[list] = None  # list[str]，command 类型用（老配置仍是必需）
-    url: Optional[str] = None       # http 类型用
-    mcp_server: Optional[str] = None  # mcp_tool 类型用
-    mcp_tool: Optional[str] = None    # mcp_tool 类型用
-    prompt: Optional[str] = None      # prompt / agent 类型用（模板字符串，.format(**payload)）
-    agent_name: Optional[str] = None  # agent 类型用（自定义子代理名，可选）
+    handler_type: str = "command"   # 五种执行器之一：command | http | mcp_tool | prompt | agent
+    command: Optional[list] = None  # 命令及参数列表，command 类型用（老配置里必填）
+    url: Optional[str] = None       # 目标网址，http 类型用
+    mcp_server: Optional[str] = None  # MCP 服务器名，mcp_tool 类型用
+    mcp_tool: Optional[str] = None    # MCP 工具名，mcp_tool 类型用
+    prompt: Optional[str] = None      # 提示词模板，prompt / agent 类型用（用 .format(**payload) 填充）
+    agent_name: Optional[str] = None  # 自定义子代理的名字，agent 类型用（可不填）
     timeout: float = 10.0
     env: Optional[dict] = None
-    # P3.5 NEW: 条件过滤（permission rule 语法，None/空 = 无条件匹配）
+    # P3.5 批次新增：条件过滤（permission rule 语法；None/空字符串 = 不过滤、每次都匹配）
     if_condition: Optional[str] = None
-    # C4（CCB 借鉴）：async hook（仅 command 类型）
-    # - async_run: 后台线程跑，dispatch 立即返回 None 不阻塞主流程
-    #   （⚠ gating 语义失效：async 的 PRE_TOOL_USE deny 来不及拦——
-    #   async 只该用于通知/审计型 hook）
-    # - async_rewake: 后台跑完 exit 2（block）时推 rewake 通知，
-    #   agent 下一轮 drain 为 ephemeral <rewake_notification> 让模型跟进
-    # - status_message: 展示文案（rewake 通知附带；日志/UI 用）
+    # C4（借鉴 CCB）：异步 hook（只有 command 类型支持）
+    # - async_run: 放到后台线程跑，dispatch 立刻返回 None，不阻塞主流程。
+    #   ⚠ 代价是"拦截"语义失效：异步的 PRE_TOOL_USE 就算想 deny 也来不及拦——
+    #   所以 async 只该用在通知/审计这类"事后知道就行"的 hook 上
+    # - async_rewake: 后台跑完且退出码为 2（block）时，推一条 rewake 通知，
+    #   agent 下一轮把它作为临时 <rewake_notification> 消息喂给模型跟进处理
+    # - status_message: 给人看的说明文字（随 rewake 通知带出；日志/UI 显示用）
     async_run: bool = False
     async_rewake: bool = False
     status_message: Optional[str] = None
@@ -112,99 +141,139 @@ class HookScriptConfig:
 
 @dataclass
 class Hook:
-    """统一包装：程序式或声明式。"""
+    """一个 hook 的统一外壳：程序式（带 fn）或声明式（带 script）二选一。"""
     name: str
     event: HookEvent
-    kind: str  # "programmatic" | "declarative"
+    kind: str  # "programmatic"（Python 函数） | "declarative"（配置声明）
     fn: Optional[Callable] = None
     script: Optional[HookScriptConfig] = None
     fail_closed: bool = False
-    # P3.6 NEW: once=True 的 hook 跑一次后被消费（从 registry 移除/跳过）
+    # P3.6 批次新增：once=True 表示"一次性"hook，跑过一次后就消费掉（后续触发直接跳过）
     once: bool = False
-    # P3.8 NEW: 声明式 command hook 是否套 sandbox（仅 Unix 生效，Windows fail-open）
+    # P3.8 批次新增：声明式 command hook 是否套 OS 沙箱（只在 Unix 生效；Windows 上降级跳过沙箱）
     use_sandbox: bool = False
 
 
 def _now_iso() -> str:
+    """当前时间的 ISO 字符串（精确到秒），给 hook payload 的时间戳字段用。"""
     return datetime.now().isoformat(timespec="seconds")
 
 
 class HookRegistry:
-    """管理所有 hook 注册和执行。实例由 RuntimeContext 持有，注入 AIAgent。"""
+    """所有 hook 的登记处兼触发器：登记谁、什么时候挨个跑、结果怎么合并。
+
+    实例由 cli.py 的 RuntimeContext 持有并注入 AIAgent——agent 主循环
+    在各个节点上调这里的 run_xxx 方法来触发对应事件。
+    """
 
     def __init__(self):
         self._hooks: dict = {e: [] for e in HookEvent}
         self._stop_fire_count: int = 0
-        # P3.6 NEW: once=True 的 hook 已被消费的 id 集合（按 Hook 对象 id）
+        # P3.6 批次新增：once=True 且已经跑过（被"消费"）的 hook 对象 id 集合
         self._consumed: set = set()
 
-    # ---- 注册 ----
+    # ---- 注册（往登记簿上添条目） ----
     def register_user_prompt_submit(self, fn, *, name=None):
+        """登记一个"用户提交问题前"触发的 hook。
+
+        参数：
+        - fn：hook 函数，签名 (prompt) -> 新 prompt 或 None（None = 不改）
+        - name：hook 名字（日志里显示用，不填就记 "anonymous"）
+        """
         self._hooks[HookEvent.USER_PROMPT_SUBMIT].append(
             Hook(name=name or "anonymous", event=HookEvent.USER_PROMPT_SUBMIT,
                  kind="programmatic", fn=fn)
         )
 
     def register_pre_tool_use(self, fn, *, name=None, fail_closed=False):
+        """登记一个"工具调用前"触发的 hook（可以拦下工具调用）。
+
+        参数：
+        - fn：hook 函数，签名 (tool_name, args) -> dict 或 None；
+          返回 {"deny": 理由} 拒绝执行、{"modify_args": 新参数} 改参数、None 不管
+        - name：hook 名字
+        - fail_closed：True 时 fn 抛异常按"拒绝"处理（默认按"不管"处理）
+        """
         self._hooks[HookEvent.PRE_TOOL_USE].append(
             Hook(name=name or "anonymous", event=HookEvent.PRE_TOOL_USE,
                  kind="programmatic", fn=fn, fail_closed=fail_closed)
         )
 
     def register_post_tool_use(self, fn, *, name=None):
+        """登记一个"工具调用后"触发的 hook（可以改写工具结果）。
+
+        参数：
+        - fn：hook 函数，签名 (tool_name, args, result) -> 新 result 或 None
+        - name：hook 名字
+        """
         self._hooks[HookEvent.POST_TOOL_USE].append(
             Hook(name=name or "anonymous", event=HookEvent.POST_TOOL_USE,
                  kind="programmatic", fn=fn)
         )
 
     def register_stop(self, fn, *, name=None):
+        """登记一个"回答结束"触发的 hook（可以让模型继续说话）。
+
+        参数：
+        - fn：hook 函数，签名 () -> 消息字符串或 None；
+          返回消息会作为"继续"的理由喂回模型
+        - name：hook 名字
+        """
         self._hooks[HookEvent.STOP].append(
             Hook(name=name or "anonymous", event=HookEvent.STOP,
                  kind="programmatic", fn=fn)
         )
 
-    # ---- P2-13 NEW: 会话/压缩/配置事件的注册 ----
+    # ---- P2-13 批次：会话/压缩/配置事件的注册 ----
     def register_session_start(self, fn, *, name=None):
-        """fn(payload: dict) -> None。payload: {session_id, started_at, agent_home}。"""
+        """登记会话开始事件 hook。fn(payload) -> None；
+        payload 含 session_id、started_at、agent_home。参数：fn 为 hook 函数，name 为名字。"""
         self._hooks[HookEvent.SESSION_START].append(
             Hook(name=name or "anonymous", event=HookEvent.SESSION_START,
                  kind="programmatic", fn=fn)
         )
 
     def register_session_end(self, fn, *, name=None):
-        """fn(payload: dict) -> None。payload: {session_id, reason, ended_at}。"""
+        """登记会话结束事件 hook。fn(payload) -> None；
+        payload 含 session_id、reason（结束原因）、ended_at。参数：fn 为 hook 函数，name 为名字。"""
         self._hooks[HookEvent.SESSION_END].append(
             Hook(name=name or "anonymous", event=HookEvent.SESSION_END,
                  kind="programmatic", fn=fn)
         )
 
     def register_pre_compact(self, fn, *, name=None):
-        """fn(payload: dict) -> Optional[{"abort": True}]。payload: {layer, messages_count, est_tokens}。"""
+        """登记"压缩前"事件 hook——这是唯一能叫停压缩的：
+        fn(payload) -> {"abort": True} 可阻止这一层压缩；
+        payload 含 layer、messages_count、est_tokens。参数：fn 为 hook 函数，name 为名字。"""
         self._hooks[HookEvent.PRE_COMPACT].append(
             Hook(name=name or "anonymous", event=HookEvent.PRE_COMPACT,
                  kind="programmatic", fn=fn)
         )
 
     def register_post_compact(self, fn, *, name=None):
-        """fn(payload: dict) -> None。payload: {messages_before, messages_after, layer}。"""
+        """登记"压缩后"通知 hook。fn(payload) -> None；
+        payload 含 messages_before、messages_after、layer。参数：fn 为 hook 函数，name 为名字。"""
         self._hooks[HookEvent.POST_COMPACT].append(
             Hook(name=name or "anonymous", event=HookEvent.POST_COMPACT,
                  kind="programmatic", fn=fn)
         )
 
     def register_config_change(self, fn, *, name=None):
-        """fn(payload: dict) -> None。payload: {changed_keys, old, new}。"""
+        """登记配置变更通知 hook。fn(payload) -> None；
+        payload 含 changed_keys、old、new。参数：fn 为 hook 函数，name 为名字。"""
         self._hooks[HookEvent.CONFIG_CHANGE].append(
             Hook(name=name or "anonymous", event=HookEvent.CONFIG_CHANGE,
                  kind="programmatic", fn=fn)
         )
 
-    # ---- batch2-T2: LLM hooks 注册 ----
+    # ---- batch2-T2 批次：LLM 调用前后的 hook 注册 ----
     def register_pre_llm_call(self, fn, *, name=None):
-        """注册 PRE_LLM_CALL hook。
+        """登记"LLM 调用前"触发的 hook（可以在请求发出去之前改消息和工具表）。
 
-        fn 签名: (messages: list, tools: Optional[list]) -> Optional[tuple[list, Optional[list]]]
-        返回 (messages, tools) 元组以修改；返回 None 表示不修改。
+        参数：
+        - fn：hook 函数，签名 (messages, tools) -> (messages, tools) 元组或 None；
+          返回元组就替换成新值，返回 None 表示不动
+        - name：hook 名字
         """
         self._hooks[HookEvent.PRE_LLM_CALL].append(
             Hook(name=name or "anonymous", event=HookEvent.PRE_LLM_CALL,
@@ -212,10 +281,11 @@ class HookRegistry:
         )
 
     def register_post_llm_call(self, fn, *, name=None):
-        """注册 POST_LLM_CALL hook。
+        """登记"LLM 调用后"触发的 hook（可以改写模型响应）。
 
-        fn 签名: (response) -> Optional[response]
-        返回新 response 以修改；返回 None 表示不修改。
+        参数：
+        - fn：hook 函数，签名 (response) -> 新 response 或 None（None 不动）
+        - name：hook 名字
         """
         self._hooks[HookEvent.POST_LLM_CALL].append(
             Hook(name=name or "anonymous", event=HookEvent.POST_LLM_CALL,
@@ -223,36 +293,49 @@ class HookRegistry:
         )
 
     def register_declarative(self, hook: Hook):
-        """注册一个声明式 hook（已构造好的 Hook 对象）。"""
+        """登记一个声明式 hook（Hook 对象已在外面的 hook_loader 构造好）。
+
+        参数：
+        - hook：装配完毕的 Hook 对象（kind="declarative"，带 script 配置）
+        """
         self._hooks[hook.event].append(hook)
 
     def clear(self, event=None):
-        """清空（测试用）。"""
+        """清空登记簿（测试用，让每个测试从干净状态开始）。
+
+        参数：
+        - event：只清这一种事件；None 表示全部清空
+        """
         if event is None:
             for e in self._hooks:
                 self._hooks[e] = []
         else:
             self._hooks[event] = []
         self._stop_fire_count = 0
-        self._consumed.clear()  # P3.6: 同步清消费记录
+        self._consumed.clear()  # P3.6 批次：一次性 hook 的消费记录也要一并清掉
 
-    # ---- P3.5/P3.6 helpers ----
+    # ---- P3.5/P3.6 批次的小工具 ----
 
     def _is_consumed(self, hook: "Hook") -> bool:
-        """P3.6: once=True 的 hook 是否已被消费。"""
+        """P3.6 批次：判断一个 once=True 的 hook 是不是已经跑过（被消费）了。"""
         return hook.once and id(hook) in self._consumed
 
     def _mark_consumed_if_once(self, hook: "Hook") -> None:
-        """P3.6: 声明式 hook 跑完后如果是 once，标记为已消费。"""
+        """P3.6 批次：声明式 hook 跑完后，如果是 once 就记下"已消费"，下次跳过。"""
         if hook.once:
             self._consumed.add(id(hook))
 
     def _matches_if_condition(self, hook: "Hook", tool_name: str, args: dict) -> bool:
-        """P3.5: 声明式 hook 的 if 条件过滤。
+        """P3.5 批次：声明式 hook 的 if 条件过滤——条件不匹配就不触发这个 hook。
 
-        - hook.script 无 if_condition → True（无条件匹配）
-        - 有 if_condition → 调 agent.hook_filter.match_if_condition
-        - 程序式 hook 不走这里（调用方应只在 declarative 时调）
+        参数：
+        - hook：要检查的 hook
+        - tool_name：当前要执行的工具名
+        - args：当前工具的参数
+
+        规则：hook.script 没配 if_condition 就一律匹配；配了就交给
+        agent.hook_filter.match_if_condition 去比对。程序式 hook 不走
+        这里（调用方保证只在声明式时才调这个方法）。
         """
         if hook.script is None:
             return True
@@ -262,11 +345,19 @@ class HookRegistry:
         from agent.hook_filter import match_if_condition
         return match_if_condition(tool_name, args, cond)
 
-    # ---- 执行：USER_PROMPT_SUBMIT ----
+    # ---- 执行：用户提交问题事件 ----
     def run_user_prompt_submit(self, prompt: str, *, session_id: str) -> str:
-        """链式：每个 hook 看到前一个的输出。失败 fail-open。
+        """把用户输入的 prompt 依次过一遍所有 hook（像流水线，每个 hook
+        都能看到并改写前一个的输出），返回最终版本的 prompt。
 
-        P3.6: 声明式 hook 支持 once（跑一次后消费）。
+        背景：可以在问题送进模型之前做改写、过滤、注入上下文等。
+        单个 hook 出异常就记条日志跳过（fail-open，当它不存在）。
+
+        参数：
+        - prompt：用户原始输入
+        - session_id：当前会话 id（拼进 hook 的 payload）
+
+        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
         """
         for hook in self._hooks[HookEvent.USER_PROMPT_SUBMIT]:
             if hook.kind == "declarative":
@@ -276,7 +367,7 @@ class HookRegistry:
                 if hook.kind == "programmatic":
                     new_prompt = hook.fn(prompt)
                 else:
-                    # declarative hook
+                    # 声明式 hook 走子进程/外部执行器
                     new_prompt = self._invoke_declarative_user_prompt(hook, prompt, session_id)
                     self._mark_consumed_if_once(hook)
                 if new_prompt is not None:
@@ -286,8 +377,16 @@ class HookRegistry:
         return prompt
 
     def _invoke_declarative_user_prompt(self, hook, prompt, session_id):
-        """跑子进程，按 IPC 协议解析。返回新 prompt 或 None。"""
-        from agent.hook_exec import dispatch_hook  # 懒加载避免循环
+        """跑一个声明式 hook 并按约定的返回格式解析。
+
+        参数：
+        - hook：要跑的声明式 hook
+        - prompt：当前 prompt
+        - session_id：会话 id
+
+        返回：新 prompt（hook 返回 {"prompt": "..."} 时）或 None（不改）。
+        """
+        from agent.hook_exec import dispatch_hook  # 懒加载，避免和 hook_exec 循环 import
         payload = {
             "event": "user_prompt_submit",
             "session_id": session_id,
@@ -298,25 +397,41 @@ class HookRegistry:
         result = dispatch_hook(hook, payload)
         if result is None:
             return None
-        # IPC: {"prompt": "..."} → 替换；其他/空 → None
+        # 约定的返回格式：{"prompt": "..."} 表示替换；其他/空一律当 None
         return result.get("prompt")
 
-    # ---- 执行：PRE_TOOL_USE ----
+    # ---- 执行：工具调用前事件 ----
     def run_pre_tool_use(self, tool_name: str, args: dict, *,
                          session_id: str):
-        """R30g-H5：并行执行 + deny>ask>allow 聚合。返回 (deny_reason, modified_args)。
+        """工具执行前把所有匹配的 hook 跑一遍，汇总出"要不要拦、要不要改参数"。
 
-        - 所有匹配 hook 先跑完再聚合（声明式子进程 hook 用线程池并行——
-          一个慢 hook 不拖累其他 hook 与主循环；programmatic 是进程内快函数串行）
-        - 聚合优先级：deny > ask > allow/None；modify_args 按注册顺序叠加
-          （注意：并行下每个 hook 的判决基于**原始参数**计算——多 hook 同时
-          改参的链式语义与旧串行版略有差异，罕见场景）
-        - ask 档（对齐 CCB ask 语义）：本项目 pre_tool_use 无通用审批 UI，
-          ask 兑现为 fail-closed 拒绝，错误信息注明是 ask（用户可调整 hook）
-        - fail_closed hook 异常聚合为 deny（不再吞掉——R30c-A6 语义保留）
+        背景：这是唯一能"否决"工具调用的 hook 事件，所以要考虑多个 hook
+        意见不一致时听谁的。返回 (deny_reason, modified_args)：
+        deny_reason 非 None 就拒绝执行工具；modified_args 非 None 就替换参数。
 
-        P3.5: 声明式 hook 支持 if 条件过滤（permission rule 语法）。
-        P3.6: 声明式 hook 支持 once（跑一次后消费）。
+        怎么跑（R30g-H5 改成并行执行 + 聚合）：
+        - 所有匹配的 hook 先全跑完再合并结论。声明式（子进程，慢）的用
+          线程池并行——一个慢 hook 不拖累其他 hook 和主循环；程序式
+          （进程内的快函数）保持串行。
+        - 合并优先级：deny（拒）> ask（要人批）> allow/None（放行）。
+          多个 hook 都要改参数时按注册顺序叠加（先到的做基底，
+          后到的按键覆盖，异键保留并集）。
+          注意：并行跑时每个 hook 是基于**原始参数**做的判断——
+          "多个 hook 同时改参互相看得见"的旧串行语义在并行下略有出入
+          （罕见场景才碰得到）。
+        - ask 档（对齐 CCB 的 ask 语义）：本项目 pre_tool_use 没有通用的
+          审批界面，ask 就按"宁可拒绝"（fail-closed）处理，报错里注明
+          是 ask（用户可以去调整 hook 规则）。
+        - 配了 fail_closed 的 hook 出异常按 deny 汇总（历史踩坑 R30c-A6：
+          此前异常被吞掉，fail_closed 分支根本走不到，语义必须保留）。
+
+        参数：
+        - tool_name：要执行的工具名
+        - args：工具的原始参数
+        - session_id：会话 id
+
+        P3.5 批次：声明式 hook 支持 if 条件过滤（permission rule 语法）。
+        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
         """
         matched = []
         for hook in self._hooks[HookEvent.PRE_TOOL_USE]:
@@ -330,7 +445,7 @@ class HookRegistry:
             return None, None
 
         def _run_one(hook, hook_args):
-            """单 hook 执行 → (hook, result 或 Exception)。"""
+            """跑单个 hook。返回 (hook, 判决结果) 或 (hook, 异常对象)。"""
             try:
                 if hook.kind == "programmatic":
                     return hook, hook.fn(tool_name, hook_args)
@@ -340,9 +455,9 @@ class HookRegistry:
             except Exception as e:  # noqa: BLE001
                 return hook, e
 
-        # programmatic：进程内快函数——**串行链式**（后一个看到前一个的
-        # modify_args，保持旧语义）；declarative：子进程慢——并行执行
-        # （判决基于原始参数；modify_args 为罕见场景，按注册顺序替换叠加）
+        # 程序式是进程内的快函数——**串行流水线**（后一个能看到前一个
+        # 改过的参数，保持旧语义）；声明式要起子进程、慢——并行跑
+        # （判决都基于原始参数；同时改参数属罕见场景，按注册顺序叠加合并）
         prog = [h for h in matched if h.kind == "programmatic"]
         decl = [h for h in matched if h.kind != "programmatic"]
         outcomes = []
@@ -350,7 +465,7 @@ class HookRegistry:
         for h in prog:
             outcome = _run_one(h, current_args)
             outcomes.append(outcome)
-            # 链式语义（同旧串行版）：后一个 hook 看到前一个的 modify_args
+            # 流水线语义（同旧串行版）：后一个 hook 看到前一个改过的参数
             if (not isinstance(outcome[1], Exception)
                     and isinstance(outcome[1], dict)
                     and "modify_args" in outcome[1]):
@@ -386,9 +501,10 @@ class HookRegistry:
                 if not isinstance(mod, dict):
                     logger.warning("hook %s modify_args 非 dict，忽略", hook.name)
                     continue
-                # R30 审计 L14：按注册顺序叠加合并（outcomes 本身按注册序）——
-                # 旧实现后到者整体替换，先到 hook 的修改静默丢失。合并语义：
-                # 首个 hook 的完整返回为基底，后续按键覆盖（同键后到胜、异键并集）
+                # 历史踩坑（R30 审计 L14）：多个 hook 改参数必须按注册顺序
+                # 叠加合并（outcomes 本身就是按注册序收集的）——旧实现是
+                # 后到者整体替换，先到的 hook 改的东西会静默丢掉。合并规则：
+                # 第一个 hook 的完整返回做基底，后面的按键覆盖（同键后到胜、异键并集）
                 if modified_args is None:
                     modified_args = dict(mod)
                 else:
@@ -408,10 +524,18 @@ class HookRegistry:
         return None, modified_args
 
     def _invoke_declarative_pre_tool(self, hook, tool_name, args, session_id):
-        """跑子进程，按 IPC 协议解析。返回 {deny: ...}/{modify_args: ...}/None。
+        """跑一个声明式 pre_tool_use hook 并把返回翻译成统一判决。
 
-        P3.7: 处理 exit code 2 blocking 协议。
-            dispatch_hook 返回 {"action": "block", "reason": stderr} → 转 {"deny": reason}
+        参数：
+        - hook：要跑的声明式 hook
+        - tool_name / args：工具名和参数
+        - session_id：会话 id
+
+        返回：{"deny": 理由} / {"modify_args": 新参数} / None（放行）。
+
+        P3.7 批次：支持子进程 exit code 2 的拦截协议——
+        dispatch_hook 会把它转成 {"action": "block", "reason": stderr}，
+        这里再转成 {"deny": reason}。
         """
         from agent.hook_exec import dispatch_hook
         payload = {
@@ -422,29 +546,37 @@ class HookRegistry:
             "tool_name": tool_name,
             "args": args,
         }
-        # R30b-A6：propagate_error=True——fail_closed hook 执行失败时异常
-        # 向上抛，让 run_pre_tool_use 的 except 分支转为 deny（此前
-        # dispatch_hook 内部吞掉一切异常，fail_closed 分支永不可达）
+        # 历史踩坑（R30b-A6）：这里必须传 propagate_error=True——fail_closed
+        # 的 hook 执行失败时异常要向上抛，让 run_pre_tool_use 的 except 分支
+        # 转成 deny。此前 dispatch_hook 内部把一切异常都吞了，fail_closed
+        # 分支永远走不到，等于白配
         result = dispatch_hook(hook, payload, propagate_error=True)
         if result is None:
             return None
         action = result.get("action", "allow")
-        # P3.7: block（exit 2）转 deny
+        # P3.7 批次：block（exit code 2）等同于 deny
         if action in ("deny", "block"):
             return {"deny": result.get("reason", "unspecified")}
-        # R30g-H5: ask 档（升审批语义——run_pre_tool_use 聚合层兑现）
+        # R30g-H5 批次：ask 档（升审批语义——由 run_pre_tool_use 聚合层兑现）
         if action == "ask":
             return {"ask": result.get("reason", "unspecified")}
         if action == "modify":
             return {"modify_args": result.get("args", args)}
         return None
 
-    # ---- 执行：POST_TOOL_USE ----
+    # ---- 执行：工具调用后事件 ----
     def run_post_tool_use(self, tool_name: str, args: dict, result: str,
                           *, session_id: str) -> str:
-        """链式：每个 hook 看到前一个的输出。
+        """工具结果依次过一遍所有 hook（流水线：每个 hook 看到前一个的
+        输出），返回最终版本的结果。单个 hook 出异常就跳过（fail-open）。
 
-        P3.5/P3.6: 声明式 hook 支持 if 条件过滤 + once 消费。
+        参数：
+        - tool_name：刚执行的工具名
+        - args：工具参数
+        - result：工具的原始结果
+        - session_id：会话 id
+
+        P3.5/P3.6 批次：声明式 hook 支持 if 条件过滤 + once 消费。
         """
         for hook in self._hooks[HookEvent.POST_TOOL_USE]:
             if hook.kind == "declarative":
@@ -466,7 +598,12 @@ class HookRegistry:
         return result
 
     def _invoke_declarative_post_tool(self, hook, tool_name, args, result, session_id):
-        """跑子进程，按 IPC 协议解析。返回新 result 或 None。"""
+        """跑一个声明式 post_tool_use hook。
+
+        参数：hook 为要跑的 hook；tool_name/args 为工具名和参数；
+        result 为工具结果；session_id 为会话 id。
+        返回：新 result（hook 返回 {"result": "..."} 时）或 None（不改）。
+        """
         from agent.hook_exec import dispatch_hook
         payload = {
             "event": "post_tool_use",
@@ -482,11 +619,20 @@ class HookRegistry:
             return None
         return proc_result.get("result")
 
-    # ---- 执行：STOP ----
+    # ---- 执行：回答结束事件 ----
     def run_stop(self, *, session_id: str, max_fires: int = 3) -> Optional[str]:
-        """首个非 None 胜出。超过 max_fires 强制返回 None（防失控）。
+        """模型答完一轮时挨个问 hook"要不要让它继续"。
 
-        P3.6: 声明式 hook 支持 once（跑一次后消费）。
+        背景与规则：任何一个 hook 返回了消息就立刻以它为准（第一个
+        非 None 胜出），这条消息会喂回模型让它继续干活。为防止 hook
+        之间互相触发形成死循环，触发超过 max_fires 次后强制返回 None
+        （不再继续）。
+
+        参数：
+        - session_id：会话 id
+        - max_fires：本会话最多让 STOP hook"续命"几次（默认 3）
+
+        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
         """
         if self._stop_fire_count >= max_fires:
             logger.info("STOP hook 触发上限（%d/%d），本次跳过",
@@ -510,7 +656,11 @@ class HookRegistry:
         return None
 
     def _invoke_declarative_stop(self, hook, session_id):
-        """跑子进程，按 IPC 协议解析。返回 continue 消息或 None。"""
+        """跑一个声明式 stop hook。
+
+        参数：hook 为要跑的 hook；session_id 为会话 id。
+        返回："继续"的消息（hook 返回 {"continue": "..."} 时）或 None。
+        """
         from agent.hook_exec import dispatch_hook
         payload = {
             "event": "stop",
@@ -525,13 +675,24 @@ class HookRegistry:
 
     def _invoke_declarative_script(self, hook, session_id: str, event: str,
                                    timeout_cap: float = None, **extra) -> Optional[dict]:
-        """跑声明式 hook 子进程（统一入口）。返回 dispatch_hook 的 dict 或 None。
+        """跑声明式 hook 的统一入口：拼好 payload 交给 dispatch_hook 执行。
 
-        声明式 hook 的 payload 统一含 event/session_id/timestamp/hook_name，
-        事件特定字段通过 extra 传入（不传超大内容，只传元信息）。
-        dispatch_hook 按 hook.script.handler_type 分发到对应执行器
-        （command/http/mcp_tool/prompt/agent）。
-        R30g-M8：timeout_cap 非空时钳制 hook 超时（取 min，SessionEnd 用）。
+        背景：通知型事件（会话开始/结束等）的声明式 hook 都从这里走，
+        免得每个事件重复拼 payload。payload 固定带 event/session_id/
+        timestamp/hook_name 四个字段，事件自己的字段用 extra 传
+        （注意别塞超大内容，只传摘要信息——子进程间传大块数据太亏）。
+        dispatch_hook 会按 hook.script.handler_type 挑对应的执行器
+        （command/http/mcp_tool/prompt/agent 五种）。
+
+        参数：
+        - hook：要跑的声明式 hook
+        - session_id：会话 id
+        - event：事件名字符串
+        - timeout_cap：超时上限（非空时和 hook 自配的超时取较小者；
+          R30g-M8 批次加的，会话结束时用——退出不能被慢 hook 卡住）
+        - **extra：事件特定字段，原样并进 payload
+
+        返回：dispatch_hook 的 dict 结果，或 None。
         """
         from agent.hook_exec import dispatch_hook
         payload = {
@@ -543,29 +704,35 @@ class HookRegistry:
         payload.update(extra)
         return dispatch_hook(hook, payload, timeout_cap=timeout_cap)
 
-    # ---- batch2-T2: 执行 PRE_LLM_CALL / POST_LLM_CALL ----
+    # ---- batch2-T2 批次：执行 LLM 调用前/后事件 ----
     def run_pre_llm_call(self, messages: list, tools: Optional[list],
                          *, session_id: str = "") -> tuple:
-        """链式：每个 hook 可修改 messages 和 tools。
+        """请求发给 LLM 之前，把消息列表和工具表依次过一遍 hook（流水线）。
 
-        fn 签名: (messages, tools) -> Optional[(messages, tools)]
-        返回 None 时不修改（保持上一轮输出）。
-        声明式 hook：跑子进程（通知型），不修改 messages/tools。
-        失败 fail-open（视为 None）。
+        每个 hook 返回 (messages, tools) 元组就替换，返回 None 就保持
+        上一轮的输出不动。声明式 hook 只当通知跑子进程，不改内容。
+        单个 hook 出异常就跳过（fail-open）。
+
+        参数：
+        - messages：即将发给 LLM 的消息历史
+        - tools：即将随请求发给 LLM 的工具定义列表
+        - session_id：会话 id
+
+        返回：处理后的 (messages, tools) 元组。
         """
         for hook in self._hooks[HookEvent.PRE_LLM_CALL]:
             try:
                 if hook.kind == "programmatic":
                     result = hook.fn(messages, tools)
                 else:
-                    # 声明式：通知型，只传消息数量等元信息（避免超大 payload）
+                    # 声明式：通知型，只传消息条数这类摘要信息（别把大 payload 塞给子进程）
                     self._invoke_declarative_script(
                         hook, session_id, "pre_llm_call",
                         message_count=len(messages),
                     )
                     result = None
                 if result is not None:
-                    # 解包元组
+                    # 拆开 (messages, tools) 元组
                     if isinstance(result, tuple) and len(result) == 2:
                         messages, tools = result
                     else:
@@ -579,19 +746,23 @@ class HookRegistry:
         return messages, tools
 
     def run_post_llm_call(self, response, *, session_id: str = ""):
-        """链式：每个 hook 可修改 response。
+        """LLM 返回响应后，把 response 依次过一遍 hook（流水线）。
 
-        fn 签名: (response) -> Optional[response]
-        返回 None 时不修改。
-        声明式 hook：跑子进程（通知型），不修改 response。
-        失败 fail-open。
+        每个 hook 返回新 response 就替换，返回 None 不动。声明式 hook
+        只当通知跑子进程，不改 response。单个 hook 出异常就跳过（fail-open）。
+
+        参数：
+        - response：LLM 的原始响应对象
+        - session_id：会话 id
+
+        返回：处理后的 response。
         """
         for hook in self._hooks[HookEvent.POST_LLM_CALL]:
             try:
                 if hook.kind == "programmatic":
                     result = hook.fn(response)
                 else:
-                    # 声明式：通知型
+                    # 声明式：纯通知
                     self._invoke_declarative_script(hook, session_id, "post_llm_call")
                     result = None
                 if result is not None:
@@ -601,9 +772,14 @@ class HookRegistry:
                                hook.name, e)
         return response
 
-    # ---- P2-13 NEW: 会话/压缩/配置事件的执行 ----
+    # ---- P2-13 批次：会话/压缩/配置事件的执行 ----
     def run_session_start(self, payload: dict) -> None:
-        """通知型：所有 SESSION_START hook 都被调，返回值忽略。失败 fail-open。"""
+        """通知型：会话开始时把所有 SESSION_START hook 都叫一遍，返回值
+        一律忽略。单个 hook 出异常就跳过（fail-open）。
+
+        参数：
+        - payload：事件数据（session_id、started_at、agent_home 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SESSION_START]:
             try:
@@ -618,15 +794,19 @@ class HookRegistry:
                 logger.warning("SESSION_START hook %s 异常（忽略）: %s",
                                hook.name, e)
 
-    # R30g-M8：SessionEnd hook 独立短超时（对齐 CCB 默认 1500ms）——
-    # teardown 不能被慢 hook 卡死（退出等 10s 体验极差）
+    # R30g-M8 批次：会话结束 hook 的独立短超时（对齐 CCB 默认 1500ms）——
+    # 收尾阶段不能被慢 hook 卡死（退出时干等 10 秒体验太差）
     SESSION_END_TIMEOUT_CAP = 1.5
 
     def run_session_end(self, payload: dict) -> None:
-        """通知型：所有 SESSION_END hook 都被调。失败 fail-open。
+        """通知型：会话结束时把所有 SESSION_END hook 都叫一遍。
+        单个 hook 出异常就跳过（fail-open）。
 
-        R30g-M8：声明式 hook 超时钳制到 SESSION_END_TIMEOUT_CAP
-        （hook 自配更短则尊重更短值）。
+        参数：
+        - payload：事件数据（session_id、reason、ended_at 等）
+
+        R30g-M8 批次：声明式 hook 超时被钳到 SESSION_END_TIMEOUT_CAP
+        （hook 自己配得更短就尊重更短的值）。
         """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SESSION_END]:
@@ -644,9 +824,16 @@ class HookRegistry:
                                hook.name, e)
 
     def run_pre_compact(self, payload: dict) -> dict:
-        """可短路：任一 hook 返回 {"abort": True} 则停止后续 + 通知调用方。
+        """压缩前问一遍 hook"这层压缩要不要做"。
 
-        返回 {"abort": bool}。abort=True 时调用方应跳过该层压缩。
+        任何一个 hook 返回 {"abort": True} 就立刻停下（后面的 hook 不再
+        跑），并把"叫停了"告诉调用方。
+
+        参数：
+        - payload：事件数据（layer、messages_count、est_tokens 等）
+
+        返回：{"abort": bool}（abort=True 时调用方应跳过这一层压缩；
+        带 blocked_by 说明是哪个 hook 叫停的）。
         """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.PRE_COMPACT]:
@@ -670,7 +857,11 @@ class HookRegistry:
         return {"abort": False}
 
     def run_post_compact(self, payload: dict) -> None:
-        """通知型：压缩完成后通知所有 hook（metrics 收集、日志等）。"""
+        """通知型：压缩做完后告知所有 hook（供指标收集、记日志等用）。
+
+        参数：
+        - payload：事件数据（messages_before、messages_after、layer 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.POST_COMPACT]:
             try:
@@ -686,7 +877,11 @@ class HookRegistry:
                                hook.name, e)
 
     def run_config_change(self, payload: dict) -> None:
-        """通知型：配置变更后通知所有 hook（审计、缓存失效等）。"""
+        """通知型：配置变更后告知所有 hook（供审计、缓存失效等用）。
+
+        参数：
+        - payload：事件数据（changed_keys、old、new）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.CONFIG_CHANGE]:
             try:
@@ -701,15 +896,22 @@ class HookRegistry:
                 logger.warning("CONFIG_CHANGE hook %s 异常（忽略）: %s",
                                hook.name, e)
 
-    # ---- round3 NEW: 7 个关键事件 ----
+    # ---- round3 批次：7 个关键事件 ----
 
     def register_post_tool_use_failure(self, fn, *, name=None):
+        """登记"工具调用失败后"通知 hook（result 里带 error 时触发）。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.POST_TOOL_USE_FAILURE].append(
             Hook(name=name or "anonymous", event=HookEvent.POST_TOOL_USE_FAILURE,
                  kind="programmatic", fn=fn))
 
     def run_post_tool_use_failure(self, payload: dict) -> None:
-        """通知型：工具调用失败（result 含 error）时触发。fail-open。"""
+        """通知型：工具调用失败（result 含 error）时告知所有 hook。
+        单个 hook 出异常就跳过（fail-open）。
+
+        参数：
+        - payload：事件数据（session_id、tool、error、error_type 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.POST_TOOL_USE_FAILURE]:
             try:
@@ -725,11 +927,18 @@ class HookRegistry:
                 logger.warning("POST_TOOL_USE_FAILURE hook %s 异常: %s", hook.name, e)
 
     def register_subagent_start(self, fn, *, name=None):
+        """登记"子代理启动时"通知 hook。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.SUBAGENT_START].append(
             Hook(name=name or "anonymous", event=HookEvent.SUBAGENT_START,
                  kind="programmatic", fn=fn))
 
     def run_subagent_start(self, payload: dict) -> None:
+        """通知型：子代理启动时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、subagent、goal、spawn_depth 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SUBAGENT_START]:
             try:
@@ -745,11 +954,18 @@ class HookRegistry:
                 logger.warning("SUBAGENT_START hook %s 异常: %s", hook.name, e)
 
     def register_subagent_stop(self, fn, *, name=None):
+        """登记"子代理结束时"通知 hook。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.SUBAGENT_STOP].append(
             Hook(name=name or "anonymous", event=HookEvent.SUBAGENT_STOP,
                  kind="programmatic", fn=fn))
 
     def run_subagent_stop(self, payload: dict) -> None:
+        """通知型：子代理结束时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、subagent、goal、success 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SUBAGENT_STOP]:
             try:
@@ -765,11 +981,18 @@ class HookRegistry:
                 logger.warning("SUBAGENT_STOP hook %s 异常: %s", hook.name, e)
 
     def register_task_created(self, fn, *, name=None):
+        """登记"任务创建时"通知 hook。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.TASK_CREATED].append(
             Hook(name=name or "anonymous", event=HookEvent.TASK_CREATED,
                  kind="programmatic", fn=fn))
 
     def run_task_created(self, payload: dict) -> None:
+        """通知型：任务创建时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、task_id、subject、owner 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.TASK_CREATED]:
             try:
@@ -785,11 +1008,18 @@ class HookRegistry:
                 logger.warning("TASK_CREATED hook %s 异常: %s", hook.name, e)
 
     def register_task_completed(self, fn, *, name=None):
+        """登记"任务完成时"通知 hook。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.TASK_COMPLETED].append(
             Hook(name=name or "anonymous", event=HookEvent.TASK_COMPLETED,
                  kind="programmatic", fn=fn))
 
     def run_task_completed(self, payload: dict) -> None:
+        """通知型：任务完成时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、task_id、unblocked 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.TASK_COMPLETED]:
             try:
@@ -805,11 +1035,18 @@ class HookRegistry:
                 logger.warning("TASK_COMPLETED hook %s 异常: %s", hook.name, e)
 
     def register_permission_request(self, fn, *, name=None):
+        """登记"权限请求时"通知 hook（工具要用户审批前触发）。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.PERMISSION_REQUEST].append(
             Hook(name=name or "anonymous", event=HookEvent.PERMISSION_REQUEST,
                  kind="programmatic", fn=fn))
 
     def run_permission_request(self, payload: dict) -> None:
+        """通知型：权限请求时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、command、reason 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.PERMISSION_REQUEST]:
             try:
@@ -824,11 +1061,18 @@ class HookRegistry:
                 logger.warning("PERMISSION_REQUEST hook %s 异常: %s", hook.name, e)
 
     def register_permission_denied(self, fn, *, name=None):
+        """登记"权限被拒时"通知 hook。
+        参数：fn 为 hook 函数（收 payload dict，无返回值）；name 为名字。"""
         self._hooks[HookEvent.PERMISSION_DENIED].append(
             Hook(name=name or "anonymous", event=HookEvent.PERMISSION_DENIED,
                  kind="programmatic", fn=fn))
 
     def run_permission_denied(self, payload: dict) -> None:
+        """通知型：权限被拒后告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、command、reason、deny_type 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.PERMISSION_DENIED]:
             try:
@@ -843,20 +1087,28 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("PERMISSION_DENIED hook %s 异常: %s", hook.name, e)
 
-    # ---- P3.3 NEW: STOP_FAILURE 事件 ----
+    # ---- P3.3 批次：STOP_FAILURE（回答异常结束）事件 ----
 
     def register_stop_failure(self, fn, *, name=None):
-        """注册 STOP_FAILURE hook（通知型，返回值忽略）。
+        """登记 STOP_FAILURE hook（通知型，返回值忽略）。
 
-        触发时机：agent 主循环 LLM 调用失败/异常退出时（与正常 STOP 区分）。
-        payload: {session_id, error, error_type, timestamp}。
+        什么时候触发：agent 主循环 LLM 调用失败/异常退出时——注意和正常
+        回答结束（STOP）区分开，一个是"摔了"，一个是"正常干完"。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、error、error_type、timestamp）
+        - name：hook 名字
         """
         self._hooks[HookEvent.STOP_FAILURE].append(
             Hook(name=name or "anonymous", event=HookEvent.STOP_FAILURE,
                  kind="programmatic", fn=fn))
 
     def run_stop_failure(self, payload: dict) -> None:
-        """通知型：所有 STOP_FAILURE hook 都被调。fail-open。"""
+        """通知型：主循环异常退出时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、error、error_type 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.STOP_FAILURE]:
             try:
@@ -871,20 +1123,29 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("STOP_FAILURE hook %s 异常: %s", hook.name, e)
 
-    # ---- P3.4 NEW: WORKTREE_CREATE / WORKTREE_REMOVE 事件 ----
+    # ---- P3.4 批次：worktree（隔离工作区）创建/清理事件 ----
 
     def register_worktree_create(self, fn, *, name=None):
-        """注册 WORKTREE_CREATE hook（通知型）。
+        """登记 WORKTREE_CREATE hook（通知型）。
 
-        触发时机：tools/worktree.py:create_isolated_workspace 创建 worktree 成功后。
-        payload: {session_id, path, branch, workspace_type}。
+        什么时候触发：tools/worktree.py 的 create_isolated_workspace
+        成功创建出隔离工作区之后。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、path、branch、workspace_type）
+        - name：hook 名字
         """
         self._hooks[HookEvent.WORKTREE_CREATE].append(
             Hook(name=name or "anonymous", event=HookEvent.WORKTREE_CREATE,
                  kind="programmatic", fn=fn))
 
     def run_worktree_create(self, payload: dict) -> None:
-        """通知型：worktree 创建后通知所有 hook（审计、清理注册等）。fail-open。"""
+        """通知型：worktree 创建后告知所有 hook（供审计、登记待清理等）。
+        fail-open。
+
+        参数：
+        - payload：事件数据（session_id、path、branch 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.WORKTREE_CREATE]:
             try:
@@ -900,17 +1161,24 @@ class HookRegistry:
                 logger.warning("WORKTREE_CREATE hook %s 异常: %s", hook.name, e)
 
     def register_worktree_remove(self, fn, *, name=None):
-        """注册 WORKTREE_REMOVE hook（通知型）。
+        """登记 WORKTREE_REMOVE hook（通知型）。
 
-        触发时机：tools/worktree.py 的 cleanup 函数执行后。
-        payload: {session_id, path, branch}。
+        什么时候触发：tools/worktree.py 的 cleanup 清理函数执行完之后。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、path、branch）
+        - name：hook 名字
         """
         self._hooks[HookEvent.WORKTREE_REMOVE].append(
             Hook(name=name or "anonymous", event=HookEvent.WORKTREE_REMOVE,
                  kind="programmatic", fn=fn))
 
     def run_worktree_remove(self, payload: dict) -> None:
-        """通知型：worktree 清理后通知所有 hook。fail-open。"""
+        """通知型：worktree 清理后告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、path 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.WORKTREE_REMOVE]:
             try:
@@ -924,20 +1192,30 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("WORKTREE_REMOVE hook %s 异常: %s", hook.name, e)
 
-    # ---- Task N NEW: 6 个新事件 ----
+    # ---- Task N 批次：6 个新事件 ----
 
     def register_file_changed(self, fn, *, name=None):
-        """注册 FILE_CHANGED hook（通知型）。
+        """登记 FILE_CHANGED hook（通知型）。
 
-        触发时机：write_file / str_replace 等文件写入成功后（IDE 集成基础）。
-        payload: {session_id, path, op}。op ∈ {"write", "append", "edit"}。
+        什么时候触发：write_file / str_replace 等文件写入成功之后
+        （做 IDE 集成的基础）。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、path、op），
+          op 取 "write" / "append" / "edit" 三种
+        - name：hook 名字
         """
         self._hooks[HookEvent.FILE_CHANGED].append(
             Hook(name=name or "anonymous", event=HookEvent.FILE_CHANGED,
                  kind="programmatic", fn=fn))
 
     def run_file_changed(self, payload: dict) -> None:
-        """通知型：文件写入成功后通知所有 hook（IDE 同步、审计、热重载等）。fail-open。"""
+        """通知型：文件写入成功后告知所有 hook（供 IDE 同步、审计、
+        热重载等）。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、path、op 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.FILE_CHANGED]:
             try:
@@ -953,17 +1231,25 @@ class HookRegistry:
                 logger.warning("FILE_CHANGED hook %s 异常: %s", hook.name, e)
 
     def register_cwd_changed(self, fn, *, name=None):
-        """注册 CWD_CHANGED hook（通知型）。
+        """登记 CWD_CHANGED hook（通知型）。
 
-        触发时机：workspace_context 切换时（子代理 worktree 进入/退出）。
-        payload: {session_id, old, new}。
+        什么时候触发：workspace_context 切换工作目录时
+        （子代理进/出 worktree 的场景）。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、old、new——旧新目录）
+        - name：hook 名字
         """
         self._hooks[HookEvent.CWD_CHANGED].append(
             Hook(name=name or "anonymous", event=HookEvent.CWD_CHANGED,
                  kind="programmatic", fn=fn))
 
     def run_cwd_changed(self, payload: dict) -> None:
-        """通知型：workspace cwd 切换后通知所有 hook。fail-open。"""
+        """通知型：工作目录切换后告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、old、new）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.CWD_CHANGED]:
             try:
@@ -979,17 +1265,25 @@ class HookRegistry:
                 logger.warning("CWD_CHANGED hook %s 异常: %s", hook.name, e)
 
     def register_instructions_loaded(self, fn, *, name=None):
-        """注册 INSTRUCTIONS_LOADED hook（通知型）。
+        """登记 INSTRUCTIONS_LOADED hook（通知型）。
 
-        触发时机：prompt_builder 加载完项目 CLAUDE.md/OMNIMATE.md 后。
-        payload: {session_id, source, bytes}。
+        什么时候触发：prompt_builder 加载完项目的 CLAUDE.md/OMNIMATE.md
+        （项目使用说明）之后。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、source、bytes）
+        - name：hook 名字
         """
         self._hooks[HookEvent.INSTRUCTIONS_LOADED].append(
             Hook(name=name or "anonymous", event=HookEvent.INSTRUCTIONS_LOADED,
                  kind="programmatic", fn=fn))
 
     def run_instructions_loaded(self, payload: dict) -> None:
-        """通知型：项目记忆加载完通知所有 hook。fail-open。"""
+        """通知型：项目使用说明加载完后告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、source 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.INSTRUCTIONS_LOADED]:
             try:
@@ -1004,17 +1298,25 @@ class HookRegistry:
                 logger.warning("INSTRUCTIONS_LOADED hook %s 异常: %s", hook.name, e)
 
     def register_setup(self, fn, *, name=None):
-        """注册 SETUP hook（通知型）。
+        """登记 SETUP hook（通知型）。
 
-        触发时机：cli.py RuntimeContext.initialize 末尾（启动时一次）。
-        payload: {session_id, agent_home, started_at}。
+        什么时候触发：cli.py 的 RuntimeContext.initialize 收尾时——
+        每次启动只触发一次。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、agent_home、started_at）
+        - name：hook 名字
         """
         self._hooks[HookEvent.SETUP].append(
             Hook(name=name or "anonymous", event=HookEvent.SETUP,
                  kind="programmatic", fn=fn))
 
     def run_setup(self, payload: dict) -> None:
-        """通知型：agent 启动时触发一次。fail-open。"""
+        """通知型：agent 启动时触发一次。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、agent_home 等）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.SETUP]:
             try:
@@ -1029,17 +1331,24 @@ class HookRegistry:
                 logger.warning("SETUP hook %s 异常: %s", hook.name, e)
 
     def register_teammate_idle(self, fn, *, name=None):
-        """注册 TEAMMATE_IDLE hook（通知型）。
+        """登记 TEAMMATE_IDLE hook（通知型）。
 
-        触发时机：team 成员进 idle 状态（team 协作时）。
-        payload: {session_id, member}。
+        什么时候触发：团队协作中某个成员进入空闲状态时。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、member）
+        - name：hook 名字
         """
         self._hooks[HookEvent.TEAMMATE_IDLE].append(
             Hook(name=name or "anonymous", event=HookEvent.TEAMMATE_IDLE,
                  kind="programmatic", fn=fn))
 
     def run_teammate_idle(self, payload: dict) -> None:
-        """通知型：team 成员进 idle 时通知所有 hook。fail-open。"""
+        """通知型：团队成员空闲时告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、member）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.TEAMMATE_IDLE]:
             try:
@@ -1054,17 +1363,24 @@ class HookRegistry:
                 logger.warning("TEAMMATE_IDLE hook %s 异常: %s", hook.name, e)
 
     def register_elicitation_started(self, fn, *, name=None):
-        """注册 ELICITATION_STARTED hook（通知型）。
+        """登记 ELICITATION_STARTED hook（通知型）。
 
-        触发时机：ask_user 工具弹窗前（UI 集成用）。
-        payload: {session_id, prompt}。
+        什么时候触发：ask_user 工具要弹窗问用户之前（给 UI 集成用的）。
+
+        参数：
+        - fn：hook 函数，收 payload dict（session_id、prompt——问的问题）
+        - name：hook 名字
         """
         self._hooks[HookEvent.ELICITATION_STARTED].append(
             Hook(name=name or "anonymous", event=HookEvent.ELICITATION_STARTED,
                  kind="programmatic", fn=fn))
 
     def run_elicitation_started(self, payload: dict) -> None:
-        """通知型：ask_user 弹窗前通知所有 hook。fail-open。"""
+        """通知型：ask_user 弹窗前告知所有 hook。fail-open。
+
+        参数：
+        - payload：事件数据（session_id、prompt）
+        """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.ELICITATION_STARTED]:
             try:

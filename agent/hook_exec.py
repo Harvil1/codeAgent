@@ -1,19 +1,23 @@
-"""声明式 hook 的执行入口 + JSON IPC 协议。
+"""声明式 hook 的执行器：按配置把 hook 真正跑起来，并约定 JSON 通信格式。
 
-5 种 handler_type（F1 扩展）：
-- command:  本地子进程。stdin 收 payload JSON，stdout 期望合法 JSON。
-- http:     POST JSON 到 url，解析响应 JSON。
-- mcp_tool: 调 MCP 工具 mcp_server.mcp_tool。
-- prompt:   单轮 LLM 评估（走 aux_llm_router，若未注入则 fail-open）。
-- agent:    多轮子代理判断（复用 delegate_tool._run_child）。
+本文件在项目里的位置：agent/hooks.py 的 HookRegistry 只管"什么时候触发"，
+具体"怎么执行"全在这里。被 agent/hook_loader.py（配置解析）和
+cli.py（启动时注入依赖）使用。执行方式共 5 种（F1 扩展定的）：
+- command:  起本地子进程跑命令。把 payload JSON 喂给它的标准输入（stdin），
+            期望它往标准输出（stdout）吐一段合法 JSON 作为判决。
+- http:     往 url POST 一份 JSON，把响应 JSON 当判决。
+- mcp_tool: 调一个 MCP 外部工具（mcp_server 服务器上的 mcp_tool）。
+- prompt:   让辅助小模型（aux_llm）单轮评估一次；router 没注入就跳过。
+- agent:    让子代理多轮判断（复用 delegate_tool 的 _run_child）。
 
-子进程协议：
-- stdin 收到 payload 的 JSON
-- stdout 期望是合法 JSON（空 stdout = 空 dict）
-- 超时 kill
-- exit code != 0 / 启动失败 / JSON 解析失败 → None（fail-open）
+子进程的通信约定（协议）：
+- 子进程从 stdin 收到 payload 的 JSON
+- 子进程的 stdout 应该是合法 JSON（什么都没输出 = 空 dict，即"放行"）
+- 超时就 kill 掉
+- 退出码非 0 / 启动失败 / JSON 解析不出来 → 返回 None（当作没这个 hook）
 
-全部 handler 异常 → None（fail-open）。
+兜底原则：所有执行器出异常都返回 None（fail-open，出问题的 hook
+不能拖垮主流程），除非 hook 显式配了 fail_closed。
 """
 import json
 import logging
@@ -23,35 +27,39 @@ import re
 import subprocess
 from typing import Optional
 
-import requests  # 模块级，便于测试 monkeypatch（he.requests.post）
+import requests  # 放在模块级，方便测试 monkeypatch（he.requests.post）
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# aux_llm router 注入（F1）
+# 辅助小模型 router 的注入（F1）
 #
-# agent/aux_llm.py 的 AuxLLMRouter 需要在 cli.py / RuntimeContext 构造时拿
-# main_client + endpoints，没有全局单例 getter。我们提供一个模块级 provider
-# 注入点：cli.py 启动时调 set_aux_router_provider(lambda: aux_llm_router)，
-# run_prompt_hook 通过 provider 拿 router。未注入时返回 None → fail-open。
+# 背景：agent/aux_llm.py 的 AuxLLMRouter 要在 cli.py / RuntimeContext 构造时
+# 拿到 main_client 和 endpoints，它没有全局单例的 getter。所以这里留一个
+# 模块级的"提供者"注入点：cli.py 启动时调
+# set_aux_router_provider(lambda: aux_llm_router)，run_prompt_hook 再通过
+# provider 拿 router。没注入就返回 None → fail-open 跳过。
 # ============================================================================
 _AUX_ROUTER_PROVIDER = None
 
 
 def set_aux_router_provider(provider) -> None:
-    """注入一个返回 AuxLLMRouter 实例（或 None）的 callable。
+    """注入一个"能返回 AuxLLMRouter 实例（或 None）的函数"。
 
     cli.py 在构造完 aux_llm_router 后调一次：
         from agent.hook_exec import set_aux_router_provider
         set_aux_router_provider(lambda: aux_llm_router)
+
+    参数：
+    - provider：无参函数，调用后返回 AuxLLMRouter 实例或 None
     """
     global _AUX_ROUTER_PROVIDER
     _AUX_ROUTER_PROVIDER = provider
 
 
 def _get_aux_router():
-    """取注入的 AuxLLMRouter（可能为 None）。"""
+    """取出注入的 AuxLLMRouter（可能为 None——没注入或注入方出异常时）。"""
     if _AUX_ROUTER_PROVIDER is None:
         return None
     try:
@@ -62,27 +70,31 @@ def _get_aux_router():
 
 
 # ============================================================================
-# config 注入（P3.2）：dispatch_hook 需要 config 读 feature flag 门控
-# http / mcp_tool / agent 三种 handler 类型。模块级 provider（与 aux_router 同模式），
-# cli.py 启动时注入 lambda: self.config，dispatch_hook 通过它拿 config dict。
-# 未注入 → 视为全部 handler 允许（向后兼容，避免破坏现有测试）。
+# config 的注入（P3.2 批次）：dispatch_hook 需要读配置里的 feature flag
+# （功能开关），决定 http / mcp_tool / agent 三种执行器允不允许用。
+# 和上面 aux_router 同一套模式：cli.py 启动时注入 lambda: self.config，
+# dispatch_hook 通过它拿 config dict。没注入就当作"全允许"
+# （向后兼容，免得现有测试直接挂掉）。
 # ============================================================================
 _CONFIG_PROVIDER = None
 
 
 def set_config_provider(provider) -> None:
-    """注入一个返回 config dict（或 None）的 callable。
+    """注入一个"能返回 config dict（或 None）的函数"。
 
     cli.py 在 RuntimeContext 构造完后调一次：
         from agent.hook_exec import set_config_provider
         set_config_provider(lambda: self.config)
+
+    参数：
+    - provider：无参函数，调用后返回 config dict 或 None
     """
     global _CONFIG_PROVIDER
     _CONFIG_PROVIDER = provider
 
 
 def _get_config():
-    """取注入的 config dict（可能为 None）。"""
+    """取出注入的 config dict（可能为 None——没注入或注入方出异常时）。"""
     if _CONFIG_PROVIDER is None:
         return None
     try:
@@ -92,7 +104,7 @@ def _get_config():
         return None
 
 
-# P3.2: handler_type → feature flag 名的映射
+# P3.2 批次：执行器类型 → 对应 feature flag 名字的对照表
 _HANDLER_FLAG_MAP = {
     "http": "hook_http_handler",
     "mcp_tool": "hook_mcp_tool_handler",
@@ -101,50 +113,61 @@ _HANDLER_FLAG_MAP = {
 
 
 def _is_handler_allowed(handler_type: str) -> bool:
-    """检查该 handler_type 是否被 feature flag 允许。
+    """检查这种执行器类型有没有被 feature flag（功能开关）放行。
 
-    - command / prompt：无 flag 门控，永远允许（基线 handler）
-    - http / mcp_tool / agent：需要对应 flag enabled
-    - config 未注入（None）：向后兼容，全部允许
+    参数：
+    - handler_type：执行器类型字符串
+
+    规则：
+    - command / prompt：没有开关管着，永远允许（基线能力）
+    - http / mcp_tool / agent：需要对应的 flag 处于开启状态
+    - config 没注入（None）：向后兼容，全部允许
     """
     flag_name = _HANDLER_FLAG_MAP.get(handler_type)
     if flag_name is None:
-        return True  # command / prompt 无门控
+        return True  # command / prompt 不受门控
     config = _get_config()
     if config is None:
-        return True  # 未注入 config（测试场景），全放开
+        return True  # 没注入 config（多见于测试场景），全放开
     from agent.feature_flags import is_feature_enabled
     return is_feature_enabled(config, flag_name)
 
 
 def _wrap_with_sandbox(hook) -> list:
-    """P3.8: 把 hook 命令用 sandbox_runner 包装。
+    """P3.8 批次：把 hook 要跑的命令用 sandbox_runner（OS 沙箱）包一层。
 
-    平台不支持/二进制未装时 fail-open 返回原始 command（log warning）。
-    返回 argv list。
+    背景：声明式 hook 跑的是外部命令，套沙箱限制它能碰的文件范围。
+    平台不支持或沙箱程序没装时降级——返回原始 command 并记条警告
+    （fail-open，不能因为沙箱缺失让 hook 跑不了）。
+
+    参数：
+    - hook：要包装的声明式 hook
+
+    返回：包装后的 argv 列表（可直接交给 Popen）。
     """
     from agent import sandbox_runner
     try:
         # hook.script.command 是 list[str]（如 ["/bin/sh", "-c", "..."]），
-        # sandbox_runner.wrap_command 接受 str（shell 命令），
-        # 我们把 list 拼成 shell 命令字符串。
+        # 而 sandbox_runner.wrap_command 只收 str（shell 命令字符串），
+        # 所以先把 list 拼回 shell 命令
         raw_cmd = hook.script.command
         if isinstance(raw_cmd, list):
-            # 简单拼接：用 shlex.quote 保护每个参数
+            # 用 shlex.quote 给每个参数加引号保护，防参数里带空格/特殊字符被拆错
             import shlex
             shell_cmd = " ".join(shlex.quote(str(x)) for x in raw_cmd)
         else:
             shell_cmd = str(raw_cmd)
 
-        # 并发子代理 workspace：优先读 ContextVar（线程隔离），fallback 到 os.getcwd()
+        # 并发子代理各自有工作目录：优先读 ContextVar（线程隔离不串号），
+        # 读不到再退回 os.getcwd()
         from agent.workspace_context import get_workspace_cwd
         cwd = get_workspace_cwd()
-        writable_roots = []  # hook 命令默认只可写 cwd
+        writable_roots = []  # hook 命令默认只允许写 cwd（不额外开白名单）
         return sandbox_runner.wrap_command(
             shell_cmd, cwd=cwd, writable_roots=writable_roots,
         )
     except Exception as e:
-        # fail-open：沙箱不可用 → 降级到无沙箱（与 terminal_tool 同语义）
+        # fail-open：沙箱不可用就退回无沙箱执行（和 terminal_tool 同一套语义）
         logger.warning(
             "hook %s use_sandbox=True 但沙箱不可用，降级到无沙箱: %s",
             hook.name, e,
@@ -160,29 +183,40 @@ def _wrap_with_sandbox(hook) -> list:
 class HookExecutionError(RuntimeError):
     """声明式 hook 执行失败（启动失败/超时/非零退出/输出解析失败）。
 
-    R30b-A6：fail_closed=True 的 hook 在失败路径抛出。只有 pre_tool_use
-    路径（dispatch_hook(propagate_error=True)）会把异常放行给 registry
-    转为 deny；其他事件维持 fail-open（吞掉返回 None）。
+    历史踩坑（R30b-A6）：fail_closed=True 的 hook 要在失败路径把这个异常
+    抛出去。只有 pre_tool_use 路径（dispatch_hook 传 propagate_error=True）
+    会放行异常，让 registry 把它转成 deny（拒绝执行工具）；其他事件仍按
+    fail-open 处理（吞掉异常返回 None）。
     """
 
 
 def _fail_closed_or_none(hook, reason: str) -> None:
-    """失败分叉：fail_closed hook 抛 HookExecutionError，否则返回 None。"""
+    """失败时的分岔路：hook 配了 fail_closed 就抛 HookExecutionError，
+    否则安静返回 None（当作 hook 没跑）。
+
+    参数：hook 为出错的 hook；reason 为失败原因（进异常信息）。"""
     if getattr(hook, "fail_closed", False):
         raise HookExecutionError(reason)
     return None
 
 
 # ============================================================================
-# C4（CCB 借鉴）：async hook 的 rewake 通知队列
+# C4（借鉴 CCB）：异步 hook 的 rewake（重新叫醒）通知队列
 # ============================================================================
-# async hook 后台跑完 exit 2（block）且 async_rewake=True 时推入；
-# agent 的 _drain_injected_messages 每轮消费为 ephemeral <rewake_notification>。
+# 异步 hook 在后台跑完后如果退出码是 2（block）且配了 async_rewake=True，
+# 就往这个队列推一条通知；agent 主循环每轮用 _drain_injected_messages
+# 把队列里的内容作为临时 <rewake_notification> 消息喂给模型。
 _REWAKE_QUEUE: "queue.Queue" = queue.Queue()
 
 
 def _push_rewake(hook_name: str, reason: str, status_message: str = "") -> None:
-    """推一条 rewake 通知（线程安全）。"""
+    """往队列推一条 rewake 通知（线程安全——后台线程和主循环都会碰它）。
+
+    参数：
+    - hook_name：哪个 hook 发的
+    - reason：为什么叫醒（block 理由）
+    - status_message：给人看的说明文字（可空）
+    """
     import time as _time
     _REWAKE_QUEUE.put({
         "hook": hook_name,
@@ -193,7 +227,10 @@ def _push_rewake(hook_name: str, reason: str, status_message: str = "") -> None:
 
 
 def drain_rewake_notifications() -> list:
-    """取出并清空全部 rewake 通知（agent 每轮 drain）。"""
+    """把队列里攒的 rewake 通知一次性取干取净（agent 每轮开头调）。
+
+    返回：通知 dict 的列表（队列空了就是空列表）。
+    """
     notes = []
     while True:
         try:
@@ -203,10 +240,16 @@ def drain_rewake_notifications() -> list:
 
 
 def _run_async_hook(hook, payload: dict, timeout_cap: float = None) -> None:
-    """C4：async command hook——后台线程跑，dispatch 立即返回。
+    """C4 批次：异步 command hook——丢到后台线程跑，dispatch 立刻返回不等它。
 
-    exit 2 + async_rewake → 推 rewake 通知（模型下轮看到可跟进）。
-    其余结果丢弃（async 的语义就是"不等待判决"——gating 类 hook 别用 async）。
+    后台跑完退出码是 2（block）且配了 async_rewake 时，推一条 rewake 通知
+    （模型下一轮能看到并跟进）。其他结果直接扔掉——异步的语义本来就是
+    "不等待判决"，所以要拦东西的（gating 类）hook 别用异步。
+
+    参数：
+    - hook：要跑的异步 hook
+    - payload：事件数据
+    - timeout_cap：超时上限（可空）
     """
     def _bg():
         try:
@@ -234,30 +277,41 @@ def dispatch_hook(
     hook, payload: dict, *, propagate_error: bool = False,
     timeout_cap: float = None,
 ) -> Optional[dict]:
-    """按 hook.script.handler_type 分发到对应执行器。
+    """执行一个声明式 hook 的总入口：看配置选哪种执行器去跑。
 
-    所有执行器异常都被吞掉返回 None（fail-open），与原 run_script_hook 一致。
+    参数：
+    - hook：要执行的 Hook 对象（script 配置里写了用哪种执行器）
+    - payload：事件数据（会原样传给执行器）
+    - propagate_error：True 时 fail_closed hook 的异常向上抛而不是吞掉
+      （只有 pre_tool_use 路径用）
+    - timeout_cap：超时上限（非空时和 hook 自配超时取较小者）
 
-    R30b-A6：propagate_error=True（仅 pre_tool_use 路径用）且 hook.fail_closed
-    时，异常向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远不可达
-    （声明式 hook 配了 fail_closed: true 出错仍是 fail-open 放行）。
+    返回：执行器产出的 dict（判决），或 None（没跑/失败/被跳过）。
 
-    R30g-M8：timeout_cap 非空时钳制执行器超时（取 min；SessionEnd 用 1.5s
-    防 teardown 被慢 hook 卡死）。仅对有超时语义的 command/http 生效。
+    默认所有执行器的异常都吞掉返回 None（fail-open，和老的 run_script_hook
+    行为一致）。
 
-    P3.2: http / mcp_tool / agent 三种 handler 受 feature flag 门控。
-    flag 未开启时直接返回 None（视为 skip），不调对应执行器。
-    command / prompt 永远允许（基线）。
+    历史踩坑（R30b-A6）：propagate_error=True 且 hook 配了 fail_closed 时，
+    异常必须向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远走不到
+    （等于声明式 hook 配了 fail_closed: true，出错时却照样 fail-open 放行）。
+
+    R30g-M8 批次：timeout_cap 非空时钳住执行器超时（取较小值；会话结束时
+    传 1.5 秒，防止收尾被慢 hook 卡死）。只对 command/http 这两种有超时
+    概念的执行器生效。
+
+    P3.2 批次：http / mcp_tool / agent 三种执行器受 feature flag 门控，
+    flag 没开就直接返回 None（当作跳过），不碰对应执行器；
+    command / prompt 永远允许（基线能力）。
     """
     if hook.script is None:
         return None
     ht = getattr(hook.script, "handler_type", "command") or "command"
-    # C4：async command hook——后台跑不阻塞，立即返回 None
+    # C4 批次：异步 command hook——后台跑不阻塞，立刻返回 None
     if (ht == "command"
             and getattr(hook.script, "async_run", False)):
         _run_async_hook(hook, payload, timeout_cap)
         return None
-    # P3.2: flag 门控
+    # P3.2 批次：feature flag 门控
     if not _is_handler_allowed(ht):
         logger.info(
             "hook %s handler_type '%s' 被门控关闭（feature flag 未开启），跳过",
@@ -265,7 +319,7 @@ def dispatch_hook(
         )
         return None
     try:
-        # R30g-M8：仅在 cap 存在时传参（保持旧两参调用/测试 mock 兼容）
+        # R30g-M8 批次：只在 cap 存在时才传参（保持旧的两参调用/测试 mock 兼容）
         _tkw = {"timeout_cap": timeout_cap} if timeout_cap is not None else {}
         if ht == "command":
             return run_script_hook(hook, payload, **_tkw)
@@ -281,35 +335,38 @@ def dispatch_hook(
         return None
     except Exception as e:
         if propagate_error and getattr(hook, "fail_closed", False):
-            raise  # pre_tool_use 的 fail_closed 语义：异常 → registry 转 deny
+            raise  # pre_tool_use 的 fail_closed 语义：异常抛上去让 registry 转成 deny
         logger.warning("hook %s (%s) 执行失败（fail-open）: %s", hook.name, ht, e)
         return None
 
 
 # ============================================================================
-# command 类型（原 run_script_hook，保持不动）
+# command 类型：起子进程跑命令（就是最早的 run_script_hook，逻辑保持不动）
 # ============================================================================
 
 
 def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
-    """在子进程中执行声明式 hook。
+    """在子进程里执行声明式 hook 命令，按约定解析它的输出。
 
     参数：
         hook: Hook 实例（kind="declarative"，script 非 None）
         payload: 要传给子进程的 dict（含 event/session_id/timestamp/事件字段）
-        timeout_cap: R30g-M8 可选超时钳制（取 min；SessionEnd 用 1.5s）
+        timeout_cap: 可选的超时上限（R30g-M8 批次加的，取较小值；
+                     会话结束时传 1.5s 防收尾被卡）
 
     返回：
-        解析后的 dict（可能为空 dict 表示 allow），或 None（任何故障）
+        解析后的 dict（空 dict 表示"放行"），或 None（出了任何故障）
 
-    P3.8: hook.use_sandbox=True 时，命令被 sandbox_runner 包装（仅 Unix 可用）。
-          Windows/平台不支持时 fail-open 降级到无沙箱（log warning）。
-    CCAR14 Task 2: Windows + use_sandbox=True 走 Job Object 模式——命令不包装，
-          正常 Popen 启动后 attach_job（对齐 terminal_tool 的 CCAR12 分支）；
-          attach 失败 fail-open 继续（log warning）。
-    R30b-A6：失败分支（启动失败/超时/非零退出/输出解析失败）在 hook.fail_closed
-          时抛 HookExecutionError——经 pre_tool_use 路径转为 deny；exit 2 是
-          主动 block 决策不算失败，维持原协议。
+    沙箱相关：
+    P3.8 批次：hook 配了 use_sandbox=True 时，命令会被 sandbox_runner 包装
+          （只有 Unix 可用）；Windows/平台不支持时降级成无沙箱跑（记警告）。
+    CCAR14 Task 2：Windows + use_sandbox=True 走 Job Object（进程管控）模式——
+          命令不做包装，正常 Popen 启动后把进程挂进 job（对齐 terminal_tool
+          的 CCAR12 分支）；挂 job 失败也降级继续跑（记警告）。
+    历史踩坑（R30b-A6）：各失败分支（启动失败/超时/非零退出/输出解析失败）
+          在 hook.fail_closed 时要抛 HookExecutionError——经 pre_tool_use
+          路径转成 deny；注意 exit 2 是 hook 主动"拦截"的决策、不算失败，
+          维持原协议不走异常。
     """
     if hook.script is None:
         logger.warning("hook %s 缺 script 配置", hook.name)
@@ -320,19 +377,20 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         return _fail_closed_or_none(hook, f"hook {hook.name} command 为空")
 
     payload_json = json.dumps(payload, ensure_ascii=False)
-    # R30d-B6a：hook 子进程 env 不再继承宿主全量（含 API key 等敏感变量），
-    # 改用 terminal 同款 build_safe_env（洗掉密钥类）+ hook 自身声明的 env 覆盖
+    # 历史踩坑（R30d-B6a）：hook 子进程的环境变量不再原样继承宿主的全量
+    # （里面含 API key 等敏感信息），改用 terminal 同款 build_safe_env
+    # （把密钥类洗掉）+ hook 配置里自己声明的 env 覆盖
     from agent.sandbox_env import build_safe_env
     env = {**build_safe_env(), **(hook.script.env or {})}
-    # R30g-M8：超时钳制（cap 更小则用 cap）
+    # R30g-M8 批次：超时钳制（cap 更小就听 cap 的）
     effective_timeout = hook.script.timeout
     if timeout_cap is not None:
         effective_timeout = min(effective_timeout, float(timeout_cap))
 
-    # P3.8: 可选 sandbox 包装
+    # P3.8 批次：可选的沙箱包装
     argv = hook.script.command
     use_sandbox = getattr(hook, "use_sandbox", False)
-    # CCAR14 Task 2: Windows Job Object 模式（命令不包装，启动后挂 job）
+    # CCAR14 Task 2：Windows Job Object 模式（命令不包装，启动后再挂进 job）
     win_job_mode = False
     if use_sandbox:
         from agent import sandbox_runner
@@ -342,7 +400,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
                 and sandbox_runner.is_available()
             )
         except Exception as e:
-            # 查询失败按非 Job 模式处理（下面走 Unix wrapper 降级）
+            # 查询失败就当非 Job 模式处理（下面走 Unix wrapper 的降级路径）
             logger.warning("hook %s 沙箱模式查询失败（降级到 wrapper 路径）: %s",
                            hook.name, e)
             win_job_mode = False
@@ -351,11 +409,12 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
 
     if win_job_mode:
         # ============================================================
-        # CCAR14 Task 2: Windows Job Object 分支
-        # 公共路径提取到 sandbox_runner.run_with_job_object（照 terminal_tool
-        # 模式：命令不包装正常启动 → attach_job → try communicate /
-        # finally job.close()，句柄保活到进程结束：早关会在子进程还在跑时
-        # 触发全树 kill——那是误杀；超时收尸后重抛，错误语义留在本函数）
+        # CCAR14 Task 2：Windows Job Object 分支
+        # 公共流程提取到了 sandbox_runner.run_with_job_object（照抄
+        # terminal_tool 的模式：命令不包装、正常启动 → 挂进 job →
+        # try 里 communicate / finally 里关 job。job 句柄必须保活到进程
+        # 结束——提前关会触发整棵进程树被杀，那是误杀；超时先收尸再
+        # 把异常重抛出来，错误怎么报留给本函数决定）
         # ============================================================
         from agent.sandbox_runner import run_with_job_object
         try:
@@ -376,7 +435,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         stderr = result.stderr
         returncode = result.returncode
     else:
-        # 原路径：subprocess.run（无沙箱 / Unix wrapper 包装后）
+        # 老路径：直接 subprocess.run（没开沙箱，或 Unix 下被 wrapper 包装过）
         try:
             proc = subprocess.run(
                 argv,
@@ -398,9 +457,12 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         returncode = proc.returncode
 
     if returncode != 0:
-        # P3.7: exit code 2 = blocking 协议（对齐 claude-code-main）
-        # stderr 作为阻塞原因，返回特殊 dict 让调用方识别为 block。
-        # 与 fail-open（None）区分：None = 静默失败，block = 主动拒绝。
+        # P3.7 批次：exit code 2 = "拦截"协议（对齐 claude-code-main）——
+        # stderr 里写的是拦截原因，返回特殊 dict 让调用方识别成 block。
+        # 要和 fail-open（None）区分开：None = 出故障静默跳过，
+        # block = hook 主动说"不行"。
+        # 注意顺序：exit 2 的判断在非零退出分支里、fail_closed 之前——
+        # 主动拦截不算失败，不能被转成异常。
         if returncode == 2:
             stderr_txt = (stderr or "").strip()
             logger.info("hook %s exit 2 (block): %s", hook.name, stderr_txt[:200])
@@ -413,7 +475,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
 
     stdout = (stdout or "").strip()
     if not stdout:
-        return {}  # 空 stdout = allow
+        return {}  # 什么都没输出 = 默认放行（空 dict）
 
     try:
         parsed = json.loads(stdout)
@@ -427,20 +489,27 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
 
 
 # ============================================================================
-# http 类型
+# http 类型：发 HTTP 请求
 # ============================================================================
 
 
-# R25 #5 → #8：http hook ${VAR} 插值（仅白名单变量）
+# R25 #5 → #8：http hook 的 ${VAR} 环境变量插值（只允许白名单里的变量）
 _ENV_INTERP_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def interpolate_env_vars(value: str, allowed: list) -> str:
-    """对字符串做 ${VAR} 环境变量插值，只允许白名单里的变量名。
+    """把字符串里的 ${VAR} 换成环境变量的值——但只换白名单点过名的变量。
 
-    对齐 CCB httpHookAllowedEnvVars：非白名单引用保留原样并告警
-    （防 hook 配置把 API key 等敏感 env 悄悄发出去；也防用户以为
-    会插值实际没插的静默错配）。
+    背景（对齐 CCB 的 httpHookAllowedEnvVars）：不加限制的话，hook 配置
+    可能把 API key 这类敏感环境变量悄悄发到外部网址。所以不在白名单的
+    引用一律原样保留 ${VAR} 字样并记警告——既防泄漏，也防"用户以为会
+    插值、实际没插"的静默错配。
+
+    参数：
+    - value：待处理的字符串（通常是 url）
+    - allowed：允许插值的变量名列表
+
+    返回：处理后的字符串。
     """
     import os as _os
     warned = set()
@@ -462,18 +531,27 @@ def interpolate_env_vars(value: str, allowed: list) -> str:
 
 
 def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
-    """POST JSON payload 到 hook.script.url，解析响应 JSON dict。
+    """把 payload POST 到 hook 配置的 url，把响应 JSON 当判决返回。
 
-    R16 #4 SSRF 防护（agent/ssrf_guard.py）：
-    - URL allowlist（config security.http_hook_allowed_urls：None 不限/[] 全拒/
-      非空必须匹配，* 通配）
-    - DNS 预检：解析 IP 落私网/链路本地/云元数据段即拒；环回放行；
-      环境代理激活时跳过预检
-    - 禁重定向（重定向可绕过预检弹内网）
-    - URL 含 CR/LF/NUL 拒
-    命中防护 → 不外呼，返回 None（与 hook fail-open 语义一致：hook 没跑）。
+    参数：
+    - hook：要执行的 http 类型 hook
+    - payload：事件数据（POST 的请求体）
+    - timeout_cap：超时上限（非空时取较小值）
 
-    非 200 / 响应非 dict / JSON 解析失败 → None（fail-open）。
+    返回：响应里的 JSON dict，或 None（没跑/失败）。
+
+    R16 #4 的 SSRF 防护（防"让服务器替攻击者访问内网"，实现在
+    agent/ssrf_guard.py），发请求之前过四道检查：
+    - URL 白名单（配置 security.http_hook_allowed_urls：None = 不限 /
+      空列表 = 全拒 / 非空必须匹配上，支持 * 通配）
+    - DNS 预检：把域名解析成 IP，落在私网段/链路本地段/云元数据段就拒；
+      环回地址（127.x、::1）放行；环境里配了代理时跳过预检
+    - 禁止重定向（跟着重定向走可以绕过预检摸进内网）
+    - URL 里带换行符（CR/LF）或 NUL 就拒
+    命中任何一条 → 根本不发请求，返回 None（和 hook 的 fail-open 语义
+    一致：等于这个 hook 没跑）。
+
+    此外：响应不是 200 / 响应不是 JSON dict / JSON 解析失败 → None。
     """
     if not hook.script.url:
         logger.warning("http hook %s 缺 url", hook.name)
@@ -481,7 +559,7 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
     url = hook.script.url.strip()
 
     config = _get_config()
-    # R25 #8：${VAR} 插值（仅白名单；默认 [] = 完全不插值，原样发送）
+    # R25 #8：${VAR} 插值（只认白名单；默认空列表 = 完全不插值，原样发送）
     allowed_env = []
     if config is not None:
         allowed_env = [
@@ -492,7 +570,7 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
 
     from agent.ssrf_guard import check_url_against_allowlist, validate_url_for_ssrf
 
-    # URL allowlist
+    # 第一道：URL 白名单
     allowed = None
     if config is not None:
         allowed = (config.get("security") or {}).get("http_hook_allowed_urls")
@@ -501,7 +579,7 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
         logger.warning("http hook %s 被 URL allowlist 拦截: %s", hook.name, block)
         return None
 
-    # SSRF 地址段预检
+    # 第二道：SSRF 地址段预检
     err = validate_url_for_ssrf(url)
     if err:
         logger.warning("http hook %s SSRF 防护拦截: %s", hook.name, err)
@@ -514,12 +592,12 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
         timeout=(
             min(hook.script.timeout, float(timeout_cap))
             if timeout_cap is not None else hook.script.timeout
-        ),  # R30g-M8：SessionEnd 等场景钳制
-        allow_redirects=False,  # R16 #4: 重定向可绕过预检
+        ),  # R30g-M8 批次：会话结束等场景的超时钳制
+        allow_redirects=False,  # R16 #4：跟着重定向走能绕过预检，所以直接禁掉
     )
-    # R30d-H1：响应体大小上限（防恶意/异常 server 用超大 body 打爆内存；
-    # requests 已下载完成，这里至少阻止超大 JSON 的解析放大）。
-    # getattr 容错：非 requests 传输/测试替身无 content 属性时按小 body 处理。
+    # R30d-H1 批次：响应体大小上限（防恶意/异常服务器用超大 body 打爆内存；
+    # requests 拿到手时已经下载完了，这里至少挡住超大 JSON 的解析放大效应）。
+    # getattr 容错：非 requests 传输/测试替身没有 content 属性时按小 body 处理。
     _body = getattr(resp, "content", None) or b""
     if len(_body) > _MAX_HTTP_HOOK_BODY_BYTES:
         logger.warning(
@@ -539,14 +617,19 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
 
 
 # ============================================================================
-# mcp_tool 类型
+# mcp_tool 类型：调 MCP 外部工具
 # ============================================================================
 
 
 def run_mcp_tool_hook(hook, payload: dict) -> Optional[dict]:
-    """调 MCP 工具 mcp__{server}__{tool}。
+    """调用 MCP 工具 mcp__{server}__{tool}，把工具返回当判决。
 
-    payload 整体作为 arguments 传入。失败 → None（fail-open）。
+    参数：
+    - hook：要执行的 mcp_tool 类型 hook
+    - payload：事件数据（整体作为工具的 arguments 传进去）
+
+    返回：工具返回的 dict（不是 dict 就包成 {"result": ...}），或 None
+    （没配 server/tool 名 / 调用失败，fail-open）。
     """
     from agent.mcp_client import get_mcp_manager
     if not hook.script.mcp_server or not hook.script.mcp_tool:
@@ -563,26 +646,34 @@ def run_mcp_tool_hook(hook, payload: dict) -> Optional[dict]:
 
 
 # ============================================================================
-# prompt 类型（单轮 aux_llm）
+# prompt 类型：让辅助小模型单轮评估
 # ============================================================================
 
 
-# R30d-H1：http hook 响应体上限（1MB——hook 协议只需小 JSON 决策）
+# R30d-H1 批次：http hook 响应体上限（1MB——hook 协议只需要很小的 JSON 决策）
 _MAX_HTTP_HOOK_BODY_BYTES = 1_000_000
 
 
 class _SafeFormatDict(dict):
-    """format_map 的安全 dict：缺 key 时保留 {key} 原样（不抛 KeyError）。"""
+    """给 format_map 用的"宽容" dict：模板里引用了 payload 没有的字段时，
+    保留 {key} 原样（不抛 KeyError），渲染继续。"""
 
     def __missing__(self, key):
         return "{" + key + "}"
 
 
 def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
-    """单轮 LLM 评估（走注入的 aux_llm_router）。
+    """让辅助小模型（aux_llm_router）单轮评估这个事件，返回 JSON 判决。
 
-    hook.script.prompt 是模板字符串，会 .format(**payload)。
-    router 未注入 → None（fail-open，不打断主流程）。
+    背景：有些 hook 的判决逻辑写不成死规则，让小模型看一眼更灵活。
+    hook 配置里的 prompt 是模板字符串，会用 payload 的字段填空。
+
+    参数：
+    - hook：要执行的 prompt 类型 hook
+    - payload：事件数据（填模板 + 拼进最终提示词）
+
+    返回：小模型回答里解析出的 JSON dict，或 None（router 没注入 /
+    调用失败 / 解析不出 JSON——一律 fail-open，不打断主流程）。
     """
     router = _get_aux_router()
     if router is None:
@@ -593,8 +684,9 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         )
         return None
 
-    # R30d-H2：真·安全 format——format_map + _SafeFormatDict，payload 缺字段
-    # 保留 {field} 原样（此前裸 .format(**payload) 缺 key 直接 KeyError 抛穿）
+    # 历史踩坑（R30d-H2）：必须用 format_map + _SafeFormatDict 这种"安全填充"——
+    # payload 缺字段时保留 {field} 原样继续渲染（此前裸 .format(**payload)
+    # 缺 key 直接 KeyError 抛穿，整个 hook 挂掉）
     prompt_text = (
         (hook.script.prompt or "").format_map(_SafeFormatDict(payload))
         if hook.script.prompt else ""
@@ -616,10 +708,10 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
     if not resp:
         return None
 
-    # 响应可能是字符串或 OpenAI 风格 dict
+    # 响应格式不保证统一：可能是纯字符串，也可能是 OpenAI 风格的 dict
     text = resp if isinstance(resp, str) else ""
     if isinstance(resp, dict):
-        # OpenAI 风格：{choices: [{message: {content: "..."}}]}
+        # OpenAI 风格结构：{choices: [{message: {content: "..."}}]}，取正文
         try:
             text = resp["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -639,29 +731,38 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
 
 
 # ============================================================================
-# agent 类型（多轮子代理，复用 delegate）
+# agent 类型：让子代理多轮评估（复用 delegate 机制）
 # ============================================================================
 
 
 def run_agent_hook(hook, payload: dict) -> Optional[dict]:
-    """多轮子代理判断（复用 delegate_tool._run_child）。
+    """派一个子代理去多轮评估这个事件，解析它回答里的 JSON 当判决。
 
-    hook.script.prompt 是 goal 模板（.format(**payload)）。
-    hook.script.agent_name 透传给 _run_child（自定义子代理名，可选）。
-    返回 dict（解析子代理输出里的 JSON），解析失败返回 {"decision": "review", ...}。
+    背景：单轮小模型不够用的复杂判断，交给能多轮思考（还能查资料）的
+    子代理——直接复用 delegate_tool 的 _run_child，不另起炉灶。
 
-    约束：hook_exec 是模块级函数，无父 agent 上下文，因此 _run_child 不传
-    config/agent_ref。后果：
-    - config：_run_child 内部从 load_config() 自取（fallback 路径），可正常运行。
-    - agent_ref：无中断传播、无 pendingToolUseSummary、无 checkpoint 追踪。
-    agent hook 设计用于一次性事件评估（不长任务运行），影响可控。
-    如需补全，可参考 _AUX_ROUTER_PROVIDER 模式增设 _AGENT_REF_PROVIDER 注入点。
+    参数：
+    - hook：要执行的 agent 类型 hook
+    - payload：事件数据（填进 prompt 模板 + 拼进最终目标）
+
+    hook 配置里的 prompt 是目标模板（.format(**payload) 填空）；
+    agent_name 透传给 _run_child（自定义子代理名，可不填）。
+    返回：子代理输出里解析出的 dict；解析不出 JSON 时返回
+    {"decision": "review", "raw": 前 500 字}（宁可让人复审，别当放行）。
+
+    已知约束（设计取舍）：hook_exec 是模块级函数、没有父 agent 上下文，
+    所以调 _run_child 时不传 config/agent_ref。后果：
+    - config：_run_child 内部会自己 load_config()（兜底路径），能正常跑。
+    - agent_ref：没有中断传播、没有 pendingToolUseSummary、没有 checkpoint
+      追踪。agent hook 的定位就是"一次性事件评估"（不是长任务），影响可控。
+      以后要补全的话，可以照 _AUX_ROUTER_PROVIDER 的模式加个
+      _AGENT_REF_PROVIDER 注入点。
     """
-    # 懒加载避免循环
+    # 懒加载，避免和 delegate_tool 循环 import
     from tools.delegate_tool import _run_child
 
     base_prompt = hook.script.prompt or "判断以下事件是否允许，返回 allow/deny"
-    # 安全 format
+    # 安全填充：payload 缺字段就保留模板原样，不让整个 hook 挂掉
     try:
         goal = base_prompt.format(**payload)
     except (KeyError, IndexError):
@@ -669,7 +770,7 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
 
     full_goal = goal + f"\n\npayload: {json.dumps(payload, ensure_ascii=False)}"
 
-    # _run_child(goal, context, role, **kwargs)：agent_name 走 kwargs 透传
+    # _run_child 的签名是 (goal, context, role, **kwargs)：agent_name 走 kwargs 透传
     kwargs = {}
     if hook.script.agent_name:
         kwargs["agent_name"] = hook.script.agent_name

@@ -1,14 +1,15 @@
 #!/usr/bin/env python
-"""python_syntax_check.py — PRE_TOOL_USE hook.
+"""python_syntax_check.py — 内置 hook：Python 语法门禁。
 
-write_file 写 .py 文件时先做语法检查，失败则拒绝（防 agent 写坏代码到磁盘）。
+干什么：write_file 要写 .py 文件时，先用 ast 把内容解析一遍，
+语法不过关就拒绝写入——别让 agent 把跑不起来的坏代码落到磁盘上。
 
-IPC 协议（PRE_TOOL_USE）：
-  stdin:  {"event": "pre_tool_use", "tool_name": "write_file",
+跟主程序怎么通信（PRE_TOOL_USE，工具执行前触发）：
+  stdin 收：{"event": "pre_tool_use", "tool_name": "write_file",
            "args": {"path": "...", "content": "..."}, ...}
-  stdout: {"action": "deny", "reason": "..."} 或 {"action": "allow"} 或空
+  stdout 回：语法错时 {"action": "deny", "reason": "..."}；不输出就放行
 
-启用方法（settings.json）：
+启用方法（settings.json 里加）：
 {
   "hooks": {
     "pre_tool_use": [{
@@ -25,6 +26,7 @@ import sys
 
 
 def main():
+    """入口：从 stdin 读工具调用信息，是写 .py 文件就先验语法。"""
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
@@ -32,13 +34,13 @@ def main():
 
     tool = payload.get("tool_name")
     if tool != "write_file":
-        return  # 只管 write_file
+        return  # 别的工具不归我管
 
     args = payload.get("args", {})
     path = args.get("path", "")
     content = args.get("content", "")
 
-    # 只检查 .py 文件
+    # 只管 .py 文件，其他文件不拦
     if not path.endswith(".py"):
         return
 

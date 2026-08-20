@@ -1,11 +1,18 @@
-"""自定义子代理 .md 定义扫描。
+"""自定义子代理（subagent——主代理派出去干活的分身）的 .md 定义文件扫描。
 
-扫描两个目录：
-  - ~/.OmniMate/agents/（用户级，跨项目）
-  - <cwd>/.omnimate/agents/（项目级，入库共享，覆盖用户级）
+用户用 Markdown 写一份"这个子代理叫什么、会什么、用什么模型、能用哪些工具"的
+说明文件（顶部 frontmatter 填配置，正文当 system prompt），本模块负责把它们
+找出来解析成 AgentDefinition 对象，供 delegate_tool 派活时使用。
 
-frontmatter 字段：name / description / model / tools / disallowedTools /
-permissionMode / isolation / maxTurns。
+从这几个目录扫（优先级从低到高，同名的后者覆盖前者）：
+  - agent/builtin_agents/（内置，随项目分发）
+  - ~/.OmniMate/agents/（用户级，自己所有项目共用）
+  - CLI --agents 注入（命令行动态传入）
+  - <cwd>/.omnimate/agents/（项目级，可入库跟仓库走，团队共享）
+
+frontmatter（文件顶部 --- 包住的配置段）支持的字段：
+name / description / model / tools / disallowedTools / permissionMode /
+isolation / maxTurns（以及后面代码里陆续加的扩展字段）。
 """
 
 import logging
@@ -20,59 +27,83 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentDefinition:
+    """一份子代理定义（从 .md 文件或 CLI 注入解析出来）。
+
+    背景：delegate_tool 派活时按这份定义起一个独立的 AIAgent 分身——
+    用什么模型、能看到哪些工具、什么权限，全由这里的字段决定。
+    """
+
     name: str
     description: str = ""
     model: Optional[str] = None
-    tools: List[str] = field(default_factory=list)          # toolset 名白名单
+    tools: List[str] = field(default_factory=list)          # 工具集白名单（只列这些 toolset 名）
     disallowed_tools: List[str] = field(default_factory=list)
-    permission_mode: Optional[str] = None                   # default | bypassPermissions
-    isolation: Optional[str] = None                          # "worktree" | None
+    permission_mode: Optional[str] = None                   # 权限模式：default | bypassPermissions
+    isolation: Optional[str] = None                          # 隔离方式："worktree"（独立 git 工作树）| None
     max_turns: Optional[int] = None
     system_prompt: str = ""
-    # Task C1 新增：memory/skills/mcpServers 三字段
-    memory: bool = False                                  # frontmatter "memory: true"
+    # Task C1 加的三个字段：memory / skills / mcpServers
+    memory: bool = False                                  # frontmatter 写 "memory: true" → 子代理有独立记忆目录
     skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
     mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
-    # R24 #38：内联 mcpServers dict（{name: {command/args/url/...}}）——spawn 时
-    # 临时连接结束断开（不进全局配置）；与 mcp_servers 互补：
-    # mcp_servers 过滤已配置全局 server；inline_mcp_servers 定义新临时 server
+    # R24 #38：内联 mcpServers——直接在定义里写 server 配置（{名字: {command/args/url/...}}）。
+    # 起子代理时临时连上、跑完就断（不写进全局配置）。与上面 mcp_servers 是互补关系：
+    # mcp_servers 是"挑哪些已配置的全局 server 给它用"；inline_mcp_servers 是"现场定义新 server"
     inline_mcp_servers: dict = field(default_factory=dict)
     effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
-    # === Task N 新增 4 字段（借鉴 Claude Code）===
-    omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理跳过项目 OMNIMATE.md（省 token）
-    initial_prompt: str = ""                # frontmatter "initialPrompt" → 首 user turn 前置（slash 风格预处理）
-    required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺失则 agent 不显示
-    critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼 system_prompt（cache 友好）
-    # R29 #2：定义来源（builtin/user/cli/project）——project 来源的内联 MCP
-    # 需过首连审批（clone 陌生 repo 带入的 agent .md 与 .mcp.json 同威胁模型）
+    # === Task N 加的 4 个字段（借鉴 Claude Code）===
+    omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理不加载项目 OMNIMATE.md（省 token）
+    initial_prompt: str = ""                # frontmatter "initialPrompt" → 垫在第一条 user 消息前面（类似 slash 命令的预处理）
+    required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺这些 server 时整个 agent 不出现
+    critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼进 system_prompt 末尾（放尾部是为了不动前缀、保 cache）
+    # R29 #2：定义从哪来（builtin/user/cli/project）。为什么要记来源：项目级（project）
+    # 的内联 MCP 要过首次连接审批——clone 陌生 repo 带进来的 agent .md 和 .mcp.json 是同一种威胁
     source: str = "user"
 
 
 def _user_agents_dir() -> Path:
+    """用户级子代理定义目录：~/.OmniMate/agents/。"""
     from constants import get_omnimate_home
     return get_omnimate_home() / "agents"
 
 
 def _project_agents_dir() -> Path:
-    # Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩。
-    # 改走 get_workspace_cwd()（线程局部 ContextVar）。
+    # 历史踩坑（Round 1 修复）：Path.cwd() 是整个进程共享的（就是 os.getcwd），
+    # 多个子代理并发跑时会互相踩目录。所以改用 get_workspace_cwd()——
+    # 它基于线程局部的 ContextVar，每个并发上下文拿到自己的工作目录。
     from agent.workspace_context import get_workspace_cwd
     return Path(get_workspace_cwd()) / ".omnimate" / "agents"
 
 
 def _builtin_agents_dir() -> Path:
-    """内置子代理定义目录（随项目分发）：agent/builtin_agents/。"""
+    """内置子代理定义所在目录（随项目代码一起分发）：agent/builtin_agents/。"""
     return Path(__file__).parent / "builtin_agents"
 
 
 def _parse_inline_mcp(raw) -> dict:
-    """R24 #38：解析 frontmatter 的内联 mcpServers（{name: cfg} dict）。"""
+    """解析 frontmatter 里的内联 mcpServers 配置（R24 #38 引入）。
+
+    参数：
+        raw：frontmatter 解析出来的原始值
+
+    返回：
+        {server名: 配置dict} 形式的 dict；raw 不是 dict 或子项不是 dict 时返回空 dict。
+    """
     if isinstance(raw, dict):
         return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
     return {}
 
 
 def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
+    """把一个 agent .md 文件解析成 AgentDefinition。
+
+    参数：
+        skill_md：.md 文件路径
+
+    返回：
+        解析好的 AgentDefinition；文件没有 name、或解析过程出任何错，
+        都返回 None（打个 warning，不让一个坏文件连累整轮扫描）。
+    """
     try:
         content = skill_md.read_text(encoding="utf-8")
         fm, body = parse_frontmatter(content)
@@ -93,7 +124,7 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             mcp_servers=fm.get("mcpServers") or [],
             inline_mcp_servers=_parse_inline_mcp(fm.get("mcpServersInline") or fm.get("inlineMcpServers")),
             effort=fm.get("effort"),
-            # === Task N: 4 新字段 frontmatter camelCase → snake_case ===
+            # === Task N：4 个新字段，frontmatter 里是 camelCase，这里转成 python 的 snake_case ===
             omit_claude_md=bool(fm.get("omitClaudeMd", False)),
             initial_prompt=str(fm.get("initialPrompt") or ""),
             required_mcp_servers=fm.get("requiredMcpServers") or [],
@@ -105,13 +136,16 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
 
 
 def scan_agent_defs() -> Dict[str, AgentDefinition]:
-    """扫描内置 + 用户 + CLI 注入 + 项目四个来源，后者覆盖前者。
+    """把四个来源的子代理定义全扫一遍，合并成一份总表。
 
-    优先级（低 → 高）：
-      1. 内置（agent/builtin_agents/）
-      2. 用户级（~/.OmniMate/agents/）
-      3. CLI 注入（`--agents '{json}'`，对齐 Claude Code 的 --agents flag）
-      4. 项目级（<cwd>/.omnimate/agents/）
+    同名冲突时后扫的覆盖先扫的。优先级（低 → 高）：
+      1. 内置（agent/builtin_agents/，随代码分发）
+      2. 用户级（~/.OmniMate/agents/，跨项目个人配置）
+      3. CLI 注入（启动命令 --agents '{json}'，对齐 Claude Code 的 --agents 参数）
+      4. 项目级（<cwd>/.omnimate/agents/，跟仓库走，团队共享）
+
+    返回：
+        {子代理名: AgentDefinition} 字典。
     """
     defs: Dict[str, AgentDefinition] = {}
     for d, _src in [(_builtin_agents_dir(), "builtin"), (_user_agents_dir(), "user")]:
@@ -121,11 +155,11 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
             ad = _parse_one(md)
             if ad and ad.name:
                 ad.source = _src
-                defs[ad.name] = ad  # 后扫的覆盖先扫的
-    # 阶段 6 NEW: CLI 注入的子代理（优先级介于 user 和 project 之间）
+                defs[ad.name] = ad  # 同名时后扫到的赢
+    # 阶段 6 新增：CLI 注入的子代理（优先级排在 user 和 project 之间）
     for name, ad in _cli_injected.items():
         defs[name] = ad
-    # 项目级最高优先级
+    # 项目级优先级最高，最后扫、最终生效
     proj_dir = _project_agents_dir()
     if proj_dir.exists():
         for md in sorted(proj_dir.glob("*.md")):
@@ -137,7 +171,14 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
 
 
 def project_inline_mcp_servers() -> Dict[str, dict]:
-    """R29 #2：项目级 agent .md 定义的内联 MCP server 合并（fail-open）。"""
+    """把所有项目级 agent .md 里声明的内联 MCP server 合并成一张表（R29 #2 引入）。
+
+    背景：这些 server 来自项目目录（可能是 clone 来的陌生仓库），要交给
+    首连审批统一把关，所以需要先把它们收拢出来。
+
+    返回：
+        {server名: 配置dict}；扫描出任何异常都返回空 dict（fail-open，不阻塞启动）。
+    """
     try:
         return {
             name: cfg
@@ -150,18 +191,23 @@ def project_inline_mcp_servers() -> Dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# 阶段 6 NEW: CLI 动态注入（--agents '{json}'）
+# 阶段 6 新增：CLI 动态注入——启动命令 --agents '{json}' 传进来的定义放这里
 # ---------------------------------------------------------------------------
 
 _cli_injected: Dict[str, AgentDefinition] = {}
 
 
 def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
-    """注入 CLI `--agents '{json}'` 传入的子代理定义。
+    """把 CLI `--agents '{json}'` 参数传进来的子代理定义登记进来。
 
-    参数 cli_agents：{name: {description, prompt, tools, model, ...}}，
-    对齐 Claude Code `claude --agents '{json}'` 格式。
-    返回成功解析的数量。同 session 内幂等：可多次调用替换。
+    背景：对齐 Claude Code `claude --agents '{json}'` 的玩法——不落盘、
+    启动时动态塞一批子代理定义。
+
+    参数：
+        cli_agents：{名字: {description, prompt, tools, model, ...}} 形式的 dict
+
+    返回：
+        int——成功解析的数量。重复调用是替换语义（先清空再装，幂等）。
     """
     _cli_injected.clear()
     count = 0
@@ -185,7 +231,7 @@ def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
                 skills=cfg.get("skills") or [],
                 mcp_servers=cfg.get("mcpServers") or [],
                 effort=cfg.get("effort"),
-                # === Task N: CLI 注入也接受 4 新字段 ===
+                # === Task N：CLI 注入同样接受那 4 个新字段 ===
                 omit_claude_md=bool(cfg.get("omitClaudeMd", False)),
                 initial_prompt=str(cfg.get("initialPrompt") or ""),
                 required_mcp_servers=cfg.get("requiredMcpServers") or [],
@@ -200,15 +246,22 @@ def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
 
 
 def get_cli_injected() -> Dict[str, AgentDefinition]:
-    """测试用：返回当前 CLI 注入的子代理。"""
+    """查看当前 CLI 注入了哪些子代理（主要给测试断言用）。"""
     return dict(_cli_injected)
 
 
 def clear_cli_injected() -> None:
-    """测试用：清空 CLI 注入。"""
+    """清空 CLI 注入的子代理（主要给测试用例之间隔离用）。"""
     _cli_injected.clear()
 
 
 def get_agent_def(name: str) -> Optional[AgentDefinition]:
-    """按名字取单个定义。"""
+    """按名字查一个子代理定义（内部会重新扫一遍四个来源）。
+
+    参数：
+        name：子代理名
+
+    返回：
+        对应的 AgentDefinition；不存在返回 None。
+    """
     return scan_agent_defs().get(name)

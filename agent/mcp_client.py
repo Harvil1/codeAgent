@@ -1,15 +1,17 @@
-"""MCP（Model Context Protocol）客户端：stdio + HTTP/SSE/WebSocket transport。
+"""MCP（Model Context Protocol，一个让 AI 接外部工具的通用插座标准）客户端。
 
-MCP 是外部服务统一接入协议。不需要为每个外部服务（Jira、Notion、数据库）
-重写工具代码，只需实现 MCP 标准接口（tools/list + tools/call）。
+这个文件负责"插上插座"：不管对面是 Jira、Notion 还是数据库，只要是
+MCP 标准服务，就用同一套协议对接（tools/list 列工具 + tools/call 调
+工具），不用为每个外部服务重写工具代码。上层是 tools/mcp_tool.py
+（把 MCP 工具注册进工具表），被 cli.py 聚合使用。
 
-Phase 5 升级：从单一 stdio → 四种 transport：
-- stdio：启动本地子进程（原有）
-- http：JSON POST + JSON 响应（httpx），支持 OAuth 刷新
-- sse：Server-Sent Events 流式响应（httpx SSE，专用 transport）
-- websocket：长连接双向 JSON-RPC（websockets 库）
+Phase 5 升级：从只支持 stdio 一种连法扩展到四种 transport（传输方式）：
+- stdio：在本机启动一个子进程，通过它的标准输入/输出对话（原有方式）
+- http：发 JSON POST 请求、收 JSON 响应（用 httpx 库），支持 OAuth 令牌自动刷新
+- sse：Server-Sent Events（服务器单向流式推送），httpx 的 SSE 实现，独立 transport
+- websocket：长连接双向 JSON-RPC（用 websockets 库）
 
-配置文件 ~/.OmniMate/.mcp.json：
+配置文件 ~/.OmniMate/.mcp.json 长这样：
     {
       "mcpServers": {
         "filesystem": {
@@ -41,12 +43,12 @@ Phase 5 升级：从单一 stdio → 四种 transport：
       }
     }
 
-工具暴露：mcp__<server>__<tool> 前缀。
+工具暴露给 LLM 时叫 mcp__<server>__<tool>（双下划线隔开服务器名和工具名）。
 
-Feature flags：
-    mcp_http_transport: 开启 http/sse transport（默认 OFF）
-    mcp_websocket_transport: 开启 websocket transport（默认 OFF）
-    不开时对应 transport 配置自动跳过（check_fn 隐藏）。
+Feature flags（功能开关，settings.json 里配）：
+    mcp_http_transport: 打开 http/sse transport（默认关）
+    mcp_websocket_transport: 打开 websocket transport（默认关）
+    不打开时，对应 transport 的配置会被自动跳过（工具通过 check_fn 机制隐藏）。
 """
 
 import asyncio
@@ -64,22 +66,24 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Transport 抽象基类
+# Transport（传输方式）抽象基类
 # ---------------------------------------------------------------------------
 
 class MCPTransport(ABC):
-    """MCP 传输层抽象（08）。
+    """所有传输方式的共同抽象（迭代 08 引入）。
 
-    所有 transport 必须实现：
-      - connect(): 建立连接 + MCP initialize 握手
-      - send_request(method, params) -> Optional[dict]
-      - send_notification(method, params) -> None
-      - close()
-      - is_connected 属性
+    背景：stdio/HTTP/SSE/WebSocket 四种连法底层完全不同，但对上层
+    （MCPClient）要长得一样，所以定一个统一接口。每种 transport 必须实现：
+      - connect(): 建立连接 + 完成 MCP initialize 握手（先互相自报家门）
+      - send_request(method, params) -> Optional[dict]：发一个请求，等一个响应
+      - send_notification(method, params) -> None：发一个不等回复的通知
+      - close(): 断开
+      - is_connected 属性：现在连着吗
 
-    可选（Task 9 加）：
-      - set_notification_handler(handler)：注册 server → client notification 处理器
-        默认 no-op（向后兼容），子类按需 override（StdioTransport 真起 reader 线程）
+    可选实现（Task 9 加）：
+      - set_notification_handler(handler)：注册"服务器 → 客户端"通知的
+        处理器。默认什么都不做（老子类不用改），子类按需重载
+        （StdioTransport 重载了，在 reader 线程里真分发通知）
     """
 
     @abstractmethod
@@ -102,28 +106,36 @@ class MCPTransport(ABC):
         self,
         handler,  # Callable[[str, dict], None]
     ) -> None:
-        """注册 server → client notification 处理器。
+        """注册"服务器主动推送给客户端"的通知处理器。
 
-        handler(notification_method, params) 在收到 notifications/* 时调用。
-        默认实现：no-op（不强制子类 override，向后兼容 HTTPTransport 等）。
+        handler(notification_method, params) 会在收到 notifications/* 时被调用。
+        默认实现只是存起来不干活（不强制子类重载，老代码如 HTTPTransport
+        不用改就能继续用）。
 
-        StdioTransport override：reader 线程读 stdout 时真 dispatch notification。
+        StdioTransport 重载了本方法：reader 线程读 stdout 时会真正分发通知。
+
+        参数：
+            handler：回调函数，签名 (notification_method: str, params: dict) -> None
+
+        返回：无。
         """
-        # 默认 no-op（不强制子类实现，向后兼容）
+        # 默认不强制子类实现，向后兼容
         self._notification_handler = handler
 
     @property
     def notification_handler(self):
-        """返回当前注册的 notification handler（None 表示未注册）。"""
+        """查当前注册的通知处理器；返回 None 表示没注册过。"""
         return getattr(self, "_notification_handler", None)
 
-    # CCAR12 Task 5：MCP Resources 协议（默认实现，子类无需 override）
-    # send_request 在所有具体 transport 里已通用，基类直接复用；
-    # 服务器不支持 resources（JSON-RPC error）或任何异常 → None（fail-open）。
+    # CCAR12 Task 5：MCP Resources 协议（服务器除工具外还能提供"资源"——
+    # 可读的文件/数据）。这里给默认实现，子类不用重载：
+    # send_request 在所有具体 transport 里都是通用的，基类直接复用；
+    # 服务器不支持 resources（返回 JSON-RPC error）或出任何异常 →
+    # 返回 None 不抛（fail-open，坏了不影响主流程）。
     def list_resources(self) -> Optional[list]:
-        """MCP resources/list。服务器不支持/失败返回 None（fail-open）。
+        """问服务器要资源清单（MCP resources/list）。失败或对方不支持就返回 None。
 
-        返回 [{uri, name, mimeType?, description?}, ...]。
+        返回：[{uri, name, mimeType?, description?}, ...]，失败为 None。
         """
         try:
             resp = self.send_request("resources/list", {})
@@ -132,18 +144,25 @@ class MCPTransport(ABC):
             return None
 
     def read_resource(self, uri: str) -> Optional[dict]:
-        """MCP resources/read。失败返回 None（fail-open）。
+        """读一个具体资源的内容（MCP resources/read）。失败返回 None。
 
-        成功返回 {contents: [{uri, text?|blob?, mimeType?}, ...]}。
+        参数：
+            uri：资源的 URI 地址
+
+        返回：成功是 {contents: [{uri, text?|blob?, mimeType?}, ...]}，失败 None。
         """
         try:
             return self.send_request("resources/read", {"uri": uri})
         except Exception:
             return None
 
-    # 共享：MCP 握手流程（子类 connect() 末尾调用）
+    # 各子类共用：MCP 标准握手流程（子类 connect() 末尾调用）
     def _do_initialize_handshake(self) -> None:
-        """标准 MCP initialize 握手。"""
+        """（内部）做标准 MCP initialize 握手——先自报家门（协议版本/客户端
+        名），服务器应答后再发一个 initialized 通知确认握手完成。
+
+        参数：无。返回：无；服务器没回应就抛 RuntimeError。
+        """
         resp = self.send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -155,16 +174,17 @@ class MCPTransport(ABC):
 
 
 # ---------------------------------------------------------------------------
-# stdio transport（从原 MCPClient 提取）
+# stdio transport（本机子进程方式，从原 MCPClient 里拆出来的）
 # ---------------------------------------------------------------------------
 
 class StdioTransport(MCPTransport):
-    """stdio 传输：启动本地子进程通过 stdin/stdout 交换 JSON-RPC。
+    """stdio 传输：在本机启动一个子进程当 MCP 服务器，跟它的标准输入/输出
+    管道里互发 JSON-RPC 消息（好比两个人各拿一根管子喊话）。
 
-    Task 9 升级：后台 daemon thread 读 stdout，
-    response 走 queue（send_request 从 queue 拿），
-    notification dispatch 到 set_notification_handler 注册的 handler。
-    对现有调用方透明（仍 sync 阻塞等响应）。
+    Task 9 升级：起一个后台守护线程专门读子进程的 stdout——读到的
+    "响应"放进队列（send_request 从队列里取），读到的"通知"转交给
+    set_notification_handler 注册的处理器。对调用方完全透明（看起来还是
+    同步阻塞等响应的老用法）。
     """
 
     def __init__(
@@ -173,6 +193,15 @@ class StdioTransport(MCPTransport):
         args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
     ):
+        """初始化 stdio transport（只存参数，真正启动在 connect()）。
+
+        参数：
+            command：要启动的命令，如 "npx"
+            args：命令参数列表，如 ["-y", "@modelcontextprotocol/server-filesystem"]
+            env：额外环境变量（叠加在当前进程环境上），可不填
+
+        返回：无（构造函数）。
+        """
         self.command = command
         self.args = args or []
         self.env = env or {}
@@ -184,10 +213,17 @@ class StdioTransport(MCPTransport):
         self._response_queue: "queue.Queue" = queue.Queue()
         self._reader_thread: Optional[threading.Thread] = None
         self._notification_handler = None  # 默认 None（向后兼容）
-        # send_request 等响应的超时（秒）；可被子类/测试覆盖
+        # send_request 等响应的超时秒数；子类/测试可覆盖
         self._response_timeout: float = 60.0
 
     def connect(self) -> None:
+        """启动子进程并完成 MCP 握手。
+
+        环境变量 = 当前进程的 + 配置里额外给的（让子进程能拿到 API key 之类）。
+        握手失败就关掉子进程再抛错，不留半死进程。
+
+        参数：无。返回：无；失败抛 RuntimeError。
+        """
         full_env = {**os.environ, **self.env}
         self.process = subprocess.Popen(
             self._resolve_command_argv(),
@@ -197,17 +233,18 @@ class StdioTransport(MCPTransport):
             env=full_env,
             text=True,
             encoding="utf-8",
-            # server 输出坏字节（GBK/二进制日志混入）不能炸 reader 线程：
-            # replace 成 U+FFFD 后按"非 JSON 行"跳过（fail-open），否则一条
-            # UnicodeDecodeError 就让连接永久失效（2026-08-17 真实 server 测试逮到）
+            # 历史踩坑（2026-08-17 真实 server 对话测试逮到）：server 输出
+            # 里可能混坏字节（GBK 日志/二进制），不能让 reader 线程炸——
+            # replace 成 U+FFFD 替换符后当"非 JSON 行"跳过（fail-open），
+            # 否则一条 UnicodeDecodeError 就让整条连接永久失效
             errors="replace",
             bufsize=1,  # 行缓冲
         )
         try:
-            # 握手期间 send_request 会懒启动 reader 线程
+            # 握手过程中 send_request 会顺手把 reader 线程懒启动起来
             self._do_initialize_handshake()
         except Exception:
-            # 握手失败 → 关闭进程
+            # 握手失败 → 收拾掉子进程再抛
             self._connected = False
             try:
                 self.process.stdin.close()
@@ -220,10 +257,11 @@ class StdioTransport(MCPTransport):
         self._connected = True
 
     def _ensure_reader_started(self) -> None:
-        """懒启动 reader 线程（首次 send_request 时起）。
+        """（内部）懒启动 reader 线程（第一次 send_request 时才起，之后复用）。
 
-        为什么不在 connect() 末尾起：握手期间就需要读响应，
-        所以 send_request 里懒启动更简单（一个入口覆盖所有读需求）。
+        为什么不在 connect() 末尾起：握手本身就要读响应，而握手在
+        connect() 里、置成功标记之前——所以在 send_request 这个唯一
+        的读入口里懒启动，一个入口管住所有读需求，最省事。
         """
         if self._reader_thread is not None and self._reader_thread.is_alive():
             return
@@ -235,18 +273,20 @@ class StdioTransport(MCPTransport):
         self._reader_thread.start()
 
     def _reader_loop(self) -> None:
-        """daemon thread：持续读 stdout。
+        """后台守护线程的主体：不停地读子进程 stdout，一直读到流关闭。
 
-        - response（带 id）→ _response_queue
-        - notification（有 method 无 id）→ notification_handler
-        - 非 JSON 行 → 跳过（server debug 输出）
-        - handler 抛异常 → log 不影响后续读
-        - readline 返回空（EOF）→ 退出循环
+        读到的每一行按类型分流：
+        - 响应（带 id）→ 丢进 _response_queue 等人取
+        - 通知（有 method 没 id）→ 交给 notification_handler
+        - 不是 JSON 的行 → 跳过（多半是 server 自己打的调试日志）
+        - handler 抛异常 → 记日志，不影响继续读
+        - readline 返回空（EOF，管道关闭）→ 退出循环
 
-        ⚠️ 循环条件不能带 self._connected：握手期间（懒启动本线程时）
-        _connected 仍是 False（connect() 要握手成功才置 True），带它会让
-        reader 立即退出 → 响应永远读不到 → 握手 60s 超时（stdio MCP 全断，
-        2026-08-17 真实 server 对话测试逮到）。退出靠 EOF / 进程结束 / close()。
+        ⚠️ 历史踩坑（2026-08-17 真实 server 对话测试逮到，stdio MCP 全断）：
+        循环条件绝不能带 self._connected——握手期间（本线程被懒启动时）
+        _connected 还是 False（connect() 要等握手成功才置 True），带上它
+        reader 会立刻退出 → 响应永远读不到 → 握手 60s 超时。线程的退出
+        只靠 EOF / 进程结束 / close()。
         """
         while self.process and self.process.poll() is None:
             try:
@@ -255,35 +295,39 @@ class StdioTransport(MCPTransport):
                 logger.warning("mcp reader readline 异常: %s", e)
                 break
             if not line:
-                break  # EOF
+                break  # 读到 EOF（管道关了），收工
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 logger.debug("MCP 非 JSON 行: %s", line.strip())
                 continue
-            # 区分 response（带 id）vs notification（有 method 无 id）
+            # 按 JSON-RPC 惯例分流：带 id 的是响应，只带 method 的是通知
             if "id" in data:
-                # response（带 id）→ queue
+                # 响应（带 id）→ 进队列
                 self._response_queue.put(data)
             elif "method" in data:
-                # notification → handler（fail-open：handler 异常不影响后续）
+                # 通知 → 交 handler（fail-open：handler 抛异常不影响后续读）
                 handler = self._notification_handler
                 if handler is not None:
                     try:
                         handler(data["method"], data.get("params", {}))
                     except Exception as e:
                         logger.warning("notification handler 异常: %s", e)
-            # 其他类型（无 id 无 method）忽略
+            # 其他类型（既没 id 又没 method）直接忽略
 
     def _resolve_command_argv(self) -> List[str]:
-        """解析 MCP 子进程的 argv（跨平台）。
+        """（内部）算出真正用来启动子进程的命令行参数（处理跨平台差异）。
 
-        Windows 上常见坑：配置写 `npx`，但 CreateProcess 找不到裸命令
-        （实际可执行文件是 npx.cmd，且 CreateProcess 不解析 .cmd/.bat）。
-        修复：
-          - 用 shutil.which 解析命令（按 PATHEXT 补 .exe/.cmd/.bat）
-          - 解析到 .cmd/.bat 时用 cmd.exe 包装（CreateProcess 不能直接执行脚本）
+        Windows 上有个经典坑（历史踩坑）：配置里写 `npx`，但 Windows 创建
+        进程时找不到这个裸名字——实际可执行文件叫 npx.cmd，而且
+        CreateProcess 不认 .cmd/.bat 脚本。修复办法：
+          - 用 shutil.which 把命令解析成全路径（按 PATHEXT 自动补
+            .exe/.cmd/.bat 后缀）
+          - 解析出来是 .cmd/.bat 时，外面套一层 cmd.exe 来跑
+            （CreateProcess 不能直接执行脚本）
         非 Windows 直接返回 [command, *args]。
+
+        返回：参数字符串列表，可直接交给 subprocess.Popen。
         """
         if os.name != "nt":
             return [self.command, *self.args]
@@ -291,16 +335,24 @@ class StdioTransport(MCPTransport):
         import shutil
         resolved = shutil.which(self.command) or self.command
         if resolved.lower().endswith((".cmd", ".bat")):
-            # cmd /c 对含空格路径要加引号
+            # cmd /c 的参数里路径带空格时要加引号，否则会被拆开
             quoted = f'"{resolved}"' if " " in resolved else resolved
             return ["cmd", "/c", quoted, *self.args]
         return [resolved, *self.args]
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
+        """发一个 JSON-RPC 请求并阻塞等响应（老接口，调用方无需感知 reader 线程）。
+
+        参数：
+            method：MCP 方法名，如 "tools/list"
+            params：请求参数 dict
+
+        返回：响应里的 result 字段。超时或 server 报错抛 RuntimeError。
+        """
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("MCP stdio server 未运行")
 
-        # Task 9：懒启动 reader 线程（首次调用时起，之后复用）
+        # Task 9：懒启动 reader 线程（第一次调用时起，之后复用）
         self._ensure_reader_started()
 
         with self._lock:
@@ -318,9 +370,9 @@ class StdioTransport(MCPTransport):
             except (BrokenPipeError, OSError) as e:
                 raise RuntimeError(f"MCP stdio 写入失败: {e}")
 
-        # 从 queue 拿响应（reader 线程已把 response 投递过来）
-        # 注意：必须在 _lock 外等——queue 是 thread-safe 的，但持锁阻塞
-        # 会让 reader 无法拿到写 stdin 需要的 _lock（死锁）。
+        # 从队列里等响应（reader 线程已经把响应投进来了）
+        # 注意：必须在 _lock 锁外等——队列本身线程安全，但如果持着锁
+        # 阻塞等，reader 那边也拿不到写 stdin 要的同一把锁，就死锁了
         while True:
             try:
                 data = self._response_queue.get(
@@ -330,7 +382,7 @@ class StdioTransport(MCPTransport):
                 raise RuntimeError(
                     f"MCP stdio request 超时（{self._response_timeout}s）"
                 )
-            # 匹配 id
+            # 按 id 配对：队列里这条是不是我们这次请求的响应
             if data.get("id") == req_id:
                 if "error" in data:
                     err = data["error"]
@@ -338,10 +390,18 @@ class StdioTransport(MCPTransport):
                         f"MCP 错误 {err.get('code')}: {err.get('message')}"
                     )
                 return data.get("result")
-            # 不是我们要的 response（可能是迟到的旧 response）→ 丢
+            # id 对不上（多半是迟到的旧请求响应）→ 丢弃继续等
             logger.debug("MCP 丢弃过期 response: id=%s", data.get("id"))
 
     def send_notification(self, method: str, params: dict) -> None:
+        """发一个不等回复的通知（fire-and-forget，写失败也只静默吞掉）。
+
+        参数：
+            method：通知方法名
+            params：通知参数 dict
+
+        返回：无。
+        """
         if self.process is None:
             return
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
@@ -352,9 +412,13 @@ class StdioTransport(MCPTransport):
             pass
 
     def close(self) -> None:
+        """关闭连接：先断 stdin，再客气地让子进程退出（3 秒不退就 kill）。
+
+        参数：无。返回：无。
+        """
         self._connected = False
-        # reader 线程是 daemon，会随 _connected=False + process 退出自然结束
-        # （readline 会因为 stdout 关闭返回空）。
+        # reader 线程是 daemon 线程，随子进程退出自然结束
+        # （stdout 一关，readline 返回空，循环就退了）。
         if self.process is None:
             return
         try:
@@ -373,22 +437,24 @@ class StdioTransport(MCPTransport):
 
     @property
     def is_connected(self) -> bool:
+        """还连着吗：握手成功过 且 子进程还活着。"""
         return self._connected and self.process is not None
 
 
 # ---------------------------------------------------------------------------
-# HTTP transport（Phase 5：requests → httpx）
+# HTTP transport（Phase 5：从 requests 库换成了 httpx 库）
 # ---------------------------------------------------------------------------
 
 class HTTPTransport(MCPTransport):
-    """HTTP 传输（Phase 5 升级：基于 httpx）。
+    """HTTP 传输（Phase 5 升级：基于 httpx 库）。
 
-    支持：
-    - JSON POST + JSON 响应（普通）
-    - JSON POST + SSE 响应（streamable-http）
-    - OAuth：access_token 自动刷新（401 重试一次）
+    支持三种玩法：
+    - 普通：发 JSON POST，收一个 JSON 响应
+    - streamable-http：发 JSON POST，收 SSE 流式响应
+    - OAuth：访问令牌自动刷新（收到 401 会换新令牌重试一次）
 
-    HTTP 预检避免 URL 配错时卡 60s。
+    连接前先做 HTTP 预检（快速探测）：URL 配错时能秒级报错，
+    而不是傻等 60 秒超时。
     """
 
     PREFLIGHT_TIMEOUT_S = 3
@@ -399,6 +465,16 @@ class HTTPTransport(MCPTransport):
         headers: Optional[Dict[str, str]] = None,
         oauth_config: Optional[dict] = None,
     ):
+        """初始化 HTTP transport（只存配置，真正连接在 connect()）。
+
+        参数：
+            url：MCP 服务器地址，如 "https://api.github-mcp.com/v1"
+            headers：额外自定义请求头，可不填
+            oauth_config：OAuth 配置 dict（含 token_url/client_id/
+                client_secret/refresh_token），可不填
+
+        返回：无（构造函数）。
+        """
         self.url = url
         self._headers = headers or {}
         self._oauth = oauth_config
@@ -410,7 +486,11 @@ class HTTPTransport(MCPTransport):
         self._lock = threading.Lock()
 
     def connect(self) -> None:
-        # 1. 创建 httpx.Client
+        """建立连接：建 HTTP 客户端 → （配了的话）拿 OAuth 令牌 → 预检 → MCP 握手。
+
+        参数：无。返回：无；任何一步失败都清理现场后抛 RuntimeError。
+        """
+        # 1. 建 httpx 客户端（缺依赖就报清楚的错）
         try:
             import httpx  # noqa: F401
         except ImportError as e:
@@ -418,11 +498,11 @@ class HTTPTransport(MCPTransport):
         import httpx
         self._client = httpx.Client(timeout=60.0)
 
-        # 2. OAuth 初始化（如配置）
+        # 2. 配了 OAuth 就先拿访问令牌
         if self._oauth:
             self._refresh_access_token()
 
-        # 3. HTTP 预检（避免 URL 配错卡 60s）
+        # 3. HTTP 预检（3 秒内探一下端点像不像 MCP 服务器，URL 配错秒报）
         ok, reason = self._preflight()
         if not ok:
             self._client.close()
@@ -430,7 +510,7 @@ class HTTPTransport(MCPTransport):
             raise RuntimeError(f"MCP HTTP 预检失败 ({self.url}): {reason}")
         logger.info("MCP HTTP 预检通过: %s", reason)
 
-        # 4. MCP initialize 握手
+        # 4. MCP initialize 握手（失败则关客户端再抛）
         try:
             self._do_initialize_handshake()
         except Exception:
@@ -440,7 +520,16 @@ class HTTPTransport(MCPTransport):
         self._connected = True
 
     def _preflight(self) -> Tuple[bool, str]:
-        """探测端点是否是合法 MCP server。返回 (ok, reason)。"""
+        """（内部）预检：快速探测这个 URL 是不是一个像样的 MCP 端点。
+
+        思路：先发个轻量的 HEAD，看响应类型是不是 JSON/SSE；不行再发
+        GET 兜底——405（不允许 GET）也说明端点活着；401 多半是 OAuth
+        配错了；返回 HTML 网页则说明这不是 MCP 端点。
+
+        参数：无。
+
+        返回：(是否通过, 人能看懂的原因说明)。
+        """
         if self._client is None:
             return False, "client 未建立"
         probe_headers = {
@@ -451,7 +540,7 @@ class HTTPTransport(MCPTransport):
         if self._access_token:
             probe_headers["Authorization"] = f"Bearer {self._access_token}"
 
-        # 先 HEAD（轻量）
+        # 先试 HEAD（最轻量的探法）
         try:
             r = self._client.head(
                 self.url, headers=probe_headers,
@@ -463,7 +552,7 @@ class HTTPTransport(MCPTransport):
         except Exception:
             pass
 
-        # 再 GET
+        # HEAD 没结论再试 GET
         try:
             r = self._client.get(
                 self.url, headers=probe_headers,
@@ -483,10 +572,14 @@ class HTTPTransport(MCPTransport):
             return False, f"预检异常: {type(e).__name__}: {e}"
 
     def _refresh_access_token(self) -> None:
-        """用 refresh_token 换新 access_token（OAuth refresh 流程）。
+        """（内部）用 refresh_token 换一张新的 access_token（OAuth 刷新流程）。
 
-        参考 claude-code-main HTTPTransport：POST grant_type=refresh_token 到
-        token_url，拿 access_token + expires_in。过期前 60s 主动刷新。
+        背景：access_token 是短期门票，refresh_token 是长期身份证。
+        做法（参考 claude-code-main 的 HTTPTransport）：向 token_url 发
+        POST（grant_type=refresh_token），拿回新 access_token 和有效期
+        expires_in；记下过期时间，提前 60 秒主动刷新，不等它真过期。
+
+        参数：无。返回：无；没配 OAuth 直接返回，刷新失败抛 RuntimeError。
         """
         if not self._oauth:
             return
@@ -518,7 +611,7 @@ class HTTPTransport(MCPTransport):
             raise
 
     def _ensure_token(self) -> None:
-        """过期前 60s 主动刷新。"""
+        """（内部）每次请求前检查门票：离过期不到 60 秒就提前刷新。"""
         if not self._oauth:
             return
         import time
@@ -527,6 +620,14 @@ class HTTPTransport(MCPTransport):
         self._refresh_access_token()
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
+        """发一个 JSON-RPC 请求（POST）并等响应；响应是 SSE 流就按流解析。
+
+        参数：
+            method：MCP 方法名
+            params：请求参数 dict
+
+        返回：响应里的 result 字段。HTTP 非 200 或 server 报错抛 RuntimeError。
+        """
         if self._client is None:
             raise RuntimeError("MCP HTTP client 未建立")
         self._ensure_token()
@@ -547,7 +648,7 @@ class HTTPTransport(MCPTransport):
             r = self._client.post(
                 self.url, json=payload, headers=headers, timeout=60.0,
             )
-            # 401 → 刷新 token 重试一次
+            # 收到 401（门票过期被拒）→ 换张新 token 重试一次
             if r.status_code == 401 and self._oauth:
                 logger.info("MCP HTTP 401，刷新 token 后重试一次")
                 self._access_token = None
@@ -568,7 +669,17 @@ class HTTPTransport(MCPTransport):
             return r.json().get("result")
 
     def _parse_sse_response(self, text: str) -> Optional[dict]:
-        """从 SSE 流里提取最后一个 JSON-RPC result。"""
+        """（内部）从 SSE 流文本里抠出最后一个 JSON-RPC result。
+
+        背景：SSE（Server-Sent Events，服务器单向流式推送）每行是一条
+        "data: {...}" 事件，可能推多条，取最后那条有效结果；遇到 error
+        事件直接抛。
+
+        参数：
+            text：整个 SSE 响应的原文
+
+        返回：最后的 result dict；没有则 None。坏行跳过。
+        """
         result = None
         for line in text.split("\n"):
             line = line.strip()
@@ -587,6 +698,7 @@ class HTTPTransport(MCPTransport):
         return result
 
     def send_notification(self, method: str, params: dict) -> None:
+        """发一个不等回复的通知（POST 出去就不管了，失败静默吞掉）。"""
         if self._client is None:
             return
         headers = dict(self._headers)
@@ -603,6 +715,7 @@ class HTTPTransport(MCPTransport):
             pass
 
     def close(self) -> None:
+        """关闭连接：关掉 HTTP 客户端。"""
         self._connected = False
         if self._client:
             try:
@@ -613,23 +726,25 @@ class HTTPTransport(MCPTransport):
 
     @property
     def is_connected(self) -> bool:
+        """还连着吗（握手成功过）。"""
         return self._connected
 
 
 # ---------------------------------------------------------------------------
-# SSE transport（Phase 5 新增：专用 SSE 流式 transport）
+# SSE transport（Phase 5 新增：专用的 SSE 流式 transport）
 # ---------------------------------------------------------------------------
 
 class SSETransport(MCPTransport):
-    """SSE（Server-Sent Events）专用 transport（Phase 5）。
+    """SSE（Server-Sent Events，服务器单向流式推送）专用 transport（Phase 5）。
 
-    区别于 HTTPTransport 的 streamable-http（POST 后收 SSE 响应）：
-    SSETransport 建立长连接 GET 请求持续读 SSE 事件流，
-    请求通过独立 POST 发送。
+    和 HTTPTransport 里"POST 完收一个 SSE 响应"的 streamable-http 玩法不同：
+    这个类用 GET 建一条长连接、持续读 SSE 事件流，请求则从另一条
+    POST 通道发出去——两条道各走各的。
 
-    适用场景：server 需要保持长连接推送（如远程 MCP server 的 SSE 端点）。
+    适用场景：服务器需要保持长连接主动推送（比如远程 MCP server 的
+    SSE 端点）。
 
-    OAuth 流程复用 HTTPTransport 的实现（共用 token 管理）。
+    OAuth 刷新流程直接抄 HTTPTransport 的（令牌管理逻辑一样）。
     """
 
     PREFLIGHT_TIMEOUT_S = 3
@@ -641,6 +756,16 @@ class SSETransport(MCPTransport):
         oauth_config: Optional[dict] = None,
         post_url: Optional[str] = None,
     ):
+        """初始化 SSE transport（只存配置，连接在 connect()）。
+
+        参数：
+            url：SSE 事件流地址（GET 长连接用）
+            headers：额外自定义请求头，可不填
+            oauth_config：OAuth 配置 dict，可不填
+            post_url：发请求（POST）用的地址；不填默认和 url 相同
+
+        返回：无（构造函数）。
+        """
         self.url = url
         self._post_url = post_url or url  # POST 目标（默认同 URL）
         self._headers = headers or {}
@@ -653,6 +778,10 @@ class SSETransport(MCPTransport):
         self._lock = threading.Lock()
 
     def connect(self) -> None:
+        """建立连接：建 HTTP 客户端 → （配了的话）拿 OAuth 令牌 → 预检 → MCP 握手。
+
+        参数：无。返回：无；失败清理现场后抛 RuntimeError。
+        """
         try:
             import httpx  # noqa: F401
         except ImportError as e:
@@ -663,7 +792,7 @@ class SSETransport(MCPTransport):
         if self._oauth:
             self._refresh_access_token()
 
-        # 预检（复用 HTTP 风格）
+        # 预检（做法和 HTTPTransport 同款）
         ok, reason = self._preflight()
         if not ok:
             self._client.close()
@@ -680,7 +809,10 @@ class SSETransport(MCPTransport):
         self._connected = True
 
     def _preflight(self) -> Tuple[bool, str]:
-        """预检：端点需返回 event-stream 或 json content-type。"""
+        """（内部）预检：GET 一下端点，返回的类型得是 SSE 流或 JSON 才算过。
+
+        返回：(是否通过, 原因说明)。
+        """
         if self._client is None:
             return False, "client 未建立"
         probe_headers = {
@@ -707,7 +839,7 @@ class SSETransport(MCPTransport):
             return False, f"预检异常: {type(e).__name__}: {e}"
 
     def _refresh_access_token(self) -> None:
-        """OAuth refresh（与 HTTPTransport 一致）。"""
+        """（内部）用 refresh_token 换新 access_token（和 HTTPTransport 同一套流程）。"""
         if not self._oauth:
             return
         import time
@@ -746,6 +878,14 @@ class SSETransport(MCPTransport):
         self._refresh_access_token()
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
+        """发一个 JSON-RPC 请求（POST 到 post_url）并等响应；SSE 流或 JSON 都能解析。
+
+        参数：
+            method：MCP 方法名
+            params：请求参数 dict
+
+        返回：响应里的 result 字段；非 200 或 server 报错抛 RuntimeError。
+        """
         if self._client is None:
             raise RuntimeError("MCP SSE client 未建立")
         self._ensure_token()
@@ -764,7 +904,7 @@ class SSETransport(MCPTransport):
                 "method": method, "params": params,
             }
 
-            # SSE transport：POST 请求发到 post_url，响应可能是 SSE 流或 JSON
+            # SSE transport：请求 POST 到 post_url，回来的可能是 SSE 流也可能是普通 JSON
             r = self._client.post(
                 self._post_url, json=payload, headers=headers, timeout=60.0,
             )
@@ -788,7 +928,7 @@ class SSETransport(MCPTransport):
             return r.json().get("result")
 
     def _parse_sse_response(self, text: str) -> Optional[dict]:
-        """从 SSE 流里提取最后一个 JSON-RPC result。"""
+        """（内部）从 SSE 流文本里抠出最后一个 JSON-RPC result（同 HTTPTransport）。"""
         result = None
         for line in text.split("\n"):
             line = line.strip()
@@ -837,17 +977,17 @@ class SSETransport(MCPTransport):
 
 
 # ---------------------------------------------------------------------------
-# WebSocket transport（Phase 5 新增：websockets 库）
+# WebSocket transport（Phase 5 新增：用 websockets 库）
 # ---------------------------------------------------------------------------
 
 class WebSocketTransport(MCPTransport):
     """WebSocket transport（Phase 5）。
 
-    用 websockets 库建立长连接，JSON-RPC 消息双向交换。
-    websockets 库原生 async，这里用 asyncio.run 桥接到同步接口
-    （对齐 Plan 2A 桥接模式）。
+    用 websockets 库建立一条长连接，JSON-RPC 消息双向收发（像打电话，
+    两边都能随时开口）。websockets 库原生是 async 异步的，这里用
+    asyncio.run 桥接成同步接口（项目 Plan 2A 定下的统一桥接模式）。
 
-    适用场景：需要低延迟双向通信的 MCP server（如实时协作工具）。
+    适用场景：需要低延迟双向通信的 MCP server（比如实时协作工具）。
     """
 
     def __init__(
@@ -856,6 +996,15 @@ class WebSocketTransport(MCPTransport):
         headers: Optional[Dict[str, str]] = None,
         oauth_config: Optional[dict] = None,
     ):
+        """初始化 WebSocket transport（只存配置，连接在 connect()）。
+
+        参数：
+            url：WebSocket 地址（ws:// 或 wss:// 开头）
+            headers：额外自定义请求头，可不填
+            oauth_config：OAuth 配置 dict，可不填
+
+        返回：无（构造函数）。
+        """
         # websockets 库用 ws:// 或 wss:// 协议
         self.url = url
         self._headers = headers or {}
@@ -869,16 +1018,20 @@ class WebSocketTransport(MCPTransport):
         self._lock = threading.Lock()
 
     def connect(self) -> None:
+        """建立连接：自建一个 asyncio 事件循环 → 拿 OAuth 令牌 → 连 WebSocket → MCP 握手。
+
+        参数：无。返回：无；失败清理现场后抛。
+        """
         try:
             import websockets  # noqa: F401
         except ImportError as e:
             raise RuntimeError(f"缺少 WebSocket 依赖（websockets）: {e}")
 
-        # OAuth 初始化
+        # 配了 OAuth 先拿门票
         if self._oauth:
             self._refresh_access_token()
 
-        # 新建 event loop（独立于主线程的 asyncio 循环）
+        # 自建事件循环（不用主线程已有的 asyncio 循环，避免互相干扰）
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
@@ -893,9 +1046,9 @@ class WebSocketTransport(MCPTransport):
         self._connected = True
 
     async def _ws_connect(self) -> None:
-        """建立 WebSocket 连接。"""
+        """（内部）真正去连 WebSocket 服务器，把自定义头和令牌都带上。"""
         import websockets
-        # 构造请求头（websockets 库用 additional_headers）
+        # 拼请求头（websockets 库的参数名叫 additional_headers）
         extra_headers = []
         for k, v in self._headers.items():
             extra_headers.append((k, v))
@@ -907,7 +1060,7 @@ class WebSocketTransport(MCPTransport):
         )
 
     def _refresh_access_token(self) -> None:
-        """OAuth refresh（与 HTTPTransport 一致）。"""
+        """（内部）用 refresh_token 换新 access_token（和 HTTPTransport 同一套流程）。"""
         if not self._oauth:
             return
         import time
@@ -938,6 +1091,7 @@ class WebSocketTransport(MCPTransport):
             raise
 
     def _ensure_token(self) -> None:
+        """（内部）每次请求前检查门票：离过期不到 60 秒就提前刷新。"""
         if not self._oauth:
             return
         import time
@@ -946,6 +1100,14 @@ class WebSocketTransport(MCPTransport):
         self._refresh_access_token()
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
+        """发一个 JSON-RPC 请求（走 WebSocket）并等响应。
+
+        参数：
+            method：MCP 方法名
+            params：请求参数 dict
+
+        返回：响应里的 result 字段；server 报错抛 RuntimeError。
+        """
         if self._ws is None or self._loop is None:
             raise RuntimeError("MCP WebSocket 未建立")
         self._ensure_token()
@@ -960,7 +1122,14 @@ class WebSocketTransport(MCPTransport):
             return self._loop.run_until_complete(self._ws_send_and_recv(msg, req_id))
 
     async def _ws_send_and_recv(self, msg: dict, expected_id: int) -> Optional[dict]:
-        """发送请求并等待对应 id 的响应。"""
+        """（内部）把请求发出去，然后收消息直到等到 id 对得上的那条响应。
+
+        参数：
+            msg：完整 JSON-RPC 消息 dict
+            expected_id：本次请求的 id，用来配对响应
+
+        返回：响应里的 result 字段。
+        """
         await self._ws.send(json.dumps(msg))
         while True:
             raw = await self._ws.recv()
@@ -977,6 +1146,7 @@ class WebSocketTransport(MCPTransport):
                 return data.get("result")
 
     def send_notification(self, method: str, params: dict) -> None:
+        """发一个不等回复的通知（失败静默吞掉）。"""
         if self._ws is None or self._loop is None:
             return
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
@@ -986,6 +1156,7 @@ class WebSocketTransport(MCPTransport):
             pass
 
     async def _ws_close(self) -> None:
+        """（内部）关掉 WebSocket 连接（幂等，已关也不报错）。"""
         if self._ws is not None:
             try:
                 await self._ws.close()
@@ -994,6 +1165,7 @@ class WebSocketTransport(MCPTransport):
             self._ws = None
 
     def close(self) -> None:
+        """关闭连接：关 WebSocket + 关事件循环。"""
         self._connected = False
         if self._loop is not None:
             try:
@@ -1005,26 +1177,30 @@ class WebSocketTransport(MCPTransport):
 
     @property
     def is_connected(self) -> bool:
+        """还连着吗（握手成功过）。"""
         return self._connected
 
 
 # ---------------------------------------------------------------------------
-# MCP 客户端（transport wrapper）
+# MCP 客户端（transport 的统一外壳）
 # ---------------------------------------------------------------------------
 
 class MCPClient:
     """单个 MCP server 的客户端连接（Phase 5：支持 4 种 transport）。
 
-    transport 选择规则（按优先级）：
-    1. 显式 transport 字段（"stdio" / "http" / "sse" / "websocket"）
-    2. 有 url → 按 URL scheme 推断（ws/wss → websocket，否则 http）
+    背景：上层（tools/mcp_tool.py）不想关心底下是子进程还是 HTTP，
+    这个类挑好具体 transport 再包一层统一接口。
+
+    用哪种 transport 的判定顺序：
+    1. 配置里明写了 transport 字段（"stdio" / "http" / "sse" / "websocket"）
+    2. 有 url → 看网址开头（ws/wss → websocket，其余当 http）
     3. 有 command → stdio
 
     Feature flag 门控（Phase 5 集成）：
-    - websocket 需 mcp_websocket_transport 开启
-    - sse（显式）需 mcp_http_transport 开启
-    - http 向后兼容（不强制 flag，保留旧行为）
-    未开启时构造抛 ValueError（让上层 connect_all 跳过+log）。
+    - websocket 要开 mcp_websocket_transport
+    - 显式写 sse 要开 mcp_http_transport
+    - http 不设门槛（向后兼容，保住老配置的行为）
+    没开就构造抛 ValueError——故意抛给上层 connect_all 看，让它跳过并记日志。
     """
 
     def __init__(
@@ -1042,23 +1218,40 @@ class MCPClient:
         exclude: Optional[List[str]] = None,
         config: Optional[dict] = None,
     ):
+        """初始化：判定 transport 类型（含 feature flag 门控）并造好 transport 对象。
+
+        参数：
+            name：server 名字（会进工具全名 mcp__<name>__<tool>）
+            command：stdio 方式要启动的命令，可不填
+            args：stdio 命令的参数列表，可不填
+            env：stdio 子进程的额外环境变量，可不填
+            url：远程 server 的地址（http/sse/websocket 用），可不填
+            headers：额外请求头，可不填
+            oauth：OAuth 配置 dict，可不填
+            transport：显式指定 "stdio"/"http"/"sse"/"websocket"，可不填（自动推断）
+            include：只保留这些工具名（白名单），可不填
+            exclude：排除这些工具名（黑名单），可不填
+            config：应用配置 dict（查 feature flag 用），可不填
+
+        返回：无（构造函数）。flag 没开或类型推不出来抛 ValueError。
+        """
         self.name = name
         self.include = include
         self.exclude = exclude
         self._connected = False
 
-        # Feature flag 检查（Phase 5 集成）
+        # 先查功能开关（Phase 5 集成）
         from agent.feature_flags import is_feature_enabled
         cfg = config or {}
         http_enabled = is_feature_enabled(cfg, "mcp_http_transport")
         ws_enabled = is_feature_enabled(cfg, "mcp_websocket_transport")
 
-        # 推断 transport 类型
+        # 推断该用哪种 transport
         transport_type = self._resolve_transport_type(
             transport, url, command,
         )
 
-        # 按类型构造 + flag 门控
+        # 按类型造 transport + flag 门控
         if transport_type == "websocket":
             if not ws_enabled:
                 raise ValueError(
@@ -1069,7 +1262,7 @@ class MCPClient:
                 url=url, headers=headers, oauth_config=oauth,
             )
         elif transport_type == "sse":
-            # 显式 SSE 需要 flag（专用 transport）
+            # 显式写 sse 是专用 transport，要 flag 开着才让用
             if not http_enabled:
                 raise ValueError(
                     f"MCP server {name}: sse transport 需要 "
@@ -1079,7 +1272,7 @@ class MCPClient:
                 url=url, headers=headers, oauth_config=oauth,
             )
         elif transport_type == "http":
-            # http 向后兼容：不强制 flag（旧行为保护）
+            # http 不设 flag 门槛（保护老配置，行为不突变）
             self._transport = HTTPTransport(
                 url=url, headers=headers, oauth_config=oauth,
             )
@@ -1096,9 +1289,16 @@ class MCPClient:
         url: Optional[str],
         command: Optional[str],
     ) -> str:
-        """推断 transport 类型。
+        """（内部）推断该用哪种 transport。
 
-        优先级：显式 transport > URL scheme > command 存在性。
+        优先级：配置里明写 > 看网址开头 > 有 command 就 stdio。
+
+        参数：
+            transport：配置里显式写的类型（可 None）
+            url：远程地址（可 None）
+            command：本机命令（可 None）
+
+        返回："stdio"/"http"/"sse"/"websocket" 之一；推不出来抛 ValueError。
         """
         if transport:
             t = transport.lower().strip()
@@ -1106,49 +1306,68 @@ class MCPClient:
                 return t
             raise ValueError(f"未知 transport 类型: {transport}")
 
-        # 无显式 transport → 按 URL scheme 推断
+        # 没明写 transport → 按网址开头猜
         if url:
             lower = url.lower()
             if lower.startswith(("ws://", "wss://")):
                 return "websocket"
-            return "http"  # 默认 HTTP（含 streamable-http）
+            return "http"  # 默认按 HTTP 处理（含 streamable-http）
 
-        # 无 URL → command 必须存在
+        # 连 URL 都没有 → 必须给了 command，走 stdio
         if command:
             return "stdio"
 
         raise ValueError("必须配 transport / url / command 之一")
 
     def connect(self) -> None:
+        """连接服务器（底下 transport 的 connect，含 MCP 握手）。"""
         self._transport.connect()
         self._connected = True
         logger.info("MCP server %s 已连接", self.name)
 
     def list_tools(self) -> List[dict]:
+        """问服务器要工具清单（tools/list）。
+
+        返回：工具描述 dict 的列表；拿不到就是空列表。
+        """
         resp = self._transport.send_request("tools/list", {})
         return resp.get("tools", []) if resp else []
 
     def call_tool(self, name: str, arguments: dict) -> dict:
+        """调用服务器上的一个工具（tools/call）。
+
+        参数：
+            name：工具名（不带 mcp__ 前缀的原始名）
+            arguments：工具参数 dict
+
+        返回：工具执行结果 dict；空结果给空 dict。
+        """
         return self._transport.send_request("tools/call", {
             "name": name,
             "arguments": arguments or {},
         }) or {}
 
-    # CCAR12 Task 5：resources 透传（fail-open，None = 不支持/失败）
+    # CCAR12 Task 5：resources 透传（fail-open：返回 None = 对方不支持或失败）
     def list_resources(self) -> Optional[list]:
-        """列出 server 的 resources（transport.list_resources）。"""
+        """列出 server 的资源清单（转手调 transport.list_resources）。"""
         return self._transport.list_resources()
 
     def read_resource(self, uri: str) -> Optional[dict]:
-        """读单个 resource 内容（transport.read_resource）。"""
+        """读单个资源内容（转手调 transport.read_resource）。
+
+        参数：
+            uri：资源的 URI 地址
+        """
         return self._transport.read_resource(uri)
 
     def close(self) -> None:
+        """断开连接。"""
         self._connected = False
         self._transport.close()
 
     @property
     def connected(self) -> bool:
+        """还连着吗：自己记录的标记 和 transport 的实时状态 都得为真。"""
         return self._connected and self._transport.is_connected
 
 
@@ -1157,10 +1376,13 @@ class MCPClient:
 # ---------------------------------------------------------------------------
 
 def load_mcp_config(config_path=None) -> Dict[str, dict]:
-    """加载 .mcp.json 配置。
+    """加载用户级 MCP 配置文件 .mcp.json。
 
-    返回 {server_name: cfg}，cfg 含 command/args/env（stdio）或
-    url/headers/oauth（HTTP）。
+    参数：
+        config_path：配置文件路径；不填默认 ~/.OmniMate/.mcp.json
+
+    返回：{server名: 该server的配置dict}。stdio 型含 command/args/env；
+    HTTP 型含 url/headers/oauth。文件不存在或读坏了返回空 dict（不抛）。
     """
     if config_path is None:
         try:
@@ -1182,11 +1404,14 @@ def load_mcp_config(config_path=None) -> Dict[str, dict]:
 
 
 def load_project_mcp_config() -> Tuple[Optional[Path], Dict[str, dict]]:
-    """R25 #3：读项目级 .mcp.json（<workspace cwd>/.mcp.json）。
+    """读项目级 MCP 配置（R25 安全专项第 3 项）：当前工作目录下的 .mcp.json。
 
-    返回 (配置文件路径或 None, {server_name: cfg})。
-    项目级配置不受用户直接控制（clone 陌生 repo 即带入），调用方
-    （initialize_mcp）必须先过首连审批。
+    参数：无。
+
+    返回：(配置文件路径或 None, {server名: 配置dict})。
+    为什么单独搞项目级：项目里的 .mcp.json 不受用户直接控制——
+    clone 一个陌生仓库就可能被带进来，所以调用方（initialize_mcp）
+    必须先过"首连审批"（第一次连之前问用户）才能连。
     """
     try:
         from agent.workspace_context import get_workspace_cwd
@@ -1209,9 +1434,10 @@ def load_project_mcp_config() -> Tuple[Optional[Path], Dict[str, dict]]:
 # ---------------------------------------------------------------------------
 
 class MCPManager:
-    """管理多个 MCP server 连接。"""
+    """管家：同时管着多个 MCP server 的连接（增删查、列工具、调用分发）。"""
 
     def __init__(self):
+        """初始化：空的连接表 + 一把锁（保护连接表的并发读写）。"""
         self._clients: Dict[str, MCPClient] = {}
         self._lock = threading.Lock()
 
@@ -1221,16 +1447,19 @@ class MCPManager:
         *,
         app_config: Optional[dict] = None,
     ) -> None:
-        """连接所有配置的 server。
+        """按配置把所有 server 都连一遍（单个失败只记日志跳过，不拖垮整体）。
 
-        配置字段（按 transport）：
-        - stdio: transport="stdio", command, args, env
-        - http:  transport="http", url, headers, oauth
-        - sse:   transport="sse", url, headers, oauth
-        - websocket: transport="websocket", url, headers, oauth
-        - 通用:  include, exclude（工具过滤）
+        参数：
+            config：{server名: 配置dict}；不填则自动去读 ~/.OmniMate/.mcp.json。
+                配置字段按 transport 分：
+                - stdio: transport="stdio", command, args, env
+                - http:  transport="http", url, headers, oauth
+                - sse:   transport="sse", url, headers, oauth
+                - websocket: transport="websocket", url, headers, oauth
+                - 通用:  include, exclude（工具白/黑名单过滤）
+            app_config：应用配置字典（查 feature flag 用），可不填
 
-        app_config：应用配置字典（用于 feature flag 检查）。
+        返回：无。
         """
         if config is None:
             config = load_mcp_config()
@@ -1239,7 +1468,7 @@ class MCPManager:
             try:
                 self.connect_one(name, cfg, app_config=app_config)
             except Exception as e:
-                # 保持原语义：单个 server 失败（含 transport flag 未开）只跳过
+                # 保持既有语义：单个 server 失败（包括 transport flag 没开）只跳过
                 logger.warning("MCP server %s 连接失败: %s", name, e)
 
     def connect_one(
@@ -1249,10 +1478,16 @@ class MCPManager:
         *,
         app_config: Optional[dict] = None,
     ) -> "MCPClient":
-        """连接单个 server（R24 #38：agent 内联 mcpServers 用）。
+        """连接单个 server（R24 裁决第 38 项：给 agent 定义里内联的 mcpServers 用）。
 
-        返回 MCPClient；连接失败抛异常（调用方决定 fail-open 还是抛）。
-        已存在同名连接直接复用（幂等）。
+        参数：
+            name：server 名字
+            cfg：单个 server 的配置 dict（字段同 connect_all 的说明）
+            app_config：应用配置字典（查 feature flag 用），可不填
+
+        返回：连好的 MCPClient。失败直接抛异常（要不要吞由调用方定，
+        和 connect_all 的"只跳过"语义不同）。同名连接已存在且活着就直接
+        复用（幂等，连两次不报错）。
         """
         with self._lock:
             existing = self._clients.get(name)
@@ -1277,9 +1512,13 @@ class MCPManager:
         return client
 
     def disconnect_one(self, name: str) -> bool:
-        """断开并移除单个 server 连接（R24 #38：临时连接结束断开）。
+        """断开并移除单个 server 连接（R24 裁决第 38 项：临时连接用完就断，
+        不留残留——比如 agent 定义里的内联 server）。
 
-        返回是否找到并断开。
+        参数：
+            name：server 名字
+
+        返回：True 表示找到并断开了；False 表示本来就没这个连接。
         """
         with self._lock:
             client = self._clients.pop(name, None)
@@ -1292,7 +1531,13 @@ class MCPManager:
         return True
 
     def get_all_tools(self) -> List[dict]:
-        """获取所有 server 的工具列表（含 server 名前缀）。"""
+        """汇总所有在线 server 的工具清单（工具名带上 mcp__server__ 前缀）。
+
+        参数：无。
+
+        返回：工具描述 dict 列表，每项含 server/original_name/full_name/
+        description/inputSchema。单个 server 列工具失败只记日志跳过。
+        """
         all_tools = []
         with self._lock:
             clients = list(self._clients.items())
@@ -1331,7 +1576,15 @@ class MCPManager:
         return all_tools
 
     def call(self, full_name: str, arguments: dict) -> dict:
-        """调用 MCP 工具（full_name 格式：mcp__server__tool）。"""
+        """调用一个 MCP 工具。
+
+        参数：
+            full_name：工具全名，格式 mcp__server__tool（双下划线分隔）
+            arguments：工具参数 dict
+
+        返回：工具结果 dict；名字不合法/没连上/调用失败都返回
+        {"error": ...} 形式的 dict（不抛异常）。
+        """
         parts = full_name.split("__", 2)
         if len(parts) != 3 or parts[0] != "mcp":
             return {"error": f"非法 MCP 工具名: {full_name}"}
@@ -1349,10 +1602,17 @@ class MCPManager:
         except Exception as e:
             return {"error": f"MCP 调用失败: {e}"}
 
-    # CCAR12 Task 5：resources 协议入口（供 mcp_resource 工具调用）
-    # 错误风格与 call() 对齐：统一返回 dict（成功/失败都是 JSON 可序列化）。
+    # CCAR12 Task 5：resources 协议的对外入口（给 mcp_resource 工具调）。
+    # 错误风格与 call() 对齐：统一返回 dict，成功失败都能直接 JSON 序列化。
     def list_resources(self, server_name: str) -> dict:
-        """列某个 server 的 resources。失败返回错误 dict。"""
+        """列某个 server 的资源清单。
+
+        参数：
+            server_name：server 名字
+
+        返回：成功是 {"server": ..., "resources": [...]};
+        失败是 {"error": ..., "error_type": ...}（没连上/不支持/出错）。
+        """
         with self._lock:
             client = self._clients.get(server_name)
         if client is None:
@@ -1377,7 +1637,15 @@ class MCPManager:
         return {"server": server_name, "resources": resources}
 
     def read_resource(self, server_name: str, uri: str) -> dict:
-        """读某个 server 的单个 resource。失败返回错误 dict。"""
+        """读某个 server 上的单个资源内容。
+
+        参数：
+            server_name：server 名字
+            uri：资源的 URI 地址（必填）
+
+        返回：成功是资源内容 dict；失败是 {"error": ..., "error_type": ...}
+        （没连上/缺参数/不存在/不支持）。
+        """
         with self._lock:
             client = self._clients.get(server_name)
         if client is None:
@@ -1410,7 +1678,7 @@ class MCPManager:
         return result
 
     def close_all(self) -> None:
-        """关闭所有连接。"""
+        """把所有连接一口气全关掉（退出时用；单个关闭失败也继续关别的）。"""
         with self._lock:
             clients = list(self._clients.values())
             self._clients.clear()
@@ -1422,11 +1690,12 @@ class MCPManager:
 
     @property
     def servers(self) -> List[str]:
+        """现在管着哪些 server（名字列表）。"""
         with self._lock:
             return list(self._clients.keys())
 
 
-# 全局单例
+# 全局单例（整个进程共用一个管家）
 _mcp_manager = MCPManager()
 
 

@@ -1,19 +1,24 @@
-"""会话存储：JSONL 文件（无 SQLite）。
+"""会话存储：用 JSONL 文件存聊天记录（不用数据库 SQLite）。
 
-文件布局：
+这个文件管的是"历史会话库"——每个会话的标题、时间、消息记录，支持
+/resume 恢复、/search 搜索、fork 克隆。给 cli.py 和 agent/__init__.py
+这些上层调用方用。
+
+文件布局（好比一个档案柜）：
   ~/.OmniMate/.sessions/
-  ├── index.json              # 所有会话元数据（数组）
-  ├── <session_id>.jsonl      # 每个会话的消息历史（每行一条 JSON）
-  └── <session_id>.jsonl.bak  # 删除时改名备份（完全可逆）
+  ├── index.json              # 目录卡片：所有会话的元数据列表
+  ├── <session_id>.jsonl      # 每个会话一个档案袋：消息历史，每行一条 JSON
+  └── <session_id>.jsonl.bak  # 删除会话时只是改名为 .bak 备份（可恢复，不真删）
 
-设计权衡（为啥不用 SQLite）：
-  - Windows 上 SQLite 文件锁曾反复出问题（X8 rowid bug 等）
-  - 与项目"文件优先"哲学一致（memory/tasks 都是文件）
-  - 用户可直接看/编辑 JSONL
-  - 跨平台一致
-  - 全文搜索降级为 Python re（小规模够用）
+设计权衡（为啥不用 SQLite 数据库）：
+  - Windows 上 SQLite 的文件锁反复出过问题（历史踩坑：X8 rowid bug 等）
+  - 符合项目"文件优先"的哲学（memory/tasks 也都是纯文件）
+  - 用户可以直接用记事本打开看/改 JSONL
+  - 跨平台行为一致
+  - 代价：全文搜索退化为 Python re 正则扫描（单用户小规模够用）
 
-接口与原 SQLite 版本完全一致（cli.py / agent/__init__.py 等调用方无需改动）。
+对外接口和原 SQLite 版本完全一致——cli.py / agent/__init__.py 等
+调用方一行都不用改。
 """
 
 import json
@@ -29,45 +34,48 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 兼容老接口的存根（其他模块可能 import）
+# 兼容老接口的存根（SQLite 时代的函数名，别的模块可能还在 import，留着占位）
 # ---------------------------------------------------------------------------
 
 def is_fts5_available() -> bool:
-    """兼容老接口（JSONL 版不需要 FTS5）。"""
+    """兼容老接口：SQLite 时代查 FTS5 全文搜索扩展是否可用，JSONL 版用不上，恒返回 False。"""
     return False
 
 
 def is_trigram_available() -> bool:
-    """兼容老接口。"""
+    """兼容老接口：SQLite 时代查 trigram 索引是否可用，JSONL 版用不上，恒返回 False。"""
     return False
 
 
 def _contains_cjk(s: str) -> bool:
-    """兼容老接口。"""
+    """兼容老接口：判断字符串里有没有中日韩字符（原供分词用，现在留着防 import 报错）。"""
     return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
 
 class SessionStore:
     """会话存储管理器（JSONL 文件实现）。
 
-    所有接口与原 SQLite 版本兼容（cli.py / agent/__init__.py 等调用方无需改动）。
-    __init__ 接受 db_path（兼容老接口），实际作为目录用：
-    - 如果传文件路径（如 sessions.db）→ 自动转 parent/.sessions/
-    - 如果传目录路径 → 直接用
+    背景：负责会话的增删查改、消息追加、搜索、统计、fork。
+    所有接口与原 SQLite 版本兼容（cli.py / agent/__init__.py 等调用方
+    无需改动）。__init__ 接受 db_path 也是为了兼容老接口，实际当目录用：
+    - 传的是文件路径（如 sessions.db）→ 自动改用它旁边的 .sessions/ 目录
+    - 传的是目录路径 → 直接用
 
-    线程安全：通过 _lock 保护 index.json 和 .jsonl 写入。
+    线程安全：写 index.json 和 .jsonl 都要先拿 _lock 锁，防并发写坏文件。
     """
 
     def __init__(self, db_path):
-        """初始化。
+        """初始化：确定存储目录、建目录、准备缓存，必要时迁移老的 SQLite 库。
 
-        参数 db_path 为兼容老接口保留（原是 sessions.db 文件路径）。
-        实际数据存储在 db_path 对应的目录中：
-        - 文件路径（含 .db 后缀）→ parent / ".sessions"
-        - 目录路径 → 直接用
+        参数：
+            db_path：老接口传法是 sessions.db 文件路径；实际按目录用——
+            带 .db 后缀的文件路径会自动转成它所在目录下的 ".sessions"
+            子目录；传目录则直接使用。
+
+        返回：无（构造函数）。
         """
         db_path = Path(db_path)
-        # 兼容：如果传的是 .db 文件路径，改成 sibling 目录
+        # 兼容：传的是 .db 文件路径时，改用同目录下的 .sessions 目录
         if db_path.suffix == ".db":
             self._sessions_dir = db_path.parent / ".sessions"
         else:
@@ -75,20 +83,26 @@ class SessionStore:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self._sessions_dir / "index.json"
         self._lock = threading.Lock()
-        self._index_cache: Optional[List[dict]] = None  # 内存缓存（首次访问加载）
-        # 消息缓存（Round 3 压力优化）：session_id -> ((mtime, size), msgs)，
-        # search/get_messages/get_stats 热路径免重复读盘 + JSON 解析。
-        # 双因子键防 mtime 精度窗口（Windows ~15ms）内 append 误判。
+        self._index_cache: Optional[List[dict]] = None  # 目录卡片的内存缓存（第一次访问时加载）
+        # 消息缓存（Round 3 压力优化）：session_id -> ((mtime, size), msgs)。
+        # 为什么要缓存：search/get_messages/get_stats 是热路径，每次都
+        # 读盘 + JSON 解析太慢；文件一变（mtime/size 变）缓存自动失效。
+        # 为什么键用 mtime+size 双因子：Windows 的 mtime 精度只有 ~15ms，
+        # 同一时间窗内 append 前后 mtime 可能一样，单看 mtime 会误判
+        # "文件没变"而漏读新消息（历史踩坑）。
         self._msgs_cache: dict = {}
-        # 自动迁移老 SQLite（如果检测到）
+        # 如果发现老的 SQLite 库就自动迁移
         self._maybe_migrate_sqlite()
 
     # ------------------------------------------------------------------
-    # 内部辅助
+    # 内部辅助函数
     # ------------------------------------------------------------------
 
     def _load_index(self) -> List[dict]:
-        """加载 index（带内存缓存）。"""
+        """（内部）读目录卡片 index.json，读一次后缓存在内存里反复用。
+
+        返回：会话元数据的 dict 列表（文件不存在或坏了就当空列表）。
+        """
         if self._index_cache is not None:
             return self._index_cache
         if not self._index_path.exists():
@@ -103,7 +117,11 @@ class SessionStore:
         return self._index_cache
 
     def _save_index(self) -> None:
-        """原子写 index.json（用 atomic_write_text 保证跨平台一致）。"""
+        """（内部）把内存里的目录卡片写回 index.json。
+
+        为什么用 atomic_write_text（先写临时文件再改名）：保证写一半
+        断电/崩溃也不会留下半个坏文件，跨平台行为一致。
+        """
         from agent.atomic_io import atomic_write_text
         if self._index_cache is None:
             return
@@ -114,15 +132,28 @@ class SessionStore:
         )
 
     def _session_file(self, session_id: str) -> Path:
-        """单个会话的 .jsonl 文件路径。"""
+        """（内部）算出某个会话的 .jsonl 档案袋文件完整路径。
+
+        参数：
+            session_id：会话 ID
+
+        返回：Path 对象，如 <目录>/<session_id>.jsonl
+        """
         return self._sessions_dir / f"{session_id}.jsonl"
 
     def _read_session_msgs(self, session_id: str) -> List[dict]:
-        """读 .jsonl 全部消息（不动 index；mtime 缓存，只读共享）。
+        """（内部）读某个会话 .jsonl 里的全部消息（只读，不动 index）。
 
-        压力优化（Round 3）：search/get_messages/get_stats/fork 每次
-        全量读盘 + JSON 解析是热路径（万条消息每次 ~100ms+）。缓存
-        (mtime, msgs)，文件变了自动失效重读。调用方全部只读遍历。
+        背景（Round 3 压力优化）：search/get_messages/get_stats/fork
+        每次都全量读盘 + 逐行 JSON 解析，是热路径——上万条消息时一次
+        要 100ms 以上。所以加了缓存：记下 (mtime, size)，文件没变就
+        直接用上次解析好的结果；调用方拿到后只做只读遍历，不会互相污染。
+        文件不存在时返回空列表；个别行 JSON 坏了就跳过那行。
+
+        参数：
+            session_id：会话 ID
+
+        返回：原始消息 dict 列表（含 id/timestamp 等内部字段）。
         """
         path = self._session_file(session_id)
         try:
@@ -150,7 +181,17 @@ class SessionStore:
         return msgs
 
     def _compute_turn_index(self, session_id: str, role: str) -> int:
-        """计算 turn_index（user 消息开始新 turn）。"""
+        """（内部）算新消息的轮次编号：每来一条 user 消息就开一个新轮次。
+
+        背景：turn_index 用来给消息分组（一问多答算一轮），方便 UI 展示
+        和后续按轮检索。
+
+        参数：
+            session_id：会话 ID
+            role：新消息的角色（"user"/"assistant"/"tool" 等）
+
+        返回：int 轮次号（空会话的第一条 user 消息是第 1 轮）。
+        """
         msgs = self._read_session_msgs(session_id)
         if not msgs:
             return 1 if role == "user" else 0
@@ -158,12 +199,19 @@ class SessionStore:
         return max_turn + 1 if role == "user" else max_turn
 
     # ------------------------------------------------------------------
-    # 自动迁移老 SQLite
+    # 自动迁移老的 SQLite 库
     # ------------------------------------------------------------------
 
     def _maybe_migrate_sqlite(self) -> None:
-        """检测老 sessions.db，存在且 index 为空时一次性迁移到 JSONL。"""
-        # sessions.db 通常在 sessions_dir 的 parent
+        """检测有没有老的 sessions.db，有且 index 为空时一次性迁移到 JSONL。
+
+        背景：老版本用 SQLite 存会话，升级后首次启动要无缝把老数据搬过来。
+
+        参数：无。
+
+        返回：无（迁移结果只写日志）。
+        """
+        # sessions.db 一般放在 sessions_dir 的上一级，两个位置都探一下
         candidates = [
             self._sessions_dir.parent / "sessions.db",
             self._sessions_dir / "sessions.db",
@@ -171,10 +219,10 @@ class SessionStore:
         old_db = next((p for p in candidates if p.exists()), None)
         if old_db is None:
             return
-        # 已经迁移过（有 .bak）→ 跳过
+        # 已迁移过（旁边留了 .bak）→ 不重复搬
         if old_db.with_suffix(".db.bak").exists():
             return
-        # 只在 index 为空时迁移（避免覆盖已有数据）
+        # 只在 index 还是空的时候迁移，避免覆盖新数据
         if self._load_index():
             return
         logger.info("检测到老 SQLite %s，开始迁移到 JSONL...", old_db)
@@ -186,7 +234,13 @@ class SessionStore:
             logger.error("迁移失败（保留 sessions.db）: %s", e)
 
     def _migrate_from_sqlite(self, db_path: Path) -> None:
-        """从 SQLite 迁移数据到 JSONL。"""
+        """真正干活：把 SQLite 库里的会话和消息逐条搬进 JSONL 文件。
+
+        参数：
+            db_path：老的 sessions.db 文件路径
+
+        返回：无（搬完顺手更新内存 index 并写盘）。
+        """
         import sqlite3
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
@@ -238,15 +292,15 @@ class SessionStore:
             conn.close()
 
     # ------------------------------------------------------------------
-    # 会话生命周期
+    # 会话生命周期（建/删/查）
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """兼容接口（JSONL 无连接，no-op）。"""
+        """兼容老接口：SQLite 时代要关连接，JSONL 版没有连接，什么都不做。"""
         pass
 
     def __del__(self):
-        # 兼容老接口（JSONL 无连接需关）
+        # 兼容老接口：SQLite 时代析构要关连接，现在没有连接要关
         try:
             pass
         except Exception:
@@ -259,7 +313,15 @@ class SessionStore:
         model: Optional[str] = None,
         provider: Optional[str] = None,
     ) -> str:
-        """创建新会话，返回 session_id。"""
+        """新建一个会话（登记到目录卡片 + 建空的 .jsonl 档案袋）。
+
+        参数：
+            title：会话标题，可不填
+            model：创建时用的模型名，可不填
+            provider：模型提供方（如 deepseek），可不填
+
+        返回：新生成的 session_id（UUID 字符串）。
+        """
         session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -274,7 +336,7 @@ class SessionStore:
                 "provider": provider,
             })
             self._save_index()
-        # 建空 .jsonl
+        # 建一个空的 .jsonl 档案袋占位
         self._session_file(session_id).touch()
         return session_id
 
@@ -288,9 +350,20 @@ class SessionStore:
         tool_call_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> str:
-        """追加一条消息到会话。
+        """往会话末尾追加一条消息（像在档案袋里再加一张纸条）。
 
-        name：tool 消息的工具名（对齐 Claude Code 会话恢复）。
+        背景：agent 主循环每产生一条 user/assistant/tool 消息都落盘一次，
+        崩溃/重启后才能完整恢复对话。
+
+        参数：
+            session_id：往哪个会话追加
+            role：消息角色（"user"/"assistant"/"tool" 等）
+            content：消息正文
+            tool_calls：assistant 消息携带的工具调用列表（可不填）
+            tool_call_id：tool 消息对应的调用 ID，用于配对（可不填）
+            name：tool 消息的工具名（对齐 Claude Code 的会话恢复格式）
+
+        返回：这条消息自己的 msg_id（UUID 字符串）。
         """
         msg_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -306,13 +379,15 @@ class SessionStore:
             "turn_index": turn_index,
         }
         with self._lock:
-            # 追加到 .jsonl（单行写入，POSIX 上 < PIPE_BUF 原子）
+            # 往 .jsonl 尾部追加一行（单行小写入，在 POSIX 上小于
+            # PIPE_BUF 时天然原子，不会被别的进程写穿插）
             with self._session_file(session_id).open("a", encoding="utf-8") as f:
                 f.write(json.dumps(line_obj, ensure_ascii=False) + "\n")
-            # 主动失效消息缓存（mtime 粒度 ~15ms，同窗口 append 前后
-            # mtime 可能相同导致缓存误判有效——见 test_fork_session_does_not_mutate_source）
+            # 历史踩坑：写完必须主动踢掉消息缓存——mtime 精度只有 ~15ms，
+            # 同一窗口内连续 append 时 mtime 可能没变，缓存会误判"文件
+            # 没变"而漏掉刚写的消息（回归用例 test_fork_session_does_not_mutate_source 盯着）
             self._msgs_cache.pop(session_id, None)
-            # 更新 index（updated_at + message_count）
+            # 同步刷新目录卡片（更新时间 + 消息计数）
             index = self._load_index()
             for entry in index:
                 if entry["id"] == session_id:
@@ -328,13 +403,18 @@ class SessionStore:
         *,
         limit: Optional[int] = None,
     ) -> List[dict]:
-        """获取会话的消息历史。
+        """读某个会话的消息历史（给恢复会话/上层展示用）。
 
-        limit=N 时取最后 N 条（按写入时序）。
+        参数：
+            session_id：会话 ID
+            limit：只要最后 N 条（按写入顺序），不填给全部
+
+        返回：消息 dict 列表，只保留 role/content/tool_calls 等
+        对外字段（id/timestamp 等内部记账字段已剥掉）。
         """
         msgs = self._read_session_msgs(session_id)
         if limit:
-            msgs = msgs[-limit:]  # 取最后 N 条
+            msgs = msgs[-limit:]  # 只保留最后 N 条
         # 转成兼容格式（去掉 id/timestamp/turn_index 等内部字段）
         result = []
         for m in msgs:
@@ -357,7 +437,14 @@ class SessionStore:
         limit: int = 50,
         offset: int = 0,
     ) -> List[dict]:
-        """列出会话（按 updated_at 倒序）。"""
+        """分页列出会话，最近动过的排最前（按 updated_at 倒序）。
+
+        参数：
+            limit：一页最多几条，默认 50
+            offset：跳过前几条（翻页用），默认 0
+
+        返回：会话元数据 dict 列表。
+        """
         with self._lock:
             index = list(self._load_index())
         sorted_index = sorted(
@@ -366,7 +453,13 @@ class SessionStore:
         return sorted_index[offset:offset + limit]
 
     def get_session(self, session_id: str) -> Optional[dict]:
-        """获取单个会话信息。"""
+        """查一个会话的元数据（标题/时间/计数这些，不含消息）。
+
+        参数：
+            session_id：会话 ID
+
+        返回：元数据 dict 的副本；找不到返回 None。
+        """
         with self._lock:
             index = self._load_index()
         for s in index:
@@ -375,7 +468,14 @@ class SessionStore:
         return None
 
     def set_title(self, session_id: str, title: str) -> None:
-        """设置会话标题。"""
+        """改会话标题（顺手刷新 updated_at）。
+
+        参数：
+            session_id：会话 ID
+            title：新标题
+
+        返回：无。会话不存在时静默不动。
+        """
         with self._lock:
             index = self._load_index()
             for s in index:
@@ -386,28 +486,36 @@ class SessionStore:
             self._save_index()
 
     def delete_session(self, session_id: str) -> None:
-        """删除会话（消息文件改名 .bak，完全可逆）。
+        """删除会话——但其实是"假删"：消息文件改名成 .bak 备份，随时可恢复。
 
-        S7 fix: 原子操作——index 移除 + 文件改名在同一锁内完成。
+        这是项目"完全可逆"铁律的体现，符合数据永不真删的约定。
+
+        历史踩坑（S7 修复）：要从目录卡片移除和文件改名这两步在
+        同一把锁里做完，否则中途被打断会出现两步只做一半的脏状态。
+
+        参数：
+            session_id：要删的会话 ID
+
+        返回：无。
         """
         with self._lock:
             path = self._session_file(session_id)
             if path.exists():
                 bak = path.with_suffix(".jsonl.bak")
                 try:
-                    # 如果 .bak 已存在先删
+                    # 已有同名 .bak 就先清掉，否则改名会撞名失败
                     if bak.exists():
                         bak.unlink()
                     path.rename(bak)
                 except OSError:
-                    # Windows rename 偶尔失败 → 直接 unlink
+                    # Windows 上 rename 偶发失败 → 兜底直接删（牺牲可逆保可用）
                     path.unlink(missing_ok=True)
             index = self._load_index()
             self._index_cache = [s for s in index if s["id"] != session_id]
             self._save_index()
 
     # ------------------------------------------------------------------
-    # P2-12: fork
+    # P2-12: 会话 fork（克隆）
     # ------------------------------------------------------------------
 
     def fork_session(
@@ -416,7 +524,15 @@ class SessionStore:
         *,
         title: Optional[str] = None,
     ) -> str:
-        """克隆现有会话为新会话（消息全复制）。"""
+        """把一个现有会话整个克隆成新会话——消息文件原样复制一份，
+        之后两边各改各的互不影响（像复印一份档案）。
+
+        参数：
+            source_session_id：被克隆的源会话 ID
+            title：新会话标题；不填就自动叫 "Fork of <源标题>"
+
+        返回：新会话的 session_id。源会话不存在时抛 ValueError。
+        """
         source = self.get_session(source_session_id)
         if source is None:
             raise ValueError(f"source session 不存在: {source_session_id}")
@@ -435,7 +551,7 @@ class SessionStore:
                 dst_path.write_text(
                     src_path.read_text(encoding="utf-8"), encoding="utf-8"
                 )
-                # 更新 message_count
+                # 把新会话的消息计数改准（复制来的不是 0）
                 line_count = sum(
                     1 for line in dst_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
@@ -449,7 +565,7 @@ class SessionStore:
         return new_id
 
     # ------------------------------------------------------------------
-    # 全文搜索（Python re 替代 FTS5）
+    # 全文搜索（用 Python 正则扫描，替代 SQLite 时代的 FTS5 全文索引）
     # ------------------------------------------------------------------
 
     def search(
@@ -463,14 +579,25 @@ class SessionStore:
         since: Optional[str] = None,
         until: Optional[str] = None,
     ) -> List[dict]:
-        """全文搜索消息（Python re 实现）。
+        """在所有会话的消息里做全文搜索（Python 正则实现）。
 
-        降级说明（vs SQLite FTS5）：
-        - 之前用 FTS5 + trigram fallback + snippet 函数
-        - 现在用 re.escape + IGNORECASE 扫所有 .jsonl
-        - 性能：1万条消息约 100ms（单用户场景够用）
-        - 中文子串：直接 substring 匹配（re.search）
-        - snippet：query 周围 context_chars 字符
+        背景（相比 SQLite FTS5 的降级说明）：
+        - 之前用 FTS5 全文索引 + trigram 兜底 + snippet 函数
+        - 现在用 re.escape + 忽略大小写扫所有 .jsonl
+        - 性能：一万条消息约 100ms（单用户场景够用）
+        - 中文子串：直接子串匹配（re.search 天然支持）
+        - snippet：截取关键词周围若干字符的上下文片段
+
+        参数：
+            query：搜索关键词（按字面匹配，忽略大小写）
+            limit：最多返回几条，默认 10
+            session_id：只在指定会话里搜（不填搜全部）
+            role：只搜指定角色（如 "user"）的消息
+            tool_name：只搜调过指定工具的消息
+            since：只搜这个时间点之后的消息（ISO 时间字符串）
+            until：只搜这个时间点之前的消息
+
+        返回：命中结果 dict 列表（含 content/session_id/snippet 等）。
         """
         if not query.strip():
             return []
@@ -480,11 +607,11 @@ class SessionStore:
             return []
 
         results = []
-        # 限定 session_id 时只扫一个文件
+        # 指定了 session_id 就只扫那一个档案袋，否则扫最近 1000 个会话
         scan_sessions = (
             [self.get_session(session_id)] if session_id else self.list_sessions(limit=1000)
         )
-        scan_sessions = [s for s in scan_sessions if s]  # 过滤 None
+        scan_sessions = [s for s in scan_sessions if s]  # 滤掉查不存在的会话返回的 None
 
         for s in scan_sessions:
             sid = s["id"]
@@ -493,7 +620,7 @@ class SessionStore:
                 content = m.get("content", "") or ""
                 if not pattern.search(content):
                     continue
-                # 过滤
+                # 命中关键词后，再过一遍各筛选条件
                 if role and m.get("role") != role:
                     continue
                 if since and m.get("timestamp", "") < since:
@@ -526,7 +653,16 @@ class SessionStore:
 
     @staticmethod
     def _make_snippet(content: str, query: str, context_chars: int = 50) -> str:
-        """生成 snippet（query 周围 context_chars 字符）。"""
+        """（内部）生成摘要片段：截取关键词第一次出现位置前后各 context_chars 个字符，
+        不够截的地方省略号表示。
+
+        参数：
+            content：消息全文
+            query：搜索关键词
+            context_chars：关键词前后各带多少字符，默认 50
+
+        返回：截好的片段字符串；没找到关键词就返回开头 100 字符。
+        """
         idx = content.lower().find(query.lower())
         if idx == -1:
             return content[:100]
@@ -541,7 +677,16 @@ class SessionStore:
     # ------------------------------------------------------------------
 
     def get_stats(self) -> dict:
-        """聚合统计：会话/消息/工具调用频次/角色分布。"""
+        """汇总统计整个会话库：会话数/消息数/各工具被调了多少次/角色分布等。
+
+        背景：给 /stats 命令做数据源，帮用户了解自己的使用情况。
+
+        参数：无。
+
+        返回：统计 dict，含 sessions/messages/earliest/latest/
+        top_sessions（消息最多的前 5 个会话）/tool_calls（前 10 个高频
+        工具）/role_distribution（各角色消息条数）。
+        """
         index = self.list_sessions(limit=10000)
         sessions_count = len(index)
         messages_count = sum(s.get("message_count", 0) for s in index)
@@ -552,7 +697,7 @@ class SessionStore:
         top_sessions = sorted(
             index, key=lambda s: s.get("message_count", 0), reverse=True
         )[:5]
-        # 角色分布 + 工具调用统计（扫所有 .jsonl）
+        # 角色分布 + 工具调用统计（要逐条翻所有 .jsonl 档案袋）
         role_dist = {}
         tool_counter = {}
         for s in index:
@@ -561,7 +706,7 @@ class SessionStore:
                 role_dist[role] = role_dist.get(role, 0) + 1
                 tcs = m.get("tool_calls")
                 if not isinstance(tcs, list):
-                    continue  # 防御：tool_calls 可能被篡改为字符串/对象等
+                    continue  # 防御：tool_calls 字段可能被改坏成字符串等，跳过不崩
                 for tc in tcs:
                     if isinstance(tc, dict):
                         fn = tc.get("function", {})

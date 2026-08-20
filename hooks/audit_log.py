@@ -1,14 +1,15 @@
 #!/usr/bin/env python
-"""audit_log.py — USER_PROMPT_SUBMIT + POST_TOOL_USE hook.
+"""audit_log.py — 内置 hook 示例：审计日志。
 
-把用户 prompt 和工具调用结果写到日志文件，便于审计/调试。
+干什么：用户每次提交 prompt、每次工具调用结束，都往日志文件里记一笔，
+方便事后查账（这个 agent 到底干了什么、工具返回了什么）。
 
-IPC 协议：
-  USER_PROMPT_SUBMIT stdin: {"event": "...", "prompt": "...", ...}
-  POST_TOOL_USE      stdin: {"event": "...", "tool_name": "...", "result": "...", ...}
-  stdout: 空（不修改原数据，只写日志）
+跟主程序怎么通信（hook 都是独立小进程，走 stdin/stdout 传 JSON）：
+  USER_PROMPT_SUBMIT（用户提交输入时）stdin 收：{"event": "...", "prompt": "...", ...}
+  POST_TOOL_USE（工具跑完后）stdin 收：{"event": "...", "tool_name": "...", "result": "...", ...}
+  stdout 不输出任何东西（只旁观记账，不改原数据）
 
-启用方法（settings.json）：
+怎么启用（在 settings.json 里加）：
 {
   "hooks": {
     "user_prompt_submit": [{
@@ -34,11 +35,19 @@ from pathlib import Path
 
 
 def get_log_path() -> Path:
+    """日志文件写到哪：优先读环境变量 AUDIT_LOG_PATH，没设就用默认的 ~/.OmniMate/.audit.log。
+
+    返回：展开 ~ 后的 Path。
+    """
     raw = os.environ.get("AUDIT_LOG_PATH", "~/.OmniMate/.audit.log")
     return Path(raw).expanduser()
 
 
 def main():
+    """入口：从 stdin 读事件 JSON，拼一行日志追加写进日志文件。
+
+    背景：stdin 读不进有效 JSON 就安静退出（hook 不能因为自己挂了连累主程序）。
+    """
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
@@ -50,7 +59,7 @@ def main():
 
     if event == "user_prompt_submit":
         prompt = payload.get("prompt", "")
-        # 截断长 prompt
+        # 太长的 prompt 只留前 500 字符（日志是查线索的，不是全文备份）
         if len(prompt) > 500:
             prompt = prompt[:497] + "..."
         line = f"[{ts}] [{session}] USER: {prompt}\n"
@@ -69,7 +78,7 @@ def main():
         with log_path.open("a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
-        # fail-open：日志写不进去不应阻塞 agent
+        # fail-open：日志写不进去就写不进去，绝不能因此卡住 agent 主流程
         pass
 
 

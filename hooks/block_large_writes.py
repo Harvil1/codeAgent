@@ -1,14 +1,15 @@
 #!/usr/bin/env python
-"""block_large_writes.py — PRE_TOOL_USE hook.
+"""block_large_writes.py — 内置 hook：拦截超大写入。
 
-write_file 写超大文件（默认 5MB）时拒绝，防意外写爆磁盘。
+干什么：write_file 要写的内容超过上限（默认 5MB）就直接拒绝——
+agent 失控狂写大文件时，这道闸能把磁盘保住。
 
-IPC 协议（PRE_TOOL_USE）：
-  stdin:  {"event": "pre_tool_use", "tool_name": "write_file",
+跟主程序怎么通信（PRE_TOOL_USE，工具执行前触发）：
+  stdin 收：{"event": "pre_tool_use", "tool_name": "write_file",
            "args": {"path": "...", "content": "..."}, ...}
-  stdout: {"action": "deny", "reason": "..."} 或空
+  stdout 回：{"action": "deny", "reason": "..."} 拒绝；不输出就放行
 
-启用方法（settings.json）：
+启用方法（settings.json 里加，MAX_WRITE_BYTES 可调上限）：
 {
   "hooks": {
     "pre_tool_use": [{
@@ -25,10 +26,11 @@ import os
 import sys
 
 
-DEFAULT_MAX = 5 * 1024 * 1024  # 5 MB
+DEFAULT_MAX = 5 * 1024 * 1024  # 默认上限 5MB
 
 
 def main():
+    """入口：从 stdin 读工具调用信息，超限的 write_file 输出 deny。"""
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
