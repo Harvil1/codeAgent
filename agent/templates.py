@@ -1,11 +1,22 @@
-"""cron 任务模板（R26 #18）。
+"""cron 任务模板（R26 #18）——把常用的定时作业写成"菜谱卡片"，照单点菜即可。
 
-常用作业写成"菜谱卡片"放固定目录，cron_create(template=名字) 照单点菜，
-不用每次口述一遍配置。发现两个目录（项目级覆盖用户级同名）：
-  - ~/.OmniMate/templates/*.md
-  - <cwd>/.omnimate/templates/*.md
-frontmatter 字段：cron（必需）/ message（缺省用 body）/ catch_up / recurring。
-对齐 CCB jobs/templates.ts；frontmatter 解析复用 skill_commands.parse_frontmatter。
+cron（定时调度）的基础知识：让程序按时间表自动干活，比如"每天早上 9 点
+跑一次日报"。以前每次创建定时任务都得口述一遍配置；有了模板，写一张
+卡片放固定目录，cron_create(template=名字) 直接按卡片下单。
+
+在项目里的位置：给 tools/cron_tool.py 提供模板目录；解析 frontmatter
+（Markdown 顶部 --- 包起来的元数据块）复用 agent/skill_commands.py 的
+parse_frontmatter，不重复造轮子。对齐 CCB 的 jobs/templates.ts。
+
+扫两个目录（项目级同名覆盖用户级）：
+  - ~/.OmniMate/templates/*.md        用户级（跨项目通用）
+  - <当前项目>/.omnimate/templates/*.md  项目级
+
+卡片 frontmatter 字段：
+  - cron：时间表（必需，缺了这张卡片直接不收）
+  - message：到点要发给 agent 的话（不写就用正文 body 代替）
+  - catch_up：错过了要不要补跑（默认不补）
+  - recurring：是不是重复任务（默认是）
 """
 import logging
 from pathlib import Path
@@ -19,12 +30,16 @@ _cache: dict = {"key": None, "templates": {}}
 
 
 def _invalidate_cache() -> None:
-    """测试/调试用：清缓存。"""
+    """清空缓存（测试/调试用，下次扫描强制重读磁盘）。"""
     _cache["key"] = None
     _cache["templates"] = {}
 
 
 def _template_dirs() -> list:
+    """列出要扫的模板目录：用户级 templates + 当前项目的 .omnimate/templates。
+
+    返回：目录 Path 列表（某个来源取不到就跳过，不报错）。
+    """
     dirs = []
     try:
         from constants import get_omnimate_home
@@ -40,7 +55,17 @@ def _template_dirs() -> list:
 
 
 def load_task_templates() -> Dict[str, dict]:
-    """扫描模板目录（mtime+size 双因子缓存）。fail-open。"""
+    """扫描模板目录，返回"模板名 → 配置 dict"（带缓存，整体 fail-open）。
+
+    缓存用 mtime+size 双因子（修改时间+文件大小）判断"变没变"——Windows
+    上修改时间精度只有约 15 毫秒，光看时间会误判"没变"，要加上大小一起
+    比对才靠谱。fail-open：目录不存在、卡片解析失败、任何意外都跳过或
+    返回空，绝不抛错。
+
+    参数：无。
+    返回：{文件名（去 .md）: {cron, message, catch_up, recurring}}；
+        没有 cron 字段的卡片不收。
+    """
     try:
         stat_key = []
         files = []
@@ -55,7 +80,7 @@ def load_task_templates() -> Dict[str, dict]:
         if _cache["key"] == key:
             return _cache["templates"]
         result: Dict[str, dict] = {}
-        for md in files:  # 后扫的项目级覆盖用户级同名
+        for md in files:  # 项目级目录排在后面后扫，同名卡片自然顶掉用户级的
             try:
                 content = md.read_text(encoding="utf-8")
                 fm, body = parse_frontmatter(content)

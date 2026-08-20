@@ -1,7 +1,11 @@
-"""JSONL 文件消息总线。
+"""消息总线（成员间发信的邮局）：用 JSONL 文件落地。
 
-每个 agent 一个 inbox 文件 (~/.OmniMate/.team/inbox/{name}.jsonl)。
-所有读写用文件锁序列化（Windows msvcrt / POSIX fcntl，spike 验证过）。
+每个成员一个收件箱文件（~/.OmniMate/.team/inbox/{name}.jsonl，一行一封信）。
+发信 = 往对方的文件里追加一行；收信 = 把自己文件整个读走并清空。
+
+为什么用文件 + 锁而不是消息队列中间件：团队成员是各自独立的子进程，
+文件是最简单可靠的共享方式。所有读写都套跨平台文件锁串行化
+（Windows 用 msvcrt，类 Unix 用 fcntl——提前做过技术验证 spike）。
 """
 import json
 import logging
@@ -15,14 +19,15 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+# 合法的消息类型：普通消息 / 请求（要回音）/ 响应（回音）/ 关停指令
 VALID_TYPES = {"message", "request", "response", "shutdown"}
 
 
 @dataclass
 class TeamMessage:
-    """单条消息。"""
+    """总线上流转的一封信。"""
     id: str
-    from_: str        # 发送者（不用 built-in `from`）
+    from_: str        # 发件人。字段名带下划线是因为 `from` 是 Python 关键字，不能用
     to: str
     type: str
     content: str
@@ -31,11 +36,18 @@ class TeamMessage:
 
 
 # ---------------------------------------------------------------------------
-# 跨平台文件锁
+# 跨平台文件锁（同一时刻只让一个进程碰文件，防止互相踩）
 # ---------------------------------------------------------------------------
 
 def _acquire_lock(fileobj, timeout: float = 30.0):
-    """获取独占锁。超时抛 TimeoutError。"""
+    """抢锁：拿到才准动文件，抢不到就反复试。
+
+    参数：
+        fileobj：已打开的锁文件
+        timeout：最多等多久（秒），默认 30
+
+    拿到锁后返回；超时还抢不到就抛 TimeoutError。
+    """
     deadline = time.time() + timeout
     if sys.platform == "win32":
         import msvcrt
@@ -60,7 +72,7 @@ def _acquire_lock(fileobj, timeout: float = 30.0):
 
 
 def _release_lock(fileobj):
-    """释放锁。"""
+    """还锁：用完就放，别占着茅坑。参数 fileobj 是锁文件。无返回值。"""
     if sys.platform == "win32":
         import msvcrt
         try:
@@ -73,17 +85,23 @@ def _release_lock(fileobj):
 
 
 class MessageBusLockTimeout(RuntimeError):
-    """消息总线文件锁超时（fail-closed：操作被拒绝，不无锁执行）。"""
+    """抢锁超时的专用异常（fail-closed：宁可拒绝操作，也不无锁硬干）。"""
 
 
 def _with_lock(lock_path: Path, fn):
-    """获取 lock_path 的独占锁后执行 fn。
+    """锁住某件事再干：抢到 lock_path 的独占锁后执行 fn，最后还锁。
 
-    R30c-C2：锁超时 fail-closed（抛 MessageBusLockTimeout）——此前 fail-open
-    无锁执行，read_inbox 的"读全量 + 清空"在无锁并发下会丢消息
-    （A 读到、B 也读到，A 清空后 B 再清空会把 C 新写入的消息一起清掉）。
-    对邮箱语义，丢消息比操作失败伤害更大；单进程死锁的防护由调用方
-    捕获本异常重试/降级（调用点均已有 try/except fail-open 包装）。
+    参数：
+        lock_path：锁文件路径
+        fn：要在锁内执行的操作（无参函数），返回值原样透传
+
+    历史踩坑（R30c-C2 修复）：锁超时以前是 fail-open（照干不误），
+    结果 read_inbox 的「读全量 + 清空」在无锁并发下会丢信——
+    A 和 B 同时读到同一批信，A 先清空，B 再清空时会把 C 刚写进来的
+    新信一起清掉。对邮箱来说，丢信比「这次操作失败」伤害大得多，
+    所以改成 fail-closed：超时抛 MessageBusLockTimeout。
+    死锁兜底交给调用方：捕获这个异常重试或降级
+    （各个调用点外面都已包了 try/except）。
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as lf:
@@ -103,9 +121,14 @@ def _with_lock(lock_path: Path, fn):
 # ---------------------------------------------------------------------------
 
 class MessageBus:
-    """JSONL 消息总线。"""
+    """基于 JSONL 文件的消息总线（本目录各成员的公共邮局）。"""
 
     def __init__(self, *, team_dir: Path):
+        """建好收件箱目录和锁目录。
+
+        参数：team_dir：团队工作目录，收件箱在 team_dir/inbox/，
+        锁文件在 team_dir/locks/。
+        """
         self._team_dir = Path(team_dir)
         self._inbox_dir = self._team_dir / "inbox"
         self._locks_dir = self._team_dir / "locks"
@@ -127,15 +150,25 @@ class MessageBus:
         content: str,
         request_id: Optional[str] = None,
     ) -> str:
-        """追加一条消息到 `to` 的 inbox。返回 message_id。
+        """发一封信：追加到收件人的收件箱文件末尾。
 
-        P1-8 类型校验：type_='response' 时 request_id 必填（防孤儿 response）。
+        参数：
+            from_：发件人名字（from 是关键字所以带下划线）
+            to：收件人名字
+            type_：消息类型，必须是 VALID_TYPES 之一
+            content：正文
+            request_id：关联的请求 ID；type_='response' 时必填
+
+        返回：新生成的 message_id。
+
+        历史踩坑（P1-8 修复）：response 不带 request_id 会变成「孤儿回音」
+        ——没人知道它在回复谁，所以强制校验。
         """
         if type_ not in VALID_TYPES:
             raise ValueError(
                 f"type_ 必须是 {VALID_TYPES} 之一，实际: {type_}"
             )
-        # P1-8: response 必须配对 request_id
+        # 历史踩坑（P1-8）：response 必须能对上号的 request_id，否则就是孤儿回音
         if type_ == "response" and not request_id:
             raise ValueError(
                 "type='response' 的消息必须传 request_id（防孤儿 response）"
@@ -159,13 +192,18 @@ class MessageBus:
         _with_lock(self._lock_path(to), _append)
         return msg_id
 
-    # ---- P1-8 NEW: request-response 协议化便捷方法 ----
+    # ---- 一问一答的便捷方法（P1-8 引入）----
     def send_request(
         self, *, from_: str, to: str, content: str,
     ) -> str:
-        """发 type='request' 消息，自动生成 request_id（req_ 前缀）。
+        """发一个「请求」：自动生成 req_ 前缀的回执编号。
 
-        返回 request_id，调用方拿它等响应。
+        参数：
+            from_：发件人名字
+            to：收件人名字
+            content：请求正文
+
+        返回：request_id。调用方存着它，之后凭编号对回音。
         """
         request_id = f"req_{uuid.uuid4().hex[:10]}"
         self.send(
@@ -177,9 +215,15 @@ class MessageBus:
     def send_response(
         self, *, from_: str, to: str, request_id: str, content: str,
     ) -> str:
-        """用 request_id 回复（type='response'）。
+        """回信：凭 request_id 对上原请求（type='response'）。
 
-        request_id 必填（None 时 raise ValueError）。
+        参数：
+            from_：回信人名字
+            to：收回信的人（通常是原请求发起者）
+            request_id：要回复的那个请求的编号；不传直接 ValueError
+            content：回信正文
+
+        返回：消息 id。
         """
         if not request_id:
             raise ValueError(
@@ -194,10 +238,16 @@ class MessageBus:
     def find_response(
         messages: List[TeamMessage], request_id: str,
     ) -> Optional[TeamMessage]:
-        """从消息列表里找匹配 request_id 的 response。找不到返回 None。
+        """从一堆消息里挑出对得上编号的回音。
 
-        典型用法：调用方 send_request 后周期性 read_inbox，
-        用 find_response 找出对应的 response，没找到就继续 poll。
+        参数：
+            messages：消息列表（通常是刚 read_inbox 拿到的）
+            request_id：要找的那个请求的编号
+
+        返回：匹配的 response 消息；还没到就返回 None。
+
+        典型用法：发完 send_request 后隔几秒读一次收件箱，用这个方法
+        找回音，没找到就继续等下一轮。
         """
         for m in messages:
             if (
@@ -208,7 +258,12 @@ class MessageBus:
         return None
 
     def read_inbox(self, name: str) -> List[TeamMessage]:
-        """消费式读取：返回所有消息，清空文件。"""
+        """取信（一次全取走）：返回箱里所有消息，然后把箱子清空。
+
+        参数：name：收件人名字。
+        返回：TeamMessage 列表；箱子不存在就是空的。
+        单行解析失败只记 warning 跳过那一行，不影响其他信。
+        """
         def _consume():
             inbox = self._inbox_path(name)
             if not inbox.exists():
@@ -231,12 +286,15 @@ class MessageBus:
                     ))
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning("inbox 消息解析失败 (%s): %s", line[:100], e)
-            # 清空（保留文件）
+            # 取完清空内容但保留文件本身（省得下次还要判断建文件）
             inbox.write_text("", encoding="utf-8")
             return msgs
 
         return _with_lock(self._lock_path(name), _consume)
 
     def list_inboxes(self) -> List[str]:
-        """列出所有 inbox 文件名（去 .jsonl 后缀）。"""
+        """列出现在有哪些收件箱。
+
+        返回：名字列表（文件名去掉 .jsonl 后缀，即成员名）。无参数。
+        """
         return [p.stem for p in self._inbox_dir.glob("*.jsonl")]

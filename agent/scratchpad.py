@@ -1,16 +1,19 @@
-"""会话级 scratchpad 涂鸦区（R24 #36，对齐 CC getScratchpadDir）。
+"""会话级 scratchpad（涂鸦区）——多个 worker 子代理共享的临时草稿区（R24 #36，对齐 CC 的 getScratchpadDir）。
 
-coordinator/orchestrator 场景的跨 worker 共享草稿区：
-- 路径 ``<omnimate_home>/.scratchpad/<session_id>/``（会话隔离）
-- **免权限读写**：目录加进 safe_path 的 extra_allowed_roots（运行时白名单，
-  不写 settings.json——会话级生命周期，进程重启自动失效）
-- 结构自由（CC 语义："structure files however fits the work"——
-  durable cross-worker knowledge）
-- ensure 时创建目录；cleanup 清理旧会话目录（retention 天数，默认 7）
+干什么用：coordinator（协调者）/orchestrator（编排者）带着一群 worker
+子代理干活时，需要一个大家都能写的"共享白板"——中间结论、共享状态、
+还没合并的草稿都先搁这儿。文件结构随便组织（CC 的原话："怎么顺手怎么摆"，
+反正是跨 worker 的持久知识）。
 
-与 CC 差异：CC 是 0o700 权限隔离 + tengu gate 门控；OmniMate 简化为
-目录白名单 + retention 清理（单人本地产品无多用户隔离需求）。
-fail-open：白名单注入失败只 log（scratchpad 仍可写，只是要过审批）。
+- 路径：``<omnimate_home>/.scratchpad/<session_id>/``——每个会话一格，互不串门
+- **免权限读写**：把目录加进 safe_path（路径安全检查）的 extra_allowed_roots
+  （运行时白名单）。注意只加在内存里、不写 settings.json——这白名单只活
+  到进程退出，重启自动失效，正好匹配"会话级"的生命周期
+- ensure 时建目录；cleanup 按保留天数清理旧会话的目录（默认 7 天）
+
+和 CC 的差异：CC 用 0o700 权限隔离 + 内部门控；OmniMate 简化成目录白名单 +
+定期清理（单机单人产品，没有多用户隔离需求）。fail-open：白名单注入失败
+只记 log，涂鸦区照常能写——只是写文件要多过一次审批。
 """
 import logging
 import time
@@ -19,11 +22,18 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# 涂鸦区目录的保留天数：超过 7 天没动过的会话目录会被清理
 DEFAULT_RETENTION_DAYS = 7
 
 
 def scratchpad_dir(session_id: str, omnimate_home=None) -> Path:
-    """会话 scratchpad 目录路径（不创建）。"""
+    """算出某个会话的涂鸦区目录路径（只算路径，不建目录）。
+
+    参数：
+        session_id：会话 id（里面的怪字符会被剔掉，防止拼出危险路径）。
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+    返回：该会话涂鸦区的 Path。
+    """
     if omnimate_home is None:
         try:
             from constants import get_omnimate_home
@@ -35,11 +45,17 @@ def scratchpad_dir(session_id: str, omnimate_home=None) -> Path:
 
 
 def ensure_scratchpad(session_id: str, omnimate_home=None) -> Optional[Path]:
-    """创建会话 scratchpad 目录并注入免权限白名单。返回目录路径。
+    """把会话涂鸦区建出来，并加进免权限白名单。返回目录路径。
 
-    白名单注入：add_extra_allowed_root（运行时，进程级——与 /add-dir 同
-    通道但持久化由调用方决定；这里只加运行时，不写 settings.json）。
-    fail-open：白名单失败仍返回目录（写文件会走审批）。
+    白名单注入说明：走 add_extra_allowed_root，只加在运行时内存里（跟
+    /add-dir 是同一个通道，但这里不持久化——会话级的东西不该写进全局
+    settings.json）。fail-open：白名单没加成也照常返回目录，只是往里写
+    文件时会走审批流程。
+
+    参数：
+        session_id：会话 id。
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+    返回：涂鸦区目录 Path；连目录都建不出来返回 None（fail-open）。
     """
     try:
         d = scratchpad_dir(session_id, omnimate_home)
@@ -56,7 +72,13 @@ def ensure_scratchpad(session_id: str, omnimate_home=None) -> Optional[Path]:
 
 
 def scratchpad_context_block(session_id: str, omnimate_home=None) -> str:
-    """注入 orchestrator/coordinator 用户上下文的 scratchpad 说明（对齐 CC 文案）。"""
+    """生成一段塞进协调者上下文的"涂鸦区使用说明"（文案对齐 CC）。
+
+    参数：
+        session_id：会话 id。
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+    返回：说明文字（含目录路径），可直接拼在 user 消息后面。
+    """
     d = scratchpad_dir(session_id, omnimate_home)
     return (
         f"\n\nScratchpad 目录：{d}\n"
@@ -66,11 +88,16 @@ def scratchpad_context_block(session_id: str, omnimate_home=None) -> str:
 
 
 def cleanup_old_scratchpads(omnimate_home=None, retention_days: int = DEFAULT_RETENTION_DAYS) -> int:
-    """清理超过 retention_days 未修改的旧会话 scratchpad 目录。返回清理数。
+    """清理"超过 retention_days 天没动过"的旧会话涂鸦区目录。返回清了几个。
 
-    ⚠️ 完全可逆铁律的例外说明：scratchpad 是**临时涂鸦区**（非知识库），
-    会话隔离 + 按 mtime 清理是 CC 同款语义；真正的知识沉淀走记忆/技能系统。
-    fail-open。
+    ⚠️ 这是"完全可逆"铁律的一个明写例外：项目里的自动管理原则是永不真删，
+    但涂鸦区是**临时草稿**不是知识库——按最后修改时间清理是 CC 同款语义；
+    真正要长期保留的知识请走记忆/技能系统，别指望这里。
+
+    参数：
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+        retention_days：保留天数（默认 7 天）。
+    返回：删掉的目录数；任何异常都吞掉返回 0（fail-open）。
     """
     try:
         if omnimate_home is None:

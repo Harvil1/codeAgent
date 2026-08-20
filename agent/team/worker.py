@@ -1,5 +1,9 @@
 # agent/team/worker.py
-"""子 agent CLI 入口。
+"""工人进程的启动入口：被当命令行程序拉起来干活的子 agent。
+
+谁拉它：coordinator.py 的 spawn 用 subprocess 启动本模块。
+它干什么：组装一个独立的 AIAgent 实例（带团队总线和协调员），
+把命令行传来的任务跑完，把结果发回给主 agent，然后退出。
 
 用法：
     python -m agent.team.worker --name X --task "..." \
@@ -37,7 +41,7 @@ def main():
     team_dir = Path(args.team_dir)
     agent_home = Path(args.agent_home)
 
-    # 延迟导入避免循环
+    # 导入放函数内（延迟导入）：这些模块反过来会引用 worker 链上的东西，顶部导入会循环
     from config import load_config
     from agent.memory_store import MemoryStore
     from agent.team.bus import MessageBus
@@ -51,7 +55,7 @@ def main():
         team_dir=team_dir, omnimate_home=agent_home, config=config,
     )
 
-    # 构造 AIAgent
+    # 从配置抠出模型三件套，构造 AIAgent
     api_base = config.get("model", {}).get("base_url") or ""
     api_key = config.get("model", {}).get("api_key") or ""
     model_name = config.get("model", {}).get("name", "deepseek-chat")
@@ -66,21 +70,28 @@ def main():
     )
 
     if args.autonomous:
-        # === P4b-T3: autonomous 模式 ===
-        # P4b final-fix I2: try/except 包裹 lifecycle.run，避免静默崩溃
+        # === autonomous 模式（P4b-T3 引入） ===
+        # 历史踩坑（P4b final-fix I2）：lifecycle.run 必须 try/except 包住，
+        # 否则异常会让进程静默崩掉，主 agent 完全不知情
         from agent.team.lifecycle import AutonomousLifecycle
         team_cfg = config.get("team", {})
 
         def _run_work(task):
-            """每个 WORK 周期前清空 history（spec §9.3：WORK 周期独立）。
+            """干活回调：每轮 WORK 前清空对话历史，再跑一遍任务。
 
-            Task E2: run_conversation 已改 async（T_D4）。_run_work 是
-            AutonomousLifecycle 的 work_fn 回调，签名要求 sync Callable[[str], str]
-            （lifecycle.run 是同步状态机），所以内部用 asyncio.run 驱动一次
-            async run_conversation。每个周期独立 event loop，无嵌套风险。
+            参数：task：本轮任务文本。
+            返回：run_conversation 的最终回复文本。
+
+            为什么清空历史：规范 §9.3 要求每个 WORK 周期独立——
+            上一轮的对话不该渗进这一轮。
+
+            历史踩坑（Task E2）：run_conversation 已经改成 async 了，但
+            lifecycle 的 work_fn 签名要求同步函数（lifecycle.run 是同步
+            状态机），所以这里用 asyncio.run 桥接。每个周期各起一个
+            独立 event loop（跑完即弃），不存在嵌套 loop 的风险。
             """
-            agent.conversation_history = []  # 清空，避免跨周期累积
-            agent._idle_requested = False    # 已在 run_conversation 头部重置，但防御性
+            agent.conversation_history = []  # 周期独立：跨周期累积会污染上下文
+            agent._idle_requested = False    # run_conversation 开头本会重置，这里是双保险
             return asyncio.run(agent.run_conversation(task))
 
         lifecycle = AutonomousLifecycle(
@@ -109,11 +120,11 @@ def main():
             coordinator.update_status(args.name, "failed")
             sys.exit(1)
     else:
-        # 一次性模式（Phase 4a）
+        # 一次性模式（Phase 4a 最早形态）：跑完一个任务就退，不进入轮询等活
         try:
-            # Task E2: run_conversation 已改 async（T_D4）。
-            # worker 是 CLI 子进程入口（coordinator.spawn 启动），main 保持同步签名，
-            # 在调用点用 asyncio.run 驱动 async run_conversation（对齐 E1 模式）。
+            # 历史踩坑（Task E2）：run_conversation 已改 async。worker 是 CLI
+            # 子进程入口（由 coordinator.spawn 启动），main 必须保持同步签名，
+            # 所以在调用点用 asyncio.run 驱动（对齐 E1 模式）。
             response = asyncio.run(agent.run_conversation(args.task))
             bus.send(
                 from_=args.name, to="main",

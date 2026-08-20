@@ -1,15 +1,17 @@
-"""工具执行进度摘要（P1-10）。
+"""工具执行进度摘要（P1-10）——长时间任务跑着的时候，定时告诉用户"我还在干活、在干什么"。
 
-长工具调用（subagent / 后台任务）执行期间，周期性调用 aux_llm 生成进度摘要，
-通过 stream_callback 推送给前端，让用户知道"还在做什么"。
+场景：subagent（子代理）或后台任务一跑就是几分钟，界面上毫无动静用户
+会以为卡死了。这个模块在背后开一个小线程，每隔一阵推一条进度消息给
+前端，就像外卖 App 上"骑手已取餐"那种提示。
 
-设计：
-- daemon thread 每 interval 秒触发一次
-- 有 aux_llm_router：调 LLM 生成基于 goal 的简短进度提示（用便宜模型）
-- 无 aux_llm_router：发心跳 "任务仍在执行..."
-- interval=0 时禁用（测试用）
+怎么干活：
+- daemon thread（守护线程——主程序退出时它跟着死，不挡路）每 interval 秒触发一次
+- 配了 aux_llm_router（辅助小模型路由，专门干杂活省钱）：让便宜模型根据
+  任务目标生成一句简短的进度提示
+- 没配：就发固定心跳文案"任务仍在执行..."
+- interval=0 时整个功能关闭（测试用）
 
-用法：
+用法（模块用法就这一种，直接套）：
     with ProgressReporter(
         goal="执行测试",
         stream_callback=cb,
@@ -24,14 +26,15 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_PROGRESS_INTERVAL = 30.0  # 秒
+DEFAULT_PROGRESS_INTERVAL = 30.0  # 默认多久报一次进度（秒）
 DEFAULT_HEARTBEAT_MESSAGE = "任务仍在执行..."
 
 
 class ProgressReporter:
-    """周期性发送进度通知的辅助类（P1-10）。
+    """周期性发进度通知的小助手（P1-10）。
 
-    用法见模块 docstring。
+    用法：像文件一样 with 打开（详见本模块开头的 docstring，那里有完整示例）：
+    进 with 时自动 start 起后台线程，出 with 时自动 stop。
     """
 
     def __init__(
@@ -43,6 +46,16 @@ class ProgressReporter:
         interval: float = DEFAULT_PROGRESS_INTERVAL,
         aux_model: Optional[str] = None,
     ):
+        """记下配置，先不起线程（start/with 进去才起）。
+
+        参数：
+            goal：这次在干什么（任务目标，会出现在进度消息里）。
+            stream_callback：推送函数，收事件 dict；传 None 则整个功能不启动。
+            aux_llm_router：辅助小模型路由，用来生成更聪明的进度文案；
+                传 None 就只发固定心跳。
+            interval：多少秒报一次（默认 30；<=0 关闭功能）。
+            aux_model：指定辅助模型名；None 用路由默认的。
+        """
         self.goal = goal
         self.stream_callback = stream_callback
         self.aux_llm_router = aux_llm_router
@@ -53,14 +66,19 @@ class ProgressReporter:
         self._tick_count = 0
 
     def __enter__(self):
+        """进 with 块：自动启动进度线程。"""
         self.start()
         return self
 
     def __exit__(self, *args):
+        """出 with 块：自动停线程。"""
         self.stop()
 
     def start(self) -> None:
-        """启动 daemon thread。幂等。interval<=0 或 stream_callback=None 时 no-op。"""
+        """启动后台进度线程（守护线程）。调多次也无害。
+
+        interval<=0 或没配 stream_callback 时什么都不做（等于关闭功能）。
+        """
         if self.interval <= 0 or self.stream_callback is None:
             return
         self._stop_event.clear()
@@ -70,16 +88,17 @@ class ProgressReporter:
         self._thread.start()
 
     def stop(self) -> None:
-        """停止 thread。幂等。"""
+        """停掉进度线程（置停止标记 + 最多等 1 秒收尾）。调多次也无害。"""
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
 
     def tick_once(self) -> dict:
-        """同步触发一次进度事件（测试用，不走 thread）。
+        """立刻同步触发一次进度事件——不走线程，测试专用。
 
-        返回推送的事件 dict。
+        参数：无。
+        返回：本次推送的事件 dict（含 type/goal/tick/耗时/消息文案）。
         """
         self._tick_count += 1
         msg = self.generate_message()
@@ -98,7 +117,7 @@ class ProgressReporter:
         return event
 
     def _run(self) -> None:
-        """daemon thread 主循环：每 interval 秒 tick 一次。"""
+        """进度线程的主循环：每 interval 秒报一次，收到停止标记就退出。"""
         while not self._stop_event.wait(self.interval):
             try:
                 self.tick_once()
@@ -106,9 +125,13 @@ class ProgressReporter:
                 logger.debug("progress reporter tick 异常: %s", e)
 
     def generate_message(self) -> str:
-        """生成进度消息。有 aux_llm 时调 LLM，否则发心跳。
+        """生成一条进度文案：有小模型就让它现写一句，否则发固定心跳。
 
-        fail-open：LLM 失败时降级为心跳，绝不抛异常。
+        fail-open：调小模型失败就降级成心跳文案，这个函数绝不抛异常
+        ——进度提示是锦上添花，不能反过来把正事搅黄。
+
+        参数：无。
+        返回：进度文案字符串（小模型写的截到 80 字符）。
         """
         if self.aux_llm_router is None:
             return DEFAULT_HEARTBEAT_MESSAGE
@@ -118,8 +141,9 @@ class ProgressReporter:
                 f"已经过了约 {self._tick_count * self.interval:.0f} 秒。"
                 f"用 10 个字以内简短描述一个等待中的进度提示（不要复述任务）："
             )
-            # Task D4 fix: aux_llm_router.chat_completions 已改 async。
-            # 本函数在 daemon thread 里跑（无事件循环），用 asyncio.run 驱动。
+            # 历史踩坑（Task D4 修复）：aux_llm_router.chat_completions 已经改成
+            # 异步函数了；而本函数跑在守护线程里（线程里没有事件循环），漏了
+            # 用 asyncio.run 驱动会直接失效。
             import asyncio
             resp = asyncio.run(self.aux_llm_router.chat_completions(
                 [{"role": "user", "content": prompt}],

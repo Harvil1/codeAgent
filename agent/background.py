@@ -1,15 +1,24 @@
-"""后台任务管理器：长命令异步执行 + 完成时通知。
+"""后台任务管理器：让跑得久的命令在后台执行，不卡住对话，跑完再通知。
 
-设计目标：
-- subprocess.Popen 跑命令（不共享 GIL）
-- 每任务一个 daemon thread 读 stdout 并 wait
-- 完成时 push 到 _notifications deque（lock 保护）
-- 主循环每轮 drain_notifications 清空
-- 默认非 detach（agent 退出清理）；detach=True 用 start_new_session/CREATE_NEW_PROCESS_GROUP
-- 并发上限默认 5
-- P1-3: stall_timeout > 0 时启用停滞看门狗（45 秒无 stdout 增长 → 通知 LLM）
+打个比方：你让师傅装软件（要 10 分钟），不用站在旁边干等——先去干别的，
+装完了师傅喊你一声。这个文件就是那个"安排后台干活 + 干完喊人"的管家。
 
-跨平台：subprocess 必须 text=True, encoding="utf-8"（OMNIMATE.md 强制）。
+在项目里的位置：由 CLI 的 RuntimeContext 持有，工具层（后台任务工具）
+调用它启动/查询/停止任务，主循环每轮来把完成通知取走。
+
+工作方式：
+- 用 subprocess.Popen 跑命令（独立进程，不受 Python 全局锁拖累）
+- 每个任务配一个后台守护线程，负责收输出、等进程结束
+- 任务结束时把通知塞进队列（有锁保护，防打架）
+- 主循环每轮调 drain_notifications 把通知一次取走
+- 默认跟着 agent 同生共死（agent 退出就清理）；detach=True 则让任务
+  独立成新进程组，agent 退了它也继续跑
+- 同时最多跑 5 个后台任务（防失控）
+- 停滞看门狗（P1-3）：连续 45 秒没有任何新输出 → 发通知提醒 LLM
+  "这任务可能卡住了"（比如命令在等交互确认）
+
+跨平台注意：subprocess 必须开 text=True, encoding="utf-8"
+（Windows 默认编码是 cp1252，不开会中文乱码——项目铁律）。
 """
 import copy
 import logging
@@ -27,18 +36,36 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# P1-3: 默认停滞超时（秒）。连续 stall_timeout 内 stdout 无新增字节判定为"可能卡交互"。
-# 0 表示禁用（向后兼容）；BackgroundManager 构造时显式传 45.0 才启用。
+# P1-3 定的默认停滞超时（秒）：连续这么久标准输出没有新增一个字节，
+# 就判定为"可能卡在交互提示"。0 表示禁用这功能（兼容老行为）；
+# BackgroundManager 构造时显式传 45.0 才真正启用。
 DEFAULT_STALL_TIMEOUT = 45.0
 
 
 @dataclass
 class BackgroundTask:
-    """后台任务状态。daemon thread 写，工具 handler 读，都用 manager.lock。"""
+    """一个后台任务的全部状态（跑什么命令、跑到哪步、输出了什么）。
+
+    读写规矩：后台守护线程写它，工具层读它，两边都得先拿 manager 的锁。
+    字段大白话：
+    - task_id：任务唯一编号（形如 bg_ab12cd34）
+    - command：要跑的命令（列表形式）
+    - cwd：在哪个目录跑；None=用当前目录
+    - status：任务状态——running(跑着)/completed(正常结束)/failed(失败)/stopped(被手动停)
+    - pid：进程号
+    - started_at / ended_at：开始/结束时间
+    - detach：True=agent 退出后任务继续独立跑
+    - exit_code：进程退出码（0=成功）
+    - stdout / stderr：捕捉到的标准输出/错误输出（会截断到上限）
+    - _proc：进程对象本体（repr 里藏起来，防打印一大坨）
+    - monitor：R22 #32 引入的"监视模式"——跑 tail -f/watch 这类持续观察命令时
+      开这个：不算卡住（安静是常态），输出同步落盘
+    - output_file：监视模式的输出落盘文件，随时 read_file 看新增内容
+    """
     task_id: str
     command: list
     cwd: Optional[Path]
-    status: str  # "running" | "completed" | "failed" | "stopped"
+    status: str  # 取值：running(跑着) / completed(正常结束) / failed(失败) / stopped(被手动停)
     pid: Optional[int]
     started_at: datetime
     detach: bool = False
@@ -47,13 +74,13 @@ class BackgroundTask:
     stdout: str = ""
     stderr: str = ""
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
-    # R22 #32：monitor 模式（流式监视——tail -f/watch/轮询）
-    monitor: bool = False                  # 豁免 stall 通知（安静是常态）
-    output_file: Optional[str] = None      # stdout tee 落盘路径（read_file 随时查增量）
+    # R22 #32：监视模式（流式观察——tail -f/watch/轮询类命令）
+    monitor: bool = False                  # 开了就不发"卡住"提醒（这类命令安静是常态）
+    output_file: Optional[str] = None      # 输出同步落盘的文件路径（read_file 随时查新增）
 
 
 class BackgroundManager:
-    """单进程内的后台任务管理器。实例由 RuntimeContext 持有。"""
+    """后台任务管理器本体（管启动、盯梢、通知、停止）。实例由 RuntimeContext 持有。"""
 
     def __init__(
         self,
@@ -62,8 +89,19 @@ class BackgroundManager:
         notification_stdout_cap: int = 500,
         result_stdout_cap: int = 5000,
         default_timeout: float = 600.0,
-        stall_timeout: float = 45.0,  # X12 fix: 默认 45s 看门狗开（之前 0 等于禁用）
+        stall_timeout: float = 45.0,  # X12 修复：默认 45 秒看门狗开启（以前默认 0 等于关着）
     ):
+        """建管理器。
+
+        参数：
+        - max_concurrent：最多同时跑几个后台任务，默认 5
+        - notification_stdout_cap：发给 LLM 的通知里输出截到多长，默认 500 字符
+        - result_stdout_cap：查询任务结果时的输出上限，默认 5000 字符
+        - default_timeout：任务默认最长跑多久（秒），默认 600=10 分钟
+        - stall_timeout：多久没新输出算"可能卡住"（秒）；0=关闭看门狗
+
+        返回：无（构造函数）。
+        """
         self._tasks: dict = {}
         self._lock = threading.Lock()
         self._notifications: deque = deque()
@@ -71,8 +109,8 @@ class BackgroundManager:
         self._notification_stdout_cap = notification_stdout_cap
         self._result_stdout_cap = result_stdout_cap
         self._default_timeout = default_timeout
-        # P1-3: 停滞看门狗超时。0=禁用（向后兼容，走 communicate 单次阻塞路径）
-        # >0 启用：用 reader 线程 + 主线程轮询，stall_timeout 秒无 stdout 新增则 push 通知。
+        # P1-3：停滞看门狗超时。0=关闭（走老的单次阻塞等待，兼容旧行为）；
+        # >0 开启：用专门的读输出线程 + 主线程定期巡查，超过这个秒数没新输出就发提醒。
         self._stall_timeout = stall_timeout
 
     # ---- 启动 ----
@@ -86,14 +124,25 @@ class BackgroundManager:
         monitor: bool = False,
         monitor_dir=None,
     ) -> str:
-        """启动后台任务。返回 task_id。
+        """启动一个后台任务，立刻返回任务编号（不等命令跑完）。
 
-        R22 #32：monitor=True 走流式监视语义（tail -f/watch/轮询命令）——
-        stdout 增量 tee 到 <monitor_dir>/<task_id>.log（read_file 随时查）、
-        豁免 stall 看门狗通知（安静是常态）、timeout 默认 24h（长跑）。
-        进程退出时照常 push 通知（对齐 CC Monitor 的退出通知）。
+        monitor=True 走"监视模式"（R22 #32，跑 tail -f/watch 这类持续观察命令）：
+        - 新输出实时抄送到 <monitor_dir>/<task_id>.log，随时 read_file 看增量
+        - 不发"卡住"提醒（这类命令安静是常态）
+        - 默认超时放宽到 24 小时（本来就是长跑的）
+        - 进程退出时照常发通知（对齐 CC Monitor 的行为）
 
-        Raises RuntimeError if at max_concurrent.
+        参数：
+        - command：要跑的命令（列表形式）
+        - cwd：在哪个目录跑；None=用当前目录
+        - detach：True=agent 退出后任务继续独立跑
+        - timeout：最长跑多久（秒）；None=用默认值
+        - monitor：是否监视模式
+        - monitor_dir：监视输出文件放哪个目录；None=用默认目录
+
+        返回：task_id（任务编号）。
+        后台任务已满员时抛 RuntimeError；命令本身不存在不抛——
+        会建成一个 failed 任务并通过通知报告。
         """
         with self._lock:
             running_count = sum(
@@ -123,7 +172,7 @@ class BackgroundManager:
             try:
                 proc = subprocess.Popen(command, **popen_kwargs)
             except (FileNotFoundError, OSError) as e:
-                # 命令不存在等：直接创建 failed 任务
+                # 命令不存在之类的启动失败：不抛异常，直接建成一个 failed 任务
                 task = BackgroundTask(
                     task_id=task_id,
                     command=command,
@@ -151,7 +200,7 @@ class BackgroundManager:
                 _proc=proc,
                 monitor=monitor,
             )
-            # R22 #32：monitor 输出文件（stdout tee，read_file 随时查增量）
+            # R22 #32：监视模式的输出文件（输出实时抄送到这，read_file 随时查增量）
             if monitor:
                 try:
                     m_dir = Path(monitor_dir) if monitor_dir else (
@@ -160,13 +209,13 @@ class BackgroundManager:
                     m_dir.mkdir(parents=True, exist_ok=True)
                     task.output_file = str(m_dir / f"{task_id}.log")
                 except Exception:
-                    task.output_file = None  # fail-open：落盘失败仍可跑
+                    task.output_file = None  # 求稳：落盘失败也不影响任务照跑
             self._tasks[task_id] = task
 
-        # 起 daemon thread 监控
+        # 起一个守护线程专门盯这个任务
         effective_timeout = timeout if timeout is not None else self._default_timeout
         if monitor:
-            # R22 #32：监视器长跑（默认 24h）+ 强制 stall 轮询路径（增量 tee 需要）
+            # R22 #32：监视器默认长跑 24 小时 + 强制走轮询路径（实时抄送输出需要它）
             if timeout is None:
                 effective_timeout = 86400.0
         t = threading.Thread(
@@ -184,15 +233,24 @@ class BackgroundManager:
         timeout: float,
         stall_timeout: float = 0.0,
     ):
-        """daemon thread：读 stdout/stderr、wait、push 通知。
+        """守护线程的活儿：收输出、等进程结束、发通知。
 
-        stall_timeout > 0 时启用停滞看门狗（P1-3）：
-          - 用 reader 子线程读 stdout/stderr 到 queue
-          - 主线程轮询：proc.poll() / stall 检测 / 总 timeout
-          - stall_timeout 秒无 stdout 新增 → push 停滞通知（不 kill，让 LLM 决定）
-        stall_timeout == 0 时走旧 communicate 单次阻塞路径（向后兼容）。
-        monitor 任务（task.monitor=True）走 stall 路径但**跳过 stall 通知**
-        （流式监视安静是常态）并 tee stdout 到 output_file。
+        看门狗开启时（stall_timeout > 0，P1-3 引入）：
+          - 用两个专门的读输出子线程把 stdout/stderr 源源不断搬进队列
+          - 本线程定期巡查三件事：进程结束没 / 卡住没 / 总超时到没
+          - 超过 stall_timeout 秒没有新输出 → 发"可能卡住"提醒
+            （只提醒不杀进程——怎么办交给 LLM 决定）
+        stall_timeout == 0 时走老的单次阻塞等待路径（兼容旧行为）。
+        监视模式任务（task.monitor=True）也走轮询路径（要实时抄送输出），
+        但**跳过卡住提醒**（持续观察类命令安静是常态）。
+
+        参数：
+        - task_id：任务编号
+        - proc：要盯的进程对象
+        - timeout：总超时（秒）
+        - stall_timeout：卡住判定阈值（秒）；0=不启用
+
+        返回：无（结果通过通知队列汇报）。
         """
         task = self._tasks.get(task_id)
         is_monitor = bool(task and task.monitor)
@@ -206,13 +264,22 @@ class BackgroundManager:
     def _watch_classic(
         self, task_id: str, proc: subprocess.Popen, timeout: float,
     ):
-        """旧路径：communicate(timeout) 阻塞等待（向后兼容）。"""
+        """老路径：一次性阻塞等到命令结束或超时（看门狗关闭时用，兼容旧行为）。
+
+        参数：
+        - task_id：任务编号
+        - proc：要盯的进程对象
+        - timeout：总超时（秒）
+
+        返回：无（结果通过通知队列汇报）。
+        """
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             exit_code = proc.returncode
             with self._lock:
                 task = self._tasks.get(task_id)
-                # I-3 修复：如果 stop() 已改状态（非 running），不覆盖，不重复 push 通知
+                # 历史踩坑（I-3 修复）：stop() 抢先把状态改了（不再是 running）时，
+                # 这里绝不能再覆盖状态、再发一条重复通知
                 if task is None or task.status != "running":
                     return
                 task.stdout = (stdout or "")[: self._result_stdout_cap]
@@ -256,16 +323,24 @@ class BackgroundManager:
         timeout: float,
         stall_timeout: float,
     ):
-        """P1-3: reader 线程 + 主线程轮询，支持停滞看门狗。
+        """带看门狗的盯梢方式（P1-3）：读输出线程 + 本线程定期巡查。
 
         流程：
-          1. 启动两个 reader daemon 线程读 stdout/stderr → queue
-          2. 主线程每 0.5 秒轮询：
-             - drain queue → append 到 parts
-             - 有新输出 → 重置 last_output_time
-             - proc.poll() not None → 进程结束，drain 剩余，push 最终通知
-             - 总 timeout 到 → kill + push failed
-             - stall_timeout 秒无新输出 → push 停滞通知（task 仍 running）
+          1. 起两个读输出线程，把 stdout/stderr 逐行搬进队列
+          2. 本线程每 0.5 秒醒一次，依次查：
+             - 把队列里攒的输出搬进缓存
+             - 有新输出 → "最近输出时间"重新计时
+             - 进程结束了吗（poll）→ 结束就收尾、发最终通知
+             - 总超时到了吗 → 到了就杀进程、标记失败
+             - 超过 stall_timeout 没新输出 → 发"可能卡住"提醒（任务保持 running）
+
+        参数：
+        - task_id：任务编号
+        - proc：要盯的进程对象
+        - timeout：总超时（秒）
+        - stall_timeout：卡住判定阈值（秒）
+
+        返回：无（结果通过通知队列汇报）。
         """
         stdout_q: queue.Queue = queue.Queue()
         stderr_q: queue.Queue = queue.Queue()
@@ -297,7 +372,7 @@ class BackgroundManager:
         stall_notified = False
         deadline = time.monotonic() + timeout
 
-        # R22 #32：monitor 语义——tee stdout 到文件 + 跳过 stall 通知
+        # R22 #32：监视模式的两件套——输出实时抄送到文件 + 跳过"卡住"提醒
         with self._lock:
             _task_ref = self._tasks.get(task_id)
             is_monitor = bool(_task_ref and _task_ref.monitor)
@@ -307,17 +382,17 @@ class BackgroundManager:
             try:
                 tee_f = open(output_file, "a", encoding="utf-8")
             except Exception:
-                tee_f = None  # fail-open：落盘失败不影响监视
+                tee_f = None  # 求稳：抄送文件打不开就不抄，监视照常
 
         try:
             while True:
-                # I-3: stop() 已介入则退出
+                # 历史踩坑（I-3 修复）：发现 stop() 已抢先改状态，立刻退出别再抢
                 with self._lock:
                     task = self._tasks.get(task_id)
                     if task is None or task.status != "running":
                         return
 
-                # drain queue（非阻塞）
+                # 把队列里攒的输出搬出来（队列空就立刻走人，不傻等）
                 got_new = False
                 try:
                     while True:
@@ -342,10 +417,10 @@ class BackgroundManager:
                     last_output_time = time.monotonic()
                     stall_notified = False
 
-                # 进程结束？
+                # 进程结束了吗？
                 rc = proc.poll()
                 if rc is not None:
-                    # 等 reader 线程读完剩余
+                    # 给读输出线程 1 秒时间把尾巴读完
                     t_out.join(timeout=1.0)
                     t_err.join(timeout=1.0)
                     try:
@@ -373,7 +448,7 @@ class BackgroundManager:
                     return
 
                 now = time.monotonic()
-                # 总 timeout 到？
+                # 总超时到了吗？
                 if now >= deadline:
                     proc.kill()
                     try:
@@ -392,7 +467,7 @@ class BackgroundManager:
                         self._push_notification_locked(task)
                     return
 
-                # 停滞检测（R22 #32：monitor 任务跳过——流式监视安静是常态）
+                # 卡住检测（R22 #32：监视模式任务跳过——持续观察安静是常态）
                 if (
                     not stall_notified
                     and not is_monitor
@@ -401,7 +476,7 @@ class BackgroundManager:
                     with self._lock:
                         task = self._tasks.get(task_id)
                         if task is not None and task.status == "running":
-                            # push 停滞通知（task 状态不变）
+                            # 发"可能卡住"提醒（任务状态保持 running 不动）
                             self._notifications.append({
                                 "task_id": task_id,
                                 "status": "running",
@@ -425,7 +500,7 @@ class BackgroundManager:
                         task_id, stall_timeout,
                     )
 
-                time.sleep(0.5)  # 轮询间隔
+                time.sleep(0.5)  # 巡查间隔半秒：够及时，也不至于空转太勤
         except Exception as e:
             logger.warning("bg task %s stall watcher 异常: %s", task_id, e)
             try:
@@ -442,7 +517,7 @@ class BackgroundManager:
                 task.stderr = str(e)[: self._result_stdout_cap]
                 self._push_notification_locked(task)
         finally:
-            # R22 #32：monitor tee 文件关闭（所有退出路径）
+            # R22 #32：抄送文件必须在所有退出路径都关掉（漏关会占着文件句柄）
             if tee_f is not None:
                 try:
                     tee_f.close()
@@ -450,7 +525,15 @@ class BackgroundManager:
                     pass
 
     def _push_notification_locked(self, task: BackgroundTask):
-        """必须在持有 self._lock 时调。push 一个通知到 deque。"""
+        """把一条任务结束通知塞进队列（内部方法）。
+
+        规矩：调用前必须已经拿着 self._lock（方法名 _locked 就是提醒这个）。
+
+        参数：
+        - task：刚结束的任务对象
+
+        返回：无。
+        """
         self._notifications.append({
             "task_id": task.task_id,
             "status": task.status,
@@ -463,31 +546,51 @@ class BackgroundManager:
 
     # ---- 查询 ----
     def status(self, task_id: str) -> Optional[BackgroundTask]:
-        """返回任务的浅拷贝（I-4 修复：防止调用方读到部分更新）。"""
+        """查一个任务现在的状态。
+
+        历史踩坑（I-4 修复）：返回的是拷贝而不是原件——不然调用方正读着，
+        守护线程改一半，读到自相矛盾的数据。
+
+        参数：
+        - task_id：任务编号
+
+        返回：任务状态对象的拷贝；编号不存在返回 None。
+        """
         with self._lock:
             task = self._tasks.get(task_id)
             return copy.copy(task) if task else None
 
     def result(self, task_id: str) -> Optional[BackgroundTask]:
-        # 同 status，工具层会用 task.stdout（cap result_stdout_cap）
+        """查任务结果——就是 status 换个名字（工具层习惯叫"取结果"，
+        拿到后读 task.stdout，输出已按结果上限截好）。"""
         return self.status(task_id)
 
     def list_tasks(self) -> list:
-        """返回所有任务的浅拷贝列表（I-4 修复）。"""
+        """列出所有任务（每个都是拷贝，理由同 status 的 I-4 修复）。
+
+        参数：无。返回：任务拷贝的列表。
+        """
         with self._lock:
             return [copy.copy(t) for t in self._tasks.values()]
 
     # ---- 控制 ----
     def stop(self, task_id: str) -> bool:
-        """终止任务。已完成的任务返回 True（幂等）。未知任务返回 False。"""
+        """停掉一个后台任务。
+
+        参数：
+        - task_id：任务编号
+
+        返回：True=停了（已经结束的任务也算停成功，重复调用无害）；
+        False=没有这个任务。
+        """
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 return False
             if task.status in ("completed", "failed", "stopped"):
                 return True
-            # I-3 修复：先标记 "stopping"，让 _watch() 的 communicate() 返回后
-            # 检测到 status != "running" 而跳过覆盖
+            # 历史踩坑（I-3 修复）：先把状态标成 "stopping"，这样盯梢线程
+            # 醒来一看状态不是 running 就知道别人抢先了，不会覆盖结果、重复发通知
             task.status = "stopping"
             proc = task._proc
         if proc is not None:
@@ -506,7 +609,7 @@ class BackgroundManager:
             task = self._tasks.get(task_id)
             if task is None:
                 return True
-            # 无论 _watch 是否介入，stop 都设最终状态 "stopped"
+            # 不管盯梢线程有没有抢先处理，最终状态都由 stop 定成 "stopped"
             task.status = "stopped"
             task.ended_at = datetime.now()
             task.exit_code = task.exit_code if task.exit_code is not None else -1
@@ -515,7 +618,10 @@ class BackgroundManager:
 
     # ---- 通知 ----
     def drain_notifications(self) -> list:
-        """主循环每轮调。返回并清空通知队列。"""
+        """主循环每轮调一次：把攒下的通知全部取走并清空队列。
+
+        参数：无。返回：通知列表（任务结束/卡住提醒等）。
+        """
         with self._lock:
             notifications = list(self._notifications)
             self._notifications.clear()
@@ -523,7 +629,11 @@ class BackgroundManager:
 
     # ---- 生命周期 ----
     def shutdown(self) -> None:
-        """agent 退出时调；终止所有非 detach 的 running 任务。"""
+        """agent 退出时调：把所有还在跑、且没开独立存活（detach）的任务停掉。
+
+        开了 detach 的不碰——用户明确要它脱离 agent 继续跑。
+        参数无，返回无。
+        """
         with self._lock:
             to_stop = [
                 (tid, t) for tid, t in self._tasks.items()

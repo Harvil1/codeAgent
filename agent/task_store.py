@@ -1,14 +1,18 @@
-"""持久化任务图（Task System）。
+"""持久化任务仓库（Task System）——把"待办清单"存成文件，关掉程序也不丢。
 
-和 TodoWrite 的区别：
-  - TodoWrite：内存清单，单会话，扁平，LLM 维护
-  - Task System：持久化 .tasks/{id}.json，跨会话，DAG 依赖
+在项目里的位置：被 tools/task_tools.py 包成工具给 LLM 用，底层只依赖文件系统。
 
-支持：
-  - 依赖追踪（blocked_by）
-  - 状态机（pending → in_progress → completed）
-  - 所有权认领（owner）
-  - 自动解锁检查（can_start）
+和 TodoWrite（内存待办清单）的区别，打个比方：
+  - TodoWrite 像一张便签纸：写在内存里，关会话就没了，也没有先后依赖
+  - Task System 像一个项目看板：每个任务是一个 JSON 文件存在 ~/.OmniMate/.tasks/ 下，
+    跨会话保留，任务之间还能声明"先做完 A 才能做 B"（DAG 依赖——就是一张
+    "谁挡着谁"的关系网，不能有循环）
+
+本文件提供的能力：
+  - 依赖追踪（blocked_by 字段：这个任务被哪些任务挡着）
+  - 状态机（pending 待办 → in_progress 做着 → completed 做完；另有 deleted/blocked/triage）
+  - 所有权认领（owner：谁在负责这个任务）
+  - 自动解锁检查（can_start：挡路的都做完了吗）
 """
 
 import json
@@ -23,16 +27,25 @@ logger = logging.getLogger(__name__)
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "deleted", "blocked", "triage"}
 
-# 06 NEW: 同 kind 阻塞达到阈值时升级到 triage（避免死循环重试）
+# 同一类阻塞反复出现达到这个次数，就把任务升级到 triage（分诊/等人工处理）状态，
+# 避免它被一遍遍捞出来重试、原地打转。
 TRIAGE_THRESHOLD = 3
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
 
 def _now_iso() -> str:
+    """返回当前时间的 UTC 标准格式字符串（用在任务的创建/更新时间戳上）。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _tasks_dir(omnimate_home=None) -> Path:
+    """拿到存放任务 JSON 文件的目录（~/.OmniMate/.tasks/），没有就顺手建一个。
+
+    参数：
+        omnimate_home：OmniMate 的数据根目录；不传就用默认的 ~/.OmniMate
+            （测试里常传一个临时目录来隔离）。
+    返回：目录的 Path 对象（已确保存在）。
+    """
     if omnimate_home:
         home = Path(omnimate_home)
     else:
@@ -47,21 +60,36 @@ def _tasks_dir(omnimate_home=None) -> Path:
 
 
 class TaskStore:
-    """持久化任务图。每个任务一个 JSON 文件。"""
+    """任务仓库本体：每个任务存成一个 JSON 文件，读写都走这里。
+
+    一般不直接 new，用文件底部的 get_task_store() 拿缓存实例。
+    """
 
     def __init__(self, omnimate_home=None):
+        """记下任务目录（建目录的活儿由 _tasks_dir 干）。
+
+        参数：
+            omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+        """
         self._dir = _tasks_dir(omnimate_home)
 
     def _task_file(self, task_id: str) -> Path:
+        """由任务 id 拼出它的 JSON 文件路径。"""
         return self._dir / f"{task_id}.json"
 
     def _write(self, task_id: str, task: dict) -> None:
+        """把任务 dict 落盘（先写临时文件再改名，写一半断电不会留半个文件）。
+
+        参数：
+            task_id：任务 id（决定文件名）。
+            task：完整的任务 dict。
+        """
         from agent.atomic_io import atomic_write_text
         f = self._task_file(task_id)
         atomic_write_text(f, json.dumps(task, ensure_ascii=False, indent=2))
 
     # ------------------------------------------------------------------
-    # CRUD
+    # 增删改查（CRUD：Create / Read / Update / Delete）
     # ------------------------------------------------------------------
 
     def create(
@@ -71,7 +99,16 @@ class TaskStore:
         blocked_by: Optional[List[str]] = None,
         owner: Optional[str] = None,
     ) -> dict:
-        """创建任务。"""
+        """新建一个任务并落盘，初始状态是 pending（待办）。
+
+        参数：
+            subject：任务标题（一句话说清要干什么）。
+            description：任务详情，可空。
+            blocked_by：这个任务被哪些任务挡着——列表里是那些任务的 id，
+                它们全做完这个才能开工。
+            owner：认领人名字，可空（还没人认领）。
+        返回：新建好的完整任务 dict（含分配的 id）。
+        """
         task_id = f"task_{uuid.uuid4().hex[:12]}"
         task = {
             "id": task_id,
@@ -93,7 +130,12 @@ class TaskStore:
         return task
 
     def get(self, task_id: str) -> Optional[dict]:
-        """获取单个任务。"""
+        """按 id 读一个任务。
+
+        参数：
+            task_id：任务 id。
+        返回：任务 dict；文件不存在或内容坏了（JSON 解析失败）返回 None。
+        """
         f = self._task_file(task_id)
         if not f.exists():
             return None
@@ -103,7 +145,13 @@ class TaskStore:
             return None
 
     def update(self, task_id: str, **fields) -> Optional[dict]:
-        """更新任务字段（除 id 外）。"""
+        """改任务的任意字段（id 不许改，改了会指向别的任务）。
+
+        参数：
+            task_id：要改的任务 id。
+            **fields：要改的字段名=新值，如 status="completed"。
+        返回：改完的任务 dict；任务不存在返回 None。
+        """
         task = self.get(task_id)
         if task is None:
             return None
@@ -115,12 +163,19 @@ class TaskStore:
         return task
 
     def set_status(self, task_id: str, status: str) -> Optional[dict]:
+        """改任务状态（只接受 VALID_STATUSES 里列的那几种，防手滑写错）。
+
+        参数：
+            task_id：任务 id。
+            status：新状态（pending/in_progress/completed/deleted/blocked/triage）。
+        返回：更新后的任务 dict；状态名不合法或任务不存在返回 None。
+        """
         if status not in VALID_STATUSES:
             return None
         return self.update(task_id, status=status)
 
     # ------------------------------------------------------------------
-    # 06 NEW: 阻塞升级（mark_blocked + block_history）
+    # 阻塞记录与升级：任务卡住了就记一笔，反复卡住就升级等人工（06 轮新增）
     # ------------------------------------------------------------------
 
     def mark_blocked(
@@ -130,12 +185,19 @@ class TaskStore:
         kind: str = "transient",
         reason: str = "",
     ) -> dict:
-        """记录阻塞，自动升级重复阻塞到 triage。
+        """记一笔"这个任务卡住了"，卡太多次会自动升级成 triage（分诊态）。
 
-        同 kind 阻塞 >= TRIAGE_THRESHOLD 次时状态升级到 triage，
-        让 find_ready 不再选它，等人工或上级介入。
+        背景：如果只标 blocked，调度器下轮还会把它捞出来重试，反复卡反复试
+        就是死循环。所以同一类阻塞攒够 TRIAGE_THRESHOLD（3）次就升级到
+        triage，find_ready 从此跳过它，等人工或上级 agent 来处理。
 
-        返回 {"status": "blocked"|"triage", "block_count": int, "kind": str}
+        参数：
+            task_id：任务 id。
+            kind：阻塞类别，只能是 dependency（被依赖卡）/ needs_input（缺输入）/
+                capability（干不了）/ transient（临时故障）之一，别的值一律按
+                transient 处理。
+            reason：这次为什么卡住，一句话描述。
+        返回：{"status": "blocked" 或 "triage", "block_count": 该类阻塞累计次数, "kind": 类别}
         """
         if kind not in VALID_BLOCK_KINDS:
             kind = "transient"
@@ -152,11 +214,11 @@ class TaskStore:
             "reason": reason,
             "at": _now_iso(),
         })
-        # 限制历史长度（防无限增长，滚动覆盖）
+        # 历史只留最近 20 条，超过就丢最老的——不然跑几个月的文件越写越大
         if len(history) > 20:
             del history[: len(history) - 20]
 
-        # 升级判定
+        # 攒够次数就升级到 triage
         new_status = "blocked"
         triage_reason: Optional[str] = None
         if counts[kind] >= TRIAGE_THRESHOLD:
@@ -182,19 +244,40 @@ class TaskStore:
         }
 
     def claim(self, task_id: str, owner: str) -> Optional[dict]:
-        """认领任务（设置 owner 并置为 in_progress）。"""
+        """认领任务：写上自己的名字，同时把状态切成 in_progress（开工了）。
+
+        参数：
+            task_id：任务 id。
+            owner：认领人名字（哪个 agent/子代理在负责）。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         return self.update(task_id, owner=owner, status="in_progress")
 
     def complete(self, task_id: str) -> Optional[dict]:
-        """完成任务。"""
+        """把任务标成 completed（做完）。其他等着它的任务会因此解锁。
+
+        参数：
+            task_id：任务 id。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         return self.set_status(task_id, "completed")
 
     def delete(self, task_id: str) -> Optional[dict]:
-        """软删除任务（标 deleted，不真删文件）。"""
+        """软删除：只把状态标成 deleted，JSON 文件保留在盘上（想恢复还能恢复）。
+
+        参数：
+            task_id：任务 id。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         return self.set_status(task_id, "deleted")
 
     def list_all(self, status: Optional[str] = None) -> List[dict]:
-        """列出所有任务（可选按状态过滤）。"""
+        """列出所有任务，按创建时间从早到晚排。
+
+        参数：
+            status：只留这个状态的任务；不传就是全部。
+        返回：任务 dict 的列表（坏了的 JSON 文件直接跳过不报错）。
+        """
         tasks = []
         for f in sorted(self._dir.glob("*.json")):
             try:
@@ -207,14 +290,20 @@ class TaskStore:
         return tasks
 
     # ------------------------------------------------------------------
-    # 依赖
+    # 依赖：判断任务能不能开工、哪些被挡着
     # ------------------------------------------------------------------
 
     def can_start(self, task_id: str) -> bool:
-        """检查任务的所有依赖是否已完成。
+        """检查挡在这个任务前面的依赖是不是都完成了，决定它能否开工。
 
-        R30c-C4：依赖被删除（status=deleted）或文件缺失时视为已满足
-        （自动解链）——此前子任务会永久 blocked 且没有任何解除路径。
+        背景：一个依赖被软删除、或它的 JSON 文件没了，以前会让这个任务
+        永远卡在 blocked 且没有任何解除办法（历史踩坑，R30c-C4 修复）。
+        现在这类"人去楼空"的依赖直接当作已满足，自动解链。
+
+        参数：
+            task_id：任务 id。
+        返回：True=依赖全部满足可以开工；False=还有依赖没完成（任务本身
+            不存在也返回 False）。
         """
         task = self.get(task_id)
         if task is None:
@@ -232,9 +321,11 @@ class TaskStore:
         return True
 
     def find_ready(self) -> List[dict]:
-        """找出所有 pending 且依赖已满足的任务（可认领）。
+        """挑出"可以马上开工"的任务：状态是 pending 且挡路的都完成了。
 
-        排除 triage 状态（已升级等待人工介入）。
+        参数：无。
+        返回：可开工任务 dict 的列表。
+        注意：triage 状态的任务不在此列（它们在等人工介入，不自动调度）。
         """
         ready = []
         for t in self.list_all(status="pending"):
@@ -243,7 +334,11 @@ class TaskStore:
         return ready
 
     def find_blocked(self) -> List[dict]:
-        """找出依赖未满足的 pending 任务。"""
+        """反向清单：还在排队等依赖的 pending 任务。
+
+        参数：无。
+        返回：被挡住的任务 dict 的列表。
+        """
         blocked = []
         for t in self.list_all(status="pending"):
             if not self.can_start(t["id"]):
@@ -251,17 +346,29 @@ class TaskStore:
         return blocked
 
     # ------------------------------------------------------------------
-    # Kanban 增强（heartbeat / comments / artifacts）
+    # 看板小功能：心跳（我还活着）/ 评论 / 产出物清单
     # ------------------------------------------------------------------
 
     def heartbeat(self, task_id: str) -> Optional[dict]:
-        """更新 last_heartbeat_at 为当前时间。"""
+        """报个心跳：把 last_heartbeat_at 刷成当前时间，证明"这活儿有人在做"。
+
+        参数：
+            task_id：任务 id。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         return self.update(task_id, last_heartbeat_at=_now_iso())
 
     def add_comment(
         self, task_id: str, *, author: str, content: str,
     ) -> Optional[dict]:
-        """追加一条 comment。comments 只增不删。"""
+        """给任务追加一条评论（像留言板，只往上加、不删旧的）。
+
+        参数：
+            task_id：任务 id。
+            author：谁说的（agent 名/用户）。
+            content：留言内容。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         task = self.get(task_id)
         if task is None:
             return None
@@ -275,7 +382,15 @@ class TaskStore:
         return task
 
     def add_artifacts(self, task_id: str, paths: List[str]) -> Optional[dict]:
-        """把 paths 去重追加到 artifacts。"""
+        """把这个任务产出的文件路径记到 artifacts 清单里（重复的不记）。
+
+        背景：artifacts 是"这个任务做出了哪些东西"的索引，方便事后查看。
+
+        参数：
+            task_id：任务 id。
+            paths：产出文件的路径列表。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         task = self.get(task_id)
         if task is None:
             return None
@@ -288,7 +403,13 @@ class TaskStore:
         return task
 
     def remove_artifacts(self, task_id: str, paths: List[str]) -> Optional[dict]:
-        """从 artifacts 移除 paths。"""
+        """从产出物清单里划掉一些路径（记错了、文件挪走了）。
+
+        参数：
+            task_id：任务 id。
+            paths：要移除的路径列表。
+        返回：更新后的任务 dict；任务不存在返回 None。
+        """
         task = self.get(task_id)
         if task is None:
             return None
@@ -300,14 +421,19 @@ class TaskStore:
         return task
 
     # ------------------------------------------------------------------
-    # DAG 增强（cycle-safe dependency management）
+    # 依赖图安全：加依赖边之前先确认不会绕成一个圈
     # ------------------------------------------------------------------
 
     def has_path(self, start_id: str, target_id: str) -> bool:
-        """DFS：从 start_id 沿 blocked_by 边走，能否到达 target_id？
+        """沿着"被谁挡着"的关系一路问下去：start 最终（直接或间接）依赖 target 吗？
 
-        blocked_by 语义：A.blocked_by=[B] 表示 A 依赖 B。
-        所以"沿 blocked_by 走"= "查 start 依赖谁、间接依赖谁"。
+        打个比方：A 等 B，B 等 C，那从 A 出发沿"等"的箭头走能到 C。
+        这是在依赖图（DAG）上做深度优先搜索（DFS——一条路走到黑再回头换路）。
+
+        参数：
+            start_id：出发的任务 id。
+            target_id：要找的任务 id。
+        返回：True=能走到（start 直接或间接依赖 target）；False=到不了。
         """
         visited = set()
         stack = [start_id]
@@ -329,10 +455,18 @@ class TaskStore:
         self, child_id: str, parent_id: str,
         *, validate: bool = True,
     ) -> Optional[dict]:
-        """加 child 依赖 parent 的边（child.blocked_by += [parent]）。
+        """加一条"child 要等 parent"的依赖边。
 
-        validate=True 时做 cycle 检测：若 parent 已经（直接或间接）依赖 child，拒绝。
-        self-link 永远拒绝（即使 validate=False）。
+        背景：如果 A 等 B、B 又等 A，两个任务互相等就都永远动不了（成环）。
+        所以默认先检查：parent 如果已经直接或间接依赖 child，这条边会被拒。
+
+        参数：
+            child_id：被挡的任务 id（它要等别人）。
+            parent_id：挡路的任务 id（先做完它）。
+            validate：True（默认）做成环检查；False 跳过（信任调用方时用）。
+        返回：更新后的 child 任务 dict；child 不存在返回 None。
+        异常：自己等自己（self-link）任何时候都直接抛 ValueError；validate
+            检出成环也抛 ValueError。
         """
         if parent_id == child_id:
             raise ValueError("self-link forbidden")
@@ -353,14 +487,21 @@ class TaskStore:
         return child
 
 
-# R30b-A5：按 home 路径缓存的 store 池。
-# 旧实现"传了 omnimate_home 就覆盖全局单例"——任何带 home 的调用方
-# （测试、team coordinator）会污染后续所有无参调用（拿到别人的目录）。
-# 改为 keyed 缓存：同一 home 复用同一实例，不同 home 互不可见。
+# 按 home 路径分格缓存的实例池。
+# 历史踩坑（R30b-A5 修复）：旧实现是"传了 omnimate_home 就顶替全局唯一实例"，
+# 结果测试或团队协调器一带 home 进来，后面所有不传 home 的调用拿到的都是
+# 别人的目录（互相污染）。现在改成按 home 分格：同一个 home 复用同一个
+# 实例，不同 home 各用各的、互不可见。
 _task_stores: Dict[str, TaskStore] = {}
 
 
 def get_task_store(omnimate_home=None) -> TaskStore:
+    """拿 TaskStore 实例：同一个 home 永远给同一个（省得反复重建、也防串目录）。
+
+    参数：
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate（也是按这个做缓存键）。
+    返回：该 home 对应的 TaskStore 实例（首次调用时创建并缓存）。
+    """
     key = str(Path(omnimate_home).resolve()) if omnimate_home else ""
     store = _task_stores.get(key)
     if store is None:
