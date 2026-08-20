@@ -1,6 +1,10 @@
-"""curator CLI：omnimate curator <verb>
+"""Curator（维护工人）的命令行入口：python -m curator_cli <命令>。
 
-verbs：
+Curator 是后台维护程序，负责整理技能库和记忆库（归档旧技能、合并重复
+记忆等）。平时它按周期自动跑，这个 CLI 让你能手动查看/触发/暂停它。
+位于项目顶层，供命令行和测试直接调用。
+
+命令（verb）一览：
   status    - 查看 curator 状态
   run       - 手动触发审查（--dry-run 预览）
   pause     - 暂停自动触发
@@ -22,11 +26,17 @@ from tools.skill_usage import load_usage, set_pinned, restore_skill
 
 
 def _cmd_memory(args):
-    """memory 子命令:curator memory status|run [--dry-run] [--no-llm]|pause|resume
+    """处理 memory 子命令：curator memory status|run [--dry-run|--no-llm]|pause|resume。
 
-    第 1 阶段跑 apply_automatic_transitions(纯状态转换),不依赖 LLM。
-    第 2 阶段调用 run_memory_review(主模型 LLM 合并 + 矛盾检测),
-    --no-llm 跳过第 2 阶段。状态写到 <agent_home>/.memory/.curator_state.json。
+    背景：Memory Curator（记忆维护工人）分两个阶段干活——
+    第 1 阶段跑 apply_automatic_transitions：按固定规则做状态转换
+    （比如长期没用的记忆标记为过期、归档），纯机械逻辑，不花钱调 LLM。
+    第 2 阶段调用 run_memory_review：让主模型做记忆合并和矛盾检测，
+    这一步要花 token；加 --no-llm 可以跳过它只跑第 1 阶段。
+    运行状态记在 <agent_home>/.memory/.curator_state.json 里。
+
+    参数：
+        args  子命令及参数列表，如 ["run", "--dry-run"]；空列表默认当 status
     """
     import datetime
     from constants import get_omnimate_home
@@ -50,21 +60,21 @@ def _cmd_memory(args):
 
     if sub == "run":
         dry_run = "--dry-run" in args
-        no_llm = "--no-llm" in args  # 跳过 LLM 阶段
+        no_llm = "--no-llm" in args  # 加了这个开关就不跑要花 token 的 LLM 阶段
         print(f"{'[DRY RUN] ' if dry_run else ''}运行 Memory Curator...")
 
-        # 第 1 阶段
+        # 第 1 阶段：纯规则状态转换，不依赖 LLM
         if not dry_run:
             counts = apply_automatic_transitions(memory_dir)
         else:
-            # dry-run 不改记忆文件,只预览(与 skill curator 一致)
+            # dry-run 只预览不动真格：不修改任何记忆文件（和技能 curator 的语义保持一致）
             counts = {
                 "checked": 0, "marked_stale": 0,
                 "archived": 0, "reactivated": 0,
             }
         print(f"\n第 1 阶段转换: {counts}")
 
-        # 第 2 阶段(可选 LLM review)
+        # 第 2 阶段：可选的 LLM 审查（合并相似记忆、找矛盾说法）
         review_summary = "skipped"
         if not dry_run and not no_llm:
             from agent.memory_curator import run_memory_review
@@ -83,7 +93,7 @@ def _cmd_memory(args):
                 review_summary = f"failed: {e}"
                 print(f"第 2 阶段失败: {e}")
 
-        # 写状态
+        # 把本次运行结果记进状态文件，供下次 status 展示；dry-run 不落盘
         if not dry_run:
             state = load_memory_curator_state(memory_dir)
             state["last_run_at"] = datetime.datetime.now(
@@ -115,7 +125,18 @@ def _cmd_memory(args):
 
 
 def curator_cli(args: list, skills_dir: Path = None):
-    """curator 子命令入口。"""
+    """curator 命令的总分发器：看第一个词是什么，转给对应的处理函数。
+
+    背景：CLI 层（cli.py / main）收到 curator 命令后调这里；每个动词
+    （status/run/pause/...）各有一个小处理函数，这里只做路由。
+
+    参数：
+        args        命令参数列表，第一个元素是动词，如 ["run", "--dry-run"]；
+                    空列表时默认显示状态
+        skills_dir  技能库目录；不传就用 constants 里默认的技能目录
+
+    返回：无（结果直接打印到终端）。
+    """
     if skills_dir is None:
         from constants import skills_dir as _sd
         skills_dir = _sd()
@@ -126,7 +147,7 @@ def curator_cli(args: list, skills_dir: Path = None):
 
     verb = args[0]
 
-    # memory 子命令走独立的 Memory Curator 管线(第 1 阶段 dry-run/实跑)
+    # memory 是独立管线（管记忆库而不是技能库），单独转给 _cmd_memory
     if verb == "memory":
         _cmd_memory(args[1:])
         return
@@ -171,7 +192,13 @@ def curator_cli(args: list, skills_dir: Path = None):
 
 
 def _show_status(skills_dir: Path):
-    """显示 curator 状态。"""
+    """打印 curator 的运行状态：上次运行时间/总结、是否暂停、技能数量分布。
+
+    参数：
+        skills_dir  技能库目录，状态和用量数据都从这底下读
+
+    返回：无（直接打印到终端）。
+    """
     state = load_state(skills_dir)
     usage = load_usage(skills_dir)
 
@@ -196,7 +223,16 @@ def _show_status(skills_dir: Path):
 
 
 def _run_curator(skills_dir: Path, dry_run: bool = False):
-    """手动触发 curator 审查。"""
+    """立刻跑一轮技能审查（不用等自动周期），并打印审查报告。
+
+    背景：curator 平时按 7 天周期自动跑；这个函数用于手动触发或排错。
+
+    参数：
+        skills_dir  技能库目录
+        dry_run     True 时只预览会发生什么转换，不真正动文件
+
+    返回：无（报告直接打印到终端）。
+    """
     print(f"{'[DRY RUN] ' if dry_run else ''}运行 curator...")
     report = run_curator_review(skills_dir, dry_run=dry_run)
     print(f"\n转换计数: {report['transitions']}")
@@ -205,7 +241,13 @@ def _run_curator(skills_dir: Path, dry_run: bool = False):
 
 
 def _pause_curator(skills_dir: Path):
-    """暂停 curator。"""
+    """暂停 curator 的自动周期（写进状态文件，之后想恢复用 resume）。
+
+    参数：
+        skills_dir  技能库目录，状态文件存在这底下
+
+    返回：无。
+    """
     state = load_state(skills_dir)
     state["paused"] = True
     save_state(skills_dir, state)
@@ -213,7 +255,13 @@ def _pause_curator(skills_dir: Path):
 
 
 def _resume_curator(skills_dir: Path):
-    """恢复 curator。"""
+    """恢复被 pause 暂停的 curator 自动周期。
+
+    参数：
+        skills_dir  技能库目录，状态文件存在这底下
+
+    返回：无。
+    """
     state = load_state(skills_dir)
     state["paused"] = False
     save_state(skills_dir, state)
@@ -221,9 +269,13 @@ def _resume_curator(skills_dir: Path):
 
 
 def main(args=None):
-    """curator CLI 入口：python -m curator_cli <verb> ...
+    """命令行入口：python -m curator_cli <verb> ...
 
-    args=None 时从 sys.argv 读取(生产入口);传入 list 时直接使用(测试入口)。
+    参数：
+        args  参数列表；不传（None）时从 sys.argv 读取——这是生产入口的
+              路径；测试可以直接传一个 list 进来，不碰命令行
+
+    返回：无。
     """
     if args is None:
         args = sys.argv[1:]

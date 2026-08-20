@@ -1,21 +1,28 @@
-"""桌面通知（CCAR11 Task 6，Windows toast，零依赖）。
+"""Windows 桌面弹窗通知（toast——屏幕右下角那种滑出来的小气泡）。
 
-设计原则：
-- 零第三方依赖（用 PowerShell + WinRT ToastNotificationManager）
-- fail-open（任何异常返回 False，不抛）
-- 非 Windows no-op（返回 False）
-- 30 秒同标题节流（防 bg 任务批量完成时刷屏）
-- config.notifications.enabled 控制（默认 True）
+给谁用：主循环和权限模块在"需要用户抬头看一眼"的时机弹通知，比如后台
+任务跑完了、有命令等你审批、目标被暂停了。用户切去干别的事也能被叫回来。
 
-使用：
+设计原则（大白话版）：
+- 不装任何第三方包——直接调 Windows 自带的 PowerShell，让它用系统里的
+  WinRT（Windows 运行时组件）弹 toast
+- 出了任何问题都不报错、不炸主流程，只是安静地返回 False（fail-open：
+  通知弹不出来不该影响正常干活）
+- 不是 Windows（Linux/macOS）就什么都不做，返回 False
+- 同一个标题 30 秒内只弹一次（防止后台任务扎堆完成时连环轰炸屏幕）
+- 总开关在配置里：notifications.enabled，默认开
+
+用法：
     from agent.notifier import notify
     notify("标题", "内容")
 
-触发点（CCAR11 Task 6 接线）：
-1. bg 完成：agent/__init__.py:_drain_injected_messages drain 后过滤 status
-2. 权限审批：agent/permission.py 审批 callback 调用前
-3. goal pause：agent/goal.py:GoalState.pause() 集中接（CCAR13 B5，
-   network/budget/manual 全原因一处，agent/__init__.py 的散接已删）
+目前三个触发点（谁在调它）：
+1. 后台任务完成：agent/__init__.py 的 _drain_injected_messages 在收完
+   后台消息后过滤出状态类消息弹通知
+2. 权限审批：agent/permission.py 在弹出审批询问前通知用户
+3. goal 暂停：agent/goal.py 的 GoalState.pause() 集中接（历史重构
+   CCAR13 B5：不管因为断网/预算耗尽/手动暂停，统一在这一处弹，
+   agent/__init__.py 里原来东一处西一处的调用已经删掉）
 """
 import logging
 import subprocess
@@ -24,13 +31,17 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# 节流状态：title -> monotonic ts
+# 节流记录：标题 → 上次弹通知的时间戳（monotonic 单调时钟，不受改系统时间影响）
 _last_notify: dict = {}
 _THROTTLE_SECONDS = 30.0
 
 
 def _notifications_enabled() -> bool:
-    """读 config.notifications.enabled。fail-open：读不到返回 True（保守通知）。"""
+    """读配置里的通知总开关（notifications.enabled）。
+
+    fail-open 取向：配置读不出来时默认当"开着"处理——宁可多弹一次通知，
+    也不因为配置文件出问题就悄悄静音。返回 True/False 表示通知是否启用。
+    """
     try:
         from config import load_config
         return bool(load_config().get("notifications", {}).get("enabled", True))
@@ -39,38 +50,40 @@ def _notifications_enabled() -> bool:
 
 
 def _reset_throttle_for_test() -> None:
-    """测试专用：清空节流状态。生产代码勿调。"""
+    """测试专用：把节流记录清空，让下条通知一定能弹。生产代码不要调。"""
     global _last_notify
     _last_notify = {}
 
 
 def notify(title: str, message: str) -> bool:
-    """发 Windows toast。
+    """弹一个 Windows toast 桌面通知。
 
-    返回 True 表示成功投递 PowerShell；False 表示未投递（非 Windows / 被节流 /
-    配置关 / 投递失败）。任何异常都 fail-open 不抛出。
+    背景：用户可能切去别的窗口干活，重要事件（任务完成、等审批）需要一条
+    "跳到眼前"的提醒。注意"成功投递"只代表命令交给 PowerShell 了，不保证
+    用户真的看到气泡（Windows 通知设置可能关了）。
 
-    Args:
-        title: 通知标题（建议 < 30 字符）
-        message: 通知正文（>200 字符自动截断）
+    参数：
+        title: 通知标题（建议 30 字以内，太长显示不全）
+        message: 通知正文（超过 200 字符会被截断）
 
-    Returns:
-        bool: 是否成功投递
+    返回：True = 已成功交给 PowerShell 投递；False = 没投（不是 Windows /
+        被节流 / 配置关了 / 投递过程出错）。任何异常都吞掉不往外抛。
     """
-    # 闸门 1：非 Windows no-op（用户在 Linux/macOS 不会看到 toast）
+    # 闸门 1：非 Windows 直接放弃（Linux/macOS 用户根本看不到 toast）
     if sys.platform != "win32":
         return False
-    # 闸门 2：config 开关
+    # 闸门 2：配置总开关关了就不弹
     if not _notifications_enabled():
         return False
-    # 闸门 3：30s 同标题节流（防刷屏）
+    # 闸门 3：同一标题 30 秒内只弹一次（防批量事件刷屏）
     now = time.monotonic()
     if now - _last_notify.get(title, 0.0) < _THROTTLE_SECONDS:
         return False
     _last_notify[title] = now
-    # 实际投递
+    # 三道闸门都过了，真正去弹
     try:
-        # XML 转义防注入（用户内容不能逃出 XML 节点）
+        # 先把标题/正文里的 XML 特殊字符转义（toast 是 XML 格式）——
+        # 不转义的话，内容里的 < & 之类会破坏 XML 结构，甚至夹带私货
         esc_t = (title or "").replace("&", "&amp;").replace("<", "&lt;")
         esc_m = (message or "")[:200].replace("&", "&amp;").replace("<", "&lt;")
         xml = (
@@ -78,7 +91,7 @@ def notify(title: str, message: str) -> bool:
             f"<text>{esc_t}</text><text>{esc_m}</text>"
             "</binding></visual></toast>"
         )
-        # PowerShell + WinRT：零第三方依赖
+        # 用系统自带 PowerShell 调 WinRT 弹 toast——不用装任何第三方库
         ps = (
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI."
             "Notifications, ContentType = WindowsRuntime] | Out-Null;"

@@ -1,10 +1,15 @@
-"""按 11-scaffold.md 的检查清单验证 agent 功能。
+"""复刻检查清单的验证脚本：跑 22 项小检查，确认 agent 的核心功能还活着。
+
+背景：本项目是按复刻指南（11-scaffold.md）实现的，指南里有一份「这些
+功能必须存在且能用」的清单。这个脚本就是清单的自动化验收——每项做一件
+小事（建个文件、发个工具调用），看结果对不对。适合改完代码后快速回归，
+比跑全量测试快得多。
 
 用法：
     uv run python scripts/verify.py
 
-输出每项的 PASS/FAIL/SKIPPED，最终汇总。
-SKIPPED 项需要真实 API key 才能验证。
+每项输出 PASS（通过）/ FAIL（失败）/ SKIPPED（跳过），最后给汇总。
+SKIPPED 的项需要真实 API key 才能验证。
 """
 
 import asyncio
@@ -15,24 +20,35 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-# 确保项目根目录在 path
+# 以脚本方式运行时 Python 只把 scripts/ 加进搜索路径，手动把项目根也加进去
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _result(status, detail=""):
+    """拼一个检查结果字典。
+
+    参数：
+        status  结果状态："PASS" / "FAIL" / "SKIPPED"
+        detail  补充说明文字（会显示在终端）
+
+    返回：{"status": ..., "detail": ...} 字典。
+    """
     return {"status": status, "detail": detail}
 
 
 def _ok(detail=""):
+    """生成一个 PASS 结果。参数 detail 为附带的说明文字。"""
     return _result("PASS", detail)
 
 
 def _fail(detail=""):
+    """生成一个 FAIL 结果。参数 detail 为失败原因。"""
     return _result("FAIL", detail)
 
 
 def _skip(detail=""):
+    """生成一个 SKIPPED 结果。参数 detail 为跳过原因。"""
     return _result("SKIPPED", detail)
 
 
@@ -41,14 +57,20 @@ def _skip(detail=""):
 # ---------------------------------------------------------------------------
 
 def check_agent_initialization():
-    """agent 能初始化（无 API 调用）。"""
+    """验证 AIAgent 对象能正常创建（不发起任何真实 API 请求）。
+
+    返回：PASS/FAIL 结果。
+    """
     from agent import AIAgent
     agent = AIAgent(api_key="fake", model="test", enabled_toolsets=[])
     return _ok(f"max_iter={agent.max_iterations}, budget={agent.iteration_budget.remaining}")
 
 
 def check_tool_definitions():
-    """工具定义能加载。"""
+    """验证工具定义能正常加载，且核心工具（terminal/read/write/memory）都在。
+
+    返回：PASS/FAIL 结果。
+    """
     from model_tools import get_tool_definitions
     tools = get_tool_definitions(["core"])
     names = [t["function"]["name"] for t in tools]
@@ -60,7 +82,10 @@ def check_tool_definitions():
 
 
 def check_terminal_tool():
-    """terminal 工具能执行命令。"""
+    """验证 terminal 工具真的能执行一条命令（跑 echo 看输出）。
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     result = asyncio.run(registry.dispatch("terminal", {"command": "echo verify_ok"}))
     data = json.loads(result)
@@ -70,7 +95,13 @@ def check_terminal_tool():
 
 
 def check_read_file_tool(tmp):
-    """read_file 工具能读文件。"""
+    """验证 read_file 工具能读回文件内容。
+
+    参数：
+        tmp  临时目录 Path，测试文件写在这底下
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     f = tmp / "sample.txt"
     f.write_text("line1\nline2\n", encoding="utf-8")
@@ -82,7 +113,12 @@ def check_read_file_tool(tmp):
 
 
 def check_interrupt():
-    """中断机制工作。"""
+    """验证中断机制：调用 interrupt() 后，中断标志确实被设置。
+
+    背景：这是用户按 Ctrl+C 优雅打断 agent 的底层开关。
+
+    返回：PASS/FAIL 结果。
+    """
     from agent import AIAgent
     agent = AIAgent(api_key="fake", model="test", enabled_toolsets=[])
     agent.interrupt()
@@ -96,7 +132,13 @@ def check_interrupt():
 # ---------------------------------------------------------------------------
 
 def check_memory_tool_write(tmp):
-    """memory 工具能写入记忆。"""
+    """验证 memory 工具能保存一条记忆并落盘。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home 用（记忆写到 tmp/.memory/）
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     from agent.memory_store import MemoryStore
     store = MemoryStore(omnimate_home=tmp)
@@ -116,11 +158,17 @@ def check_memory_tool_write(tmp):
 
 
 def check_memory_persist(tmp):
-    """记忆文件被创建（.memory/ 目录 + MEMORY.md 索引）。"""
+    """验证保存记忆后，磁盘上真的出现了记忆文件（.memory/ 目录或 MEMORY.md 索引）。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.memory_store import MemoryStore
     store = MemoryStore(omnimate_home=tmp)
     store.add("memory", "持久化测试")
-    # 多文件模式：.memory/ 下有 .md 文件；索引在 MEMORY.md
+    # 存储是多文件模式：条目是 .memory/ 下的 .md 文件，MEMORY.md 只是索引
     memory_dir = tmp / ".memory"
     has_files = memory_dir.exists() and any(memory_dir.glob("*.md"))
     if has_files or (tmp / "MEMORY.md").exists():
@@ -129,7 +177,13 @@ def check_memory_persist(tmp):
 
 
 def check_memory_reload(tmp):
-    """重启后记忆能加载。"""
+    """验证记忆的持久性：新建一个 MemoryStore 实例（模拟重启），旧记忆还在。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.memory_store import MemoryStore
     s1 = MemoryStore(omnimate_home=tmp)
     s1.add("memory", "重启测试")
@@ -146,7 +200,13 @@ def check_memory_reload(tmp):
 # ---------------------------------------------------------------------------
 
 def _setup_skill(tmp):
-    """创建示例技能。"""
+    """在临时目录里造一个名叫 hello 的示例技能，供技能类检查复用。
+
+    参数：
+        tmp  临时目录 Path，技能建在 tmp/skills/hello/
+
+    返回：技能库目录的 Path。
+    """
     skills = tmp / "skills"
     skills.mkdir(parents=True, exist_ok=True)
     (skills / "hello").mkdir(parents=True, exist_ok=True)
@@ -158,7 +218,13 @@ def _setup_skill(tmp):
 
 
 def check_skill_trigger(tmp):
-    """/hello 技能能被触发。"""
+    """验证技能能被发现，且触发时正文内容会被注入对话。
+
+    参数：
+        tmp  临时目录 Path（会先在里面造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.skill_commands import scan_skill_commands, execute_skill
     skills = _setup_skill(tmp)
     cmds = scan_skill_commands(skills)
@@ -171,7 +237,13 @@ def check_skill_trigger(tmp):
 
 
 def check_skills_list(tmp):
-    """skills_list 工具。"""
+    """验证 skills_list 工具能列出技能库里的技能。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     skills = _setup_skill(tmp)
     result = asyncio.run(registry.dispatch("skills_list", {}, omnimate_home=tmp))
@@ -183,7 +255,13 @@ def check_skills_list(tmp):
 
 
 def check_skill_view(tmp):
-    """skill_view 工具。"""
+    """验证 skill_view 工具能查看指定技能的内容。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     _setup_skill(tmp)
     result = asyncio.run(registry.dispatch("skill_view", {"name": "hello"}, omnimate_home=tmp))
@@ -194,7 +272,13 @@ def check_skill_view(tmp):
 
 
 def check_skill_manage_create(tmp):
-    """skill_manage 能创建新技能。"""
+    """验证 skill_manage 工具能创建新技能（SKILL.md 真的出现在磁盘上）。
+
+    参数：
+        tmp  临时目录 Path，技能建在 tmp/skills/ 下
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.registry import registry
     asyncio.run(registry.dispatch(
         "skill_manage",
@@ -207,7 +291,13 @@ def check_skill_manage_create(tmp):
 
 
 def check_usage_stats(tmp):
-    """.usage.json 记录使用统计。"""
+    """验证技能使用统计：用一次技能后 .usage.json 里的计数会 +1。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.skill_usage import bump_use, load_usage
     skills = _setup_skill(tmp)
     bump_use(skills, "hello")
@@ -222,11 +312,20 @@ def check_usage_stats(tmp):
 # ---------------------------------------------------------------------------
 
 def check_sessions_db(tmp):
-    """JSONL 会话目录被创建（替代老 sessions.db）。"""
+    """验证会话存储初始化时会创建 .sessions/ 目录（新版是 JSONL 文件目录）。
+
+    背景：老版本用单个 sessions.db 数据库，新版改成了 .sessions/ 目录下
+    的 JSONL 文本文件（append-only，方便恢复）。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.session_store import SessionStore
     db = tmp / "sessions.db"
     store = SessionStore(db)
-    # JSONL 版：sessions.db 文件路径自动转 .sessions/ 目录
+    # 兼容老参数：传 sessions.db 路径会自动转成 .sessions/ 目录
     sessions_dir = tmp / ".sessions"
     if sessions_dir.exists():
         return _ok(str(sessions_dir))
@@ -234,7 +333,13 @@ def check_sessions_db(tmp):
 
 
 def check_session_search(tmp):
-    """session_search 能搜到历史对话。"""
+    """验证 session_search 工具能搜到历史对话内容。
+
+    参数：
+        tmp  临时目录 Path，会话存在这底下
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.session_store import SessionStore
     from tools.registry import registry
     store = SessionStore(tmp / "s.db")
@@ -257,15 +362,27 @@ def check_session_search(tmp):
 # ---------------------------------------------------------------------------
 
 def check_curator_status(tmp):
-    """curator status 显示状态。"""
+    """验证读取 curator 状态不报错（状态为空也是正常情况）。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.curator import load_state
     state = load_state(tmp / "skills")
-    # 空状态也是有效的
+    # 从没跑过 curator 时状态文件不存在，返回空 dict 也算通过
     return _ok(f"state keys: {list(state.keys()) or '(空)'}")
 
 
 def check_curator_dry_run(tmp):
-    """curator run --dry-run 能预览。"""
+    """验证 curator 的 dry-run 模式：只预览要做的转换，不动文件。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.curator import run_curator_review
     skills = tmp / "skills"
     skills.mkdir(parents=True, exist_ok=True)
@@ -276,7 +393,15 @@ def check_curator_dry_run(tmp):
 
 
 def check_curator_archive(tmp):
-    """归档的技能移到 .archive/。"""
+    """验证技能归档：archive 后技能目录从原地消失、出现在 .archive/ 下。
+
+    背景：「完全可逆」铁律——归档不删除，只是挪到 .archive/ 藏起来。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.skill_usage import archive_skill, mark_agent_created, bump_use
     skills = tmp / "skills"
     skills.mkdir(parents=True, exist_ok=True)
@@ -292,7 +417,13 @@ def check_curator_archive(tmp):
 
 
 def check_curator_restore(tmp):
-    """curator restore 能恢复。"""
+    """验证归档可逆：restore 能把 .archive/ 里的技能放回原位。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
     from tools.skill_usage import archive_skill, restore_skill, bump_use
     skills = tmp / "skills"
     skills.mkdir(parents=True, exist_ok=True)
@@ -312,7 +443,13 @@ def check_curator_restore(tmp):
 # ---------------------------------------------------------------------------
 
 def check_delegate_sync(tmp):
-    """subagent 同步模式（mock）。"""
+    """验证 subagent 同步委托链路（用假实现替掉子代理，不真跑 LLM）。
+
+    参数：
+        tmp  临时目录 Path（本项未用到，保持签名统一）
+
+    返回：PASS/FAIL 结果。
+    """
     from unittest.mock import patch
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="子代理完成"):
@@ -328,7 +465,13 @@ def check_delegate_sync(tmp):
 
 
 def check_delegate_batch(tmp):
-    """批量委托并行执行（mock）。"""
+    """验证 subagent 批量模式：一次派 3 个任务并全部拿到结果（假实现，不真跑）。
+
+    参数：
+        tmp  临时目录 Path（本项未用到，保持签名统一）
+
+    返回：PASS/FAIL 结果。
+    """
     from unittest.mock import patch
     from tools.registry import registry
     with patch("tools.delegate_tool._run_child", return_value="ok"):
@@ -348,7 +491,13 @@ def check_delegate_batch(tmp):
 # ---------------------------------------------------------------------------
 
 def check_context_compress():
-    """长对话触发压缩（新管线，mock LLM）。"""
+    """验证上下文压缩：消息条数超阈值时新管线会把历史压短（LLM 用假实现）。
+
+    背景：长对话不压缩会撑爆上下文窗口；这里把触发阈值调得很低，
+    确保压缩一定会发生。
+
+    返回：PASS/FAIL 结果。
+    """
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
     from config import DEFAULT_CONFIG
 
@@ -369,7 +518,7 @@ def check_context_compress():
         msgs.append({"role": "assistant", "content": f"回复 {i}"})
 
     ctx_cfg = dict(DEFAULT_CONFIG.get("context", {}))
-    # 降低阈值确保 snip 触发
+    # 把触发阈值调低到必触发，否则样例对话不够长压不动
     ctx_cfg["snip_message_threshold"] = 50
     state = CompressionSessionState()
     new_msgs, compressed, _compacted = asyncio.run(compress_if_needed(
@@ -391,6 +540,10 @@ def check_context_compress():
 # ---------------------------------------------------------------------------
 
 def main():
+    """主流程：建临时目录 → 按分类逐项跑检查并打印 PASS/FAIL → 汇总退出。
+
+    返回：进程退出码，0 = 全部通过，1 = 有失败项。
+    """
     print("=" * 60)
     print("  OmniMate 复刻检查清单验证")
     print("=" * 60)
@@ -417,7 +570,7 @@ def main():
             ("使用统计", lambda: check_usage_stats(tmp)),
         ]),
         ("会话存储", [
-            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # JSONL 版检查目录
+            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # 名字沿用旧清单，实际查的是 .sessions/ 目录
             ("session_search", lambda: check_session_search(tmp)),
         ]),
         ("Curator", [
@@ -461,7 +614,7 @@ def main():
     print(f"  {tag}  总计 {total}：{passed} 通过，{failed} 失败")
     print("=" * 60)
 
-    # 清理临时目录
+    # 收尾：删掉临时目录（删不掉也不报错，留着无妨）
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
 

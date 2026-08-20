@@ -1,14 +1,18 @@
-"""用户画像归纳器:从记忆库自动归纳用户画像。
+"""用户画像归纳器：定期把记忆库里关于用户的零散记忆，总结成一份"用户画像"。
 
-每 N 次反思后触发,读全部记忆 → aux_llm 归纳 → 存 USER_PROFILE.md → 注入 system prompt。
-让 agent 从"知道用户 10 条碎片习惯"变成"理解用户是什么样的人"。
+工作流程：每 N 次"反思"（reflection，从对话中沉淀经验的过程）之后触发一次，
+把全部记忆交给辅助 LLM（aux_llm，干杂活的小模型）归纳 → 写进
+USER_PROFILE.md → 之后注入 system prompt（系统提示词）。
+
+目的：让 agent 从"知道用户有 10 条碎片习惯"升级成"理解用户是个什么样的
+人"——好比从一沓便签纸变成一封人物小传。
 """
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PROFILE_UPDATE_INTERVAL = 5  # 每 5 次反思后更新一次
+PROFILE_UPDATE_INTERVAL = 5  # 攒够 5 次反思才更新一次画像：太频繁既浪费又没必要
 _reflection_count = 0
 
 PROFILE_PROMPT = """你是用户画像分析助手。从以下记忆条目中归纳用户的整体画像。
@@ -26,9 +30,15 @@ PROFILE_PROMPT = """你是用户画像分析助手。从以下记忆条目中归
 
 
 def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
-    """读全部记忆 → aux_llm 归纳 → 存 USER_PROFILE.md。
+    """干一次完整的归纳：读全部记忆 → 辅助 LLM 总结 → 存成 USER_PROFILE.md。
 
-    返回 True 表示画像已更新,False 表示跳过(记忆太少/调用失败)。
+    参数：
+        memory_store：记忆库（读用户相关记忆的来源）。
+        aux_llm：辅助 LLM 客户端（负责归纳总结）。
+        agent_home：agent 数据根目录（一般 ~/.OmniMate，画像存这里）。
+
+    返回：
+        True = 画像已更新；False = 这次跳过了（记忆太少 / 调用失败等）。
     """
     try:
         entries = memory_store.list_all()
@@ -36,20 +46,20 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
         return False
 
     if len(entries) < 3:
-        return False  # 记忆太少不值得归纳
+        return False  # 记忆还不到 3 条，硬归纳只会瞎编，不值得做
 
     memories = "\n".join(
         f"- [{e.type}] {e.name}: {e.description}"
         + (f" | {e.summary}" if e.summary else "")
-        for e in entries[:50]  # 最多 50 条
+        for e in entries[:50]  # 最多喂 50 条：再多 prompt 也装不下，归纳质量反而下降
     )
 
     prompt = PROFILE_PROMPT.format(memories=memories[:5000])
 
     try:
-        # Task D4 fix: aux_llm.chat_completions 已改 async。
-        # build_and_save_profile 由 _bg() daemon thread 调用（无事件循环），
-        # 用 asyncio.run 驱动。
+        # 历史踩坑（Task D4 修复）：aux_llm.chat_completions 改成了 async 异步版。
+        # 而本函数是被 _bg() 后台线程调用的（线程里没有事件循环），
+        # 所以必须用 asyncio.run 临时起一个事件循环来驱动它。
         import asyncio
         response = asyncio.run(aux_llm.chat_completions(
             [{"role": "user", "content": prompt}],
@@ -62,7 +72,7 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
     if not profile or len(profile) < 20:
         return False
 
-    # 存 USER_PROFILE.md
+    # 归纳结果落盘成 USER_PROFILE.md（原子写入，写一半断电也不会留半个文件）
     from agent.atomic_io import atomic_write_text
     profile_path = Path(agent_home) / "USER_PROFILE.md"
     content = f"# 用户画像(自动归纳)\n\n{profile}\n"
@@ -72,7 +82,14 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
 
 
 def should_update_profile() -> bool:
-    """每 N 次反思后返回 True。"""
+    """反思次数计数器：每被调用一次加一，攒满 N 次（默认 5）才返回 True。
+
+    返回：
+        True = 到了该更新画像的节点；False = 还没到，继续攒。
+
+    用法：反思流程每次结束时调一下，返回 True 才去跑
+    build_and_save_profile。
+    """
     global _reflection_count
     _reflection_count += 1
     return _reflection_count % PROFILE_UPDATE_INTERVAL == 0
