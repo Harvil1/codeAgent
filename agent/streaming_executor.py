@@ -1,21 +1,25 @@
-"""流式并发执行（R23 #7，对齐 CC StreamingToolExecutor）。
+"""流式并发执行器（R23 第 7 项，对齐 Claude Code 的 StreamingToolExecutor）。
 
-模型流式输出期间，**已完整到达的 tool_call 立即执行**——safe 工具
-（read_file/search 等只读）create_task 并发预执行，流结束后主循环只补跑
-unsafe 串行部分。收益：工具执行延迟与模型继续输出的时间重叠
-（DeepSeek 多 tool_call 场景首 call 不必等全批输出完）。
+背景：模型流式输出时，一个工具调用的参数其实早早就传完整了，但老流程
+要等整个响应全部输出完才开始跑工具——白白干等。这个模块让"已经收齐
+参数的工具调用"提前开跑：只读类工具（read_file、搜索这类，改名为
+safe 组）一边模型继续说话一边并发执行；流结束后主循环只需补跑剩下
+的 unsafe 部分（串行）。收益是"跑工具的时间"和"模型继续输出的时间"
+重叠（DeepSeek 一次发多个工具调用时，第一个不用等全批输出完）。
 
-与 CC 的差异（如实记录）：
-- CC 是 Anthropic 格式（content_block_stop 显式边界）；OpenAI delta 格式
-  无块边界，用启发式：**新 index 出现 = 前 index 参数完整**（provider 按
-  index 顺序输出）+ arguments JSON 可解析双重确认，解析失败交正常路径
-- **只预执行 safe 组**：unsafe（write/terminal 等）保持主循环串行语义
-  （顺序副作用不因流式乱序）；terminal 只读命令按 T7 动态放宽进预执行
-- 中断安全：流异常（fallback 非流式）时 drain 全部 in-flight task 再弃用
-  （防僵尸任务）；预执行结果按 tc.id 匹配，未预执行的照常执行
+和 Claude Code 原版的差异（如实记录）：
+- CC 用 Anthropic 格式，每个内容块有明确的结束边界；OpenAI 的增量
+  （delta）格式没有边界，只能靠经验规则猜：**新工具的序号出现 = 前一个
+  工具的参数已经收齐**（服务商按序号顺序输出）+ 参数 JSON 能完整解析，
+  双重确认；JSON 解析失败就放回正常路径处理
+- **只预执行 safe 组**：写文件/跑命令这类 unsafe 工具保持主循环串行
+  （副作用有先后顺序，不能因为流式就乱序）；terminal 的只读命令按 T7
+  规则动态放宽、也允许预执行
+- 中断安全：流出异常（转非流式重试）时，先把所有跑了一半的任务等完
+  再丢弃（防僵尸任务）；预执行结果按调用 ID 匹配，没预执行的照常执行
 
-门控：config agent.streaming_tool_execution（默认 False——灰度）。
-整链 fail-open：executor 任何异常退回正常 dispatch 路径。
+开关：config 的 agent.streaming_tool_execution（默认关——还在灰度）。
+整条链路 fail-open：执行器任何异常都退回正常的工具分发路径。
 """
 import asyncio
 import json
@@ -27,7 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 def _tc_from_buf(buf: dict) -> SimpleNamespace:
-    """累积 buffer → tool_call 对象（与 _dispatch_tool_calls 的形态一致）。"""
+    """把流式累积的 buffer 字典包成 tool_call 对象（字段形状和主循环
+    分发用的完全一致，这样后续代码可以复用同一套处理逻辑）。
+
+    参数：
+        buf: 流式过程攒下来的 {id, name, arguments} 字典
+
+    返回：带 id / type / function.name / function.arguments 属性的对象。
+    """
     return SimpleNamespace(
         id=buf.get("id", ""),
         type="function",
@@ -39,10 +50,16 @@ def _tc_from_buf(buf: dict) -> SimpleNamespace:
 
 
 def _is_preset_safe(tc: SimpleNamespace) -> bool:
-    """预执行安全性判定（与 _dispatch_tool_calls 分组同源）。
+    """判断这个工具调用能不能预执行（和主循环的分组逻辑同源）。
 
-    registry.isConcurrencySafe + terminal 只读命令动态放宽（T7）。
-    查不到 registry 的工具按 unsafe（fail-closed）。
+    判定规则：工具注册表里标了"可并发安全"的才算；terminal 命令按 T7
+    规则动态放宽——只读命令也算安全。注册表里查不到的工具一律按不安全
+    处理（宁可慢也不能乱跑）。
+
+    参数：
+        tc: tool_call 对象
+
+    返回：True 可以预执行；False 不行（走正常串行路径）。
     """
     try:
         from tools.registry import registry
@@ -59,38 +76,44 @@ def _is_preset_safe(tc: SimpleNamespace) -> bool:
 
 
 class StreamingToolExecutor:
-    """流式期间的 tool_call 预执行器。
+    """模型还在流式输出时，抢先执行已收齐参数的工具调用的执行器。
 
-    用法（_call_llm_streaming 内）：
+    用法（在流式调用 _call_llm_streaming 里）：
         ex = StreamingToolExecutor(agent) if enabled else None
-        # 流循环里：新 index 出现 → ex.complete(idx, prev_buf)（预执行）
-        # 流正常结束 → results = await ex.collect()  → agent 侧暂存
-        # 流异常 → await ex.drain()（收尾丢弃）
+        # 流循环里：新序号出现 → ex.complete(idx, prev_buf)（预执行）
+        # 流正常结束 → results = await ex.collect() → agent 暂存结果
+        # 流异常 → await ex.drain()（收尾并丢弃）
 
     主循环消费（_dispatch_tool_calls）：
-        preset = self._pop_streaming_preset()  # {tc_id: content}
-        已预执行的 call 跳过执行，结果直接进 merge。
+        preset = self._pop_streaming_preset()  # {调用ID: 结果文本}
+        已预执行过的调用跳过执行，结果直接并入汇总。
     """
 
     def __init__(self, agent):
         self._agent = agent
-        self._tasks: list = []       # [(tc, asyncio.Task)]
-        self._results: Dict[str, str] = {}  # tc_id → content
+        self._tasks: list = []       # 已启动的 [(tool_call, 异步任务)]
+        self._results: Dict[str, str] = {}  # 调用ID → 执行结果文本
 
     @property
     def has_pending(self) -> bool:
         return bool(self._tasks)
 
     def complete(self, idx: int, buf: dict) -> None:
-        """一个 tool_call 的 arguments 已完整（新 index 出现/流结束）。
+        """报告"某个工具调用的参数已收齐"（新序号出现或流结束时调）。
 
-        只预执行 safe + JSON 可解析的 call；其余留正常路径。fail-open。
+        只预执行"safe 且参数 JSON 能完整解析"的调用，其余留给正常路径。
+        任何异常都静默吞掉（不影响主流程）。
+
+        参数：
+            idx: 这个工具在流里的序号（只用于日志）
+            buf: 攒好的 {id, name, arguments} 字典
         """
         try:
             tc = _tc_from_buf(buf)
             if not tc.id or not tc.function.name:
                 return
-            # JSON 双重确认（启发式边界可能被 provider 违反——坏 JSON 交正常路径）
+            # 参数 JSON 再校验一遍（"新序号=前序号收齐"是经验规则，服务商
+            # 不一定守约——坏 JSON 就放回正常路径处理）
             try:
                 json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
@@ -100,8 +123,8 @@ class StreamingToolExecutor:
                 )
                 return
             if not _is_preset_safe(tc):
-                return  # unsafe 保持主循环串行
-            # pre-callback（与 _run_safe_group_concurrently 顺序版同款）
+                return  # 不安全的工具留给主循环串行跑
+            # 工具前置回调（和并发安全组的处理顺序保持一致）
             self._agent._run_tool_pre_callbacks(tc)
             task = asyncio.create_task(self._run(tc))
             self._tasks.append((tc, task))
@@ -110,7 +133,16 @@ class StreamingToolExecutor:
             logger.debug("流式预执行启动失败（fail-open）: %s", e)
 
     async def _run(self, tc) -> str:
-        """预执行单个 safe 工具（handle_function_call 全 ctx 与正常路径一致）。"""
+        """实际预执行一个 safe 工具。
+
+        参数、上下文（会话/记忆/hook 等）全按正常路径那套传——保证预执行
+        的行为和主循环执行完全一样，不会因为走捷径而缺东西。
+
+        参数：
+            tc: tool_call 对象
+
+        返回：工具产出的结果文本（JSON 字符串）。
+        """
         from model_tools import handle_function_call
         tool_args = json.loads(tc.function.arguments or "{}")
         agent = self._agent
@@ -131,7 +163,11 @@ class StreamingToolExecutor:
         )
 
     async def collect(self) -> Dict[str, str]:
-        """等待全部 in-flight 完成。返回 {tc_id: content}（异常转 JSON error）。"""
+        """等所有跑了一半的预执行任务全部完成。
+
+        返回：{调用ID: 结果文本}；某个任务抛了异常就转成 JSON 错误文本
+        放进结果里（保证每个 ID 都有条目，不炸整体）。
+        """
         if not self._tasks:
             return self._results
         try:
@@ -153,7 +189,11 @@ class StreamingToolExecutor:
         return self._results
 
     async def drain(self) -> None:
-        """流异常路径收尾：等 in-flight 完成但丢弃结果（防僵尸任务）。"""
+        """流出异常时的收尾：等跑了一半的任务结束，但结果全扔掉。
+
+        背景：直接弃置不留任务会留僵尸进程/协程在后台漂着，所以必须
+        等完再扔。这条路径的结果不会被使用（要走非流式重试了）。
+        """
         try:
             if self._tasks:
                 await asyncio.gather(

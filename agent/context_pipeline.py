@@ -1,9 +1,18 @@
 # agent/context_pipeline.py
-"""分层压缩管线：L1 snip / L2 micro / L3.5 contextCollapse / L4 llm + reactive。
+"""分层上下文压缩管线（对话太长时逐层瘦身，裁掉或浓缩旧内容，腾出空间）。
 
-替代 context_compressor.maybe_compress 的单层 LLM 摘要。
-设计详见 docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3。
-Task P1.1（spec §7.1）补 L3.5 contextCollapse：按 token 占用比折叠早期段，不动 system prompt。
+本文件是压缩的总调度台，按「便宜到贵」的顺序套多层手段：
+L1 snip（消息条数太多时裁掉中间一段，留头留尾）→ L2 micro（单条工具结果太大时
+把原文存到磁盘、原地留个缩短版+文件指针）→ L2.5 按段聚合落盘 → L3.5
+contextCollapse（按 token 占用比例把早期对话整段折叠成占位提示）→ L4 llm
+（前面都不够时才花钱调 LLM 把旧对话写成有损摘要），外加 reactive 紧急通道
+（API 报「对话超长」时立刻保命截断）。
+
+背景：它取代了旧的单层方案——context_compressor.maybe_compress 一上来就调
+LLM 摘要，又贵又容易丢信息。项目里的位置：被 agent 主循环（AIAgent）每轮调用；
+干活的零件来自 agent/context_compressor.py，落盘能力来自 agent/output_offload.py。
+设计文档：docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3；
+L3.5 部分对应 Task P1.1（spec §7.1）——按 token 占用比折叠早期段，不碰 system prompt。
 """
 import asyncio
 import json
@@ -23,52 +32,71 @@ logger = logging.getLogger(__name__)
 
 
 def _split_system(messages: list) -> Tuple[Optional[dict], list]:
-    """分离 system 消息（如果有）。返回 (system_msg_or_None, rest)。"""
+    """把开头那条 system 消息（发给 LLM 的角色设定，整场对话不变）单独摘出来。
+
+    为什么必须摘出来：压缩层都不能动 system——动了会打穿 prompt cache
+    （服务商按消息前缀复用的计费缓存，前缀一变就得全量重算，成本翻倍）。
+
+    参数：
+        messages：完整消息列表
+    返回：(system 消息或 None, 其余消息组成的列表)。
+    """
     if messages and messages[0].get("role") == "system":
         return messages[0], messages[1:]
     return None, messages
 
 
 def _reassemble(system: Optional[dict], conv: list) -> list:
-    """重新组装：system（若有）+ conv。"""
+    """把 system 消息和其余对话拼回一个完整列表（_split_system 的逆操作）。
+
+    参数：
+        system：system 消息（可能是 None，None 就不拼）
+        conv：其余对话消息列表
+    返回：拼好的完整消息列表。
+    """
     return [system, *conv] if system else conv
 
 
 def _has_tool_calls(msg: dict) -> bool:
-    """assistant 消息是否含 tool_calls。"""
+    """判断某条 assistant 消息里有没有工具调用请求（tool_calls 字段非空）。"""
     tcs = msg.get("tool_calls")
     return bool(tcs)
 
 
 def _is_tool_result(msg: dict) -> bool:
-    """是否为 tool 结果消息（role=='tool'）。"""
+    """判断某条消息是不是工具执行结果的回传（role 等于 'tool'）。"""
     return msg.get("role") == "tool"
 
 
 def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[list, bool]:
-    """改造点 ④：基于时间的微压缩——距最后一条 assistant > gap_minutes 时清旧 tool result。
+    """按时间清旧工具结果：距最后一次助手回复超过 N 分钟没动静，就把更早的工具结果内容清空。
 
-    对齐 claude-code-main microCompact:evaluateTimeBasedTrigger。
-    在 compress_if_needed 编排里最早跑（无 token 检查），L1 snip 之前。
+    背景（改造点 ④，对齐 claude-code-main 的 microCompact 时间触发）：
+    用户放着一两个小时没说话，中间那一大堆工具输出基本不会再被用到，
+    与其占着上下文，不如换成一句「旧工具结果已清空」的标记。
 
-    返回 (messages, changed)：changed=True 表示本次确实清了内容，
-    让 compress_if_needed 的 changed flag 能正确反映 time-based MC 的贡献。
+    在 compress_if_needed 的流水线里最先跑（不看 token 超没超），排在 L1 之前。
 
-    行为：
-      1. enabled=False → 直接返回 (messages, False)
-      2. 找最后一条 role=="assistant" 的消息 index
-      3. 读该消息的 _timestamp；没有就 fail-open 返回
-      4. elapsed = (now - last_ts) / 60；< gap_minutes 就返回
-      5. 超时：把 last_assistant_idx 之前的所有 tool result 清除内容，
-         保留最后 keep_recent 个（不清）
+    参数：
+        messages：完整消息列表
+        config：context 配置子字典（由 compress_if_needed 从 self.config 的 "context" 段传入）
+    返回：(消息列表, 本次是否真的清了内容)。第二个值让上层正确统计「这次有没有改动」。
 
-    fail-open：异常不影响主流程，返回 (messages, False)。
-    幂等：已清除的 tool result content 等于 CLEARED_MARK，再清也不变（changed=False）。
+    行为（大白话版）：
+      1. 开关关着（enabled=False）→ 原样返回
+      2. 找最后一条 assistant 消息的位置
+      3. 读它的时间戳（_timestamp）；没有就放弃
+      4. 距现在不足 gap_minutes 分钟 → 不动
+      5. 超时：把这条 assistant 之前的所有工具结果清空内容，
+         但最近 keep_recent 条保留不清
+
+    fail-open：出异常不影响主流程，原样返回。
+    幂等：已经清过的（内容已是占位标记）再跑一遍也不重复计「有变化」。
     """
     CLEARED_MARK = "[Old tool result content cleared]"
     try:
-        # config 是 context 子字典（由 compress_if_needed 从 self.config.get("context", {}) 传入），
-        # flat key 读法跟 snip_compact / offload_large_tool_results 一致
+        # config 是 context 配置子字典（由 compress_if_needed 从 self.config.get("context", {}) 传入），
+        # 按扁平 key 读，跟 snip_compact / offload_large_tool_results 的读法保持一致
         ctx_cfg = config if isinstance(config, dict) else {}
         enabled = ctx_cfg.get("time_based_mc_enabled", True)
         if not enabled:
@@ -124,13 +152,19 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[lis
 
 
 def strip_internal_fields(messages: list) -> list:
-    """strip 消息列表里的内部字段（如 _timestamp），不污染发给 LLM 的 prompt。
+    """把消息里的内部字段（如 _timestamp 时间戳、_ephemeral 临时标记）洗掉，再发给 LLM。
 
-    prompt cache 神圣不可侵犯：_timestamp 等内部字段绝不能进 LLM messages。
-    在 _assemble_turn_messages 组装发给 LLM 的 messages 时调用。
+    为什么：这些字段是程序自己记账用的，混进发给 LLM 的内容里不但没用，
+    还会改变文本、打穿 prompt cache（服务商按前缀复用的缓存）。在组装
+    发给 LLM 的 messages 时调用。
 
-    CCAR8 Task 11：新增 `_ephemeral` 标记，标记的消息 strip 后保留 content/role
-    但去除标记本身（_ephemeral 是 AIAgent 内部追踪用的，LLM 不需要看到）。
+    参数：
+        messages：消息列表
+    返回：洗净内部字段后的消息列表（没脏消息就原样返回）。
+
+    历史补充（CCAR8 Task 11）：`_ephemeral` 标记「这条消息只在本轮临时用」；
+    洗掉标记本身，但消息的 content/role 照常保留——LLM 需要内容，
+    不需要我们的记账标记。
     """
     INTERNAL_KEYS = ("_timestamp", "_ephemeral")
     out = []
@@ -150,19 +184,27 @@ def snip_compact(
     keep_last: int = 47,
     threshold: int = 50,
 ) -> Tuple[list, bool]:
-    """L1：消息数 > threshold 时裁中间，保留首 N + 尾 M + 占位。
+    """L1 第 1 层：消息条数超过 threshold 时，把中间一段裁掉，留头 N 条 + 尾 M 条 + 一条占位说明。
 
-    无损：占位消息提示 LLM 去 .transcripts/latest.jsonl 读回完整内容。
-    成对保护：head 边界遇到 assistant(tool_calls) 时往后扩到 tool result 结束，
-              避免把 tool_call 留在 head、tool result 切走，导致 OpenAI 协议报孤儿。
-    返回 (新消息, 是否裁剪)。
+    无损：被裁内容的完整原文在 .transcripts/latest.jsonl 里，占位消息会告诉
+    LLM 想看细节就去读那个文件。
+    成对保护：assistant 发出的工具调用（tool_calls）和对应的工具结果（tool 消息）
+    必须成对出现，拆散了 OpenAI 协议直接报错。所以裁剪边界若正好卡在
+    assistant(tool_calls) 上，就往后扩几条把它的工具结果带上，不拆散。
+
+    参数：
+        messages：完整消息列表
+        keep_first：头部保留条数
+        keep_last：尾部保留条数
+        threshold：消息总数超过这个数才裁
+    返回：(新消息列表, 是否真的裁了)。
     """
     system, conv = _split_system(messages)
-    # 已有占位 → 不二次裁（幂等）
-    # 用占位前缀 "[snip_compact:" + role=="user" + startswith 三重限定
-    # 不能用裸子串 "snip_compact"——用户消息提到这字样会误判（Bug 5）
-    # 不能只看子串 "[snip_compact:"——tool 消息读源码/输出含该子串也误判（Bug 6）
-    # 真实占位格式见 line 195-199，role 是 user，content 以 "[snip_compact:" 开头
+    # 已有占位 → 不二次裁（幂等：重复跑结果一样）
+    # 判定「已有占位」要三重限定：前缀 "[snip_compact:" + role 是 user + 内容以它开头
+    # 历史踩坑（Bug 5/6）：不能只搜裸字符串 "snip_compact"——用户消息里提到这词会误判；
+    # 也不能只搜 "[snip_compact:"——工具读到含这子串的源码/输出同样误判。
+    # 真实占位长什么样见下方构造处：role 是 user，content 以 "[snip_compact:" 开头
     placeholders = [
         m for m in conv
         if m.get("role") == "user"
@@ -175,11 +217,10 @@ def snip_compact(
     if len(conv) <= keep_first + keep_last:
         return messages, False
 
-    # head 边界成对保护：head 末尾是 assistant(tool_calls) 或 tool_result 时，
-    # 把后续的连续 tool_result 都带上（防止把同一 assistant(tc) 的多 result 拆散）。
-    # - 末尾是 assistant(tc)：纳入它所有 result
-    # - 末尾是 tool_result：说明 head 已装下某 assistant(tc) 的部分 result，
-    #   纳入剩余的连续 result（同序列）
+    # 头部边界成对保护：头部最后一条若是 assistant(tool_calls) 或工具结果，
+    # 就把后面连续的工具结果都带上（同一次工具调用可能有多条结果，不能拆一半）。
+    # - 最后是 assistant(tc)：把它所有结果都纳入头部
+    # - 最后是工具结果：说明头部已装下某次工具调用的部分结果，把剩余的连续结果补齐
     head_end = keep_first
     needs_extend = (
         head_end > 0
@@ -190,11 +231,11 @@ def snip_compact(
         while head_end < len(conv) and _is_tool_result(conv[head_end]):
             head_end += 1
 
-    # tail 边界成对保护：tail 开头是 tool_result 时，它的 assistant(tc) 必然在
-    # tail 之外（tail 第一条是 tool_result 意味着 prev 是 assistant 或更早的 result，
-    # 都在 tail 外）。无条件 tail_start += 1 跳过这些孤儿 result（L1 无损，可读 transcript 找回）。
-    # 注意：原逻辑误把"prev 是 assistant(tc)"当成"配对完整"——但 prev 在 tail 外，
-    # assistant(tc) 也不在 tail 内，仍是孤儿。
+    # 尾部边界成对保护：尾部开头若是工具结果，它对应的 assistant(tool_calls) 一定在
+    # 尾部之外（第一条就是结果，说明发起调用的消息在更前面）——留着就是孤儿，API 会拒。
+    # 无条件跳过这些孤儿结果（L1 无损，原文可从 transcript 找回）。
+    # 历史踩坑：原逻辑以为「前一条正好是 assistant(tc)」就算配对完整——但那条在尾部之外，
+    # 尾部内的结果依然是孤儿，照样报 400。
     tail_start = len(conv) - keep_last
     while tail_start < len(conv) and _is_tool_result(conv[tail_start]) and tail_start > head_end:
         tail_start += 1
@@ -224,18 +265,27 @@ def micro_compact(
     keep_recent: int = 3,
     agent_home=None,
 ) -> Tuple[list, bool]:
-    """L2：对齐 Claude Code microCompact——按单条大小折叠笨重的 tool 结果。
+    """L2 第 2 层：折叠「单条特别大」的工具结果（对齐 Claude Code 的 microCompact）。
 
-    触发：单条 tool 结果 content 超过 threshold 才折叠（不是按数量）。
-    折叠：原文落盘到 .task_outputs/，占位留 full_at 指针（agent 可 read_file 读回）。
-    保护：最近 keep_recent（默认 3）条 tool 结果永远不折叠。
-    安全：只换 content，保留 role/tool_call_id/name（不破 tool_call 配对）。
-    幂等：已是占位/已 offload 的不再动。
+    触发：某条工具结果的 content 超过 threshold 字符才折叠（看大小，不看条数）。
+    折叠：原文写进 .task_outputs/ 磁盘文件，原地换成带 full_at 文件指针的
+    缩短版——模型想看全文可以自己调 read_file 读回来。
+    保护：最近 keep_recent（默认 3）条工具结果永远不折叠（大概率马上还要用）。
+    安全：只替换 content，role/tool_call_id/name 原样保留（不破坏工具调用配对）。
+    幂等：已经折叠过/已经落过盘的不再动。
+
+    参数：
+        messages：完整消息列表
+        threshold：单条工具结果超过多少字符才折叠
+        preview_chars：折叠后保留的预览长度
+        keep_recent：最近几条工具结果受保护
+        agent_home：OmniMate 数据目录（~/.OmniMate），落盘文件的存放根目录
+    返回：(新消息列表, 是否折叠过至少一条)。
     """
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if not tool_indices:
         return messages, False
-    protected = set(tool_indices[-keep_recent:])  # 最近 keep_recent 条保护
+    protected = set(tool_indices[-keep_recent:])  # 最近 keep_recent 条工具结果受保护
 
     folded = 0
     out = []
@@ -251,7 +301,7 @@ def micro_compact(
             out.append(m)
             continue
 
-        # 落盘原文 + 留 full_at 指针（可读回，对齐 Claude Code microCompact）
+        # 把原文写进磁盘文件，原地留带 full_at 指针的预览（模型可自己读回全文）
         if agent_home:
             try:
                 from agent.output_offload import maybe_offload
@@ -259,7 +309,7 @@ def micro_compact(
                     content,
                     tool_call_id=m.get("tool_call_id") or f"micro_{i}",
                     agent_home=agent_home,
-                    threshold=0,  # 强制落盘
+                    threshold=0,  # 传 0 表示无视单条阈值、强制落盘
                     preview_chars=preview_chars,
                 )
                 if new_content != content:
@@ -271,7 +321,7 @@ def micro_compact(
             except Exception:
                 pass
 
-        # fallback（无 agent_home / 落盘失败）：hint 占位
+        # 兜底（没传 agent_home 或落盘失败）：换成提示性占位
         new_m = dict(m)
         new_m["content"] = json.dumps({
             "micro_compacted": True,
@@ -291,7 +341,7 @@ def micro_compact(
 
 
 def _already_micro_placeheld(msg: dict) -> bool:
-    """检测 tool 消息 content 是否已是 micro_compacted 占位。"""
+    """判断某条工具消息的内容是不是已被 L2 折叠成占位（避免重复折叠）。"""
     if msg.get("role") != "tool":
         return False
     content = msg.get("content", "")
@@ -305,10 +355,10 @@ def _already_micro_placeheld(msg: dict) -> bool:
 
 
 def _already_offloaded(msg: dict) -> bool:
-    """检测 tool 消息 content 是否已是 output_offload 占位（P1-2）。
+    """判断某条工具消息是不是已经落过盘（P1-2 的 output_offload 占位）。
 
-    output_offload 的占位 JSON 含 "truncated": true 和 "full_at" 字段，
-    不要再二次落盘。
+    落盘占位的 JSON 里有 "truncated": true 和 "full_at" 两个字段；
+    已是这种形态就不要再落一次盘。
     """
     if msg.get("role") != "tool":
         return False
@@ -331,16 +381,24 @@ def offload_large_tool_results(
     message_threshold: int = 200000,
     freeze: bool = True,
 ) -> Tuple[list, bool]:
-    """L2.5：主动扫描所有 role=tool 消息，超阈值落盘（改造点 ① 精细化）。
+    """L2.5：主动扫描所有工具结果消息，超阈值就落盘（改造点 ① 的精细化版本）。
 
-    三层触发逻辑：
-      1. **per-tool 阈值**（threshold，默认 50K）：单条 tool result 超阈值 → 落盘
-      2. **per-message 聚合阈值**（message_threshold，默认 200K）：一段连续 tool result
-         （不跨 user/assistant 边界）总和超阈值 → 按大小降序逐个落盘直到总和 < 阈值
-      3. **跨轮次决策冻结**（freeze=True）：已落盘的 tool_call_id 直接从 _offload_decisions
-         重放预览内容，不重新评估（保护 prompt cache，保证 byte-identical）
+    三层触发逻辑（大白话）：
+      1. 单条阈值（threshold，默认 5 万字符）：某一条工具结果太大 → 落盘
+      2. 分段聚合阈值（message_threshold，默认 20 万字符）：一段连续的工具结果
+         （不跨 user/assistant 边界）加起来太大 → 从最大的开始逐个落盘，
+         直到总和降到阈值以下
+      3. 决策冻结（freeze=True）：已经落过盘的工具调用，下次直接照抄上次生成的
+         预览内容，不再重新评估——保证内容一个字节都不变，保护 prompt cache
 
-    返回 (新消息, 是否有变化)。消息结构除 content 外不变（保 tool_call_id/name 配对）。
+    参数：
+        messages：完整消息列表
+        agent_home：OmniMate 数据目录，落盘位置
+        threshold：单条工具结果的落盘阈值（字符）
+        preview_chars：落盘后保留的预览长度
+        message_threshold：一段连续工具结果的聚合阈值；0 表示关闭聚合检查
+        freeze：是否启用决策冻结
+    返回：(新消息列表, 是否有变化)。除 content 外消息结构不变（保住工具调用配对）。
     """
     from agent.output_offload import maybe_offload
 
@@ -353,7 +411,7 @@ def offload_large_tool_results(
 
         tc_id = m.get("tool_call_id") or ""
 
-        # ── 决策冻结：已落盘的直接重放（byte-identical，保护 prompt cache）──
+        # ── 决策冻结：落过盘的直接照抄上次的预览内容（一字不差，保 prompt cache）──
         if freeze and tc_id and tc_id in _offload_decisions:
             decision = _offload_decisions[tc_id]
             # 直接用记录的预览内容替换（不重新评估）
@@ -374,7 +432,7 @@ def offload_large_tool_results(
             out.append(m)  # 已是占位（来自其他路径），不二次落盘
             continue
 
-        # per-tool 阈值触发
+        # 单条阈值触发落盘
         effective_tc_id = tc_id or f"orphan_{id(m)}"
         new_content = maybe_offload(
             content,
@@ -407,33 +465,38 @@ def offload_large_tool_results(
 
 
 # ---------------------------------------------------------------------------
-# 改造点 ①：决策冻结 + per-message 聚合
+# 改造点 ①：决策冻结 + 按段聚合落盘
 # ---------------------------------------------------------------------------
 
-_offload_decisions: dict = {}  # tool_call_id -> {"preview": str, "file_path": str|None}
-_OFFLOAD_DECISIONS_LIMIT = 1000  # LRU 上限，防长会话内存膨胀
+_offload_decisions: dict = {}  # 工具调用 id -> {"preview": 预览内容, "file_path": 文件路径}
+_OFFLOAD_DECISIONS_LIMIT = 1000  # 表大小上限（简易 LRU 淘汰），防超长会话把内存撑爆
 
 
 def _record_decision(tc_id: str, preview: str, file_path: str = None) -> None:
-    """记录落盘决策到 _offload_decisions，超 _OFFLOAD_DECISIONS_LIMIT 时 LRU 淘汰。
+    """把一条落盘决策记进全局表，表满了就淘汰最老的（简易 LRU）。
 
-    dict 在 Py3.7+ 保序（插入顺序），简化版 LRU：超限时删最早的（next(iter)）。
+    背景：dict 从 Python 3.7 起按插入顺序排列，删第一个元素就是删最早插入的。
+
+    参数：
+        tc_id：工具调用的唯一 id
+        preview：落盘后替换上去的预览内容
+        file_path：原文落到了哪个文件
     """
     if len(_offload_decisions) >= _OFFLOAD_DECISIONS_LIMIT:
-        # 淘汰最早的一个（dict 在 Py3.7+ 保序）
+        # 淘汰最早插入的一个（dict 在 Py3.7+ 保序）
         oldest = next(iter(_offload_decisions))
         del _offload_decisions[oldest]
     _offload_decisions[tc_id] = {"preview": preview, "file_path": file_path}
 
 
 def reset_offload_decisions() -> None:
-    """清空模块级落盘决策表（测试隔离用）。
+    """清空全局落盘决策表（测试之间隔离用）。
 
-    R30b-A1：不再在 AIAgent.__init__ 调用——该表是同进程内所有 agent
-    （主代理 + 并发子代理）共享的，新建 agent 时清空会把其他正在运行的
-    agent 的冻结决策一起清掉，破坏 byte-identical 重放（打穿 prompt cache）。
-    生产路径靠 _OFFLOAD_DECISIONS_LIMIT LRU 控内存；跨会话泄漏面不存在
-    （tool_call_id 由 provider 随机生成，call_xxx 不碰撞）。
+    历史踩坑（R30b-A1）：不要在新建 agent 时调这个——这张表是同进程内
+    所有 agent（主代理 + 并发子代理）共享的，新建 agent 就清空，
+    会把别的正在跑的 agent 的冻结决策一起抹掉，重放内容对不上、打穿 prompt cache。
+    生产路径靠 1000 条上限的淘汰机制控内存；跨会话也不怕泄漏
+    （工具调用 id 是服务商随机生成的，call_xxx 不会撞车）。
     """
     _offload_decisions.clear()
 
@@ -445,40 +508,46 @@ def _enforce_per_message_budget(
     preview_chars: int,
     freeze: bool,
 ) -> bool:
-    """per-message 聚合检查：一段连续 tool result 总和 > limit 时选最大的几个落盘。
+    """按段聚合检查：一段连续工具结果的总和超标时，挑最大的几条落盘。
 
-    分组规则（对齐 spec）：按 **user** 消息边界分组——一段连续的 tool result
-    （中间可以有 assistant(tool_calls)，但不能跨 user 消息）算一组。
-    这反映了"一次用户输入触发的所有工具调用"是一个逻辑单元。
+    分组规则：以 user 消息为界——一段连续的工具结果（中间可以夹着
+    assistant(tool_calls)，但不能跨过 user 消息）算一组。道理：一次用户输入
+    触发的一串工具调用是一个逻辑整体。
 
-    超限的组：按 size 降序，逐个落盘直到总和 < limit。
+    超标的组：按大小从大到小排，逐个落盘直到总和回到限内。
+    已在决策冻结表里命中的、或已经是占位的，不重复处理。
 
-    注意：已在 _offload_decisions 里（决策冻结命中）的不重复处理；
-    已是占位（_already_offloaded）的跳过。
+    参数：
+        messages：消息列表（content 会被原地修改）
+        limit：一段的总字符上限
+        agent_home：落盘目录根
+        preview_chars：落盘后保留的预览长度
+        freeze：是否记录决策（供下次冻结照抄）
+    返回：是否有消息被落盘。
     """
     from agent.output_offload import maybe_offload
 
     changed = False
 
-    # 1. 按 user 消息边界分组：收集所有 tool result 索引，
-    #    遇到新 user 消息就开新段
+    # 1. 按 user 消息边界分组：收集所有工具结果的索引，
+    #    遇到新 user 消息就开新一段
     segments = []  # list of list of indices
     current_seg = []
     for i, m in enumerate(messages):
         if m.get("role") == "tool":
             current_seg.append(i)
         elif m.get("role") == "user":
-            # user 消息是分组边界——user 之后的 tool result 属于新段
+            # user 消息是分组边界——user 之后的工具结果属于新一段
             if current_seg:
                 segments.append(current_seg)
                 current_seg = []
-        # assistant / system 消息不打断段（tool result 中间可以有 assistant(tool_calls)）
+        # assistant / system 消息不打断分段（工具结果中间可以夹 assistant(tool_calls)）
     if current_seg:
         segments.append(current_seg)
 
-    # 2. 对每段算总和，超 limit 的按 size 降序逐个落盘
+    # 2. 对每段算总和，超 limit 的按大小从大到小逐个落盘
     for seg in segments:
-        # 过滤掉已是占位或决策冻结命中的（它们 content 已经很小）
+        # 过滤掉已是占位或决策冻结命中的（它们的 content 已经很小）
         candidates = []
         seg_total = 0
         for idx in seg:
@@ -486,7 +555,7 @@ def _enforce_per_message_budget(
             content = m.get("content", "")
             seg_total += len(content) if isinstance(content, str) else 0
             tc_id = m.get("tool_call_id") or ""
-            # 决策冻结命中的或已是占位的不候选
+            # 决策冻结命中的或已是占位的不进候选
             if freeze and tc_id and tc_id in _offload_decisions:
                 continue
             if _already_offloaded(m):
@@ -500,7 +569,7 @@ def _enforce_per_message_budget(
         if not candidates:
             continue
 
-        # 按 size 降序，逐个落盘直到总和 < limit
+        # 按大小降序，逐个落盘直到总和 < limit
         candidates.sort(key=lambda x: x[1], reverse=True)
         for idx, size in candidates:
             if seg_total <= limit:
@@ -512,7 +581,7 @@ def _enforce_per_message_budget(
                 content,
                 tool_call_id=tc_id,
                 agent_home=agent_home,
-                threshold=0,  # 强制落盘（聚合触发）
+                threshold=0,  # 传 0 表示无视单条阈值、强制落盘（聚合触发）
                 preview_chars=preview_chars,
             )
             if new_content != content:
@@ -538,64 +607,60 @@ def apply_context_collapse(
     context_window: int = 128_000,
     keep_recent_turns: int = 3,
 ) -> Tuple[list, bool]:
-    """L3.5 contextCollapse：基于 token 占用比折叠早期对话段。
+    """L3.5 contextCollapse：按 token 占用比例，把早期对话整段折叠成一条占位说明。
 
-    Task P1.1（spec §7.1）。**轻量、无损、可逆**——比 L4 llm_compact（调 LLM 有损摘要）
-    便宜得多，放在 L1 snip + L2 micro 之后、L4 llm_compact 之前做兜底。
+    背景（Task P1.1，spec §7.1）：这一层**轻量、无损、可逆**——比 L4 花 LLM
+    读一遍写摘要的有损压缩便宜得多，所以排在 L1/L2 之后、L4 之前当缓冲垫。
 
-    触发：``estimate_message_tokens(messages) / context_window > threshold_ratio``
-    动作：
-        1. 拆 system（**不碰**，保护 prompt cache key）
-        2. 找出所有 pinned 消息（``content`` 以 ``[pinned]`` 开头，或显式 ``pinned: True``）
-           → 保护不折叠
-        3. 保留最近 ``keep_recent_turns`` 轮（1 轮 = user + assistant = 2 条）
-        4. 其余的"中间段"折叠成一个 ``{"role": "user", "content": "[context_collapse: ...]"}`` 占位
-        5. 最终顺序：system + pinned + 占位 + 最近 N 轮
-        6. 调用 ``_fix_tool_call_pairs`` 兜底（避免孤儿 tool result）
+    触发：估算 token 数 ÷ 模型上下文窗口大小 > threshold_ratio。
+    动作（大白话版）：
+        1. 把 system 消息摘出来不动（保 prompt cache）
+        2. 找出所有钉住的消息（pinned：内容以 [pinned] 开头，或标记 pinned=True）→ 保护
+        3. 保留最近 keep_recent_turns 轮（1 轮 = 一条 user + 一条 assistant = 2 条）
+        4. 剩下的中间段折叠成一条 "[context_collapse: ...]" 占位 user 消息
+        5. 最终顺序：system + 钉住的 + 占位 + 最近 N 轮
+        6. 最后过一遍 _fix_tool_call_pairs 兜底（防切出孤儿工具结果）
 
-    可逆性：原文由 ``snapshot_if_needed``（compress_if_needed 编排在 L4 前调用）
-    或 ``.transcripts/latest.jsonl`` 保留，占位本身提示用户/LLM 去那里找。
+    可逆：原文由 snapshot_if_needed（编排器在 L4 前调用）或
+    .transcripts/latest.jsonl 保留，占位本身会提示去哪里找。
+    幂等：列表里已有 [context_collapse: 占位 → 直接返回不重复折叠。
 
-    幂等：已含 ``[context_collapse:`` 占位 → 直接返回 ``(messages, False)``。
-
-    Args:
-        messages: 完整消息列表（含开头的 system）
-        threshold_ratio: 0-1，估算 token / context_window 超过该比例才触发
-        context_window: 模型上下文窗口大小（tokens）；默认 128K（DeepSeek/OpenAI 常见值）
-        keep_recent_turns: 保留最近多少**轮**对话（1 轮 = user + assistant = 2 条）
-
-    Returns:
-        (新消息列表, 是否发生变化)。新列表是浅拷贝；原列表不被修改。
+    参数：
+        messages：完整消息列表（含开头的 system）
+        threshold_ratio：0-1 的占用比例，超过才触发
+        context_window：模型上下文窗口大小（token 数）；默认 128K（DeepSeek/OpenAI 常见值）
+        keep_recent_turns：保护最近几轮对话（1 轮 = 2 条消息）
+    返回：(新消息列表, 是否发生了折叠)。新列表是浅拷贝，原列表不改。
     """
-    # 幂等：已是折叠态 → 不二次折叠
+    # 幂等：已是折叠状态 → 不二次折叠
     if any(
         "[context_collapse:" in str(m.get("content", ""))
         for m in messages
     ):
         return messages, False
 
-    # 估算 token；没超阈值直接 noop
+    # 估算 token；没超占用比例直接返回（noop = 什么都不做）
     est_tokens = estimate_message_tokens(messages)
     if est_tokens / max(context_window, 1) <= threshold_ratio:
         return messages, False
 
     system, conv = _split_system(messages)
     if len(conv) < (keep_recent_turns * 2 + 2):
-        # 对话太少，没什么可折叠
+        # 对话太少，没什么可折叠的
         return messages, False
 
-    # 拆 pinned + 中间段 + 最近 N 轮
-    # 最近 N 轮 = conv 末尾 keep_recent_turns*2 条（允许放宽边界以保 tool_call 成对：
-    # 如果 tail 开头是 tool_result，往前扩到对应的 assistant(tool_calls)）
+    # 拆出钉住的 + 中间段 + 最近 N 轮
+    # 最近 N 轮 = conv 末尾 keep_recent_turns*2 条（边界允许放宽以保工具调用成对：
+    # 尾段开头若是工具结果，往前扩到发起它的 assistant(tool_calls)）
     tail_len = keep_recent_turns * 2
     tail_start = len(conv) - tail_len
     while tail_start > 0 and _is_tool_result(conv[tail_start]) and tail_start > 1:
-        tail_start -= 1  # 往前找配对的 assistant(tool_calls)
+        tail_start -= 1  # 往前找发起这次调用的 assistant(tool_calls)
 
     head_region = conv[:tail_start]  # 可折叠区域
-    tail_region = conv[tail_start:]  # 最近 N 轮（保护）
+    tail_region = conv[tail_start:]  # 最近 N 轮（保护不动）
 
-    # 从 head_region 中挑出 pinned 消息（保留原位序）
+    # 从可折叠区域里挑出钉住的消息（保留原有顺序）
     pinned = []
     collapsible_indices = []
     for idx, m in enumerate(head_region):
@@ -610,10 +675,10 @@ def apply_context_collapse(
             collapsible_indices.append(idx)
 
     if not collapsible_indices:
-        # 全是 pinned，没什么可折叠
+        # 全是钉住的消息，没什么可折叠的
         return messages, False
 
-    folded_turns = len(collapsible_indices) // 2  # 粗略：2 条 = 1 轮
+    folded_turns = len(collapsible_indices) // 2  # 粗略换算：2 条消息算 1 轮
     placeholder = {
         "role": "user",
         "content": (
@@ -623,7 +688,7 @@ def apply_context_collapse(
         ),
     }
 
-    # 重组：system + pinned 段（按原序）+ 占位 + tail
+    # 重组：system + 钉住段（按原序）+ 占位 + 最近 N 轮
     new_conv = [m for _, m in pinned] + [placeholder] + tail_region
     new_conv = _fix_tool_call_pairs(new_conv)
     new_messages = _reassemble(system, new_conv)
@@ -637,11 +702,16 @@ def apply_context_collapse(
 
 
 def _build_compact_boundary(coverage: str, preserved: str) -> str:
-    """构造 compact boundary 标注（T8，对齐 CCB annotateBoundaryWithPreservedSegment）。
+    """构造压缩边界标注（T8，对齐 CCB 的 annotateBoundaryWithPreservedSegment）。
 
-    三要素：压缩时间 / 摘要覆盖范围 / 保留段范围，
-    外加"保留段精确 vs 摘要转述"提示——帮模型区分哪些内容是原文、
-    哪些是转述（引用具体数据/路径/命令输出时以保留段为准）。
+    写清楚三件事：什么时候压的 / 摘要覆盖了哪些内容 / 哪些段是原文保留的，
+    再加一句提醒「保留段是原文、摘要只是转述」——帮模型分清哪些内容可信，
+    引用具体数据/路径/命令输出时以保留段为准。
+
+    参数：
+        coverage：摘要覆盖的范围描述
+        preserved：原样保留的段的范围描述
+    返回：拼好的标注文本。
     """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     return (
@@ -668,45 +738,53 @@ async def llm_compact(
     up_to_idx: int = -1,
     tools: Optional[list] = None,
 ) -> Tuple[list, bool]:
-    """L4：L1+L2 后仍超阈值时，调 LLM 总结早期对话（async：_summarize_conversation 已改 async）。
+    """L4 第 4 层：前面几层压不下去、仍超 token 阈值时，调 LLM 把旧对话写成摘要。
 
-    precomputed_tokens: 调用方预算的 token 数(避免重复遍历)。None 时内部算。
+    有损：旧对话被摘要文本替换，细节可能丢（所以编排器在调用前会把原文
+    快照到 transcript）。函数是 async 的（内部调的 _summarize_conversation
+    已改异步；历史踩坑 Task D4 fix：这里必须 await）。
 
-    session_memory: 预提取的 session memory（改造点 ② 软目标）。
-    有值时传给 _summarize_conversation 替代 LLM 摘要。
-    SessionStore.get_memory_extract 尚未实现，目前永远 None（Phase 2 再接入）。
-
-    Task C（partial compact）：
-    - **from_idx/up_to_idx**：只压 conv[from_idx:up_to_idx] 段，保留 head + tail 原文
-    - 默认 0/-1 = 全量（向后兼容，走原 keep_recent 逻辑）
-    - partial 模式时 keep_recent 被忽略（from/up_to 完全决定切片）
-
-    Task D4 fix: 改 async + await _summarize_conversation。
+    参数：
+        messages：完整消息列表
+        llm_client：LLM 客户端
+        model：模型名
+        keep_recent：全量模式下末尾保护条数（最近这么多条不进摘要）
+        token_threshold：token 阈值，超过才压
+        msg_threshold：遗留参数，当前逻辑不用（压缩只看 token，不看消息条数）
+        precomputed_tokens：调用方已算好的 token 数（省得重复遍历）；None 时内部自己算
+        session_memory：预提取的会话记忆（改造点 ② 软目标）；有值就直接用它当摘要，
+                        不调 LLM。获取接口尚未实现，目前永远传 None（Phase 2 接入）
+        from_idx：局部压缩（Task C partial compact）起始条数——只压这一段，
+                  段外原文保留；默认 0
+        up_to_idx：局部压缩的结束条数；默认 -1 = 压到末尾。两者都取默认值时
+                   走全量模式（keep_recent 逻辑）；局部模式下 keep_recent 被忽略
+        tools：当前工具 schema 列表（fork 前缀复用要用，见 _summarize_conversation）
+    返回：(新消息列表, 是否真的压缩了)。
     """
     system, conv = _split_system(messages)
     if precomputed_tokens is not None:
         over_token = precomputed_tokens > token_threshold
     else:
         over_token = estimate_message_tokens(messages) > token_threshold
-    if not over_token:  # 对齐 Claude Code：压缩由 token 驱动，不按消息数
+    if not over_token:  # 对齐 Claude Code：压不压只看 token，不看消息条数
         return messages, False
 
-    # Task C：partial 模式 vs 全量模式
+    # Task C：局部模式 vs 全量模式
     is_partial = from_idx != 0 or up_to_idx != -1
 
     if is_partial:
-        # partial 模式：head + summary + tail 拼装
+        # 局部模式：头段原文 + 摘要 + 尾段原文 拼装
         effective_up_to = len(conv) if up_to_idx < 0 else up_to_idx
         head = conv[:from_idx]
         tail = conv[effective_up_to:] if effective_up_to < len(conv) else []
 
         summary = await _summarize_conversation(
-            conv,  # 传完整 conv，由 _summarize_conversation 内部切片
+            conv,  # 传完整 conv，由 _summarize_conversation 内部按 from/up_to 切片
             llm_client, model=model,
             session_memory=session_memory,
             from_idx=from_idx,
             up_to_idx=effective_up_to,
-            # R18 #15：fork 前缀 = 完整 messages（含 system）+ tools 同主调用
+            # R18 #15：fork 前缀 = 完整 messages（含 system），tools 与主调用一致
             fork_prefix_messages=messages,
             tools=tools,
         )
@@ -743,7 +821,7 @@ async def llm_compact(
             logger.debug("notify_compaction fail-open: %s", e)
         return new_messages, True
 
-    # 全量模式（原逻辑，向后兼容）
+    # 全量模式（原逻辑，保持向后兼容）
     if len(conv) <= keep_recent:
         return messages, False
 
@@ -753,7 +831,7 @@ async def llm_compact(
     summary = await _summarize_conversation(
         to_summarize, llm_client, model=model,
         session_memory=session_memory,
-        # R18 #15：fork 前缀 = 完整 messages（含 system）+ tools 同主调用
+        # R18 #15：fork 前缀 = 完整 messages（含 system），tools 与主调用一致
         fork_prefix_messages=messages,
         tools=tools,
     )
@@ -782,8 +860,8 @@ async def llm_compact(
         sum(len(str(m.get("content", ""))) for m in to_summarize),
         len(summary),
     )
-    # 改造点 ③：通知 cache_monitor 下次 cache 下降是预期的（compact 压缩了 messages）
-    # 放在 return 前，确保只在实际发生压缩时通知
+    # 改造点 ③：通知 cache_monitor「下次缓存命中率下降是压缩造成的，属预期」
+    # 放在 return 前，确保只在真发生压缩时才通知
     try:
         from agent.cache_monitor import notify_compaction
         notify_compaction()
@@ -794,19 +872,21 @@ async def llm_compact(
 
 @dataclass
 class CompressionSessionState:
-    """单会话的压缩状态。
+    """一场会话内压缩相关的记账簿。
 
-    - reactive_last_at: 上次 reactive_compact 触发的 time.time()（0=从未触发）
-    - reactive_count: 本会话 reactive_compact 已触发次数
-    - llm_compact_count: L4 触发次数
-    - last_llm_compact_turn: 上次 L4 触发时的 current_turn（用于 cooldown）
-    - current_turn: 当前 LLM 轮次（由 agent 主循环 increment）
-    - llm_compact_failures: R18 #18 L4 连续失败计数（触发熔断用；
-      摘要生成层的熔断在 context_compressor 的模块级状态里，这里管的是
-      「触发」层——失败后本会话不再触发 L4，省无效的摘要调用）
+    字段（大白话）：
+    - reactive_last_at：上次紧急压缩的时间戳（0 = 从没触发过）
+    - reactive_count：本场紧急压缩已触发几次
+    - llm_compact_count：L4 触发过几次
+    - last_llm_compact_turn：上次 L4 触发时的轮次号（算冷却期用）
+    - current_turn：当前 LLM 轮次号（由 agent 主循环累加）
+    - llm_compact_failures：L4 连续失败计数（R18 #18，触发熔断用）。
+      注意熔断有两层：这里管的是「要不要触发 L4」这层——连续失败就别再
+      白花钱调摘要了；摘要生成那层的熔断在 context_compressor 的模块级状态里，
+      两层互补。
 
-    向后兼容：``reacted`` 属性保留为只读代理（``reactive_count > 0``），
-    旧代码读 ``state.reacted`` 不破坏。
+    向后兼容：旧的 ``reacted`` 属性保留为只读别名（= reactive_count > 0），
+    老代码读它不会坏。
     """
     reactive_last_at: float = 0.0
     reactive_count: int = 0
@@ -817,7 +897,7 @@ class CompressionSessionState:
 
     @property
     def reacted(self) -> bool:
-        """向后兼容：reacted 等价于 reactive_count > 0。"""
+        """向后兼容：reacted 等价于「本场触发过至少一次紧急压缩」。"""
         return self.reactive_count > 0
 
     def record_llm_compact(self) -> None:
@@ -831,7 +911,7 @@ class CompressionSessionState:
         self.current_turn += 1
 
 
-# R18 #18：L4 触发熔断阈值（对齐 CCB MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3）
+# R18 #18：L4 连续失败多少次就熔断（本会话不再触发 L4）；对齐 CCB 的 3 次
 MAX_CONSECUTIVE_L4_FAILURES = 3
 
 
@@ -839,15 +919,19 @@ def estimate_tokens_hybrid(
     messages: list,
     anchor: Optional[tuple] = None,
 ) -> int:
-    """R18 #17：权威值 + 新消息粗估的混合 token 计数（对齐 CC tokenCountWithEstimation）。
+    """R18 #17：混合 token 计数——真实值打底，新增部分粗估（对齐 CC 的 tokenCountWithEstimation）。
 
-    anchor = (msg_count, input_tokens)：最近一次主调用的真实输入 token 数
-    （usage 的 prompt + cache_read + cache_creation）与当时消息条数。
-    - len(messages) > msg_count：权威值 + 其后新增消息粗估（阈值判定偏差
-      从「全程粗估」缩到「只估增量」）
-    - 消息被压缩/回退（len <= msg_count）或无锚点：全量粗估（保守回退）
+    背景：全靠估算会越估越偏，真实值又只有调完 API 才拿得到（账单里的数）。
+    折中：拿最近一次主调用返回的真实输入 token 数（usage 里的 prompt +
+    cache_read + cache_creation）当「锚点」，锚点之后新加的消息才用粗估——
+    阈值判定的误差从「全程都在估」缩小到「只估增量」。
 
-    fail-open：anchor 结构异常时按无锚点处理。
+    参数：
+        messages：完整消息列表
+        anchor：锚点元组 (当时的消息条数, 当时的真实输入 token 数)
+    返回：估算的 token 总数。
+    消息被压缩/回退过（条数比锚点还少）或没传锚点 → 全量粗估（保守回退）。
+    fail-open：锚点格式不对就当没传处理。
     """
     try:
         if anchor and len(anchor) == 2:
@@ -861,7 +945,7 @@ def estimate_tokens_hybrid(
     return estimate_message_tokens(messages)
 
 
-# 冷却窗口 + 上限的默认值（可被 config 覆盖）
+# 紧急压缩的两道保险默认值（config 可覆盖）：冷却窗口秒数 / 单会话次数上限
 REACTIVE_COOLDOWN_SECONDS = 60
 REACTIVE_MAX_PER_SESSION = 5
 
@@ -875,14 +959,22 @@ def reactive_compact(
     max_per_session: int = REACTIVE_MAX_PER_SESSION,
     now_fn=time.time,
 ) -> Tuple[list, bool]:
-    """紧急通道：API 报 prompt_too_long 时调用。
+    """紧急通道：API 报「对话超长」（prompt_too_long）时立刻调用。
 
-    只留 system + 占位 + 最后 keep_recent 条。
-    **多次触发**（Task D 改造）：每次 PTL 都可触发，受两层保护：
-      1. **冷却窗口**：距上次触发 < ``cooldown_seconds`` 则跳过（默认 60s）
-      2. **单会话上限**：已触发 ``max_per_session`` 次则跳过（默认 5）
+    做法简单粗暴：只留 system + 一条说明占位 + 最后 keep_recent 条消息，
+    其余全靠 transcript 文件找回。
+    **可多次触发**（Task D 改造）：每次报错都可以再压，但有两道保险：
+      1. 冷却窗口：距上次触发不足 cooldown_seconds 秒（默认 60s）→ 跳过
+      2. 单会话上限：本场已触发 max_per_session 次（默认 5）→ 跳过
 
-    ``now_fn`` 参数仅为测试注入用（生产代码不传）。
+    参数：
+        messages：完整消息列表
+        session_state：会话记账簿（记触发次数和时间）
+        keep_recent：末尾保留条数
+        cooldown_seconds：冷却窗口秒数
+        max_per_session：单会话触发上限
+        now_fn：取当前时间的函数，测试注入假时钟用（生产代码不传）
+    返回：(新消息列表, 是否真的压了)。
     """
     # 保护 1：冷却窗口
     now = now_fn()
@@ -922,8 +1014,8 @@ def reactive_compact(
         "reactive_compact triggered (#%d): kept last %d",
         session_state.reactive_count, len(keep),
     )
-    # 通知 cache_monitor：下次 cache 下降是预期压缩（对齐 llm_compact 的 pattern）
-    # fail-open：异常只 debug log，不影响压缩结果
+    # 通知 cache_monitor：下次缓存下降是压缩造成的，属预期（与 llm_compact 一致）
+    # fail-open：通知失败只记 debug 日志，不影响压缩结果
     try:
         from agent.cache_monitor import notify_compaction
         notify_compaction()
@@ -933,24 +1025,24 @@ def reactive_compact(
 
 
 def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000) -> int:
-    """预估"下一轮还要烧多少 token"（T1，防压缩震荡）。
+    """预估「下一轮大概还要多烧多少 token」（T1，防压缩震荡）。
 
-    对齐 CCB autoCompact 的 estimateMaxTurnGrowth：阈值 = 有效窗口 − buffer −
-    单轮增长预估。这里取最近 window 轮（user 边界分组）的**单轮 token
-    大小最大值**作为增长预估——一轮大工具结果进来会直接把下一轮顶过线，
-    提前压缩避免"压完→下一轮又到线→再压"的震荡。
+    背景（对齐 CCB autoCompact 的 estimateMaxTurnGrowth）：如果等对话真顶到
+    线才压，会出现「压完 → 下一轮一波大工具结果又顶线 → 再压」的来回震荡。
+    所以提前量 = 最近 window 轮里**最大单轮 token 量**——取最大值是因为
+    一轮大工具结果就能直接把下一轮顶过线。
 
-    Args:
-        messages: 完整消息列表（含 system，会被跳过）
-        window: 观察窗口（最近几轮），config context.llm_compact_growth_window
-        default: 历史不足 window 轮时的保守默认，config llm_compact_growth_default
+    一轮的定义：一条 user 消息 + 它后面的 assistant/tool 消息，直到下一条 user。
 
-    Returns:
-        预估增量（tokens）。空/历史不足 → default。
+    参数：
+        messages：完整消息列表（开头的 system 会被跳过）
+        window：观察最近几轮（config 的 llm_compact_growth_window）
+        default：历史不足 window 轮时的保守默认值（config 的 llm_compact_growth_default）
+    返回：预估增量（token 数）；消息为空或轮数不够 → default。
     """
     try:
         _, conv = _split_system(messages)
-        # 按 user 边界分轮：一条 user 消息 + 后续 assistant/tool 直到下一条 user
+        # 按 user 消息边界分轮：一条 user + 后续 assistant/tool 直到下一条 user
         turns: list = []
         current: list = []
         for m in conv:
@@ -984,33 +1076,43 @@ async def compress_if_needed(
     tools: Optional[list] = None,
     authoritative_tokens: Optional[tuple] = None,
 ) -> Tuple[list, bool, bool]:
-    """分层压缩编排器。返回 (新消息, 是否发生变化, 是否 LLM 摘要级压缩)（async）。
+    """分层压缩总调度（编排器）。返回 (新消息, 是否有改动, 是否发生了 LLM 摘要级压缩)。
 
-    顺序：L1 snip → L2 micro（per-tool）→ L2.5 per-message 聚合 → L2.6 总量预算
-    → **L3.5 contextCollapse** → L4 llm。
-    每层独立判定是否触发，最终统一过 _fix_tool_call_pairs。
+    流水线顺序（从便宜到贵）：时间清理 → L1 裁中间 → L2 单条折叠 →
+    L2.5 按段聚合 → L2.6 总量预算 → L3.5 整段折叠 → L4 LLM 摘要。
+    每层各自判断要不要出手，最后统一过一遍工具调用配对修复。
 
-    R30 审计 Medium-4：changed（任一层改了 messages，含无损层）与 compacted
-    （仅 L4 llm_compact——LLM 摘要有损替换）分离。调用方据此区分：
-    changed 只须同步 conversation_history；compacted 才做重建 prompt /
-    [COMPACT_BOUNDARY] / <post_compress_brief> 等全套副作用。
+    「有改动」vs「LLM 级压缩」的区分（R30 审计 Medium-4）：changed 表示任何
+    一层动过消息（包括无损层）——调用方只需把消息同步回对话历史；compacted
+    特指 L4 的有损摘要——要做重建 prompt / [COMPACT_BOUNDARY] /
+    <post_compress_brief> 那一整套后续动作。
 
-    L3.5（Task P1.1，spec §7.1）：``features.context_collapse.enabled=True`` 时，
-    按 ``est_tokens / context_window > threshold_ratio`` 触发，折叠早期段为占位
-    （无损、可逆；保护 system prompt + pinned）。
-    放在 L4 llm_compact 前做兜底——便宜得多，能少调 LLM 摘要。
+    参数：
+        messages：完整消息列表
+        llm_client：LLM 客户端（L4 用）
+        model：模型名
+        config：context 配置子字典
+        session_state：会话压缩记账簿
+        agent_home：OmniMate 数据目录
+        session_id：会话 id（日志/快照用）
+        hooks_registry：hook 注册表，可选；非 None 时压缩前后触发
+          PRE_COMPACT/POST_COMPACT 事件，PRE_COMPACT 有 hook 要求中止就跳过本次压缩
+        tools：当前工具 schema 列表（fork 前缀复用，传给 L4）
+        authoritative_tokens：真实 token 锚点 (消息条数, 真实输入 token 数)，
+          供混合计数用；None 走全量粗估
+    返回：(新消息列表, changed, compacted)。
 
-    L4 预算用 session_state.llm_compact_count，避免 L1+L2 循环误耗 L4 配额。
-
-    hooks_registry：可选。非 None 时在压缩前后触发 PRE_COMPACT/POST_COMPACT
-    事件；PRE_COMPACT 任一 hook 返回 abort 则跳过本次压缩。
-
-    Task D4 fix: 改 async + await llm_compact。
+    其他要点：
+    - L4 的判定用 session_state 里的记账，避免 L1+L2 循环白白耗掉 L4 的名额
+    - L3.5（Task P1.1，spec §7.1）：feature flag context_collapse 开启时按
+      占用比例触发，无损可逆、不碰 system 和钉住消息；排在 L4 前当缓冲，
+      能省下 LLM 摘要调用
+    - 历史踩坑（Task D4 fix）：本函数已改 async，内部必须 await llm_compact。
     """
     # PRE_COMPACT hook（可 abort）
     if hooks_registry is not None:
         try:
-            # Medium-6：hook 链移出事件循环线程（慢声明式 hook 不冻结流式输出）
+            # Medium-6：hook 链丢到线程池跑（慢 hook 别把流式输出卡住）
             abort = await asyncio.to_thread(
                 hooks_registry.run_pre_compact,
                 {
@@ -1024,15 +1126,15 @@ async def compress_if_needed(
         except Exception as e:
             logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
 
-    # ── 改造点 ④：time-based MC（最早跑，无 token 检查）──
-    # 距最后一条 assistant > 60min 时，把旧 tool result 内容替换为清除标记
-    # 对齐 claude-code-main microCompact:evaluateTimeBasedTrigger
-    # 返回 (messages, c0)：c0=True 时表示 time-based MC 清了内容，
-    # 必须参与最终 changed flag（否则 compress=False 会导致 conversation_history
-    # 不同步，下一轮又把原始 content 塞回去——time-based MC 效果只活一轮）
+    # ── 改造点 ④：时间清理（最先跑，不看 token 超没超）──
+    # 距最后一条 assistant 超 60 分钟时，把旧工具结果内容换成清除标记
+    # （对齐 claude-code-main 的 microCompact 时间触发）
+    # 返回的 c0=True 表示确实清了东西——必须算进最终 changed，
+    # 否则 changed=False 会导致对话历史不同步，下一轮又把原始内容塞回去
+    # （等于白清，效果只活一轮）
     messages, c0 = time_based_clear_old_tool_results(messages, config)
 
-    # L1 snip（对齐 Claude Code：减少频繁裁中间，由 L4 token 主导）
+    # L1 裁中间（对齐 Claude Code：少频繁裁中间，压缩主要靠 L4 的 token 判定）
     messages, c1 = snip_compact(
         messages,
         keep_first=config.get("snip_keep_first", 3),
@@ -1040,17 +1142,17 @@ async def compress_if_needed(
         threshold=config.get("snip_message_threshold", 200),
     )
 
-    # L2 micro（对齐 Claude Code microCompact：按单条大小折叠 + 落盘留指针 + 保最近3条）
-    # 替代原 L2.5 单条 offload——micro_compact 内部按大小触发 + 落盘 + 可读回
-    # 改造点 ①：threshold 默认从 10K 提到 50K（精细化，避免小结果也落盘）
+    # L2 单条折叠（对齐 Claude Code microCompact：按单条大小折叠 + 落盘留指针 + 保最近 3 条）
+    # 取代了原 L2.5 的单条落盘——micro_compact 内部自己按大小触发 + 落盘 + 可读回
+    # 改造点 ①：threshold 默认从 1 万提到 5 万字符（精细化，小结果不落盘）
     offload_threshold = config.get("output_offload_threshold", 50000)
     offload_preview = config.get("output_offload_preview", 2000)
     offload_freeze = config.get("offload_decision_freeze", True)
     from agent.output_offload import maybe_offload
 
     # ── 改造点 ①：决策冻结预处理 ──
-    # 已落盘的 tool_call_id 直接从 _offload_decisions 重放预览内容（byte-identical）
-    # 放在 L2 之前——冻结重放让 L2 看到的 content 已经是预览（不会重复落盘）
+    # 落过盘的工具调用直接照抄上次的预览内容（一字不差，保 prompt cache）
+    # 放在 L2 之前——先照抄，L2 看到的就已是预览，不会重复落盘
     c_freeze = False
     if offload_freeze and _offload_decisions:
         for i, m in enumerate(messages):
@@ -1072,7 +1174,7 @@ async def compress_if_needed(
         keep_recent=config.get("micro_keep_recent_results", 3),
         agent_home=agent_home,
     )
-    # 记录 micro_compact 产生的新落盘决策
+    # 把 micro_compact 新产生的落盘决策也记进表（下次照抄）
     if offload_freeze and c2:
         for m in messages:
             if m.get("role") != "tool":
@@ -1084,11 +1186,11 @@ async def compress_if_needed(
             if isinstance(content, str) and _already_offloaded(m):
                 _record_decision(tc_id, content)
 
-    # ── L2.5per_msg：per-message 聚合预算（改造点 ① 接入生产路径）──
-    # 按 user 消息边界分组，一段连续 tool result 总和 > message_offload_threshold
-    # 时按大小降序逐个落盘。这比 L2.6 全局预算更精细——L2.6 只看全局总和，
-    # 不区分哪个 user turn 的工具结果。per-message 先按段处理，L2.6 做最后兜底。
-    # 顺序：L2 micro（per-tool）→ L2.5per_msg（per-message 聚合）→ L2.6（全局预算）
+    # ── L2.5 按段聚合预算（改造点 ① 接入生产路径）──
+    # 按 user 消息边界分组，一段连续工具结果总和 > message_offload_threshold 时，
+    # 从最大的开始逐个落盘。比 L2.6 全局预算更精细——L2.6 只看全局总和，
+    # 不区分是哪个 user 轮次的工具结果。按段处理在前，L2.6 做最后兜底。
+    # 顺序：L2 单条 → L2.5 按段聚合 → L2.6 全局预算
     c_per_msg = False
     msg_threshold = config.get("message_offload_threshold", 200_000)
     if msg_threshold > 0:
@@ -1102,11 +1204,10 @@ async def compress_if_needed(
         if c_per_msg:
             logger.info("L2.5 per-message 聚合 offload: 按 user 边界分组落盘")
 
-    # L2.6 总量预算：全部 tool 结果合计仍超预算 → 最大的再落盘（全局兜底）
-    # 改造点 ① Round 1 fix：解耦 L2.6 budget 与 message_offload_threshold
-    #   L2.6 读 tool_result_total_budget（默认 200K），不再 aliasing message_offload_threshold
-    #   ——两者语义不同：message_offload_threshold 是 per-segment 阈值，
-    #   tool_result_total_budget 是全局 tool 结果总量上限
+    # L2.6 总量预算：全部工具结果加起来仍超预算 → 挑最大的再落盘（全局兜底）
+    # 历史踩坑（改造点 ① Round 1 fix）：L2.6 的预算曾与 message_offload_threshold
+    #   共用一个值，但两者语义不同——后者是「一段」的阈值，前者是全局总量上限。
+    #   现已解耦：L2.6 读 tool_result_total_budget（默认 20 万字符）
     c26 = False
     TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
@@ -1115,7 +1216,7 @@ async def compress_if_needed(
             len(str(messages[i].get("content", ""))) for i in tool_indices
         )
         if tool_total > TOTAL_TOOL_BUDGET:
-            # 按当前长度排序,最大的先 offload
+            # 按当前长度排序，最大的先落盘
             sorted_indices = sorted(
                 tool_indices,
                 key=lambda i: len(str(messages[i].get("content", ""))),
@@ -1141,7 +1242,7 @@ async def compress_if_needed(
                     messages[i]["content"] = new_content
                     tool_total -= len(content) - len(new_content)
                     c26 = True
-                    # 改造点 ①：记录决策（跨轮次 byte-identical 重放）
+                    # 改造点 ①：记录决策（下轮照抄这次的内容，一字不差）
                     if offload_freeze:
                         tc_id = messages[i].get("tool_call_id") or f"budget_{i}"
                         _record_decision(tc_id, new_content)
@@ -1150,23 +1251,23 @@ async def compress_if_needed(
                         i, len(content), len(new_content),
                     )
 
-    # L3.5 contextCollapse（Task P1.1，spec §7.1）
-    # 触发条件：flag 开 + est_tokens / context_window > threshold_ratio（默认 0.8）
-    # 无损、可逆（折叠段在 .transcripts/latest.jsonl），保护 system prompt + pinned
-    # 放在 L4 前——便宜得多，能挡掉很多 L4 调用
+    # L3.5 整段折叠（Task P1.1，spec §7.1）
+    # 触发条件：feature flag 开 + 估算 token ÷ 窗口大小 > 占用比（默认 0.8）
+    # 无损、可逆（折叠段原文在 .transcripts/latest.jsonl），不碰 system 和钉住消息
+    # 排在 L4 前——便宜得多，能挡掉很多 L4 的 LLM 调用
     c35 = False
     from agent.feature_flags import is_feature_enabled, get_feature_config
     if is_feature_enabled(config, "context_collapse"):
         cc_cfg = get_feature_config(config, "context_collapse")
         cc_threshold = cc_cfg.get("threshold_ratio", 0.8)
-        # context_window：优先 config 显式声明的值；否则按模型推断
+        # context_window：优先用 config 里显式写的值；没写就按模型名推断
         context_window = config.get("context_collapse_context_window")
         if not context_window:
             if model and "[1m]" in str(model):
                 context_window = 1_000_000
             else:
                 context_window = 128_000  # DeepSeek/OpenAI 常见值
-        # 折叠前先把 transcript 快照（L3.5 虽无损但好习惯，保持可读回）
+        # 折叠前先把 transcript 快照一份（L3.5 虽是无损的，但保持原文可读回是好习惯）
         # 注意：L3.5 不像 L4 那样有损，这里不强制 force
         messages, c35 = apply_context_collapse(
             messages,
@@ -1180,29 +1281,29 @@ async def compress_if_needed(
                 cc_threshold, context_window,
             )
 
-    # L4 llm（条件：cooldown 已过 + 超阈值 + 未熔断）
-    # R30d-D1：取消"每会话最多 N 次"总量上限（对齐 CCB——只留 cooldown +
-    # 连续失败熔断）。此前默认 3 次的总量帽让长会话在第 3 次压缩后永久
-    # 失去 L4，退化为频繁紧急截断；成功压缩受 cooldown + token 阈值双重
-    # 门控，不会失控烧钱。llm_compact_count 仅作遥测展示。
+    # L4 llm（出手条件：冷却期已过 + 超阈值 + 没熔断）
+    # 历史踩坑（R30d-D1）：曾有「每会话最多压 3 次」的总量帽，长会话第 3 次
+    # 压缩后就永久失去 L4，退化成频繁紧急截断；现已取消（对齐 CCB——只留
+    # 冷却期 + 连续失败熔断）。成功压缩受冷却期和 token 阈值双重门控，
+    # 不会失控烧钱。llm_compact_count 只用于展示统计。
     c4 = False
     cooldown = config.get("llm_compact_cooldown_turns", 5)
     llm_compact_count = session_state.llm_compact_count
     conv_len = len(_split_system(messages)[1])
-    # R18 #17：权威锚点混合计数（有锚点用 真实值+增量粗估，否则全量粗估）
+    # R18 #17：混合计数（有锚点用 真实值+增量粗估，否则全量粗估）
     est_tokens = estimate_tokens_hybrid(messages, authoritative_tokens)
 
-    # 方向 1: 自适应压缩阈值(1M 上下文模型放宽到 700K)
-    # 1M 窗口留 30% 给输出(300K),70% 给输入(700K)
-    # 对齐 Claude Code:压缩完全由 token 驱动(接近窗口才压缩),
-    # 不按消息数触发(曾因"消息数 > 100 就压"导致长会话被压 51 次、agent 反复失忆)。
+    # 方向 1：自适应压缩阈值（1M 大窗口模型放宽到 70 万）
+    # 1M 窗口留 30% 给输出（30 万）、70% 给输入（70 万）
+    # 对齐 Claude Code：压不压完全由 token 决定（接近窗口才压），不按消息条数——
+    # 历史踩坑：曾因「消息数 > 100 就压」导致一个长会话被压了 51 次、agent 反复失忆。
     token_threshold = config.get("llm_compact_token_threshold", 100000)
     if model and "[1m]" in str(model):
         token_threshold = max(token_threshold, 700000)
 
-    # T1（核心机制对齐第 1 项）：单轮增长预估——est + growth >= threshold 提前触发。
-    # 一次大工具结果进来会直接把下一轮顶过线，等真到线再压就是
-    # "压完→下一轮又到线→再压"的震荡；提前量 = 最近几轮的最大单轮增速。
+    # T1（核心机制对齐第 1 项）：单轮增长预估——预估 token + 增量 >= 阈值就提前触发。
+    # 一轮大工具结果进来会直接把下一轮顶过线，等真到线再压就会
+    # 「压完 → 下一轮又到线 → 再压」来回震荡；提前量 = 最近几轮的最大单轮体量。
     growth = estimate_turn_growth(
         messages,
         window=config.get("llm_compact_growth_window", 3),
@@ -1210,8 +1311,8 @@ async def compress_if_needed(
     )
     over_threshold = est_tokens + growth >= token_threshold
     cooldown_ok = session_state.cooldown_ok(cooldown)
-    # R18 #18：L4 触发熔断——连续失败达阈值本会话不再触发（触发层熔断，
-    # 与摘要生成层熔断互补：前者省无效调用，后者降级规则总结）
+    # R18 #18：L4 触发熔断——连续失败达阈值后本会话不再触发（这是「触发层」熔断，
+    # 与摘要生成层的熔断互补：前者省掉无效调用，后者降级用规则总结凑合）
     tripped = session_state.llm_compact_failures >= MAX_CONSECUTIVE_L4_FAILURES
     logger.info(
         "L4 trigger check: over_threshold=%s, est_tokens=%d, growth=%d, conv_msgs=%d, "
@@ -1223,7 +1324,7 @@ async def compress_if_needed(
     )
     if over_threshold and cooldown_ok and not tripped:
         logger.info("L4 triggered")
-        # L4 前落盘 transcript（force=True，因为 L4 是有损的）
+        # L4 调用前先把 transcript 落盘（force=True 强制快照，因为 L4 是有损的）
         if config.get("transcript_enabled", True):
             try:
                 snapshot_if_needed(
@@ -1243,17 +1344,17 @@ async def compress_if_needed(
             model=model,
             keep_recent=config.get("llm_compact_keep_recent", 30),
             token_threshold=token_threshold,  # 自适应阈值
-            # T1：传入 est+growth（提前触发时 est 可能未到 threshold，
-            # llm_compact 内部门槛用同一个"下一轮预期水位"判定，避免二次拦截）
+            # T1：把 est+growth 传进去（提前触发时 est 本身可能还没到阈值，
+            # llm_compact 内部门槛用同一个「下一轮预期水位」判定，避免二次拦截）
             precomputed_tokens=est_tokens + growth,
-            tools=tools,  # R18 #15：fork 前缀复用
+            tools=tools,  # R18 #15：fork 前缀复用要用
         )
         if c4:
             session_state.record_llm_compact()
-            # R18 #18：降级产出（LLM 摘要失败 → 规则总结兜底）算触发质量失败——
-            # 降级压缩可用但有损，连续降级应停触发（对齐 CC autocompact 失败即停）。
-            # _summarize_conversation 永不抛异常（内部兜底），失败信号走模块级
-            # _last_summary_degraded（压缩在主循环串行，无并发竞争）。
+            # R18 #18：降级产出（LLM 摘要失败 → 用规则总结凑合）算一次触发质量失败——
+            # 降级压缩能用但有损，连续降级就该停止触发（对齐 CC autocompact 失败即停）。
+            # _summarize_conversation 永不抛异常（内部自己兜底），失败信号走
+            # 模块级的 _last_summary_degraded 标记（压缩在主循环里串行，无并发竞争）。
             from agent.context_compressor import _last_summary_degraded
             if _last_summary_degraded:
                 session_state.llm_compact_failures += 1
@@ -1262,9 +1363,9 @@ async def compress_if_needed(
                     session_state.llm_compact_failures, MAX_CONSECUTIVE_L4_FAILURES,
                 )
             else:
-                session_state.llm_compact_failures = 0  # 真 LLM 摘要成功清零
+                session_state.llm_compact_failures = 0  # 真 LLM 摘要成功则清零
         else:
-            # llm_compact 拒绝压缩（未过内部门槛）——不计失败
+            # llm_compact 自己拒绝压缩（没过内部门槛）——不算失败
             pass
     elif over_threshold:
         if tripped:
@@ -1273,7 +1374,7 @@ async def compress_if_needed(
                 session_state.llm_compact_failures,
             )
         else:
-            # R30d-D1：总量上限分支已移除——剩下的唯一拦截原因是 cooldown
+            # R30d-D1：总量上限分支已移除——剩下唯一的拦截原因是冷却期未过
             logger.info("L4 skipped: cooldown active (last=%d, current=%d, need=%d)",
                         session_state.last_llm_compact_turn, session_state.current_turn, cooldown)
     else:
@@ -1281,22 +1382,22 @@ async def compress_if_needed(
 
     changed = c0 or c1 or c_freeze or c2 or c_per_msg or c26 or c35 or c4
     if changed:
-        # 终极保险：再过一遍 _fix_tool_call_pairs
+        # 终极保险：最后再过一遍工具调用配对修复
         system, conv = _split_system(messages)
         messages = _reassemble(system, _fix_tool_call_pairs(conv))
-        # R25 #6：任一层实际改动 messages → 通知 cache_monitor 下次 cache
-        # 下降是预期的（L4/reactive 内部已各自 notify；这里补齐 time-MC/
-        # L1/L2*/L3.5 路径。幂等 flag，重复调用无害）
+        # R25 #6：任一层真改动了消息 → 通知 cache_monitor「下次缓存下降是预期的」
+        # （L4/紧急压缩内部已各自通知过；这里补齐时间清理/L1/L2*/L3.5 路径。
+        # 幂等标记，重复调用无害）
         try:
             from agent.cache_monitor import notify_compaction
             notify_compaction()
         except Exception as e:
             logger.debug("notify_compaction fail-open: %s", e)
 
-    # POST_COMPACT hook（通知压缩完成）
+    # POST_COMPACT hook（广播压缩已完成）
     if hooks_registry is not None:
         try:
-            # Medium-6：移出事件循环线程
+            # Medium-6：丢到线程池跑（慢 hook 别卡住事件循环）
             await asyncio.to_thread(
                 hooks_registry.run_post_compact,
                 {

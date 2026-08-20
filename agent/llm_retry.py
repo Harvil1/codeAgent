@@ -1,12 +1,20 @@
-"""LLM API 调用的重试与错误恢复。
+"""LLM 调用的「防摔垫」：失败了怎么办的整套预案。
 
-策略：
-  - 可重试错误（429 限流、5xx 服务器错误、连接错误）：指数退避重试
-  - 不可重试错误（400 参数错、401 认证错）：立即抛出
-  - 主模型重试耗尽后切换备用模型（如有配置）
-  - finish_reason=length（max_tokens 截断）：先升 max_tokens 重试，再发续写提示
+背景：调 LLM API 就像打电话——对面可能占线（429 限流）、可能机房出事
+（5xx 服务器错误）、可能信号不好（连接断/超时）。这些「再打一次也许
+就通了」的错，值得自动重试；而打错号码级别的错（400 参数错、401 认证
+错）重打一百次也没用，得立刻报出来。
 
-借鉴 业界 的韧性机制。
+本模块的策略：
+  - 可重试错误（429/5xx/连接问题）：按「越等越久」的节奏自动重试
+    （指数退避：1s、2s、4s……就像别人占线时你隔越来越久再拨）
+  - 不可重试错误（400/401）：立即抛出，不浪费时间
+  - 主模型实在打不通：切换备用模型再试一次（如果配了）
+  - 回答被输出上限拦腰截断：先把上限调大重试，还不行就让模型「接着说」
+
+处于 agent/__init__.py（主循环）之下、llm_client.py（真正的接线层）
+之上——每次 LLM 请求都先经过这里的「防摔」包装。借鉴了 Claude Code
+的韧性机制。
 """
 
 import asyncio
@@ -19,40 +27,48 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RETRIES = 5
-DEFAULT_INITIAL_BACKOFF = 1.0  # 秒，指数退避起点
-DEFAULT_JITTER_RATIO = 0.25    # 抖动比例：sleep = base + uniform(0, base*ratio)
-DEFAULT_MAX_BACKOFF = 60.0     # 单次退避上限（普通模式；X7）
-UNATTENDED_MAX_BACKOFF = 300.0  # R17 #44：unattended 长跑模式退避帽 5min（对齐 CCB）
+DEFAULT_INITIAL_BACKOFF = 1.0  # 首次等待的秒数（指数退避的起点，之后翻倍）
+DEFAULT_JITTER_RATIO = 0.25    # 「抖动」比例：实际等待 = 基础值 + 随机(0, 基础值*比例)
+DEFAULT_MAX_BACKOFF = 60.0     # 单次最长等多久（普通模式；防止一等几小时）
+UNATTENDED_MAX_BACKOFF = 300.0  # 无人值守长跑模式的最长等待 5 分钟（对齐业界做法）
 
-# 持久重试（unattended）模式默认值（Task P2.1）
-DEFAULT_UNATTENDED_MAX_HOURS = 24  # 持续重试最长 24 小时
+# 无人值守（unattended）持久重试模式的默认值：连续重试最多撑 24 小时
+DEFAULT_UNATTENDED_MAX_HOURS = 24
 
-# max_tokens 升级默认值（P0-3 / R17 #10）
-# initial=None 表示不显式传 max_tokens，让 provider SDK 用模型默认值
-# escalated=64000 对齐 CCB ESCALATED_MAX_TOKENS=64k（原 32768）。
-# 模型输出上限更小的 provider（如 DeepSeek 8K）会报 400 溢出——
-# 由 R17 #13 的 400 溢出自适应（parse_context_overflow）动态下调兜底，
-# 升级调用失败本身也 fail-open 沿用截断响应。
+# 输出上限（max_tokens）「升级」的默认值：
+# - 初始 None = 不主动传这个参数，让 SDK 用模型自己的默认值
+# - 升级到 64000（对齐业界 64k；早年是 32768）
+# 设计取舍：输出上限较小的服务商（如 DeepSeek 只有 8K）收到 64k 会报
+# 400 溢出——由下面的「400 溢出自适应」（parse_context_overflow）动态
+# 下调兜底；万一升级调用本身失败，也沿用截断的回答（fail-open 不硬抛）。
 DEFAULT_INITIAL_MAX_TOKENS: Optional[int] = None
 DEFAULT_ESCALATED_MAX_TOKENS = 64000
 
-# R17 #10：升级后仍截断的「续写恢复」上限（对齐 CC MAX_OUTPUT_TOKENS_RECOVERY_LIMIT=3）
+# 升级后仍被截断时，「请模型接着说」的续写恢复最多做几轮（对齐业界，3 次）
 DEFAULT_OUTPUT_RECOVERY_LIMIT = 3
 
-# 529 连续失败阈值（P1-1）
-# Anthropic 过载（status 529）通常持续一段时间，达到阈值立即切 fallback，
-# 不在已知过载的 endpoint 上浪费重试次数（避免占用限流配额）。
+# 529（服务过载）连续失败多少次就换备胎：
+# 过载通常要持续一阵子，与其在已知过载的端点上一遍遍撞墙（还白占
+# 限流配额），不如攒够 3 次立刻切备用模型。
 DEFAULT_CONSECUTIVE_529_THRESHOLD = 3
 
-# R25 #5：退避心跳分片（对齐 CCB unattended 30s 心跳——长退避期间保持可观察）
+# 退避「心跳」分片长度：等待超过 30 秒时切成小段，段间报个进度
+# （不然几分钟没动静，用户还以为程序挂了）
 HEARTBEAT_CHUNK_SECONDS = 30.0
 
 
 async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
-    """分片 sleep：每 ≤30s 一个片段，片段间调 heartbeat_cb(elapsed, total)。
+    """把漫长的等待切成小段睡，每段之间报一次「还活着」的心跳。
 
-    - 无 callback 或 total <= 30s：直接 sleep（零开销，向后兼容）
-    - callback 抛异常：吞掉（fail-open，心跳不能影响重试本身）
+    背景：无人值守模式一次可能等好几分钟，全程无动静会让人以为程序
+    挂了。所以把等待切成最长 30 秒的小段，每段睡完调一次回调汇报进度。
+
+    参数：
+        total：总共要等的秒数
+        heartbeat_cb：心跳回调函数 fn(已等秒数, 总秒数)；没传或总时长
+                      不到 30 秒就直接睡（零开销，兼容旧用法）
+
+    返回：无。回调抛异常会被吞掉——汇报进度的事不能拖垮重试正事。
     """
     if heartbeat_cb is None or total <= HEARTBEAT_CHUNK_SECONDS:
         await asyncio.sleep(total)
@@ -70,7 +86,13 @@ async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
 
 
 def _error_status_code(error: Exception) -> Optional[int]:
-    """从异常提取 HTTP 状态码（兼容多种 SDK 形态）。"""
+    """从异常对象里抠出 HTTP 状态码（不同 SDK 存的字段名不一样，都试试）。
+
+    参数：
+        error：任意异常
+
+    返回：状态码数字；异常里没带就返回 None。
+    """
     code = getattr(error, "status_code", None)
     if code is not None:
         return code
@@ -81,10 +103,17 @@ def _error_status_code(error: Exception) -> Optional[int]:
 
 
 def is_retryable(error: Exception) -> bool:
-    """判断异常是否可重试。
+    """判断一个错误值不值得「再试一次」。
 
-    可重试：限流（429）、服务器错误（5xx）、连接错误、超时。
-    不可重试：参数错误（400）、认证错误（401）、权限错误（403）。
+    判断标准（像判断电话没打通的原因）：
+    - 可重试：占线（429 限流）、对面机房出事（5xx）、信号断、超时
+    - 不可重试：号码拨错（400 参数错）、门禁卡无效（401 认证错）、
+      没权限（403）——这些重试一万次结果也一样
+
+    参数：
+        error：要判断的异常
+
+    返回：True = 值得重试；False = 立刻报错别浪费时间。
     """
     try:
         from openai import (
@@ -93,15 +122,16 @@ def is_retryable(error: Exception) -> bool:
         if isinstance(error, (RateLimitError, APIConnectionError, APITimeoutError)):
             return True
         if isinstance(error, APIStatusError):
-            # 5xx 和 429 可重试
+            # 5xx 和 429 才值得重试，其余（4xx）都是「自己的问题」
             return error.status_code >= 500 or error.status_code == 429
     except ImportError:
         pass
 
-    # R26 #10：httpx 传输层错误（连接重置/断管/网络错误基类）一律可重试。
-    # openai SDK 会把 httpx 错误包装成 APIConnectionError 再抛（上面已命中），
-    # 但 httpx 错误也可能裸透出（其它 SDK/自定义路径），类名 "transporterror"
-    # 不含 "connection"/"timeout" 关键字，按 isinstance 兜底。
+    # 历史踩坑（R26 #10 修复）：httpx 的传输层错误（连接被重置/管道断裂/
+    # 各种网络毛病的总类）一律可重试。openai SDK 通常会把它包装成
+    # APIConnectionError（上面已经命中），但其它路径可能裸着抛出来——
+    # 这种异常的类名里不含 "connection"/"timeout" 字样，光靠名字兜底
+    # 会漏判，所以这里按类型兜底。
     try:
         import httpx
         if isinstance(error, httpx.TransportError):
@@ -109,7 +139,7 @@ def is_retryable(error: Exception) -> bool:
     except ImportError:
         pass
 
-    # 兜底：按异常类名判断
+    # 最后的兜底：看异常类名里有没有「超时/连接/临时」这类字眼
     error_type = type(error).__name__.lower()
     if any(kw in error_type for kw in ("timeout", "connection", "temporary")):
         return True
@@ -117,14 +147,23 @@ def is_retryable(error: Exception) -> bool:
 
 
 def get_retry_after(error: Exception) -> Optional[float]:
-    """从错误中提取 Retry-After（秒）。"""
+    """从错误里读出服务器建议的「多久后再来」（Retry-After，单位秒）。
+
+    背景：429 限流时规范的服务器会在响应头里写明「请 X 秒后再试」，
+    照着等比自己瞎猜礼貌也高效。
+
+    参数：
+        error：要检查的异常
+
+    返回：建议等待的秒数；没给就返回 None。
+    """
     try:
         retry_after = getattr(error, "retry_after", None)
         if retry_after:
             return float(retry_after)
     except (TypeError, ValueError):
         pass
-    # openai 库的 response headers
+    # openai 库把响应头放在 response_headers 属性里
     try:
         headers = getattr(error, "response_headers", None) or {}
         ra = headers.get("retry-after") or headers.get("Retry-After")
@@ -135,15 +174,21 @@ def get_retry_after(error: Exception) -> Optional[float]:
     return None
 
 
-# R26 #10：连接重置类错误——重试前重建 client（弃用坏死连接池）
+# 连接被掐断类错误的名字特征（R26 #10）：遇到它们，重试前要先重建
+# client 扔掉坏掉的连接池——在坏池子上重试大概率还是同样的错
 _RESET_NAMES = ("connectionreset", "brokenpipe", "remoteprotocol", "readerror", "writeerror")
 
 
 def _is_connection_reset(error: Exception) -> bool:
-    """是否连接重置/断管类错误（按异常类名与 __cause__ 链判断）。
+    """判断是不是「连接被掐断」类错误（看异常名和它引发错误的整条链）。
 
-    对齐 CCB withRetry 的 ECONNRESET/EPIPE 禁 keep-alive 重连：
-    这类错误说明底层连接坏了，在同一连接池上重试大概率复现。
+    道理：这类错误说明底下的电话线断了，在原来的线上重拨只会再听到
+    忙音——得换根线（重建 client）再拨。
+
+    参数：
+        error：要判断的异常
+
+    返回：True = 连接断了，重试前该重建 client。
     """
     name = type(error).__name__.lower()
     if any(k in name for k in _RESET_NAMES):
@@ -158,29 +203,37 @@ def _is_connection_reset(error: Exception) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# R17 #13：400 溢出自适应（input + max_tokens > context limit 的数值解析）
+# 400 溢出自适应（R17 #13）：请求的「输入 + 输出上限」超过了模型的
+# 上下文总容量时，服务器会报 400 并在报错文字里写出具体数字。这里用
+# 两个正则把数字抠出来，好算出一个塞得下的输出上限再重试
 # ---------------------------------------------------------------------------
 
-# CCB 精确格式："input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
+# 第一种报错格式（数字最全）："input length and `max_tokens` exceed
+# context limit: 188059 + 20000 > 200000"（输入 + 输出 > 总容量）
 _OVERFLOW_EXACT_RE = re.compile(
     r"input length and `max_tokens` exceed context limit:\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)"
 )
-# OpenAI 经典格式："This model's maximum context length is 131072 tokens.
-# However, you requested 140000 tokens (120000 input tokens and 20000 max_tokens)"
+# 第二种（OpenAI 老格式）："This model's maximum context length is 131072
+# tokens. However, you requested 140000 tokens (120000 input tokens and
+# 20000 max_tokens)"
 _OVERFLOW_LOOSE_RE = re.compile(
     r"maximum context length is (\d+) tokens?.*?(\d+) input tokens",
     re.DOTALL,
 )
 
-# 恢复缓冲与下限（对齐 CCB：安全缓冲 1k / 下限 3000）
+# 重算输出上限时的安全余量（留 1000 token 缓冲）和最低保底（3000）
 _OVERFLOW_SAFETY_BUFFER = 1000
 _OVERFLOW_MIN_MAX_TOKENS = 3000
 
 
 def parse_context_overflow(error: Exception) -> Optional[Tuple[int, int]]:
-    """从 400 溢出报文解析 (input_tokens, context_limit)。
+    """从 400 溢出的报错文字里抠出「输入量」和「总容量」两个数字。
 
-    命中两种格式其一即返回；解析失败返回 None（调用方按普通 400 处理）。
+    参数：
+        error：服务器抛的 400 异常（看它的报错文字）
+
+    返回：(输入 token 数, 上下文总容量)；两种报错格式都没匹配上则
+    返回 None——调用方就当普通 400 处理。
     """
     msg = str(error)
     m = _OVERFLOW_EXACT_RE.search(msg)
@@ -193,9 +246,14 @@ def parse_context_overflow(error: Exception) -> Optional[Tuple[int, int]]:
 
 
 def compute_overflow_max_tokens(input_tokens: int, context_limit: int) -> Optional[int]:
-    """计算恢复用 max_tokens：context_limit - input - 1000，下限 3000。
+    """算一个塞得下的输出上限：总容量 - 输入 - 1000 缓冲，最低保底 3000。
 
-    返回 None 表示输入本身就太大（剩余空间 < 3000），无恢复价值。
+    参数：
+        input_tokens：这回请求的输入 token 数
+        context_limit：模型的上下文总容量
+
+    返回：新的输出上限；返回 None 表示输入自己就快把容量占满了
+    （剩余不到 3000），调小输出也救不了，没有恢复价值。
     """
     new_max = context_limit - input_tokens - _OVERFLOW_SAFETY_BUFFER
     if new_max < _OVERFLOW_MIN_MAX_TOKENS:
@@ -218,57 +276,62 @@ async def call_with_retry(
     background: bool = False,  # R25 #4：后台调用（子代理摘要等）遇 529 立即放弃
     heartbeat_cb=None,  # R25 #5：长退避分片心跳（fn(elapsed, total)）
 ):
-    """带重试和备用 client 的 async LLM 调用。
+    """带着全套「防摔预案」调一次 LLM：自动重试、自动换备胎、自动调参。
 
-    流程：
-      1. 主 client 重试 max_retries 次（指数退避 + 抖动）
-      2. 连续 N 次 529（Anthropic 过载）→ 立即切 fallback（不等耗尽）
-      3. 全部失败后，如果有 fallback_llm_client，用备用 client 再试 1 次
-      4. 都失败则抛最后错误
+    整个流程像打电话的过程：
+      1. 用主号码（主 client）重拨 max_retries 次，每次比上次多等一会
+         （指数退避 + 随机抖动）
+      2. 如果连续 N 次听到「对面过载」（529），不等拨完次数直接换备胎
+      3. 主号码彻底打不通，而配了备胎（fallback_llm_client），就再试一次
+      4. 备胎也不行，只好把最后一个错误抛出去
 
-    改造说明（Plan 2A Task D1）：原同步 `def` 改 `async def`；
-    `llm_client.chat_completions(...)` / `fallback_llm_client.chat_completions(...)`
-    加 await（LLMClient 已改 async，Task B1/B2/B3）；
-    `time.sleep(...)` 改 `await asyncio.sleep(...)`（不阻塞事件循环）。
-    退避/抖动/529 早切/max_tokens 升级逻辑不变。
+    历史改造（Plan 2A Task D1，保留背景）：本函数原来是同步 def，
+    后来整个项目改异步——LLM client 的 chat_completions 都加了 await，
+    sleep 也换成 asyncio 版（不让等待卡住整个事件循环）。
+    退避/抖动/529 早切/max_tokens 升级的逻辑自始至终没变。
 
-    持久重试模式（Task P2.1）：当 config 中 `bash_unattended_retry` flag 开启时，
-      - max_retries 视为无限（持续重试不因计数耗尽退出）
-      - 加 deadline = time.monotonic() + max_hours * 3600
-      - 循环改为 while（计数 < effective_max_retries）+ deadline 检查
-      - 普通 5xx/429 重试 / 529 早切 / fallback 逻辑保留
-      - flag OFF 或 config=None → 完全走原 max_retries 逻辑（向后兼容）
+    无人值守持久重试模式：当配置里的 `bash_unattended_retry` 开关打开——
+      - 重试次数视为无限（不会数满退出，只受时间限制）
+      - 设一个「截止时刻」（默认 24 小时后），到点收手
+      - 其余逻辑（普通重试/529 早切/备胎）照旧
+      - 开关没开或不传 config，完全走原来的按次数重试（兼容旧用法）
 
     参数：
-        llm_client: LLMClient 实例（async chat_completions 方法）
-        messages: 消息列表
-        tools: 工具 schema 列表（OpenAI 格式）
-        max_retries: 最大重试次数
-        initial_backoff: 首次退避秒数
-        fallback_llm_client: 备用 LLMClient（主 client 失败时切换）
-        jitter_ratio: 抖动比例（默认 0.25），sleep = base + uniform(0, base*ratio)。
-                      多实例并发遇到 429 时避免雷击；设 0 关闭抖动（向后兼容）。
-        max_tokens: 透传给 chat_completions 的 max_tokens（None 时不传，让 SDK 用默认）。
-                    主循环检测 finish_reason=length 后用 MaxTokensEscalator 升级此值。
-        consecutive_529_threshold: 连续 529 次数达阈值即切 fallback（默认 3）。
-                                   0 表示禁用提前切换，走完所有重试。
-        config: 配置字典（可选）。传入时检查 bash_unattended_retry flag：
-                开启则启用持久重试模式，max_retries 被视为无限，
-                加 max_hours（默认 24h）deadline 守护。
-        background: True 表示后台任务调用。遇 529（服务过载）直接抛出不重试——
-                    后台重试只会火上浇油，下个周期天然重跑（对齐 CCB 防放大）。
-        heartbeat_cb: 长退避分片心跳回调 fn(elapsed, total)。退避 >30s 时
-                      每 30s 调一次（异常吞掉，fail-open）——数分钟退避期间
-                      用户/宿主不至于以为 agent 挂了。
+        llm_client：主 LLM client（需要有 async 的 chat_completions 方法）
+        messages：对话历史（消息列表）
+        tools：可用工具清单（OpenAI 格式，可不传）
+        max_retries：最多重试几次
+        initial_backoff：第一次失败后等多久（秒），之后逐次翻倍
+        fallback_llm_client：备用 client（主 client 失败时切换，可不传）
+        jitter_ratio：抖动比例（默认 0.25），实际等待 = 基础值 + 随机量。
+                      作用：很多实例同时撞上限流时，加 randomness 错开
+                      各自的重试时刻，避免「集体再撞」；设 0 关闭（兼容旧用法）。
+        max_tokens：输出上限，透传给 chat_completions（None 就不传，
+                    让 SDK 用默认值）。主循环发现回答被截断后，会用
+                    MaxTokensEscalator 把这个值调大再试。
+        consecutive_529_threshold：连续多少次 529 就换备胎（默认 3）。
+                      0 表示不提前切，老老实实拨完全部次数。
+        config：配置字典（可不传）。传了就会检查 bash_unattended_retry
+                      开关，开了进入上面说的持久重试模式。
+        background：True 表示这是后台任务的调用。遇到 529（过载）直接
+                      放弃不重试——后台任务下个周期本来就会重跑，在过载
+                      的端点上硬挤只会火上浇油。
+        heartbeat_cb：长等待的心跳回调 fn(已等秒数, 总秒数)。等待超过
+                      30 秒时每 30 秒报一次（回调出错会被吞掉）——不然
+                      一等好几分钟，用户还以为程序挂了。
+
+    返回：成功的话返回 LLM 的响应对象。
+    抛错：所有尝试都失败时，抛最后一次遇到的那个异常。
     """
     last_error: Optional[Exception] = None
-    # X6 fix: max_retries<=0 直接抛友好错误（否则下面 for 循环不进，最后 raise None → TypeError）
-    # 注意：unattended 模式下 max_retries 被改写为 inf，此校验仅对原模式生效。
-    # unattended 模式下原 max_retries 值被忽略，不走此分支。
+    # 历史踩坑（X6 修复）：max_retries<=0 时下面的循环一次都不进，
+    # 最后会变成「raise None」，报出让人摸不着头脑的 TypeError——
+    # 所以提前拦下给个说得清的错误。
+    # 注意：无人值守模式下重试次数视为无限，不走这个校验（原值被忽略）。
 
-    # ── Task P2.1: 持久重试（unattended）模式接入 ──
-    # flag ON：max_retries=inf，加 deadline（time.monotonic 起算）
-    # flag OFF / config=None：原 max_retries 逻辑不变
+    # ── 无人值守持久重试模式的接入 ──
+    # 开关开：重试次数无限，只受截止时刻约束
+    # 开关没开 / 没传 config：完全走原来的按次数逻辑
     unattended_enabled = False
     deadline: Optional[float] = None
     if config is not None:
@@ -291,29 +354,30 @@ async def call_with_retry(
                 int(max_hours),
             )
 
-    # 计算生效的重试上限：unattended 模式下无限（用 float('inf') 比较）
-    # 用 float('inf') 而非改写 max_retries 变量类型（保持 int 语义清晰）。
+    # 算出实际生效的重试上限：无人值守模式给无限（拿正无穷比较）。
+    # 之所以不改 max_retries 本身、另开一个变量，是为了让它保持
+    # 「int 类型的次数」这个清晰含义，不搞类型混淆。
     if unattended_enabled:
         effective_max_retries: float = float('inf')
-        # unattended 模式下跳过 max_retries<=0 的 ValueError 校验
-        # （因为原值可能任意，被忽略）
+        # 无人值守模式下跳过 max_retries<=0 的校验（原值随便填都被忽略）
     else:
         if max_retries <= 0:
             raise ValueError(f"max_retries must be > 0, got {max_retries}")
         effective_max_retries = max_retries
 
-    # max_tokens=None 时不传该参数，避免某些 provider 把 None 当 0 处理
+    # max_tokens 为 None 时干脆不传这个参数——有的服务商会把 None
+    # 当成 0 处理（一个字都不让说）
     call_kwargs = {"tools": tools}
     if max_tokens is not None:
         call_kwargs["max_tokens"] = max_tokens
 
-    consecutive_529 = 0  # 连续 529 计数器
-    overflow_adjusts = 0  # R17 #13：400 溢出下调次数（独立计数，不耗正常重试）
+    consecutive_529 = 0  # 连续 529（过载）的计数器
+    overflow_adjusts = 0  # 400 溢出导致下调输出上限的次数（单独计数，不占用正常重试名额）
 
-    # 主 client 重试（while 循环兼容 finite max_retries 和 unattended 无限模式）
+    # 主 client 的重试循环（while 写法同时兼容「按次数」和「无限+截止时刻」两种模式）
     attempt = 0
     while attempt < effective_max_retries:
-        # unattended 模式：每次循环检查 deadline，超时退出
+        # 无人值守模式：每圈都看一眼表，到截止时刻就收手
         if unattended_enabled and deadline is not None:
             if time.monotonic() >= deadline:
                 logger.warning(
@@ -326,10 +390,11 @@ async def call_with_retry(
             return await llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
-            # === R17 #13：400 溢出自适应（input + max_tokens > context limit）===
-            # 报文含可解析的溢出数值 → 动态下调 max_tokens 立即重试（最多 2 次，
-            # 不耗正常重试计数）。解析不出 / 输入本身太大 / 已到下限 → 按普通
-            # 400 不可重试抛出（透出给上层 reactive_compact / PTL 恢复路径）。
+            # === 400 溢出自适应（R17 #13）===
+            # 报错文字里带了具体数字 → 现场把输出上限调小、立刻重试
+            # （最多调 2 次，不占正常重试的名额）。解析不出数字 / 输入
+            # 本身太大 / 已调到底 → 当普通 400 抛出去，交给上层的
+            # 上下文压缩等恢复机制处理。
             if (
                 _error_status_code(e) == 400
                 and "max_tokens" in call_kwargs
@@ -353,13 +418,13 @@ async def call_with_retry(
             if not is_retryable(e):
                 raise
 
-            # R25 #4：后台调用遇 529 立即放弃（防放大）——非前台 querySource
-            # 不该在已知过载的 endpoint 上排队重试
+            # 后台调用遇 529（过载）直接放弃（R25 #4，防「火上浇油」）——
+            # 后台任务下个周期自然会重跑，没必要在过载端点上排队硬挤
             if background and _error_status_code(e) == 529:
                 logger.warning("后台 LLM 调用遇 529（过载），放弃重试（防放大）")
                 raise
 
-            # R26 #10：连接重置 → 重建 client 再重试（不额外耗重试计数）
+            # 连接被掐断 → 先重建 client（换新连接池）再重试，不额外耗重试名额（R26 #10）
             if _is_connection_reset(e):
                 reset = getattr(llm_client, "reset_client", None)
                 if reset is not None:
@@ -369,17 +434,17 @@ async def call_with_retry(
                     except Exception as re:
                         logger.debug("reset_client 失败（按原样重试）: %s", re)
 
-            # P1-1: 529 连续失败精确切换
-            # 过载往往持续一段时间，期间可能反复抛 529 / 5xx。把 5xx 都计入过载计数，
-            # 避免出现"529→500→529"导致计数清零、永远到不了阈值的场景。
-            # 仅当遇到非过载错误（429 限流、连接错误、超时）时才清零。
+            # 529 连续失败计数（P1-1）：过载期间服务器可能 529/500 交替着抛，
+            # 所以所有 5xx 都算「过载嫌疑」往计数器上加——不然出现
+            # "529→500→529" 的交替就把计数清零了，永远凑不满阈值。
+            # 只有遇到跟过载无关的错（429 限流/连接问题/超时）才清零。
             status = _error_status_code(e)
             if status is not None and status >= 500:
                 consecutive_529 += 1
             elif status is None:
-                # 无状态码（连接/超时类）→ 视为本轮过载无关，重置
+                # 没有状态码（连接/超时类问题）→ 跟过载无关，计数清零
                 consecutive_529 = 0
-            # status < 500（如 429）→ 重置
+            # 状态码小于 500（比如 429）→ 也清零
             else:
                 consecutive_529 = 0
             if (
@@ -392,15 +457,15 @@ async def call_with_retry(
                     "连续 %d 次 529（过载），立即切备用 client（不耗尽重试）",
                     consecutive_529,
                 )
-                break  # 跳出主 client 重试，进入 fallback 路径
+                break  # 跳出主 client 的重试循环，进入下面的备胎路径
 
             backoff = _compute_backoff(
                 attempt=attempt,
                 initial_backoff=initial_backoff,
                 retry_after=get_retry_after(e),
                 jitter_ratio=jitter_ratio,
-                # R17 #44：unattended 模式退避帽放宽到 5min（对齐 CCB）——
-                # 普通模式 60s 帽（防用户等死），长跑模式太频繁反而挤占限流配额
+                # 等待上限分两档：普通模式 60 秒（不能让干等的用户以为死机了），
+                # 无人值守长跑模式放宽到 5 分钟（重试太勤反而白占限流配额）
                 max_backoff=(
                     UNATTENDED_MAX_BACKOFF
                     if unattended_enabled else DEFAULT_MAX_BACKOFF
@@ -419,7 +484,7 @@ async def call_with_retry(
             await _sleep_with_heartbeat(backoff, heartbeat_cb)
             attempt += 1
 
-    # 主 client 重试耗尽（或被 529 阈值打断 / deadline 到期），尝试备用 client
+    # 主 client 的重试名额用完（或被 529 阈值打断/到了截止时刻），换备胎试试
     if fallback_llm_client is not None:
         logger.warning("切换备用 LLM client")
         try:
@@ -432,23 +497,24 @@ async def call_with_retry(
 
 
 class MaxTokensEscalator:
-    """跟踪 max_tokens 升级状态（P0-3）。
+    """「输出上限调节器」：记住当前该用多大的 max_tokens。
 
-    策略：finish_reason=length（max_tokens 截断）时，先升级 max_tokens 重试一次，
-    升级后仍不够才发"请继续"续写消息。升级重试不打断思路，续写容易接歪。
+    背景：当回答因为输出上限（max_tokens）被拦腰截断时，有两种补救——
+    先把上限调大重发一次原请求（模型能一口气说完，思路连贯）；调大后
+    还不够，才发「请继续」让模型接着写（接续的地方容易接歪）。
+    本类就是记住「现在到哪一步了」的小账本。
 
-    用法：
+    用法示例：
         esc = MaxTokensEscalator()
-        # 第一次调用：用 get_next_max_tokens()，None 表示用 SDK 默认
+        # 第一次调用：问账本要当前上限（None 表示不传，让 SDK 用默认）
         response = client.chat_completions(messages, max_tokens=esc.get_next_max_tokens())
         if detect_length_finish(response) and not esc.has_escalated:
             esc.escalate()
-            # 重试同一请求（不追加消息）
+            # 原请求原样重发（不追加消息），只是上限变大了
             response = client.chat_completions(messages, max_tokens=esc.get_next_max_tokens())
-        # 升级后仍 length → 调用方发"请继续"
+        # 调大后仍被截断 → 由调用方发"请继续"做续写恢复
 
-    一个 AIAgent 实例持有一个 escalator，整个会话生命周期复用。
-    会话间 reset() 一次。
+    一个 AIAgent 实例配一个账本，整个会话反复用；换新会话时 reset 一次。
     """
 
     def __init__(
@@ -457,38 +523,47 @@ class MaxTokensEscalator:
         initial: Optional[int] = DEFAULT_INITIAL_MAX_TOKENS,
         escalated: int = DEFAULT_ESCALATED_MAX_TOKENS,
     ):
+        # 参数：initial = 初始上限（默认 None，不传给 SDK 用它默认值）；
+        # escalated = 升级后的大上限（默认 64000）
         self._initial = initial
         self._escalated = escalated
         self.has_escalated = False
 
     def get_next_max_tokens(self) -> Optional[int]:
-        """返回当前应使用的 max_tokens。
+        """问账本：这次该用多大的输出上限。
 
-        - 未升级：返回 initial（默认 None，表示不传给 SDK）
-        - 已升级：返回 escalated 值
+        - 还没升级：返回初始值（默认 None，表示不传给 SDK）
+        - 已升级：返回升级后的大值
+
+        返回：本次调用应使用的 max_tokens（或 None）。
         """
         return self._escalated if self.has_escalated else self._initial
 
     def escalate(self) -> int:
-        """升级到 escalated 值。幂等：多次调用结果相同。
+        """把上限调到升级档。重复调也一样（账已记过就不再变）。
 
-        返回升级后的 max_tokens。
+        返回：升级后的 max_tokens。
         """
         self.has_escalated = True
         return self._escalated
 
     def reset(self) -> None:
-        """重置到未升级状态（新会话用）。"""
+        """把账本翻回「还没升级」那一页（新会话开头的复位用）。"""
         self.has_escalated = False
 
 
 def detect_length_finish(response) -> bool:
-    """检测 LLM 响应是否因 max_tokens 截断。
+    """判断回答是不是被输出上限拦腰截断的。
 
-    finish_reason == "length" → True
-    其他（"stop" / "tool_calls" / None / 结构异常）→ False
+    看一个标志位：结束原因（finish_reason）为 "length" 就是被截断；
+    其他情况（"stop" 正常说完 / "tool_calls" 要调工具 / 没写 / 响应
+    结构不对劲）都算没截断。
 
-    fail-open：response 结构异常返回 False（不当截断处理，避免误升级）。
+    参数：
+        response：LLM 响应对象
+
+    返回：True = 被截断。响应结构异常时也返回 False（宁可漏判也不
+    误判——误判会白白升级上限）。
     """
     try:
         choices = getattr(response, "choices", None)
@@ -508,16 +583,26 @@ def _compute_backoff(
     jitter_ratio: float = DEFAULT_JITTER_RATIO,
     max_backoff: float = None,
 ) -> float:
-    """计算退避秒数：base + jitter。
+    """算出这次该等多久再重试。
 
-    - base = retry_after（若有）或 initial_backoff * 2^attempt
-    - jitter = uniform(0, base * jitter_ratio)
-    - 返回 base + jitter
+    公式大白话：
+    - 基础等待 = 服务器建议的 Retry-After（有就用它），否则
+      首次等待 × 2 的「第几次重试」次方（1s→2s→4s→8s……）
+    - 再加一点随机量（抖动），错开同时撞限流的难兄难弟们
+    - 最后封顶，不让一次等待等出天荒地老
 
-    X7 fix: 加上限，防止大 retry_after 或大 attempt 卡死主循环。
-    R17 #44：上限参数化——普通模式 60s（防数小时 sleep 让用户以为 agent 挂了），
-    unattended 长跑模式 5min（对齐 CCB；None 时用 DEFAULT_MAX_BACKOFF）。
-    jitter_ratio=0 时返回纯 base（向后兼容）。
+    参数：
+        attempt：这是第几次重试（从 0 起）
+        initial_backoff：首次等待的秒数
+        retry_after：服务器建议的等待秒数（可不传）
+        jitter_ratio：抖动比例（0 = 不要抖动，兼容旧用法）
+        max_backoff：等待上限（不传用默认 60 秒）
+
+    历史踩坑：早期没有上限——Retry-After 很大或重试次数多时会一等
+    几小时，用户以为程序挂了（X7 修复加了帽）；后来又按模式分了档：
+    普通模式 60 秒、无人值守长跑模式 5 分钟（R17 #44）。
+
+    返回：实际该睡的秒数。
     """
     cap = DEFAULT_MAX_BACKOFF if max_backoff is None else max_backoff
     base = retry_after if retry_after else initial_backoff * (2 ** attempt)

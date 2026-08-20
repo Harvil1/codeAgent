@@ -1,12 +1,20 @@
-"""LLM 调用抽象层：统一 OpenAI 兼容格式和 Anthropic 原生格式。
+"""LLM 调用的「翻译官」层：把两家画风不同的 API 统一成一副面孔。
 
-两种 client 都实现 chat_completions()，返回 OpenAI 兼容的响应结构
-（response.choices[0].message.content / tool_calls），让 AIAgent 循环
-不用关心底层 SDK 差异。
+背景：市面上的大模型 API 主要分两种格式——OpenAI 兼容格式（DeepSeek、
+OpenRouter、本地 Ollama 等都用这套）和 Anthropic 原生格式（Claude 官方）。
+如果让上层对话主循环直接面对两种 SDK，就得处处写「如果是 A 家就……」。
 
-格式选择由 model_config["format"] 决定：
+所以本文件提供两个 client（可以理解为「接线员」），都实现同一个方法
+chat_completions()，返回的响应统一长成 OpenAI 的样子（从
+response.choices[0].message 里取 content 和 tool_calls）。这样上层
+AIAgent 主循环完全不用关心底层接的是哪家 API。
+
+用哪个 client 由 model_config（模型配置字典）里的 "format" 字段决定：
   - "openai"    → OpenAICompatClient（DeepSeek/OpenAI/OpenRouter 等）
   - "anthropic" → AnthropicClient（Claude 原生 API）
+
+在依赖链里位于 model_tools.py 之下，是所有 LLM 请求的最终出口；
+aux_llm.py 的辅助路由器也通过本文件的工厂函数创建 client。
 """
 
 import asyncio
@@ -15,20 +23,23 @@ import logging
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-# 模块级导入 AsyncOpenAI，便于测试用 patch("agent.llm_client.AsyncOpenAI") 替换。
-# （局部 import 无法被 unittest.mock.patch 定位到模块属性）
+# 历史踩坑：AsyncOpenAI 必须在模块顶层 import，测试才能用
+# patch("agent.llm_client.AsyncOpenAI") 把它换成假对象。
+# （写在函数内部的局部 import，unittest.mock.patch 找不到、也换不了）
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-# R17 #12：流空闲看门狗默认值（对齐 CCB STREAM_IDLE_TIMEOUT_MS=90s）
+# 流式「看门狗」的默认空闲超时（90 秒，参考 Claude Code 的同款设置）。
+# 看门狗 = 盯着流式输出，太久没新数据就认为卡死并中止。
 DEFAULT_STREAM_IDLE_TIMEOUT = 90.0
 
 
 class LLMStreamIdleTimeout(Exception):
-    """流式空闲超时（看门狗触发）：idle_timeout 秒内没有任何 chunk/event。
+    """流式回答「卡住不动」的异常：看门狗发现 idle_timeout 秒内一个字都没来。
 
-    上层（扣留-恢复，R17 #9）捕获后转非流式重试，而不是直接报错。
+    上层有个「扣留-恢复」机制会接住这个异常，改用非流式方式再试一次，
+    而不是直接向用户报错（详见 agent/__init__.py 的恢复逻辑）。
     """
 
 
@@ -38,15 +49,26 @@ async def _iterate_with_watchdog(
     idle_timeout: float,
     describe: str = "",
 ):
-    """带空闲看门狗的 async 迭代器包装（R17 #12）。
+    """给流式输出套一个「闹钟」：太久没下一段内容就中止并报超时。
 
-    idle_timeout 秒内没等到下一个 item → 尽力关闭流 → 抛 LLMStreamIdleTimeout。
-    idle_timeout <= 0 表示禁用（原样迭代，向后兼容）。
+    背景：流式回答就像水龙头滴水，正常情况一段接一段地来。如果网络或
+    服务器卡住，普通写法会永远干等。本函数在每次等下一段时设一个
+    idle_timeout 秒的闹钟，超时还没等到就关掉流、抛 LLMStreamIdleTimeout。
 
-    实现：async for 无法直接加超时，改手工 __anext__ + asyncio.wait_for。
-    超时时 wait_for 会取消挂起的 __anext__（取消底层接收协程，安全）。
-    与 CC 的差异：CC 另有「半超时 warning + >30s 事件间隔停顿计数」遥测，
-    OmniMate 无对应遥测通道，只做超时 abort（记录差异）。
+    做法：Python 的 `async for` 语法没法直接加超时，所以改成手工调
+    __anext__() 并用 asyncio.wait_for 包一层；超时时 wait_for 会顺手
+    取消那个还在傻等的接收协程（安全，不会留尾巴）。
+
+    与 Claude Code 的差异（有意为之）：CC 还有一套「半超时警告 + 停顿
+    计数」的遥测上报，本项目没有对应的遥测通道，只做超时中止。
+
+    参数：
+        stream：原始的 async 迭代器（流式响应）
+        idle_timeout：闹钟秒数；小于等于 0 表示关掉看门狗（原样迭代，
+                      兼容旧配置）
+        describe：附加到报错信息里的说明文字（比如带上模型名，方便排查）
+
+    产出（yield）：流里原本的每个 item；超时则抛 LLMStreamIdleTimeout。
     """
     if idle_timeout <= 0:
         async for item in stream:
@@ -66,7 +88,7 @@ async def _iterate_with_watchdog(
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception:
-                    pass  # 关流失败无所谓：__anext__ 已被取消
+                    pass  # 关流失败也无所谓：等数据的协程已被取消，不会泄漏
             raise LLMStreamIdleTimeout(
                 f"流式空闲超时（{idle_timeout:.0f}s 无数据{describe}），已中止流"
             )
@@ -74,17 +96,25 @@ async def _iterate_with_watchdog(
 
 
 # ---------------------------------------------------------------------------
-# usage 抽取（OpenAI / Anthropic SDK 字段名不同，统一为标准化 dict）
+# token 用量（usage）字段提取：两家 SDK 的字段名不一样，这里统一成
+# 同一种字典格式，上层只用认一种
 # ---------------------------------------------------------------------------
 
 def _extract_openai_usage(usage_obj) -> Optional[dict]:
-    """从 OpenAI 兼容 SDK 的 usage 对象提取标准化 token dict。
+    """把 OpenAI 兼容 SDK 的「用量统计对象」翻译成统一格式的字典。
 
-    返回 None 表示无 usage 对象。返回 dict 含 5 字段：
-    prompt_tokens / completion_tokens / total_tokens /
-    cache_read / cache_creation（DeepSeek/OpenAI 各自命名都做兜底）。
+    背景：「这轮对话花了多少 token」这类统计，DeepSeek 和 OpenAI 官方
+    各有一套字段名（比如缓存命中，一个叫 prompt_cache_hit_tokens，一个
+    叫 cache_read_input_tokens）。这里把两种叫法都兜住，输出统一的 5 个
+    字段：prompt_tokens（输入）/ completion_tokens（输出）/ total_tokens
+    （总计）/ cache_read（命中缓存省下的）/ cache_creation（新写缓存的）。
 
-    被 LLMClient/OpenAICompatClient 的流式路径共用，避免字段提取逻辑重复。
+    流式和非流式两条路都要做这件事，抽出来共用，避免抄两遍。
+
+    参数：
+        usage_obj：SDK 响应里的 usage 对象（可能为 None）
+
+    返回：统一格 dict；没有 usage 对象时返回 None。
     """
     if usage_obj is None:
         return None
@@ -100,10 +130,15 @@ def _extract_openai_usage(usage_obj) -> Optional[dict]:
 
 
 def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
-    """从 Anthropic SDK 的 usage 对象提取标准化 token dict。
+    """把 Anthropic SDK 的用量统计翻译成上面 OpenAI 那套统一格式。
 
-    Anthropic 用 input_tokens/output_tokens 命名；映射回 OpenAI 标准。
-    total_tokens 由 input+output 计算（Anthropic 不直接给 total）。
+    背景：Anthropic 把输入/输出叫做 input_tokens/output_tokens，而且
+    不直接给总数——这里改名映射，总数自己加出来。
+
+    参数：
+        usage_obj：Anthropic 响应里的 usage 对象（可能为 None）
+
+    返回：统一格式 dict；没有 usage 对象时返回 None。
     """
     if usage_obj is None:
         return None
@@ -123,7 +158,7 @@ def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 class LLMClient:
-    """LLM 调用抽象基类。"""
+    """所有 LLM client 的「模板」基类：规定必须长什么样，本身不能直接用。"""
 
     async def chat_completions(
         self,
@@ -132,11 +167,18 @@ class LLMClient:
         tools: Optional[List[dict]] = None,
         **kwargs,
     ):
-        """async 调用 LLM，返回 OpenAI 兼容的响应结构。
+        """非流式地调一次 LLM，回答一口气全回来。
 
-        返回对象必须有：
-            response.choices[0].message.content  (str or None)
-            response.choices[0].message.tool_calls  (list or None)
+        约定：返回的对象必须能这样取值（也就是 OpenAI 的样子）——
+            response.choices[0].message.content   （回答文本，str 或 None）
+            response.choices[0].message.tool_calls（模型想调的工具列表，或 None）
+
+        参数：
+            messages：对话历史（OpenAI 格式的消息字典列表）
+            tools：可用的工具清单（OpenAI 格式 schema，可省略）
+            **kwargs：其余参数原样透传给底层 SDK
+
+        返回：OpenAI 兼容格式的响应对象。
         """
         raise NotImplementedError
 
@@ -147,18 +189,25 @@ class LLMClient:
         tools: Optional[List[dict]] = None,
         **kwargs,
     ):
-        """async 流式调用 LLM，yield dict chunk。
+        """流式地调 LLM：回答像打字机一样一小段一小段地往外吐。
 
-        每个 chunk 是 dict（不是 SDK 对象，避免上层处理多种 SDK 差异）：
+        吐出来的每一小段（chunk）都是统一格式的 dict，不是 SDK 原始对象——
+        这样上层不管底层接的是哪家 API，都只认这一种格式：
             {
-                "content": str,           # 本 chunk 增量文本（可空字符串）
-                "tool_calls": list,       # 本 chunk 增量工具调用（可空列表）
-                "finish_reason": str?,    # 仅最后一个 chunk 有
-                "usage": dict?,           # 仅最后一个 chunk 有（可选）
+                "content": str,        # 这一小段新增的文本（可能是空串）
+                "tool_calls": list,    # 这一小段新增的工具调用（可能是空列表）
+                "finish_reason": str?, # 结束原因，只有最后一个 chunk 才有
+                "usage": dict?,        # token 用量，一般只有最后一个 chunk 有
             }
 
-        默认实现：调非流式接口后模拟一次性 yield（让无流式能力的 client 也能用）。
-        子类重写真流式。
+        基类的默认实现是个「假流式」：先走非流式拿完整回答，再一口气
+        yield 出去——这样不支持流式的 client 也能套用同一个接口。
+        真正的子类会重写成真流式。
+
+        参数：
+            messages：对话历史（OpenAI 格式消息列表）
+            tools：可用工具清单（可省略）
+            **kwargs：其余参数透传给底层 SDK
         """
         resp = await self.chat_completions(messages, tools=tools, **kwargs)
         choice = resp.choices[0]
@@ -172,18 +221,22 @@ class LLMClient:
         }
 
     def reset_client(self) -> None:
-        """R26 #10：重建底层 HTTP client（连接重置后弃用旧连接池）。
+        """把底下的 HTTP 连接池整个换新（历史踩坑修复，R26 #10）。
 
-        基类 no-op；子类按需重写。调用方保证线程安全（重试路径串行）。
+        背景：连接一旦被重置弄坏，在坏连接池上重试大概率还是失败，
+        所以重试逻辑会先调这个方法重建 client 再试。
+
+        基类里什么都不做（no-op）；需要的子类自己重写。调用方是串行的
+        重试路径，不存在两个线程同时重建的并发问题。
         """
 
 
 # ---------------------------------------------------------------------------
-# OpenAI 兼容 client（DeepSeek/OpenAI/OpenRouter/本地 Ollama 等）
+# OpenAI 兼容格式的 client（DeepSeek/OpenAI/OpenRouter/本地 Ollama 等都用这套）
 # ---------------------------------------------------------------------------
 
 class OpenAICompatClient(LLMClient):
-    """OpenAI 兼容格式的 LLM client（async）。"""
+    """接 OpenAI 兼容 API 的 client（异步），项目默认走这一类。"""
 
     def __init__(
         self,
@@ -196,15 +249,16 @@ class OpenAICompatClient(LLMClient):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
-        # R26 #10：留存认证凭据，reset_client 重建时用（不依赖 SDK 暴露读取）
+        # 历史踩坑（R26 #10 修复）：把密钥自己存一份。SDK 不保证让你读回
+        # 旧 client 的密钥，重建时没存就得不偿失。
         self._api_key = api_key
-        # R17 #12：流空闲看门狗（秒；<=0 禁用）
+        # 流式看门狗的空闲秒数；小于等于 0 表示关掉看门狗
         self.stream_idle_timeout = stream_idle_timeout
 
     def reset_client(self) -> None:
-        """R26 #10：丢弃可能坏死的连接池，重建 AsyncOpenAI。"""
+        """扔掉可能坏掉的连接池，重新造一个 AsyncOpenAI（R26 #10）。"""
         try:
-            # best-effort 关旧 client（已坏也无妨）
+            # 尽力关掉旧 client；它已经坏了也无所谓，反正要扔
             import asyncio as _aio
             try:
                 loop = _aio.get_running_loop()
@@ -217,10 +271,16 @@ class OpenAICompatClient(LLMClient):
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self._api_key)
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
-        """async 直接转发到 AsyncOpenAI SDK。返回原生的 OpenAI 响应对象。"""
-        # 防御：上层（memory_manager / reflection / retriever）习惯在 kwargs 里
-        # 传 model=xxx，但 self.model 已经是 client 的属性，重复传会让 OpenAI SDK
-        # 报 "got multiple values for keyword argument 'model'"。这里 pop 掉。
+        """非流式调用：直接转交给 AsyncOpenAI SDK，原样返回它的响应对象。
+
+        参数：
+            messages：对话历史（OpenAI 格式消息列表）
+            tools：可用工具清单（可省略）
+            **kwargs：其余参数透传给 SDK
+        """
+        # 防御性处理：上层几个模块（记忆管理/反思/检索）习惯在 kwargs 里
+        # 带上 model=xxx。但模型名已经是本 client 的属性，这里再收一次
+        # 同名参数，SDK 会报「model 参数传了两遍」。所以先扔掉外来的。
         kwargs.pop("model", None)
         return await self.client.chat.completions.create(
             model=self.model,
@@ -230,13 +290,19 @@ class OpenAICompatClient(LLMClient):
         )
 
     async def chat_completions_stream(self, messages, *, tools=None, **kwargs):
-        """async 流式：stream=True，async for chunk。
+        """真流式调用：开 stream=True，一段一段收 chunk。
 
-        每个 chunk 是规范化后的 dict（见 LLMClient.chat_completions_stream 文档）。
-        tool_calls 的 delta 保留 SDK 原对象（含 index/id/function 字段），
-        上层负责按 index 累积。
+        每个 chunk 都转成统一格式的 dict（格式见基类
+        chat_completions_stream 的说明）。工具调用的增量部分保留 SDK
+        原始对象（里面有 index/id/function 等字段），由上层按序号拼装
+        成完整调用。
+
+        参数：
+            messages：对话历史（OpenAI 格式消息列表）
+            tools：可用工具清单（可省略）
+            **kwargs：其余参数透传给 SDK
         """
-        # 同 chat_completions，防御 kwargs 里的 model 重复
+        # 同上：扔掉外来的 model，防止同名参数传两遍
         kwargs.pop("model", None)
         stream = await self.client.chat.completions.create(
             model=self.model,
@@ -246,7 +312,7 @@ class OpenAICompatClient(LLMClient):
             stream_options={"include_usage": True},
             **kwargs,
         )
-        # R17 #12：空闲看门狗（90s 无 chunk → 中止流）
+        # 流式看门狗：90 秒没等到新 chunk 就中止流
         async for chunk in _iterate_with_watchdog(
             stream,
             idle_timeout=self.stream_idle_timeout,
@@ -254,7 +320,7 @@ class OpenAICompatClient(LLMClient):
         ):
             usage_dict = _extract_openai_usage(getattr(chunk, "usage", None))
             if not chunk.choices:
-                # 最后一个 chunk 可能只有 usage
+                # 收尾的那个 chunk 可能不带内容、只带用量统计
                 if usage_dict:
                     yield {
                         "content": "",
@@ -273,19 +339,20 @@ class OpenAICompatClient(LLMClient):
 
 
 # ---------------------------------------------------------------------------
-# Anthropic 原生 client（Claude 系列）
+# Anthropic 原生格式的 client（Claude 系列）
 # ---------------------------------------------------------------------------
 
 class AnthropicClient(LLMClient):
-    """Anthropic 原生格式的 LLM client（async）。
+    """接 Anthropic 原生 API 的 client（异步），对外仍装成 OpenAI 的样子。
 
-    Claude API 和 OpenAI 格式的关键差异：
-    - system 是顶层参数（不在 messages 数组里）
-    - 工具 schema 格式不同（input_schema vs parameters）
-    - 响应 content 是 block 数组（text/tool_use），不是单一字符串
+    Claude 的 API 和 OpenAI 格式有几处根本性的「说方言」差异：
+    - 系统提示词（system）是顶层参数，不放在消息列表里
+    - 工具定义的字段名不同（input_schema vs parameters）
+    - 回答的 content 是「积木块」数组（文本块/工具调用块混着排），
+      不是一整根字符串
 
-    这里做双向转换，对外暴露 OpenAI 兼容接口。
-    底层使用 AsyncAnthropic，所有 LLM 调用走 async/await。
+    所以本类做双向翻译：请求发出去前转成 Anthropic 方言，回答拿回来后
+    再转回 OpenAI 样子。底层用 AsyncAnthropic SDK，全部异步调用。
     """
 
     def __init__(
@@ -298,23 +365,30 @@ class AnthropicClient(LLMClient):
         effort_level: str = None,
         stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
     ):
-        """创建 Anthropic async client。
+        """创建 Anthropic 异步 client。
 
-        认证方式(二选一):
-        - api_key:用 x-api-key header(Anthropic 官方)
-        - auth_token:用 Authorization: Bearer header(DeepSeek Anthropic 端点)
+        认证方式二选一（就像门禁卡有两种刷法）：
+        - api_key：走 x-api-key 请求头（Anthropic 官方用这种）
+        - auth_token：走 Authorization: Bearer 请求头（DeepSeek 的
+          Anthropic 兼容端点用这种）
 
-        effort_level(思考强度,类 业界 的 CLAUDE_CODE_EFFORT_LEVEL):
-        - "max": 85% 的 max_tokens 给思考预算(最强推理)
-        - "high": 50% 给思考
-        - "medium": 25% 给思考
-        - "low" / None: 不思考(直接回答)
+        参数：
+            api_key：Anthropic 官方密钥
+            model：模型名
+            base_url：API 地址（换端点时用）
+            auth_token：Bearer 认证令牌（与 api_key 二选一，优先用它）
+            effort_level：思考强度（不思考就让它直接回答）：
+                - "max"：85% 的输出额度给思考（推理最强）
+                - "high"：50% 给思考
+                - "medium"：25% 给思考
+                - "low" / None：不思考，直接回答
+            stream_idle_timeout：流式看门狗秒数（<=0 关闭）
         """
         from anthropic import AsyncAnthropic
         kwargs = {}
         if base_url:
             kwargs["base_url"] = base_url
-        # auth_token 优先(DeepSeek 等 Anthropic 兼容端点用 Bearer)
+        # auth_token 优先（DeepSeek 等 Anthropic 兼容端点用 Bearer 认证）
         if auth_token:
             kwargs["auth_token"] = auth_token
         elif api_key:
@@ -324,17 +398,18 @@ class AnthropicClient(LLMClient):
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
-        # R26 #10：留存认证/端点凭据，reset_client 重建时用（同名重建 AsyncAnthropic）
+        # 历史踩坑（R26 #10 修复）：把密钥/地址各存一份，
+        # reset_client 重建时直接用，不指望 SDK 让你读回旧值
         self._api_key = api_key
         self._auth_token = auth_token
         self._base_url = base_url
-        # R17 #12：流空闲看门狗（秒；<=0 禁用）
+        # 流式看门狗秒数；<=0 表示关闭
         self.stream_idle_timeout = stream_idle_timeout
 
     def reset_client(self) -> None:
-        """R26 #10：丢弃可能坏死的连接池，重建 AsyncAnthropic（同名重建）。"""
+        """扔掉可能坏掉的连接池，按原来的配置重建 AsyncAnthropic（R26 #10）。"""
         try:
-            # best-effort 关旧 client（已坏也无妨）
+            # 尽力关掉旧 client；它已经坏了也无所谓，反正要扔
             import asyncio as _aio
             try:
                 loop = _aio.get_running_loop()
@@ -348,33 +423,33 @@ class AnthropicClient(LLMClient):
         kwargs = {}
         if self._base_url:
             kwargs["base_url"] = self._base_url
-        # auth_token 优先(与 __init__ 同序)，兜底 api_key
+        # auth_token 优先（与 __init__ 同序），兜底用 api_key
         if self._auth_token:
             kwargs["auth_token"] = self._auth_token
         elif self._api_key:
             kwargs["api_key"] = self._api_key
         self.client = AsyncAnthropic(**kwargs)
 
-    # effort_level → 思考参数(DeepSeek 格式)
+    # effort_level（思考强度）换算成 DeepSeek 的思考参数。
     # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
-    # DeepSeek 的 Anthropic 端点不用 Anthropic 原生的 budget_tokens,
-    # 而是用 output_config.effort 控制思考强度。
+    # 设计取舍：DeepSeek 的 Anthropic 端点不用 Anthropic 原生的
+    # budget_tokens，而是用 output_config.effort 控制思考强度。
 
     def _build_thinking_config(self):
-        """返回 DeepSeek 思考模式开关参数。
+        """返回 DeepSeek 思考模式的开关参数。
 
-        DeepSeek 默认思考模式 enabled。
-        effort_level=low 时显式关闭,其余都 enabled。
+        DeepSeek 默认开着思考模式；effort_level=low 时才显式关掉，
+        其余档位都保持开。
         """
         if not self.effort_level or self.effort_level == "low":
             return None
         return {"type": "enabled"}
 
     def _build_output_config(self):
-        """返回 DeepSeek 思考强度(output_config.effort)。
+        """返回 DeepSeek 的思考强度参数（output_config.effort）。
 
-        DeepSeek Anthropic 格式:output_config={"effort": "max"/"high"}。
-        medium 映射为 high(DeepSeek 兼容策略)。
+        DeepSeek 的 Anthropic 格式是 output_config={"effort": "max"/"high"}；
+        medium 档映射成 high（DeepSeek 只认这两档，就近往上靠）。
         """
         if not self.effort_level or self.effort_level == "low":
             return None
@@ -387,10 +462,18 @@ class AnthropicClient(LLMClient):
         tools: Optional[List[dict]],
         max_tokens: int,
     ) -> Dict[str, Any]:
-        """构造 Anthropic API 调用参数（chat_completions 和 stream 共用）。
+        """拼装一次 Anthropic 请求的全部参数（流式和非流式共用）。
 
-        含：system 拼接、消息转换、工具转换、思考模式 + output_config。
-        抽出这个 helper 消除两个 chat_completions* 方法的重复（~25 行）。
+        背景：发请求前要做的翻译活不少——拼系统提示词、转消息格式、
+        转工具格式、配思考模式和强度。流式/非流式两个方法都要这一套，
+        抽成公共函数免得抄两遍（能省 25 行左右）。
+
+        参数：
+            messages：OpenAI 格式的消息列表
+            tools：OpenAI 格式的工具清单（可为 None）
+            max_tokens：本次回答的输出上限
+
+        返回：可直接拆开传给 Anthropic SDK 的参数字典。
         """
         system_parts = [
             m.get("content", "")
@@ -410,11 +493,12 @@ class AnthropicClient(LLMClient):
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
 
-        # effort_level:思考模式(DeepSeek 格式:thinking 开关 + output_config 强度)
+        # 思考模式：DeepSeek 格式 = thinking 开关 + output_config 强度，两个参数
         thinking = self._build_thinking_config()
         if thinking:
             kwargs["thinking"] = thinking
-        # output_config 是 DeepSeek 扩展参数,用 extra_body 传(不在 Anthropic SDK 标准字段里)
+        # output_config 是 DeepSeek 的私有扩展，Anthropic SDK 不认识，
+        # 只能塞在 extra_body 里捎过去
         output_config = self._build_output_config()
         if output_config:
             kwargs["extra_body"] = {"output_config": output_config}
@@ -422,23 +506,36 @@ class AnthropicClient(LLMClient):
         return kwargs
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
-        """async 调 anthropic.messages.create。"""
+        """非流式调用：调 Anthropic 的 messages.create，再翻译回 OpenAI 样子。
+
+        参数：
+            messages：OpenAI 格式消息列表
+            tools：工具清单（可省略）
+            **kwargs：可含 max_tokens（输出上限，默认 4096）
+        """
         max_tokens = kwargs.get("max_tokens", 4096)
         create_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
         response = await self.client.messages.create(**create_kwargs)
         return self._wrap_response(response)
 
     async def chat_completions_stream(self, messages, *, tools=None, **kwargs):
-        """Anthropic 原生流式：async with messages.stream。"""
+        """Anthropic 原生流式：用 messages.stream 一边收一边翻译。
+
+        参数：
+            messages：OpenAI 格式消息列表
+            tools：工具清单（可省略）
+            **kwargs：可含 max_tokens（默认 4096）
+        """
         max_tokens = kwargs.get("max_tokens", 4096)
         stream_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
 
-        # 累积 tool_use（Anthropic 流式按 block 增量，需要聚合 id+name+完整 input）
+        # Anthropic 的流式把一次工具调用拆成很多碎片发过来，
+        # 得准备几个「篮子」把每个调用的 id/名字/参数碎片攒齐
         tool_buffers: Dict[int, Dict[str, Any]] = {}
         current_tool_idx: Optional[int] = None
 
         async with self.client.messages.stream(**stream_kwargs) as stream:
-            # R17 #12：空闲看门狗（90s 无 event → 中止流；async with 兜底清理）
+            # 看门狗：90 秒没等到新事件就中止流（async with 保证善后清理）
             async for event in _iterate_with_watchdog(
                 stream,
                 idle_timeout=self.stream_idle_timeout,
@@ -448,7 +545,7 @@ class AnthropicClient(LLMClient):
                 if evt_type == "content_block_start":
                     block = getattr(event, "content_block", None)
                     if block is not None and getattr(block, "type", "") == "tool_use":
-                        # 新 tool_use 块开始
+                        # 一个新的工具调用块开张，登记个新篮子
                         idx = len(tool_buffers)
                         tool_buffers[idx] = {
                             "id": getattr(block, "id", ""),
@@ -471,14 +568,14 @@ class AnthropicClient(LLMClient):
                                 "usage": None,
                             }
                     elif delta_type == "input_json_delta":
-                        # 工具参数 JSON 分片累积
+                        # 工具参数的 JSON 被切片发来，一片片往篮子里攒
                         partial = getattr(delta, "partial_json", "") or ""
                         if current_tool_idx is not None and partial:
                             tool_buffers[current_tool_idx]["input_json"] += partial
                 elif evt_type == "content_block_stop":
                     current_tool_idx = None
 
-            # 流结束：聚合 tool_calls 一次性 yield
+            # 流结束：把攒在篮子里的工具调用拼完整，一次性 yield 出去
             final_message = await stream.get_final_message()
             tool_calls_out = []
             for idx in sorted(tool_buffers.keys()):
@@ -493,7 +590,7 @@ class AnthropicClient(LLMClient):
                     ),
                 ))
             usage_dict = _extract_anthropic_usage(getattr(final_message, "usage", None))
-            # 从 final_message 提取 thinking(DeepSeek 工具调用回传需要)
+            # 从最终消息里抠出思考内容（DeepSeek 要求下轮带工具调用时回传它）
             thinking_text = ""
             thinking_sig = ""
             for block in getattr(final_message, "content", []):
@@ -510,11 +607,17 @@ class AnthropicClient(LLMClient):
             }
 
     def _convert_messages_to_anthropic(self, messages: list) -> list:
-        """把 OpenAI 格式的消息列表转成 Anthropic 格式。
+        """把 OpenAI 格式的整段对话历史翻译成 Anthropic 格式。
 
-        关键:合并连续的 tool 消息成一个 user(tool_result × N)。
-        Anthropic 协议要求所有 tool_results 在同一个 user 消息里,
-        不允许连续多个 user 消息(OpenAI 允许每个 tool_result 独立)。
+        最关键的一步：把连续多条工具结果合并成一条 user 消息。
+        因为 Anthropic 协议规定所有工具结果必须装在同一个 user 消息里，
+        不允许两条 user 消息挨着；而 OpenAI 那边每个工具结果各自成条。
+        （另外 system 消息在这里被抽走——它要走顶层参数，见上层拼装。）
+
+        参数：
+            messages：OpenAI 格式的消息列表
+
+        返回：Anthropic 格式的消息列表。
         """
         conversation = []
         i = 0
@@ -527,7 +630,7 @@ class AnthropicClient(LLMClient):
                 continue
 
             if role == "tool":
-                # 合并连续的 tool 消息成一个 user(tool_result × N)
+                # 把连续的工具结果合并成一条 user 消息（Anthropic 的规矩）
                 tool_results = []
                 while i < len(messages) and messages[i].get("role") == "tool":
                     tool_results.append({
@@ -544,16 +647,23 @@ class AnthropicClient(LLMClient):
         return conversation
 
     def _convert_message(self, msg: dict) -> dict:
-        """OpenAI 消息 → Anthropic 消息。
+        """翻译单条 OpenAI 消息为 Anthropic 消息。
 
-        工具调用轮次回传 thinking block(DeepSeek 要求)。
+        特别注意：助手消息里带工具调用时，必须把上一轮的思考内容
+        （thinking 块）一起回传——这是 DeepSeek 思考模式的硬性要求，
+        不带会报错。
+
+        参数：
+            msg：一条 OpenAI 格式的消息字典
+
+        返回：一条 Anthropic 格式的消息字典。
         """
         role = msg.get("role")
         content = msg.get("content")
 
         if role == "assistant":
             blocks = []
-            # 工具调用时必须回传 thinking(DeepSeek 思考模式要求)
+            # 带工具调用时必须回传思考内容（DeepSeek 思考模式的硬性要求）
             rc = msg.get("reasoning_content")
             sig = msg.get("thinking_signature")
             if rc and sig:
@@ -561,7 +671,7 @@ class AnthropicClient(LLMClient):
 
             has_tool_calls = bool(msg.get("tool_calls"))
             if has_tool_calls or blocks:
-                # 有 tool_calls 或 thinking → 用 blocks 格式
+                # 有工具调用或思考内容 → 得用「积木块」格式组装
                 if content:
                     blocks.append({"type": "text", "text": content})
                 for tc in (msg.get("tool_calls") or []):
@@ -580,7 +690,7 @@ class AnthropicClient(LLMClient):
                 return {"role": "assistant", "content": blocks}
 
         if role == "tool":
-            # tool 结果：Anthropic 用 user 角色 + tool_result block
+            # 工具结果：Anthropic 的说法是 user 角色 + tool_result 积木块
             return {
                 "role": "user",
                 "content": [{
@@ -590,11 +700,17 @@ class AnthropicClient(LLMClient):
                 }],
             }
 
-        # 普通 user/assistant
+        # 普通的 user/assistant 文本消息，直接照搬
         return {"role": role, "content": content or ""}
 
     def _convert_tools(self, openai_tools: List[dict]) -> List[dict]:
-        """OpenAI 工具 schema → Anthropic 工具 schema。"""
+        """把 OpenAI 格式的工具说明书翻译成 Anthropic 格式。
+
+        参数：
+            openai_tools：OpenAI 格式的工具 schema 列表
+
+        返回：Anthropic 格式（name/description/input_schema）的工具列表。
+        """
         anthropic_tools = []
         for t in openai_tools:
             if t.get("type") == "function":
@@ -602,8 +718,9 @@ class AnthropicClient(LLMClient):
                 anthropic_tools.append({
                     "name": func["name"],
                     "description": func.get("description", ""),
-                    # OmniMate 内部 schema 用 input_schema（不是 OpenAI 的 parameters）
-                    # 两者兼容：先 parameters 后 input_schema 再 fallback 空
+                    # 历史坑：本项目内部 schema 用的键是 input_schema，
+                    # 跟 OpenAI 的 parameters 不是同一个名字。两种都认：
+                    # 先试 parameters，再试 input_schema，都没有就给个空壳
                     "input_schema": func.get("parameters") or func.get("input_schema") or {
                         "type": "object",
                         "properties": {},
@@ -612,9 +729,16 @@ class AnthropicClient(LLMClient):
         return anthropic_tools
 
     def _wrap_response(self, anthropic_response):
-        """把 Anthropic 响应包装成 OpenAI 兼容格式(SimpleNamespace)。
+        """把 Anthropic 的回答重新包装成 OpenAI 的样子。
 
-        保留 thinking 块的 reasoning_content + signature(DeepSeek 工具调用回传需要)。
+        用 SimpleNamespace（一个能随意挂属性的轻量对象）手工搭出
+        choices[0].message 那套结构。思考块的正文和签名也要留出来——
+        DeepSeek 要求下一轮带工具调用时回传它们。
+
+        参数：
+            anthropic_response：Anthropic SDK 的原始响应对象
+
+        返回：长得像 OpenAI 响应的 SimpleNamespace。
         """
         content_text = ""
         tool_calls = None
@@ -623,7 +747,7 @@ class AnthropicClient(LLMClient):
 
         for block in anthropic_response.content:
             if block.type == "thinking":
-                # DeepSeek 思考模式:thinking 块含思维链 + signature
+                # DeepSeek 思考模式：思考块里装着思维链正文 + 防伪签名
                 reasoning_content += getattr(block, "thinking", "")
                 thinking_signature = getattr(block, "signature", "") or thinking_signature
             elif block.type == "text":
@@ -643,7 +767,7 @@ class AnthropicClient(LLMClient):
         message = SimpleNamespace(
             content=content_text if content_text else None,
             tool_calls=tool_calls,
-            # 工具调用时,后续请求必须回传 thinking(DeepSeek 要求)
+            # 下轮带工具调用时必须把思考内容回传（DeepSeek 的硬性要求）
             reasoning_content=reasoning_content or None,
             thinking_signature=thinking_signature or None,
         )
@@ -658,32 +782,37 @@ class AnthropicClient(LLMClient):
 
 
 # ---------------------------------------------------------------------------
-# 工厂函数
+# 工厂函数（「按订单造 client」的入口）
 # ---------------------------------------------------------------------------
 
 def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
-    """根据 model_config 的 format 字段创建对应 client。
+    """按配置字典造一个对应的 LLM client（项目的统一入口）。
 
-    model_config 结构：
-        {
-            "format": "openai" | "anthropic",
-            "base_url": "...",
-            "api_key": "...",
-            "model": "...",
-        }
+    参数：
+        model_config：模型配置字典，长这样——
+            {
+                "format": "openai" 或 "anthropic"（默认 openai），
+                "base_url": "API 地址"，
+                "api_key": "密钥"，
+                "model": "模型名"，
+                另可选 "auth_token"（Bearer 认证）、"effort_level"
+                （思考强度）、"stream_idle_timeout"（看门狗秒数）
+            }
+
+    返回：OpenAICompatClient 或 AnthropicClient 实例。
     """
     fmt = (model_config.get("format") or "openai").lower()
     api_key = model_config.get("api_key") or ""
     model = model_config.get("model") or ""
     base_url = model_config.get("base_url")
-    # R17 #12：流空闲看门狗（config llm.stream_idle_timeout_seconds，默认 90s，<=0 禁用）
+    # 看门狗秒数从配置读；读不到或读出来不是数字就用默认 90 秒（<=0 关闭）
     try:
         idle_timeout = float(model_config.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT))
     except (TypeError, ValueError):
         idle_timeout = DEFAULT_STREAM_IDLE_TIMEOUT
 
     if fmt == "anthropic":
-        # auth_token 用于 DeepSeek 等 Anthropic 兼容端点(Bearer 认证)
+        # auth_token 给 DeepSeek 等兼容端点用（Bearer 认证那种）
         auth_token = model_config.get("auth_token") or ""
         effort_level = model_config.get("effort_level") or ""
         return AnthropicClient(
@@ -695,7 +824,7 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
             stream_idle_timeout=idle_timeout,
         )
 
-    # 默认 openai 兼容
+    # 没特别说明就走 OpenAI 兼容格式
     return OpenAICompatClient(
         base_url=base_url, api_key=api_key, model=model,
         stream_idle_timeout=idle_timeout,
@@ -703,7 +832,14 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
 
 
 async def aclose_llm_client(client) -> None:
-    """best-effort 关闭底层 SDK client（AsyncOpenAI/AsyncAnthropic 都暴露 .client.close 协程；fail-open）。"""
+    """尽力关掉 client 底下的 HTTP 连接（收尾打扫用，关不上也不报错）。
+
+    两种 SDK 的内部对象都有 close 方法（协程），调一下就行；
+    出任何异常都吞掉——打扫失败不该影响正事。
+
+    参数：
+        client：上面任意一种 LLMClient 实例
+    """
     try:
         inner = getattr(client, "client", None)
         if inner is not None and hasattr(inner, "close"):
@@ -715,22 +851,28 @@ async def aclose_llm_client(client) -> None:
 
 
 class ThreadedLLMClient(LLMClient):
-    """线程上下文专用 LLM client（R26 终审 follow-up 修复）。
+    """给「后台线程」专用的 LLM client（R26 终审 follow-up 修复的历史坑）。
 
-    问题：httpx 连接池绑定首次使用时的事件循环。daemon 线程（curator/
-    progress/ticker）里 asyncio.run 每次新建循环——复用主循环绑定的
-    主 client 会报 "Event loop is closed"，甚至污染主对话的连接池。
+    问题出在哪：HTTP 连接池（httpx）在第一次使用时会跟当时的「事件循环」
+    （可以理解为异步调度中心）绑定死。后台守护线程（curator 维护工/
+    进度播报/定时器）里每次 asyncio.run 都新建一个循环——拿主循环的
+    client 去用会报 "Event loop is closed"（旧循环已关），还可能把
+    主对话的连接池也带坏。
 
-    方案：每次调用在**当前循环内**新建底层 client，用完即关（aclose）。
-    成本 = 每次一次 TCP 握手（后台任务低频，可忽略）；换来彻底的跨循环
-    安全（在主循环调用同样安全——loop 无关）。reset_client 继承基类
-    no-op（无持久池可重建）。
+    解决思路土但稳：每次调用都在**当前循环里**现场造一个新 client，
+    用完立刻关。代价是每次多一次 TCP 握手（后台任务调用不频繁，可以
+    忽略）；换来彻底的循环无关安全——在主循环里这么调也一样没问题。
+    因为没有常驻连接池，reset_client 直接用基类的空实现。
+
+    参数（__init__）：
+        model_config：模型配置字典（会拷贝一份存起来）
     """
 
     def __init__(self, model_config: Dict[str, Any]):
         self._model_config = dict(model_config or {})
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
+        # 每次都现场造 client、用完就扔，见类说明
         client = create_llm_client(self._model_config)
         try:
             return await client.chat_completions(messages, tools=tools, **kwargs)

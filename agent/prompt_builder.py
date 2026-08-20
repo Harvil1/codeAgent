@@ -1,15 +1,19 @@
-"""System prompt 组装器。
+"""system prompt（系统提示词，模型每次对话都收到的"开场白"）的组装车间。
 
-关键原则：
-1. 会话开始时构建一次，后续缓存（_cached_system_prompt）
-2. 必须 byte-stable（同一会话内字节级不变）
-3. 记忆是 frozen 快照（本次会话不更新）
-4. 技能只列名字和描述，不包含正文
+在项目里的位置：被 agent/__init__.py（AIAgent 主类）调用，产出发给 LLM 的
+system prompt；素材来自记忆、技能目录、项目 OMNIMATE.md 等。
 
-05 升级：拆成 stable/context/volatile 三层，让 prompt cache 命中率最大化。
-- stable：跨会话不变（身份、指导）
-- context：单会话内不变（记忆、技能、OMNIMATE.md）
-- volatile：每轮可变（todo、reminder）
+四条关键原则（改这里之前必须懂）：
+1. 会话开始时构建一次就缓存住（_cached_system_prompt），中途不再重建
+2. 同一会话内必须字节级不变——LLM 服务商按"前缀一模一样"来复用缓存，
+   改一个字缓存就全废，费用直接翻倍
+3. 记忆是开工那一刻拍的照片（frozen 快照），本次会话中途不刷新
+4. 技能只列"名字 + 一句话描述"，正文等模型自己调 load_skill 按需取
+
+三层结构（05 轮升级，目的是让缓存命中率最大化）：
+- stable：跨会话都不变（身份、各种指导文案）——缓存几乎永远命中
+- context：单个会话内不变（记忆、技能索引、OMNIMATE.md）——会话内命中
+- volatile：每轮都可能变（todo、提醒）——不指望命中缓存
 """
 
 import logging
@@ -23,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 指导文本（注入 system prompt，告诉 LLM 怎么用记忆/技能/搜索）
+# 下面几个 GUIDANCE 常量是"使用说明书"文本，拼进 system prompt，
+# 教模型怎么用记忆/技能/会话搜索这些家伙什
 # ---------------------------------------------------------------------------
 
 MEMORY_GUIDANCE = (
@@ -105,32 +110,33 @@ DELEGATE_GUIDANCE = (
 
 
 # ---------------------------------------------------------------------------
-# 三层结构（05）
+# 三层结构的数据容器（05 轮引入）
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SystemPromptLayers:
-    """三层系统提示（05）。
+    """装 system prompt 三层文本的容器。
 
-    - stable: 跨会话不变（身份、指导、工具文档）
-    - context: 单会话内不变（记忆索引、技能索引、OMNIMATE.md）
-    - volatile: 每轮可变（todo、reminder、extra_instructions）
+    - stable: 跨会话不变的部分（身份、指导、工具文档）
+    - context: 单会话内不变的部分（记忆索引、技能索引、OMNIMATE.md）
+    - volatile: 每轮可变的部分（todo、reminder、extra_instructions）
 
-    API 厂商 prompt cache 按"前缀哈希"匹配，分层能让 stable 跨会话命中、
-    context 单会话命中，整体命中率上去。
+    为什么要分层：LLM 服务商的缓存按"消息前缀是否一致"来复用，越靠前的
+    内容越稳定、缓存命中越多。把不变的内容排前面、易变的排后面，
+    stable 层可以跨会话命中，context 层在会话内命中，整体省钱提速。
     """
     stable: str
     context: str
     volatile: str
 
     def render_flat(self) -> str:
-        """合并成单个字符串（向后兼容老接口）。"""
+        """把三层拼成一个大字符串。给老接口用（老接口只收一个字符串）。"""
         parts = [self.stable, self.context, self.volatile]
         return "\n\n".join(p for p in parts if p)
 
 
 # ---------------------------------------------------------------------------
-# 主构建函数（05 三层版）
+# 主构建函数（05 轮的三层版，新代码都用这个）
 # ---------------------------------------------------------------------------
 
 def build_system_prompt_layers(
@@ -142,25 +148,41 @@ def build_system_prompt_layers(
     context_files: Optional[List[Path]] = None,
     extra_instructions: str = "",
     include_guidance: bool = True,
-    # volatile 来源（运行时传入）
+    # volatile 层的素材（运行时才有的东西，从外面传进来）
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
-    # === Task N NEW: 自定义子代理可跳过项目 OMNIMATE.md（省 token）===
+    # === Task N 新增：自定义子代理可跳过项目 OMNIMATE.md 注入（省 token）===
     omit_project_memory: bool = False,
-    # === C6（CCB outputStyles）：输出风格节文本（context 层注入；空=未启用）===
+    # === C6（借鉴 CCB outputStyles）：输出风格节的文本（拼进 context 层；空=未启用风格）===
     output_style_text: str = "",
 ) -> SystemPromptLayers:
-    """构建三层 system prompt（05）。
+    """组装出三层 system prompt。
 
-    分层动机：
-      - stable：跨会话不变（同版本同一台机器，几乎 100% 命中 cache）
-      - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内 80%+ 命中）
-      - volatile：每轮可变（todo / reminder），不期望 cache 命中
+    背景：缓存按"前缀一致"复用，所以要把不变的内容排前面、易变的排后面。
+      - stable：跨会话不变（同版本同一台机器，几乎 100% 命中缓存）
+      - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内大部分轮次命中）
+      - volatile：每轮可变（todo / 提醒），不指望命中缓存
 
-    Task N: omit_project_memory=True 时跳过项目 OMNIMATE.md 注入，
-    用于 read-only / 轻量子代理（对齐 Claude Code omitClaudeMd 字段）。
+    参数：
+        memory_store: 记忆仓库对象。历史包袱：现在已不再往 system prompt
+            注入记忆（CCAR10 Task 2 改成每轮按需检索注入），参数留着只是
+            兼容旧调用，函数里不使用
+        memory_manager: 记忆管理器，能产出扩展记忆块拼进 context 层；没有就不拼
+        enabled_toolsets: 当前启用的工具集名字列表（目前本函数未直接使用）
+        skills_dir: 技能目录；不传就自动用内置 + 用户两个默认目录
+        context_files: 额外要拼进 prompt 的文件路径列表（存在才读）
+        extra_instructions: 额外指令文本，进 volatile 层
+        include_guidance: 是否拼入各段"使用指南"文案；子代理可关掉省 token
+        task_state: 当前任务列表的文本快照，进 volatile 层
+        reminder: 给模型的提醒文本，进 volatile 层
+        omit_project_memory: True 时跳过项目 OMNIMATE.md 注入——给只读/
+            轻量子代理省 token 用（对齐 Claude Code 的 omitClaudeMd 字段）
+        output_style_text: 输出风格节文本，拼在 context 层末尾；空串表示
+            未启用风格、不拼
+
+    返回：SystemPromptLayers 三层容器。
     """
-    # ---- stable 层 ----
+    # ---- stable 层（跨会话不变的指导文案）----
     stable_parts = []
     if include_guidance:
         stable_parts.extend([
@@ -170,10 +192,11 @@ def build_system_prompt_layers(
         ])
     stable = "\n\n".join(stable_parts)
 
-    # ---- context 层 ----
+    # ---- context 层（单会话内不变的东西）----
     context_parts = []
-    # 当前工作目录（log.log 案例：新会话里 LLM 被记忆检索结果中其他项目的
-    # 条目带偏，跑去探索记忆里的旧项目。明确注入当前目录 + "以当前为准"）
+    # 先注入当前工作目录。历史踩坑（log.log 案例）：新会话里模型被记忆检索
+    # 结果中别的项目的条目带偏，跑去翻记忆里的旧项目。明确告诉它当前目录
+    # 是哪个、"以当前为准"
     try:
         from agent.workspace_context import get_workspace_cwd
         context_parts.append(
@@ -188,17 +211,18 @@ def build_system_prompt_layers(
     if skills_dir is None:
         try:
             from constants import all_skills_dirs as _asd
-            skills_dir = _asd()  # 内置 + 用户两个目录
+            skills_dir = _asd()  # 默认扫内置 + 用户两个技能目录
         except Exception:
             skills_dir = None
     if skills_dir:
         skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
-    # CCAR10 Task 2: 记忆索引不再注入 system prompt（保护 prompt cache）。
-    # snapshot 改走 ephemeral 注入（_pending_ephemeral_messages），
-    # 每轮按 query 检索后注入（无 aux_llm_router 时降级回 snapshot 一次性注入）。
-    # memory_store 参数保留签名向后兼容，但不再注入任何内容到 system prompt。
+    # CCAR10 Task 2 的改动：记忆索引不再拼进 system prompt（否则每条新记忆
+    # 都会让整个前缀缓存报废）。改成"用完即扔"的临时注入（ephemeral）：
+    # 每轮按当前问题检索相关记忆再注入消息里；没有辅助 LLM 路由时就退回
+    # 老办法——开工时拍一次快照、一次性注入。
+    # memory_store 参数只为了兼容旧调用签名，不再注入任何内容。
     if memory_manager:
         try:
             ext_block = memory_manager.build_system_prompt()
@@ -207,7 +231,7 @@ def build_system_prompt_layers(
         except Exception:
             pass
 
-    # 用户画像(自动归纳,每 5 次反思后更新)
+    # 用户画像文件（系统自动归纳，每 5 次反思后更新一次）
     try:
         from constants import get_omnimate_home
         profile_path = get_omnimate_home() / "USER_PROFILE.md"
@@ -218,8 +242,8 @@ def build_system_prompt_layers(
     except Exception:
         pass
 
-    # MCP routing hints(借鉴 DeerFlow):用户配 .mcp.json 时可加 keywords 字段,
-    # 帮助 LLM 看到关键词就知道用哪个 MCP server。如:
+    # MCP 路由提示（借鉴 DeerFlow）：用户在 .mcp.json 里可以给 server 加
+    # keywords 字段，模型一看到关键词就知道该找哪个外部工具服务器。例如：
     #   "postgres": {"keywords": ["订单", "数据库", "SQL"]}
     try:
         from agent.mcp_client import collect_routing_hints
@@ -229,11 +253,12 @@ def build_system_prompt_layers(
     except Exception as e:
         logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
 
-    # 项目记忆：递归扫 cwd → root 收集 OMNIMATE.md
-    # 对齐 Claude Code 的 "recursive CLAUDE.md lookup" 语义
-    # Round 1 fix: Path.cwd() 也是进程级（等价 os.getcwd），并发子代理会踩。
-    # 改走 get_workspace_cwd()（线程局部 ContextVar）。
-    # Task N: omit_project_memory=True 时跳过（自定义子代理 omitClaudeMd=true）
+    # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 OMNIMATE.md
+    # （对齐 Claude Code "递归向上找 CLAUDE.md" 的做法）
+    # 历史踩坑（Round 1 修复）：Path.cwd() 读的是整个进程的当前目录，
+    # 多个子代理并发跑时会互相踩。改用 get_workspace_cwd()（每个任务
+    # 各自独立的上下文变量，互不干扰）。
+    # Task N：omit_project_memory=True 时跳过这整段（子代理省 token 用）
     if not omit_project_memory:
         try:
             from agent.workspace_context import get_workspace_cwd
@@ -244,7 +269,7 @@ def build_system_prompt_layers(
                     content = pmd.read_text(encoding="utf-8")
                     content = _expand_imports(content, pmd.parent)
                     if content.strip():
-                        # 显示相对路径，便于调试（绝对路径太长）
+                        # 展示用相对路径好读（绝对路径太长太吵）
                         try:
                             rel = pmd.relative_to(scan_root)
                         except ValueError:
@@ -264,12 +289,12 @@ def build_system_prompt_layers(
                     context_parts.append(f"## 上下文文件: {cf.name}\n{content}")
                 except Exception as e:
                     logger.warning("读取上下文文件失败 %s: %s", cf, e)
-    # C6：输出风格（context 层末尾；fail-open——空文本不注入）
+    # C6：输出风格节放 context 层末尾。空文本 = 未启用风格，就不拼（出错也不影响主流程）
     if output_style_text:
         context_parts.append(output_style_text)
     context = "\n\n".join(context_parts)
 
-    # ---- volatile 层 ----
+    # ---- volatile 层（每轮都可能变的部分）----
     volatile_parts = []
     if task_state:
         volatile_parts.append(f"<current_tasks>{task_state}</current_tasks>")
@@ -283,7 +308,7 @@ def build_system_prompt_layers(
 
 
 # ---------------------------------------------------------------------------
-# 主构建函数（向后兼容旧接口）
+# 老接口包装（新代码请直接用上面的三层版）
 # ---------------------------------------------------------------------------
 
 def build_system_prompt(
@@ -297,10 +322,23 @@ def build_system_prompt(
     include_guidance: bool = True,
     output_style_text: str = "",
 ) -> str:
-    """组装 system prompt（向后兼容旧接口）。
+    """组装 system prompt 并拍平成单个字符串（给老调用方用的兼容壳）。
 
-    内部走 build_system_prompt_layers 然后合并成单个字符串。
-    新代码应直接调 build_system_prompt_layers 拿三层。
+    背景：老代码只收一个字符串，不认三层结构。这里内部调
+    build_system_prompt_layers 拿三层再拼平。新代码应直接调
+    build_system_prompt_layers，能享受分层缓存的好处。
+
+    参数：
+        memory_store: 记忆仓库（现在只是签名兼容，不注入内容）
+        memory_manager: 记忆管理器，可产出扩展记忆块
+        enabled_toolsets: 启用的工具集列表（透传，未直接使用）
+        skills_dir: 技能目录；不传用默认目录
+        context_files: 额外拼入的文件路径列表
+        extra_instructions: 额外指令文本（进 volatile 层）
+        include_guidance: 是否拼入各段使用指南
+        output_style_text: 输出风格节文本；空串表示未启用
+
+    返回：拼平的 system prompt 字符串。
     """
     layers = build_system_prompt_layers(
         memory_store=memory_store,
@@ -321,26 +359,35 @@ def _current_cwd() -> str:
 
 
 def _paths_match(paths: list, cwd: str) -> bool:
-    """简化版 path glob 匹配：支持前缀目录 + 后缀扩展名 + * 通配。
+    """判断当前目录是否命中技能 frontmatter 里的 paths 条件（简化版通配匹配）。
 
-    基于 brief 的简化版（startswith 语义），并扩展支持绝对路径 cwd：
-    当 cwd 是绝对路径（os.getcwd() 返回值）时，检查 base 是否作为路径段出现。
+    背景：技能可以声明"只在这些路径下生效"（paths 字段），本函数检查当前
+    工作目录是否匹配。支持三种写法：目录前缀（src/**）、扩展名（*.py）、
+    星号通配。实现上用简化的"字符串前缀"判断（沿用 brief 的语义），并额外
+    兼容绝对路径形式的 cwd：检查目录名是否作为完整路径段出现。
+
+    参数：
+        paths: 技能声明的路径模式列表（如 ["src/**", "*.py"]）
+        cwd: 当前工作目录字符串
+
+    返回：True 表示当前目录匹配（技能该出现）；False 不匹配。
     """
     import fnmatch
     cwd_norm = cwd.replace("\\", "/")
     for pat in paths or []:
         pat = pat.replace("\\", "/")
-        # src/** → cwd 在 src/ 下即匹配
+        # src/** 形态：当前目录在 src/ 下面就算匹配
         if pat.endswith("/**"):
             base = pat[:-3]
-            # brief 原始语义：相对 cwd 前缀匹配（接受 srcfoo 边界，风险 2）
+            # 沿用 brief 的原始语义：按字符串前缀匹配（会接受 srcfoo 这种
+            # 边界误命中，是已知的可接受风险）
             if cwd_norm.startswith(base):
                 return True
-            # 绝对 cwd：检查 base 作为路径段出现（/src/ 或末尾 /src）
+            # 绝对路径形态：要求目录名作为完整路径段出现（/src/ 或结尾 /src）
             if f"/{base}/" in cwd_norm or cwd_norm.endswith(f"/{base}"):
                 return True
-        # *.py → cwd 下有 .py 文件？简化：cwd 路径段不匹配，但保留技能（保守显示）
-        # 用 fnmatch 兜底
+        # *.py 这类扩展名模式没法只看目录字符串判断——保守起见按"匹配"放行，
+        # 让技能显示出来（宁可多显示不可漏掉）；用 fnmatch 通配兜底
         if fnmatch.fnmatch(cwd_norm, f"*/{pat}") or fnmatch.fnmatch(cwd_norm, pat):
             return True
     return False
@@ -352,14 +399,26 @@ def _expand_imports(
     depth: int = 0,
     _visited: Optional[set] = None,
 ) -> str:
-    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（对齐 Claude Code `@import` 语义）。
+    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）。
+
+    背景：对齐 Claude Code 的 @import 语法——项目记忆里写一行 @docs/api.md，
+    读的时候自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
 
     规则：
-    - `@path/to/file` 相对 base_dir 解析，递归展开（max_depth=5）
-    - `@~/foo/bar` 展开 home 目录
-    - **跳过 code span 和 code block**（避免 `@anthropic-ai/sdk` 被误判）
-    - 文件不存在 / 不是文件 → 原样保留（不抛错）
-    - 同一文件多次引用只展开一次（防环）
+    - `@path/to/file` 相对 base_dir 解析，引用里还有引用就递归展开（最深 5 层）
+    - `@~/foo/bar` 会展开用户 home 目录
+    - 代码片段（`...`）和代码块（```...```）里的 @ 不算引用（防止把
+      `@anthropic-ai/sdk` 这种包名误当成引用）
+    - 文件不存在或不是文件 → 原样保留那行字（不报错）
+    - 同一个文件被引用多次只展开第一次（防止 A 引 B、B 引 A 无限转圈）
+
+    参数：
+        content: OMNIMATE.md 原文
+        base_dir: 相对引用的基准目录（通常是被展开文件所在目录）
+        depth: 当前递归深度
+        _visited: 已展开过的文件集合（防环用，递归间共享）
+
+    返回：展开后的文本。
     """
     import re
     if _visited is None:
@@ -371,7 +430,7 @@ def _expand_imports(
     pattern = re.compile(r"@(~?[\w./-]+)")
 
     def _resolve_and_read(path_str: str):
-        # `@foo` 单 token 没 / 也没 ~  → 当作 @username，不当 import
+        # `@foo` 这种单词（没有 / 也没有 ~）是 @用户名 不是文件引用，跳过
         if not path_str.startswith("~") and "/" not in path_str \
                 and not path_str.endswith((".md", ".txt", ".rst")):
             return None
@@ -390,20 +449,20 @@ def _expand_imports(
             return None
 
     def _expand_text_segment(text: str) -> str:
-        """扫描文本段里的 @path（已经被切除了 code span/block）。"""
+        """扫描一段纯文本里的 @path 并替换为文件内容（代码片段已被切走保护）。"""
         def replace(m):
             path_str = m.group(1)
             inner = _resolve_and_read(path_str)
             if inner is None:
                 return m.group(0)  # 原样
-            # 递归展开引用文件里的 @path
+            # 引用的文件里可能还有 @path，递归继续展开
             return _expand_imports(inner, (base_dir / path_str).resolve().parent
                                    if not path_str.startswith("~")
                                    else Path(path_str).expanduser().parent,
                                    depth + 1, _visited)
         return pattern.sub(replace, text)
 
-    # 按行扫描，跳过 fenced code block；inline code span 用正则切分保护
+    # 按行扫：围栏代码块整块跳过；行内代码片段用正则切开保护起来
     out_lines = []
     in_fence = False
     fence_marker = None
@@ -424,7 +483,7 @@ def _expand_imports(
         if in_fence:
             out_lines.append(line)
             continue
-        # 不在 code block：拆出 inline code span 保护，剩余段做 @path 展开
+        # 不在代码块里：把行内代码片段切出来不动，剩下的部分做 @path 展开
         segments = inline_code_re.split(line)
         processed = [
             seg if (seg.startswith("`") and seg.endswith("`") and len(seg) >= 2)
@@ -436,15 +495,20 @@ def _expand_imports(
 
 
 def _scan_project_memory_files(cwd: Path) -> List[Path]:
-    """从 cwd 向上扫到磁盘根或 .git 目录，收集所有 OMNIMATE.md。
+    """从当前目录一路向上扫，收集沿途所有 OMNIMATE.md（项目的说明文件）。
 
-    返回顺序：**从根到 cwd**（外层先注入，内层覆盖语义）。
-    停止规则：遇到含 .git 的目录就停（含该层），不再向上。
-    这是 monorepo 友好的设计：在子项目里跑 omnimate 时，
-    扫到 monorepo 根（含 .git）就停，不会越过到无关目录。
+    背景：对齐 Claude Code"从当前目录向上递归读 CLAUDE.md"的做法——
+    项目每层目录都可以有自己的说明文件，全收集起来给模型看。
 
-    对齐 Claude Code "从 cwd 向上递归读 CLAUDE.md" 的语义，
-    但品牌用 OMNIMATE.md。
+    停止规则：遇到含 .git 的目录（仓库根）就停，含这一层，不再往上。
+    这是对 monorepo（一个大仓多个子项目）友好的设计：在子项目里跑时，
+    扫到 monorepo 根就停，不会越过仓库跑到无关目录去。
+
+    参数：
+        cwd: 从哪个目录开始向上扫
+
+    返回：OMNIMATE.md 路径列表，顺序是**从仓库根到当前目录**——外层的
+    先注入、内层的后注入（后读的语义上覆盖先读的，跟变量作用域同理）。
     """
     found: List[Path] = []
     try:
@@ -455,32 +519,40 @@ def _scan_project_memory_files(cwd: Path) -> List[Path]:
         omninate_md = current / "OMNIMATE.md"
         if omninate_md.exists():
             found.append(omninate_md)
-        # .git 所在层 = 仓库根，含这一层即可，不再向上
+        # 有 .git 的这层就是仓库根——这层也要、但不再往上
         if (current / ".git").exists():
             break
         parent = current.parent
         if parent == current:
-            break  # 磁盘根
+            break  # 到磁盘最顶层了
         current = parent
-    found.reverse()  # 从根到 cwd
+    found.reverse()  # 倒序成"从根到当前目录"
     return found
 
 
 def _build_skill_index(skills_dirs) -> str:
-    """构建技能索引(名字 + 描述),支持多目录(内置 + 用户)。
+    """构建拼进 prompt 的技能索引：每行一个"技能名 + 一句话描述"。
 
-    只列出 active 状态的技能,跳过归档的。
-    多目录场景:按列表顺序扫描,后者覆盖前者(用户目录优先)。
+    背景：system prompt 只放索引不放正文（省 token），模型看索引决定
+    要不要调 load_skill 取正文。支持多个技能目录（内置 + 用户自定义）。
+
+    规则：只列启用中的技能，归档的不列。多个目录按列表顺序扫，
+    同名技能后扫的覆盖先扫的（用户目录排在后面 = 用户说了算）。
+
+    参数：
+        skills_dirs: 技能目录路径列表（也兼容传单个路径）
+
+    返回：索引文本；一个技能都没有时返回空串（调用方就不拼这节了）。
     """
     import json
 
-    # 兼容单目录输入
+    # 老调用可能只传一个目录，包成列表统一处理
     if isinstance(skills_dirs, (str, Path)):
         skills_dirs = [skills_dirs]
 
     lines = ["使用 /技能名 触发对应技能。"]
 
-    # 收集所有目录的 .usage.json(用户目录的覆盖内置的)
+    # 收集各目录的 .usage.json（使用状态记录；用户目录的覆盖内置的）
     usage = {}
     for skills_dir in skills_dirs:
         skills_dir = Path(skills_dir)
@@ -491,36 +563,36 @@ def _build_skill_index(skills_dirs) -> str:
             except Exception:
                 pass
 
-    # 扫描所有目录的技能,后者覆盖前者
-    seen = {}  # name → skill_md 路径
+    # 扫各目录的技能，同名以后扫的为准
+    seen = {}  # 技能名 → SKILL.md 路径
     for skills_dir in skills_dirs:
         skills_dir = Path(skills_dir)
         if not skills_dir.exists():
             continue
         for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
             name = skill_md.parent.name
-            seen[name] = skill_md  # 后扫的覆盖先扫的
+            seen[name] = skill_md  # 同名技能：后扫的覆盖先扫的
 
     for name in sorted(seen.keys()):
         skill_md = seen[name]
         rec = usage.get(name, {})
 
-        # 跳过归档的
+        # 已归档的技能不进索引
         if rec.get("state") == "archived":
             continue
 
         try:
             content = skill_md.read_text(encoding="utf-8")
             frontmatter, _ = parse_frontmatter(content)
-            # disable-model-invocation: true → 不注入索引（模型不能自动触发）
+            # 声明了 disable-model-invocation 的技能不进索引（只许用户手动触发）
             if frontmatter.get("disable-model-invocation", False) is True:
                 continue
-            # paths frontmatter：cwd 不匹配则不注入索引
+            # 声明了 paths 条件的技能：当前目录不匹配就不进索引
             paths = frontmatter.get("paths")
             if paths:
                 if not _paths_match(paths, _current_cwd()):
                     continue
-            # 优先用 frontmatter 的 description，否则回退到 _extract_description
+            # 描述优先取 frontmatter 里的，没有再从正文猜
             description = frontmatter.get("description", "") or _extract_description(content)
             if description:
                 lines.append(f"- /{name}: {description}")
@@ -529,14 +601,20 @@ def _build_skill_index(skills_dirs) -> str:
         except Exception:
             lines.append(f"- /{name}")
 
-    if len(lines) == 1:  # 只有标题行
+    if len(lines) == 1:  # 只剩标题行说明一个技能都没有
         return ""
 
     return "\n".join(lines)
 
 
 def _extract_description(content: str) -> str:
-    """从 SKILL.md 提取 description 字段。"""
+    """从 SKILL.md 的 frontmatter 里抠出 description 字段的值。
+
+    参数：
+        content: SKILL.md 全文
+
+    返回：描述文本；没有 frontmatter 或没有该字段时返回空串。
+    """
     if not content.startswith("---"):
         return ""
     parts = content.split("---", 2)

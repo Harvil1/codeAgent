@@ -1,12 +1,16 @@
-"""辅助 LLM 统一路由器（batch2-T3 + 07 升级：N 级熔断链）。
+"""辅助 LLM 的统一调度台（多端点 + 熔断保护）。
 
-用途：为记忆检索、上下文压缩、自动记忆提取等辅助任务提供独立的 LLM 配置。
-- 07 升级：从单 aux → 多 endpoint 链 + 熔断（连续失败自动跳过）
-- 兼容老配置：单个 aux_config 自动转成 1 个 endpoint
-- 主对话仍走主 client（通过 llm_retry 的 fallback_llm_client 配置）
+背景：项目里除了主对话，还有一批「打杂」的活也要用 LLM——记忆检索、
+上下文压缩、自动提取记忆、起标题等。这些活不值得用主模型（又贵又
+占额度），通常配一个便宜的小模型来干。
 
-熔断规则：连续 N 次失败 → 开 X 秒熔断 → 跳过此 endpoint。
-所有 endpoint 失败 → 降级到主 client。
+本模块就是这些杂活的统一调度台：
+- 可以配一串备选端点（endpoint，即一组「API 地址 + 模型 + 密钥」），
+  按优先级挨个试，谁先成功用谁
+- 带熔断（保险丝）机制：某个端点连续失败就先「拉闸」跳过它一会儿，
+  免得每次都白撞一遍
+- 兼容旧配置：老版本只有一个 aux_config，会自动当成一员转进新结构
+- 主对话不走这里，仍走主 client（由 llm_retry 的备胎机制负责）
 """
 import logging
 import os
@@ -19,7 +23,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMEndpoint:
-    """一个 LLM 端点（07）。"""
+    """一个 LLM 端点：一组「API 地址 + 模型 + 密钥」的组合。
+
+    参数（字段）：
+        name：这个端点的名字（起个别名好认）
+        base_url：API 地址
+        api_key_env：密钥放在哪个环境变量里（空 = 不从环境变量拿，
+                    直接用 api_key_default）
+        api_key_default：直接写死的占位密钥（本地 Ollama 常填 "ollama"）
+        model：模型名
+        priority：优先级，数字越小越先被尝试
+        enabled：开关，False 就不启用
+        format：API 格式，"openai" 或 "anthropic"
+    """
     name: str
     base_url: str
     api_key_env: str = ""          # 环境变量名（空表示用 api_key_default）
@@ -31,16 +47,17 @@ class LLMEndpoint:
 
 
 class AuxLLMRouter:
-    """辅助 LLM 统一路由器（多 endpoint + 熔断）。
+    """辅助 LLM 的调度台：多个端点排队试，配熔断保险丝。
 
-    用于 curator / memory retrieval / title 等后台任务。
-    主对话仍走主 client。
+    服侍对象是后台杂活（curator 维护工/记忆检索/起标题等），
+    主对话不归它管。
 
-    熔断规则：连续 CIRCUIT_FAILURE_THRESHOLD 次失败 → 熔断 CIRCUIT_OPEN_SECONDS 秒。
+    熔断规则：某端点连续失败够 CIRCUIT_FAILURE_THRESHOLD 次 →
+    拉闸 CIRCUIT_OPEN_SECONDS 秒，期间跳过它。
     """
 
-    CIRCUIT_FAILURE_THRESHOLD = 3
-    CIRCUIT_OPEN_SECONDS = 300  # 5 分钟
+    CIRCUIT_FAILURE_THRESHOLD = 3   # 连续失败几次拉闸
+    CIRCUIT_OPEN_SECONDS = 300      # 拉闸多久（5 分钟）
 
     def __init__(
         self,
@@ -49,19 +66,20 @@ class AuxLLMRouter:
         aux_config: Optional[Dict[str, Any]] = None,
         endpoints: Optional[List[LLMEndpoint]] = None,
     ):
-        """
+        """把端点列表准备好、造好 client、初始化熔断账本。
+
         参数：
-            main_client: 主 LLM client（必须有 chat_completions 方法）
-            main_model: 主模型名（保留参数，传给 chat_completions）
-            aux_config: 老的单 aux 配置（向后兼容，自动转成 1 个 endpoint）
-            endpoints: 新的多 endpoint 链（优先于 aux_config）
+            main_client：主 LLM client（兜底用，必须有 chat_completions 方法）
+            main_model：主模型名（保留的参数，会透传给 chat_completions）
+            aux_config：老版本的单 aux 配置（兼容用，自动转成一个端点）
+            endpoints：新的多端点列表（给了它就无视 aux_config）
         """
         self._main_client = main_client
         self._main_model = main_model
 
-        # 兼容老配置：aux_config 里有 model 字段时转成 1 个 endpoint
+        # 兼容旧配置：aux_config 里有 model 字段时，转成 1 个端点
         raw_endpoints: List[LLMEndpoint] = []
-        self._legacy_aux_api_key: Optional[str] = None  # 老配置直接传 api_key
+        self._legacy_aux_api_key: Optional[str] = None  # 旧配置是直接给密钥的，先存着
 
         if endpoints:
             raw_endpoints = [e for e in endpoints if e.enabled]
@@ -69,18 +87,19 @@ class AuxLLMRouter:
             raw_endpoints.append(LLMEndpoint(
                 name="legacy_aux",
                 base_url=aux_config.get("base_url", ""),
-                api_key_env="",  # 老配置直接传 api_key
+                api_key_env="",  # 旧配置不走环境变量，直接给密钥
                 model=aux_config["model"],
                 priority=1,
                 format=aux_config.get("format", "openai"),
             ))
-            # 老 aux_config 直接给了 api_key，缓存起来
+            # 旧配置里直接写了 api_key，存起来备用
             self._legacy_aux_api_key = aux_config.get("api_key", "")
 
-        # 按 priority 排序（小→大）
+        # 按优先级排序（数字小的排前面，先被尝试）
         raw_endpoints.sort(key=lambda e: e.priority)
 
-        # eager 创建 client：失败的 endpoint 不进 _endpoints（让 is_aux_configured 反映真实状态）
+        # 启动时就造好 client（而不是等第一次调用才造）：造不出来的
+        # 端点直接不进名单——这样「是否配了辅助模型」的查询才真实
         self._endpoints: List[LLMEndpoint] = []
         self._client_cache: Dict[str, Any] = {}
         for ep in raw_endpoints:
@@ -91,7 +110,7 @@ class AuxLLMRouter:
             else:
                 logger.warning("endpoint %s client 创建失败，已跳过", ep.name)
 
-        # 熔断状态
+        # 熔断（保险丝）账本：每个端点记两笔——连败次数、拉闸到几点
         self._failure_counts: Dict[str, int] = {e.name: 0 for e in self._endpoints}
         self._circuit_open_until: Dict[str, float] = {e.name: 0 for e in self._endpoints}
 
@@ -103,8 +122,14 @@ class AuxLLMRouter:
             )
 
     def _create_client_for(self, ep: LLMEndpoint) -> Optional[Any]:
-        """为单个 endpoint 创建 client（__init__ 时调用）。"""
-        # 解析 api_key
+        """给一个端点造出它的 LLM client（初始化时逐个调用）。
+
+        参数：
+            ep：要接线的端点
+
+        返回：造好的 client；密钥没配或创建出错则返回 None（跳过该端点）。
+        """
+        # 先把密钥弄到手
         if ep.name == "legacy_aux" and self._legacy_aux_api_key:
             api_key = self._legacy_aux_api_key
         elif ep.api_key_env:
@@ -131,27 +156,34 @@ class AuxLLMRouter:
 
     @property
     def is_aux_configured(self) -> bool:
-        """是否配置了至少一个辅助 endpoint。"""
+        """问一句：到底配没配上辅助模型？（至少有一个能用的端点才算配了）"""
         return bool(self._endpoints)
 
     async def chat_completions(self, messages: list, **kwargs):
-        """依次尝试 endpoints，第一个成功就返回（async：LLMClient.chat_completions 已改 async）。
+        """挨个试辅助端点，谁先成功就用谁的结果；全砸了就找主 client 兜底。
 
-        熔断中的 endpoint 跳过。所有 endpoint 失败 → 降级到主 client。
+        正被拉闸（熔断中）的端点直接跳过。
 
-        Task D4 fix: 改 async def + await 内部 chat_completions 调用。
-        在线程上下文（无事件循环）调用的地方用 asyncio.run() 包装。
+        历史改造（Task D4 修复，保留背景）：整个项目改异步时本方法跟着
+        改成 async；在线程里（没有事件循环）调它的地方要用
+        asyncio.run() 包一层。
+
+        参数：
+            messages：对话历史（消息列表）
+            **kwargs：其余参数原样传给底层 client
+
+        返回：成功端点的 LLM 响应；辅助端点全失败时返回主 client 的结果。
         """
         now = time.time()
         tried: List[tuple] = []
 
         for ep in self._endpoints:
-            # 熔断检查
+            # 先看保险丝：拉闸中就跳过
             if self._circuit_open_until.get(ep.name, 0) > now:
                 tried.append((ep.name, "circuit-open"))
                 continue
 
-            # client 已在 __init__ 时 eager 创建（cache 里直接读）
+            # client 在初始化时就造好了，这里直接取
             client = self._client_cache.get(ep.name)
             if client is None:
                 tried.append((ep.name, "no-client"))
@@ -159,7 +191,7 @@ class AuxLLMRouter:
 
             try:
                 resp = await client.chat_completions(messages, **kwargs)
-                # 成功，重置失败计数
+                # 成功了，连败计数清零
                 self._failure_counts[ep.name] = 0
                 return resp
             except Exception as e:
@@ -169,7 +201,7 @@ class AuxLLMRouter:
                 )
                 tried.append((ep.name, str(e)[:100]))
 
-                # 触发熔断
+                # 连败够了，拉闸
                 if self._failure_counts[ep.name] >= self.CIRCUIT_FAILURE_THRESHOLD:
                     self._circuit_open_until[ep.name] = (
                         now + self.CIRCUIT_OPEN_SECONDS
@@ -180,7 +212,7 @@ class AuxLLMRouter:
                         self.CIRCUIT_OPEN_SECONDS,
                     )
 
-        # 全部失败 → fallback 到主 client
+        # 辅助端点全军覆没 → 请主 client 出面兜底
         if tried:
             logger.info(
                 "所有 aux endpoints 失败，降级到主 client。尝试: %s",
@@ -189,11 +221,15 @@ class AuxLLMRouter:
         return await self._main_client.chat_completions(messages, **kwargs)
 
     # ------------------------------------------------------------------
-    # 07 NEW: 熔断状态查询（测试 / 监控用）
+    # 熔断状态查询（测试 / 监控用）
     # ------------------------------------------------------------------
 
     def get_circuit_status(self) -> Dict[str, Dict]:
-        """返回每个 endpoint 的熔断状态（用于监控 / 测试）。"""
+        """看一眼每个端点的保险丝状态（连败几次、拉闸没、还剩几秒解封）。
+
+        返回：字典，键是端点名，值含 failures（连败次数）、
+        circuit_open（是否拉闸中）、circuit_remaining_seconds（解封倒计时）。
+        """
         now = time.time()
         result = {}
         for ep in self._endpoints:
@@ -206,9 +242,10 @@ class AuxLLMRouter:
         return result
 
     def reset_circuit(self, name: Optional[str] = None) -> None:
-        """手动重置熔断状态（测试 / 运维用）。
+        """手动把保险丝合回去（测试 / 运维排障用）。
 
-        name=None 时重置所有 endpoint。
+        参数：
+            name：指定端点名；不传（None）就把所有端点都复位。
         """
         targets = [name] if name else list(self._failure_counts.keys())
         for n in targets:
