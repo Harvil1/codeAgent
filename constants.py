@@ -1,14 +1,17 @@
-"""常量和路径函数。
+"""常量和路径函数——整个项目最底层的模块，谁都不依赖、谁都用到它。
 
-无依赖的底层模块，提供 agent home 等路径解析。
-支持 OMNIMATE_HOME 环境变量覆盖默认路径（测试/开发用）。
+这个文件是干嘛的：集中提供各种数据文件的路径（agent home、技能目录、
+记忆文件、会话数据库等），让全项目"问一个地方"就能拿到统一路径。
 
-所有数据（API key、记忆、工具、技能、会话、任务）统一在 ~/.OmniMate/ 下：
+所有数据（API key、记忆、工具、技能、会话、任务）统一放在 ~/.OmniMate/ 下：
   - Linux/macOS: ~/.OmniMate/
   - Windows:     C:\\Users\\<user>\\.OmniMate\\
 
-设计原则：跨平台目录一致，避免自动迁移带来的路径漂移。
-未来若做成 Windows 安装包，可重新启用 AppData 定位 + 一次性迁移。
+设计取舍：故意让三个平台用同一个目录名（而不是 Windows 走 AppData），
+避免自动迁移带来路径漂移的坑。未来若真做成 Windows 安装包，
+可以重新启用 AppData 定位 + 一次性迁移。
+
+支持 OMNIMATE_HOME 环境变量覆盖默认位置（测试和多配置隔离用）。
 """
 
 import os
@@ -16,11 +19,14 @@ from pathlib import Path
 
 
 def _default_omnimate_home() -> Path:
-    """返回默认数据目录。
+    """算出 agent home（数据总目录）的位置。
 
     优先级：
-      1. OMNIMATE_HOME 环境变量（覆盖默认，测试/开发用）
-      2. ~/.OmniMate/（跨平台一致）
+      1. OMNIMATE_HOME 环境变量（测试/开发时用来切一个临时目录）
+      2. 都没设就用 ~/.OmniMate/
+
+    返回：
+        Path 对象，指向 agent home 目录。
     """
     env_override = os.environ.get("OMNIMATE_HOME")
     if env_override:
@@ -29,60 +35,88 @@ def _default_omnimate_home() -> Path:
 
 
 def _default_logs_dir() -> Path:
-    """日志目录（统一在 agent home 下，便于排查）。"""
+    """日志目录（统一放 agent home 下，出问题好找）。
+
+    返回：
+        Path 对象，指向 <agent home>/logs。
+    """
     return _default_omnimate_home() / "logs"
 
 
 def get_omnimate_home() -> Path:
-    """获取 agent home 目录。
+    """拿到 agent home 目录（全项目数据的根目录）。
 
-    每次调用都重新检查 OMNIMATE_HOME 环境变量（测试时可临时覆盖）。
+    背景：每次调用都重新读一遍 OMNIMATE_HOME 环境变量而不是
+    启动时记死——这样测试代码可以随时临时切换目录。
+
+    返回：
+        Path 对象，指向 agent home 目录。
     """
     return _default_omnimate_home()
 
 
 def display_omnimate_home() -> str:
-    """用于显示给用户的路径字符串。"""
+    """拿到适合展示给用户看的 home 路径字符串。
+
+    返回：
+        路径的字符串形式（用于界面显示/日志）。
+    """
     return str(get_omnimate_home())
 
 
 def skills_dir() -> Path:
-    """用户技能库根目录(每个子目录是一个技能)。
+    """用户技能库根目录（每个子目录是一个技能）。
 
-    用户自己创建/agent 自动创建的技能放这里。跨机器需 rsync 跟随用户数据。
+    用户自己创建、agent 自动沉淀的技能都放这里。
+    换机器时需要跟着用户数据一起 rsync 搬走。
+
+    返回：
+        Path 对象，指向 <agent home>/skills。
     """
     return get_omnimate_home() / "skills"
 
 
 def builtin_skills_dir() -> Path:
-    """内置技能目录(项目代码自带,跟 git 走)。
+    """内置技能目录（项目代码自带，跟着 git 走）。
 
-    内置技能跟用户数据分离:
-    - 内置:本项目 skills/ 目录(开发者维护,装哪台机器都一样)
-    - 用户:~/.OmniMate/skills/(用户/agent 维护,跨机器要 rsync)
+    背景：内置技能和用户技能故意分开存——
+    - 内置：本项目的 skills/ 目录（开发者维护，装哪台机器内容都一样）
+    - 用户：~/.OmniMate/skills/（用户/agent 维护，换机器要跟着搬）
 
-    同名时用户目录优先(用户可覆盖内置)。
+    两边有同名技能时用户目录优先（用户可以覆盖内置的）。
+
+    返回：
+        Path 对象，指向项目根下的 skills/。
     """
-    # 项目根 = constants.py 的父目录(constants.py 在项目根)
+    # 项目根 = constants.py 的父目录（本文件就放在项目根）
     return Path(__file__).resolve().parent / "skills"
 
 
 def project_root() -> Path:
-    """项目根目录(constants.py 所在目录)。
+    """项目根目录（constants.py 所在目录）。
 
-    用于写保护:agent 不能修改项目自身的代码。
+    背景：用途是写保护——agent 不能修改程序自身的代码，
+    判断"是不是程序自己"就靠这个路径。
+
+    返回：
+        Path 对象，指向项目根。
     """
     return Path(__file__).resolve().parent
 
 
 def all_skills_dirs() -> list:
-    """所有技能扫描目录(内置 + 用户 + 已启用 plugin,顺序决定优先级)。
+    """列出所有要扫描的技能目录（内置 + 用户 + 已启用插件）。
 
-    返回 [builtin, user, plugin1/skills, ...],后者覆盖前者
-    (用户/plugin 优先于内置)。plugin 通过 plugin.json 的 enabled 字段控制。
+    背景：技能可能来自三个地方，扫描顺序决定优先级——
+    返回 [内置, 用户, 插件1/skills, ...]，排在后面的同名技能
+    覆盖前面的（即用户/插件能盖过内置）。插件通过各自
+    plugin.json 的 enabled 字段控制是否参与。
+
+    返回：
+        Path 列表，顺序即优先级（低→高）。
     """
     dirs = [builtin_skills_dir(), skills_dir()]
-    # 已启用 plugin 的 skills 目录
+    # 再把已启用插件的 skills 目录追加进来
     plugins_root = plugins_dir()
     if plugins_root.exists():
         import json as _json
@@ -94,7 +128,7 @@ def all_skills_dirs() -> list:
                 continue
             try:
                 data = _json.loads(manifest.read_text(encoding="utf-8"))
-                if data.get("enabled", True):  # 默认启用
+                if data.get("enabled", True):  # manifest 没写 enabled 就默认启用
                     skills = plugin_dir / "skills"
                     if skills.is_dir():
                         dirs.append(skills)
@@ -104,65 +138,114 @@ def all_skills_dirs() -> list:
 
 
 def plugins_dir() -> Path:
-    """Plugin 目录(每个子目录是一个 plugin:plugin.json + skills/)。
+    """插件目录（每个子目录是一个插件：plugin.json + skills/）。
 
-    plugin 结构:
-        ~/.OmniMate/plugins/<name>/plugin.json   (manifest: name/version/description/enabled)
+    插件的结构长这样：
+        ~/.OmniMate/plugins/<name>/plugin.json   （清单：名称/版本/描述/是否启用）
         ~/.OmniMate/plugins/<name>/skills/<skill>/SKILL.md
-    启动时 all_skills_dirs() 扫已启用 plugin 的 skills/。
+    程序启动时由 all_skills_dirs() 扫描已启用插件的 skills/ 子目录。
+
+    返回：
+        Path 对象，指向 <agent home>/plugins。
     """
     return get_omnimate_home() / "plugins"
 
 
 def logs_dir() -> Path:
-    """日志目录（统一在 ~/.OmniMate/logs 下）。"""
+    """日志目录（统一在 ~/.OmniMate/logs 下）。
+
+    返回：
+        Path 对象，指向日志目录。
+    """
     return _default_logs_dir()
 
 
 def archive_dir() -> Path:
-    """归档目录（curator 把不用的技能移到这里，永不删除）。"""
+    """归档目录——技能管理员（curator）把不用的技能挪到这里，永不删除。
+
+    背景：项目的铁律是"完全可逆"，自动整理只搬家不删东西，
+    用户后悔了随时能从这儿捞回来。
+
+    返回：
+        Path 对象，指向 <agent home>/skills/.archive。
+    """
     return get_omnimate_home() / "skills" / ".archive"
 
 
 def memory_file() -> Path:
-    """MEMORY.md 路径（agent 的笔记：环境事实、项目约定）。"""
+    """MEMORY.md 的路径（agent 的笔记本：环境事实、项目约定）。
+
+    返回：
+        Path 对象，指向 <agent home>/MEMORY.md。
+    """
     return get_omnimate_home() / "MEMORY.md"
 
 
 def user_file() -> Path:
-    """USER.md 路径（用户画像：偏好、沟通风格）。"""
+    """USER.md 的路径（用户画像：偏好、沟通风格）。
+
+    返回：
+        Path 对象，指向 <agent home>/USER.md。
+    """
     return get_omnimate_home() / "USER.md"
 
 
 def config_path() -> Path:
-    """config.yaml 路径。"""
+    """config.yaml 的路径（旧配置文件，现在主要做迁移源）。
+
+    返回：
+        Path 对象，指向 <agent home>/config.yaml。
+    """
     return get_omnimate_home() / "config.yaml"
 
 
 def env_file() -> Path:
-    """.env 路径（密钥）。"""
+    """.env 文件的路径（存放 API 密钥等敏感值）。
+
+    返回：
+        Path 对象，指向 <agent home>/.env。
+    """
     return get_omnimate_home() / ".env"
 
 
 def sessions_db_path() -> Path:
-    """会话数据库路径。"""
+    """会话数据库文件的路径。
+
+    返回：
+        Path 对象，指向 <agent home>/sessions.db。
+    """
     return get_omnimate_home() / "sessions.db"
 
 
 def session_dir() -> Path:
-    """会话级临时数据目录（env 文件等）。
+    """会话级临时数据目录（放各会话自己的 env 文件等）。
 
-    阶段 5 NEW：OMNIMATE_ENV_FILE 持久化目录（对齐 Claude Code 的 CLAUDE_ENV_FILE）。
-    SessionStart hook 可以 echo 'export K=V' >> $OMNIMATE_ENV_FILE，
-    terminal_tool 后续执行命令时会 merge 这个文件到 subprocess env。
+    背景（对齐 Claude Code 的 CLAUDE_ENV_FILE 机制）：
+    每个会话有一个专属 env 文件（路径放在 OMNIMATE_ENV_FILE
+    环境变量里传给 hook），SessionStart hook 可以往里追加
+    `export K=V` 这类行；之后 terminal 工具执行命令时会把
+    这个文件的内容合并进子进程的环境变量——相当于"会话开始时
+    记下的环境设置，之后每条命令都自动带上"。
+
+    返回：
+        Path 对象，指向 <agent home>/.session。
     """
     return get_omnimate_home() / ".session"
 
 
 def session_env_file(session_id: str) -> Path:
-    """会话级 env 文件路径（OMNIMATE_ENV_FILE）。"""
+    """某个会话专属的 env 文件路径（即 OMNIMATE_ENV_FILE 指向的文件）。
+
+    参数：
+        session_id：会话 ID。为空用 "default"；里面的非法字符
+            （字母数字和 -_ 之外的）会被清掉——防止有人拿
+            "../../" 之类的会话 ID 把文件写到目录外面去。
+
+    返回：
+        Path 对象，指向 <agent home>/.session/<安全化的会话ID>.env。
+    """
     sid = session_id or "default"
-    # 清理非法字符（防 path traversal）
+    # 清理非法字符（防路径穿越攻击）
     safe_sid = "".join(c for c in sid if c.isalnum() or c in "-_")
     if not safe_sid:
         safe_sid = "default"

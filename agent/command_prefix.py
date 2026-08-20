@@ -1,14 +1,19 @@
-"""审批前缀规则的保守派生（R25 #2）。
+"""审批前缀规则的保守派生（R25 #2 引入）。
 
-用户批准一条命令后，如果它以 curated 表里的"可泛化前缀"开头，
-额外存一条前缀规则——下次同前缀的命令不再询问。
+大白话：用户每批准一条命令，系统会记一个"下次不再问"的白名单。如果只是
+逐字记录（exact 匹配），用户每次跑 `uv run pytest tests/test_a.py`、
+`uv run pytest tests/test_b.py` 都要重新点一遍批准，很烦。这个模块做的事是：
+批准的命令如果以一张人工精选（curated）表里的"可泛化前缀"开头（比如
+`uv run pytest`），就额外存一条前缀规则——下次任何以这个前缀开头的命令
+都自动放行，不再打扰用户。
 
-为什么是 curated 表而不是"首 token 泛化"：
-批准 ``git push origin feature-x`` 不该自动放行 ``git push --force origin master``。
-只有明确无破坏性的迭代类命令（跑测试/静态检查）才值得泛化，
-破坏性命令保持 exact 匹配（宁可多问一次）。
+为什么不干脆"取命令第一个词来泛化"？因为太危险：用户批准了
+``git push origin feature-x``，不代表该放行 ``git push --force origin master``。
+所以只有明确无破坏性的迭代类命令（跑测试、静态检查）进了这张表；
+破坏性命令永远保持逐字匹配（exact）——宁可多问一次，不可错放一次。
 
-对齐 CCB PermissionUpdate 的"审批持久化为规则"，但泛化面收窄到本表。
+设计上对齐了 CCB 的"审批结果持久化成规则"思路，但泛化范围收窄到这张
+人工维护的表，不是任意泛化。
 """
 
 import logging
@@ -17,7 +22,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 可泛化前缀表（词边界匹配；追加条目即生效）
+# 可泛化前缀表（按词边界匹配；往表里追加条目立刻生效）
 _PREFIXABLE = (
     "uv run pytest",
     "uv run python -m pytest",
@@ -34,19 +39,29 @@ _PREFIXABLE = (
     "mypy",
 )
 
-# 复合操作符/重定向出现 → 不泛化（后半段可能藏破坏性命令；重定向可写文件）
-# R25 终审补分隔符：换行/\r（`pytest tests\nrm -rf build` 整条换行复合）、
-# ${（参数展开）、<（进程替换）——漏任何一个都等于前缀免审放行整条复合命令。
+# 命令里出现这些复合操作符/重定向就不泛化：后半段可能藏着破坏性命令，
+# 重定向（> >>）还会写文件——前缀只覆盖开头，盖不住后面。
+# 历史踩坑（R25 终审补的分隔符）：换行/\r 也要算（`pytest tests\nrm -rf build`
+# 靠换行拼成的复合命令），还有 ${（参数展开）和 <（进程替换）——
+# 漏掉任何一个，都等于让前缀免审放行了整条复合命令。
 _COMPOUND_RE = re.compile(r"&&|\|\||;|\||`|\$\(|\$\{|<\(|\n|\r|>|>>")
 
 
 def derive_approved_prefix(command: str) -> Optional[str]:
-    """从已批准命令派生可泛化前缀；不可泛化返回 None。
+    """从一条已批准的命令里提取可泛化的前缀；不能泛化就返回 None。
 
-    规则：
-      - 空/含复合操作符 → None
-      - 与表项完全相同（无多余 token）→ None（exact 白名单已覆盖，泛化无增益）
-      - 以某表项的 token 序列开头且其后还有 token → 返回该表项
+    干什么：看这条命令是否以 curated 表里某个前缀开头且后面还带了参数，
+    是就返回那个前缀（供存成前缀规则）。
+
+    为什么需要：跑测试这类高频命令每次都弹审批太烦，详见模块头说明。
+
+    参数：
+        command: 用户刚批准的完整命令字符串。
+
+    返回：可泛化的前缀（如 "uv run pytest"）；以下情况返回 None——
+      - 命令为空或含复合操作符/重定向（后半段可能藏危险动作）；
+      - 命令和某个表项一模一样（没有多余参数）——逐字白名单已经覆盖它，
+        再泛化没有额外好处。
     """
     cmd = (command or "").strip()
     if not cmd or _COMPOUND_RE.search(cmd):
@@ -62,10 +77,19 @@ def derive_approved_prefix(command: str) -> Optional[str]:
 
 
 def is_prefix_match_safe(command: str) -> bool:
-    """前缀规则**匹配**时的安全护栏（R25 #2 review fix）。
+    """前缀规则匹配时的安全护栏（R25 #2 评审后补的修复）。
 
-    派生侧只保证入库那一刻无复合形态；后续命令若带复合操作符/重定向
-    （如 ``uv run pytest && rm xxx``、``pytest > ~/.bashrc``），
-    前半段匹配不能让整条命令免审批——一律回落 exact/正常闸门。
+    干什么：检查一条命令适不适合走"前缀免审"。
+
+    为什么需要：派生入库那一刻能保证命令没有复合形态，但以后来的命令
+    是新输入——比如 ``uv run pytest && rm xxx``、``pytest > ~/.bashrc``，
+    前半段虽然匹配前缀，后半段却藏着危险动作。这种情况不能让整条命令
+    免审批，必须回落到逐字匹配/正常权限闸门。
+
+    参数：
+        command: 待检查的命令字符串。
+
+    返回：True 表示可以安全地走前缀匹配（命令里没有复合操作符/重定向）；
+    False 表示不行，得走正常审批。
     """
     return not _COMPOUND_RE.search(command or "")

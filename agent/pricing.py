@@ -1,18 +1,22 @@
-"""LLM 价格表 + 成本估算。
+"""各 LLM 模型的价格表 + 花费估算。
+
+在项目里的位置：一张静态参考表，被 usage_tracker（用量统计）调用，
+把 token 数换算成美元花费。
 
 价格单位：美元 / 百万 tokens（$/M tokens）。
-数据来源：各家官方价格页（2026-07 行情）。
+数据来源：各家官方价格页（2026 年 7 月行情）。
 
-每条记录：
+每条价格记录是一个四元组，按顺序是：
     (input_cache_miss, input_cache_hit, input_cache_write, output)
+    （输入·缓存未命中，输入·缓存命中，输入·缓存写入，输出）
 
-如果某模型的某项价格未知，用 0.0 占位（估算会偏低）。
+某项价格查不到时用 0.0 占位（这样估算结果会偏低，宁可少报不瞎报）。
 """
 
 from typing import Dict, Tuple, Optional
 
 
-# provider → model → (in_miss, in_hit, in_write, out)  全部 $/M tokens
+# 结构：provider → model → (in_miss, in_hit, in_write, out)，单位都是 $/M tokens
 PRICING: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
     "deepseek": {
         # https://api-docs.deepseek.com/quick_start/pricing
@@ -38,37 +42,53 @@ PRICING: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
         "claude-3-5-haiku":   (0.80, 0.08, 1.00, 4.00),
     },
     "openrouter": {
-        # OpenRouter 上各模型价格随源 provider；用 null 表示"按模型名前缀匹配后回退"
-        # 这里不放具体条目，让调用方在匹配 openrouter/前缀时拆出真实 provider
+        # OpenRouter 只是中转，各模型价格跟原 provider 走；这里故意不放
+        # 条目——匹配到 openrouter/ 前缀时由 _normalize_openrouter 拆出
+        # 真实 provider 再查价
     },
 }
 
 
 def _normalize_openrouter(provider: str, model: str) -> Tuple[str, str]:
-    """拆 openrouter/<provider>/<model> 形式，返回 (real_provider, real_model)。
+    """把 openrouter/<provider>/<model> 形式的名字拆开，返回 (真实provider, 真实model)。
 
-    非	openrouter 或路径段不足时原样返回。
+    背景：经 OpenRouter 中转调用时，模型名里带着完整路由路径，直接查
+    价格表查不到，得先拆出真正的厂家和型号。
+
+    参数：
+        provider —— 厂家名（如 "openrouter"）
+        model    —— 模型名（可能是 "openrouter/deepseek/deepseek-chat" 这种带路径的）
+
+    返回：拆好后的 (provider, model)。不是 openrouter、或路径段不够拆时，
+    原样返回不改动。
     """
     if provider != "openrouter" or "/" not in model:
         return provider, model
     parts = model.split("/", 2)
     if len(parts) >= 3:
-        # ["openrouter", "deepseek", "deepseek-chat"]
+        # ["openrouter", "deepseek", "deepseek-chat"] → 中间段是真实厂家
         return parts[1], parts[2]
     if len(parts) == 2:
-        # ["openrouter", "gpt-4o"]（无中间 provider，用第一个当 model 名）
+        # ["openrouter", "gpt-4o"]（没写中间厂家，只能拿后半当模型名）
         return provider, parts[1]
     return provider, model
 
 
 def get_pricing(provider: str, model: str) -> Optional[Tuple[float, float, float, float]]:
-    """查询 (provider, model) 的价格。
+    """查某个模型的价格四元组。
 
-    匹配策略：
+    参数：
+        provider —— 厂家名（如 "deepseek"，大小写不敏感）
+        model    —— 模型名（如 "deepseek-chat"）
+
+    返回：(输入未命中, 输入命中, 缓存写入, 输出) 四个单价；查不到返回 None。
+
+    匹配策略（按顺序试）：
     1. 精确匹配 provider → model
-    2. 模型名前缀匹配（如 "deepseek-chat-0324" → "deepseek-chat"）
-    3. OpenRouter 前缀（"openrouter/deepseek/..."）拆出真实 provider 再匹配
-    4. 找不到返回 None
+    2. 模型名前缀匹配（如 "deepseek-chat-0324" 这种带版本后缀的 → 按
+       "deepseek-chat" 查到）
+    3. OpenRouter 路径（"openrouter/deepseek/..."）拆出真实 provider 再查
+    4. 都不行返回 None
     """
     p = (provider or "").lower()
     m = (model or "").lower()
@@ -79,11 +99,11 @@ def get_pricing(provider: str, model: str) -> Optional[Tuple[float, float, float
     if not provider_table:
         return None
 
-    # 精确
+    # 先试精确名
     if m in provider_table:
         return provider_table[m]
 
-    # 前缀匹配（模型名可能带版本后缀，如 deepseek-chat-0324）
+    # 再试前缀（模型名常带版本后缀，如 deepseek-chat-0324）
     for prefix, price in provider_table.items():
         if m.startswith(prefix):
             return price
@@ -100,21 +120,27 @@ def estimate_cost_usd(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
 ) -> Optional[dict]:
-    """估算美元成本。
+    """把一次 LLM 调用的 token 数换算成美元花费。
 
-    返回 dict：
+    参数：
+        provider              —— 厂家名（用于查价表）
+        model                 —— 模型名
+        prompt_tokens         —— 本次输入总 token 数（含缓存命中部分）
+        completion_tokens     —— 本次输出 token 数
+        cache_read_tokens     —— 其中命中缓存的部分（便宜）
+        cache_creation_tokens —— 其中写缓存的部分（贵）
+
+    返回：字典，形如：
         {
-            "cost_usd": float,
+            "cost_usd": 总花费,
             "breakdown": {
-                "input": float,        # cache miss 部分
-                "cache_hit": float,    # cache 命中（便宜）
-                "cache_write": float,  # cache 写入（贵）
+                "input": float,        # 缓存未命中部分的输入花费
+                "cache_hit": float,    # 命中缓存（便宜）
+                "cache_write": float,  # 写入缓存（贵）
                 "output": float,
             },
-            "pricing_source": str,     # "exact" / "prefix" / "unknown"
         }
-
-    找不到价格返回 None。
+    价格表里查不到该模型时返回 None。
     """
     pricing = get_pricing(provider, model)
     if pricing is None:
@@ -122,7 +148,7 @@ def estimate_cost_usd(
 
     in_miss_price, in_hit_price, in_write_price, out_price = pricing
 
-    # cache hit / write 部分从 prompt_tokens 里分出去，剩余算 cache miss
+    # prompt_tokens 是总数：把命中/写入缓存的部分扣掉，剩下的才算全价输入
     cache_miss_tokens = max(0, prompt_tokens - cache_read_tokens - cache_creation_tokens)
 
     cost_input = cache_miss_tokens * in_miss_price / 1_000_000

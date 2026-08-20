@@ -1,28 +1,34 @@
-"""Bash 命令注入面检测（R16 #1）。
+"""Bash 命令「注入面」检查（R16 安全专项第 1 项）。
 
-对齐 CCB BashTool/bashSecurity.ts 的「注入面模式」分桶（BASH_SECURITY_CHECK_IDS
-1-24 的核心子集），适配 OmniMate：**命中 → 升审批**（不进黑名单硬拒）。
-CC 同款语义：这些形态本身不一定是攻击，但会让"所见命令"与"实际执行"不一致，
-必须让用户看到原文后手动批准。
+这个文件是干嘛的：检查一条要执行的 bash 命令里，有没有「看起来无害、
+实际执行时会长出别的东西」的写法。好比收快递时发现箱子被重新封过——
+不一定有毒，但必须当面拆开看一眼才敢签收。
 
-与 CC 的差异（如实记录）：
-- 无 shell-quote / tree-sitter 解析器 → 跳过 validateMalformedTokenInjection
-  （依赖 token 流的未闭合定界符检测）和 hasShellQuoteSingleQuoteBug
-  （shell-quote 特有的单引号反斜杠 bug）
-- 不拦普通重定向 < / >（CC validateRedirections 对任何重定向 ask；OmniMate
-  只读通道已把含重定向命令排除出快速通道，写目标另走 safe_path/check_path
-  白名单层——全套搬过来对 OmniMate 场景过噪）
-- quoted heredoc 剥离是简化版（CC 的 isSafeHeredoc/stripSafeHeredocSubstitutions
-  连 $(cat <<'EOF'...) 整块剥除；本实现按行剥体，起始行保留 << 前缀，
-  $( 形态仍会命中 $() 检查 → 多问一次审批，方向保守）
-- obfuscated flags 只移植正则子集 + 「引号内容以 dash 开头」扫描器，
-  CC 的引号链式拼接状态机（"-""exec 等形态）未全量移植
+参照对象是 CCB（Claude Code 的一个分支版本）BashTool/bashSecurity.ts 里
+的「注入面模式」清单（编号 1-24 里的核心部分）。关键语义差别：OmniMate
+里命中不是直接拒绝，而是**升级成让用户手动审批**。为什么不打死？因为
+这些写法本身不一定是攻击，只是会让「你看到的命令」和「实际跑的命令」
+不一致——所以至少要让人看到原文、亲手点批准。
 
-检查实现分层（对齐 CC extractQuotedContent 的三种视图）：
-- raw            原始命令
-- with_dq        剥单引号内容（双引号内容保留——双引号内 $() ` 仍展开）
-- fully          剥全部引号内容（单双引号内都不展开的形态用这个视图）
-- keepq          剥引号内容但保留引号字符（检测引号邻接，词中 # 用）
+和 CC 实现的差别（如实记录，都是有原因的取舍）：
+- 我们没有 shell-quote / tree-sitter 这类解析器，所以跳过两个检查：
+  validateMalformedTokenInjection（要靠 token 流才能发现的未闭合引号）
+  和 hasShellQuoteSingleQuoteBug（shell-quote 库特有的单引号反斜杠 bug）
+- 普通重定向 < / > 不拦。CC 对任何重定向都要问一次；我们的只读快速通道
+  已经把带重定向的命令排除在免审之外了，写入目标另有 safe_path/check_path
+  白名单把关——全套照搬对我们场景太吵（动不动就弹审批）
+- 「带引号的 heredoc」剥除是简化版：CC 能把 $(cat <<'EOF'...) 这种整块
+  拿掉；我们只按行剥正文，起始行还留着 << 前缀，所以 $( 形态仍会被
+  $() 检查命中——结果是多问一次审批，方向偏保守（宁可多问不漏问）
+- 混淆 flag 检查只移植了正则子集 + 「引号内容以横杠开头」的扫描器；
+  CC 那套引号链式拼接状态机（识别 "-""exec 这类拼法）没有全搬
+
+检查用的「视图」分层（对齐 CC extractQuotedContent 的三种看法）：
+- raw            命令原文
+- with_dq        去掉单引号内容后的视图（双引号内容保留——因为双引号里
+                  的 $() 和反引号依然会被 shell 展开，得让检查器看见）
+- fully          单双引号内容都去掉（引号里不展开的形态用这个视图查）
+- keepq          去掉引号内容但保留引号字符本身（查引号挨着 # 的形态用）
 """
 import re
 from typing import Optional
@@ -32,10 +38,19 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 def _extract_quoted_content(command: str, is_jq: bool = False):
-    """返回 (with_dq, fully, keepq) 三种引号视图。
+    """生成三种「引号视图」，返回 (with_dq, fully, keepq) 三个字符串。
 
-    is_jq=True 时双引号字符保留在 with_dq（对齐 CC 的 jq 特例——jq 过滤器
-    里的引号元字符形态需要被引号元字符检查看到）。
+    干什么：把命令按引号状态拆出三种看法，供不同检查器选用。
+    背景：bash 里单引号内容完全不展开、双引号内容部分展开，检查器必须
+    区分「引号里的字符」和「裸字符」，否则会被引号骗过。
+
+    参数：
+        command —— 要分析的命令原文
+        is_jq   —— 命令是不是 jq。True 时双引号字符会保留在 with_dq 视图里
+                   （对齐 CC 的 jq 特例：jq 过滤器里的引号元字符形态需要
+                   被引号元字符检查看到）
+
+    返回：三个字符串的元组 (with_dq, fully, keepq)。
     """
     with_dq: list = []
     fully: list = []
@@ -86,10 +101,12 @@ _HEREDOC_OPEN_RE = re.compile(
 
 
 def _strip_quoted_heredocs(command: str) -> str:
-    """剥除 quoted/escaped 定界符 heredoc 的正文（正文是字面量，不展开）。
+    r"""把「带引号/转义定界符」的 heredoc 正文从命令里拿掉，返回剩余部分。
 
-    未加引号的 heredoc（<<EOF）正文会展开 $()/反引号，必须保留给检查器看。
-    找不到闭合定界符时整段保留（保守方向）。
+    背景：heredoc 定界符加了引号（<<'EOF'）或反斜杠（<<\EOF）时，正文是
+    纯字面量、不会被 shell 展开——里面的 $() 之类的可疑形态是纸老虎，
+    拿掉可以少误报。没加引号的 heredoc（<<EOF）正文会展开 $() 和反引号，
+    必须留给检查器看。找不到闭合定界符时整段保留（宁可多查不漏查）。
     """
     lines = command.split("\n")
     out: list = []
@@ -110,7 +127,7 @@ def _strip_quoted_heredocs(command: str) -> str:
                     break
                 j += 1
             if closed:
-                # 保留 << 之前的命令部分（如 "cat " / "echo $("）
+                # << 前面如果有真命令（如 "cat "）要留着，不能整行丢
                 prefix = line[: m.start()].rstrip()
                 out.append(prefix if prefix else "true")
                 i = j + 1
@@ -124,18 +141,20 @@ def _strip_quoted_heredocs(command: str) -> str:
 # 各类检查（预编译正则）
 # ---------------------------------------------------------------------------
 
-# 控制字符（0x00-0x08/0x0B/0x0C/0x0E-0x1F/0x7F；bash 静默丢弃、混淆检查器）
+# 控制字符（0x00-0x08/0x0B/0x0C/0x0E-0x1F/0x7F）——bash 会静默丢弃它们，
+# 可能用来迷惑基于文本的检查器
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-# Unicode 空白（解析器与 bash 分词不一致）
+# Unicode 空白——不同解析器对它们的分词结果可能不一致
 _UNICODE_WS_RE = re.compile(
     "[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
 )
-# 命令替换/进程替换/zsh 展开（跑在 with_dq 视图：单引号内不展开）
+# 命令替换/进程替换/zsh 展开形态（在 with_dq 视图上查：单引号内不展开）
 _SUBSTITUTION_PATTERNS = [
     (re.compile(r"<\("), "进程替换 <()"),
     (re.compile(r">\("), "进程替换 >()"),
     (re.compile(r"=\("), "zsh 进程替换 =()"),
-    # zsh =cmd 词首展开（=curl → /usr/bin/curl，可绕前缀规则；不匹配 VAR=val）
+    # zsh 的 =cmd 写法在词首会把命令名换成完整路径（=curl → /usr/bin/curl），
+    # 可以绕过按命令名的前缀规则；正则设计成不匹配 VAR=val 赋值
     (re.compile(r"(?:^|[\s;&|])=[A-Za-z_]"), "zsh =cmd 展开"),
     (re.compile(r"\$\("), "$() 命令替换"),
     (re.compile(r"\$\{"), "${} 参数替换"),
@@ -146,21 +165,22 @@ _SUBSTITUTION_PATTERNS = [
     (re.compile(r"\}\s*always\s*\{"), "zsh always 块"),
     (re.compile(r"<#"), "PowerShell 注释语法 <#"),
 ]
-# IFS 注入
+# IFS 注入（改分隔符变量让字符串被重新切分执行）
 _IFS_RE = re.compile(r"\$IFS|\$\{[^}]*IFS")
-# /proc/*/environ（环境变量泄露）
+# 读 /proc/*/environ（偷看别的进程环境变量）
 _PROC_ENVIRON_RE = re.compile(r"/proc/.*/environ")
-# /dev/tcp|udp 网络伪设备
+# /dev/tcp|udp 网络伪设备（不用 curl 也能发起网络连接）
 _NETWORK_DEVICE_RE = re.compile(r"""/dev/(tcp|udp)/[^/\s"'`$]+/\d+""", re.IGNORECASE)
-# 引号参数里藏 shell 元字符（"a;b" 作为参数）
+# 引号参数里藏 shell 元字符（例如把 "a;b" 当参数传，展开后变两条命令）
 _QUOTED_METACHAR_RE = re.compile(r"""(?:^|\s)["'][^"']*[;&][^"']*["'](?:\s|$)""")
-# 重定向/管道上下文里的变量
+# 重定向/管道旁边出现变量（重定向目标可能是变量，运行前看不出来）
 _DANGEROUS_VAR_RE = re.compile(r"[<>|]\s*\$[A-Za-z_]|\$[A-Za-z_][A-Za-z0-9_]*\s*[|<>]")
-# 换行分隔多命令（\<换行> 续行豁免：前导是 空白+反斜杠）
+# 换行分隔的多条命令（豁免「空白+反斜杠+换行」的续行写法）
 _NEWLINE_CMD_RE = re.compile(r"(?<![\s]\\)[\n\r]\s*\S")
-# 词中 #（bash 字面量 vs 注释剥离解析器的差异；排除 bash 求长语法 ${#var}）
+# 词中间出现 #（bash 当字面量、但会剥注释的解析器当注释起点，两边理解不一致；
+# 排除 bash 求字符串长度的 ${#var} 语法）
 _MID_WORD_HASH_RE = re.compile(r"\S(?<!\$\{)#")
-# ANSI-C / locale 引号（可编码任意字符）
+# ANSI-C / locale 引号（$'..' 里可以编码任意字符，混淆检查器）
 _ANSI_C_QUOTE_RE = re.compile(r"\$'[^']*'")
 _LOCALE_QUOTE_RE = re.compile(r'\$"[^"]*"')
 _EMPTY_SPECIAL_QUOTE_DASH_RE = re.compile(r"\$['\"]{2}\s*-")
@@ -169,9 +189,9 @@ _EMPTY_PAIR_QUOTED_DASH_RE = re.compile(r"""(?:""|'')+['"]-""")
 _TRIPLE_QUOTE_START_RE = re.compile(r"""(?:^|\s)['"]{3,}""")
 _QUOTE_DASH_FULLY_RE = re.compile(r"""\s['"`]-""")
 _DOUBLE_QUOTE_DASH_FULLY_RE = re.compile(r"""['"`]{2}-""")
-# 引号内容以 dash+flag 字符开头（quoted flag 混淆：" -f" / '--flag'）
+# 引号内容以 dash+flag 字符开头（把 flag 藏进引号里混淆：" -f" / '--flag'）
 _QUOTED_FLAG_CONTENT_RE = re.compile(r"^-+[A-Za-z0-9$`]")
-# zsh 危险 builtin（zmodload 系）
+# zsh 危险 builtin（zmodload 一族，能加载模块绕过二进制名检查）
 _ZSH_DANGEROUS_COMMANDS = frozenset({
     "zmodload", "emulate",
     "sysopen", "sysread", "syswrite", "sysseek",
@@ -182,17 +202,26 @@ _ZSH_DANGEROUS_COMMANDS = frozenset({
 _ZSH_PRECOMMAND_MODIFIERS = frozenset({"command", "builtin", "noglob", "nocorrect"})
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
 _FC_E_RE = re.compile(r"\s-\S*e")
-# jq 危险面
+# jq 的危险面
 _JQ_SYSTEM_RE = re.compile(r"\bsystem\s*\(")
 _JQ_FLAGS_RE = re.compile(
     r"(?:^|\s)(?:-f\b|--from-file|--rawfile|--slurpfile|-L\b|--library-path)"
 )
-# 操作符集合（反斜杠转义操作符检测用）
+# 操作符集合（查「反斜杠转义操作符」时用）
 _SHELL_OPERATORS = frozenset(";|&<>")
 
 
 def _has_unescaped_char(content: str, char: str) -> bool:
-    """内容里是否有未转义的指定单字符（跳过 \\x 转义对）。"""
+    r"""看内容里有没有出现「未被反斜杠转义」的指定单字符。
+
+    背景：反斜杠转义对（\\x）要整对跳过，否则会把 `\`` 误当成真反引号。
+
+    参数：
+        content —— 要查的字符串
+        char    —— 要找的单字符（如反引号）
+
+    返回：True 表示存在未转义的目标字符。
+    """
     i = 0
     while i < len(content):
         if content[i] == "\\" and i + 1 < len(content):
@@ -205,9 +234,16 @@ def _has_unescaped_char(content: str, char: str) -> bool:
 
 
 def _scan_quotes(command: str):
-    """通用引号状态扫描，yield (idx, char, in_sq, in_dq, escaped)。
+    """逐字符扫描命令，边扫边维护引号状态，逐个产出 (idx, char, in_sq, in_dq)。
 
-    语义对齐 CC：反斜杠在单引号内是字面量；先处理反斜杠再处理引号翻转。
+    背景：多个检查器都需要知道「当前字符在不在引号里」，抽成公共生成器
+    避免每个检查器各写一套容易出错的引号状态机。
+
+    参数：
+        command —— 要扫描的命令
+
+    产出：每个字符一个元组（下标、字符、是否在单引号内、是否在双引号内）。
+    语义对齐 CC：反斜杠在单引号内是字面量；先处理反斜杠再处理引号开合。
     """
     in_sq = in_dq = False
     escaped = False
@@ -228,7 +264,16 @@ def _scan_quotes(command: str):
 
 
 def _has_backslash_escaped_whitespace(command: str) -> bool:
-    """引号外的 反斜杠+空格/tab（bash 单 token vs 解析器双 token）。"""
+    r"""检查引号外有没有「反斜杠+空格/tab」的写法。
+
+    背景：`\ ` 在 bash 里把空格粘进一个词，但基于文本的解析器可能把它
+    切成两个词——两边分词不一致就可能被钻空子。
+
+    参数：
+        command —— 命令原文
+
+    返回：True 表示存在这种形态。
+    """
     in_sq = in_dq = False
     i = 0
     n = len(command)
@@ -248,9 +293,17 @@ def _has_backslash_escaped_whitespace(command: str) -> bool:
 
 
 def _has_backslash_escaped_operator(command: str) -> bool:
-    r"""引号外的 \<operator>（\; \| \& \< \>，隐藏命令结构）。
+    r"""检查引号外有没有「反斜杠+操作符」（\; \| \& \< \>）的写法。
 
-    已知误报：find . -exec cmd {} \; —— 多问一次审批，可接受。
+    背景：转义的操作符能把命令的真实结构藏起来，让检查器看不出这里
+    其实有分隔/管道。
+
+    参数：
+        command —— 命令原文
+
+    返回：True 表示存在这种形态。
+    已知误报：find . -exec cmd {} \; 这类合法写法也会命中——代价是
+    多问一次审批，可接受。
     """
     in_sq = in_dq = False
     i = 0
@@ -275,7 +328,16 @@ def _has_backslash_escaped_operator(command: str) -> bool:
 
 
 def _check_carriage_return_outside_dq(command: str) -> bool:
-    """CR 出现在双引号外（bash IFS 不含 CR，分词差异面）。"""
+    """检查回车符（\r）是否出现在双引号外。
+
+    背景：bash 的默认分隔符列表里没有 \r，会把带 \r 的内容当普通字符并进
+    词里，而很多解析器按换行符家族切分——两边分词结果不同。
+
+    参数：
+        command —— 命令原文
+
+    返回：True 表示双引号外存在 \r。
+    """
     if "\r" not in command:
         return False
     for _i, ch, _sq, in_dq in _scan_quotes(command):
@@ -285,7 +347,16 @@ def _check_carriage_return_outside_dq(command: str) -> bool:
 
 
 def _check_comment_quote_desync(command: str) -> bool:
-    """未引用 # 注释里含引号字符（让引号跟踪器失步）。"""
+    """检查未加引号的 # 注释内容里是否藏了引号字符。
+
+    背景：如果注释里出现引号，简单的「跟踪引号开合」的解析器会把注释里
+    的引号当真，之后所有引号状态全部错位（失步），后续检查全被带偏。
+
+    参数：
+        command —— 命令原文
+
+    返回：True 表示存在这种形态。
+    """
     in_sq = in_dq = False
     escaped = False
     i = 0
@@ -331,7 +402,16 @@ def _check_comment_quote_desync(command: str) -> bool:
 
 
 def _check_quoted_newline_hash(command: str) -> bool:
-    """引号内换行 + 下一行 # 开头（对基于行的检查隐藏参数）。"""
+    """检查「引号内的换行 + 下一行以 # 开头」的组合。
+
+    背景：按行逐行检查的工具会把 # 行当注释跳过，但这段其实在引号里、
+    是真参数——参数被藏在检查器看不见的地方。
+
+    参数：
+        command —— 命令原文
+
+    返回：True 表示存在这种形态。
+    """
     if "\n" not in command or "#" not in command:
         return False
     for i, ch, in_sq, in_dq in _scan_quotes(command):
@@ -344,6 +424,7 @@ def _check_quoted_newline_hash(command: str) -> bool:
 
 
 def _is_escaped_at(content: str, pos: int) -> bool:
+    """判断 content[pos] 处的字符是否被反斜杠转义（往前数连续反斜杠的奇偶）。"""
     backslashes = 0
     i = pos - 1
     while i >= 0 and content[i] == "\\":
@@ -353,10 +434,18 @@ def _is_escaped_at(content: str, pos: int) -> bool:
 
 
 def _check_brace_expansion(fully: str) -> bool:
-    """未引用的花括号展开（{a,b} / {1..5}——bash 展开成多词）。
+    """检查是否存在未加引号的花括号展开（{a,b} / {1..5}）。
 
-    fully 视图已剥全部引号内容（引号内不展开），只查裸花括号。
-    含 CC 的闭括号盈余防御（引号剥离造成计数失配 → 直接判可疑）。
+    背景：bash 会把 {a,b} 展开成多个词——检查器看到的参数形态和实际执行的
+    不一样。fully 视图已经把引号内容剥掉（引号内不展开），所以这里查到的
+    都是裸花括号。
+
+    参数：
+        fully —— 剥掉全部引号内容后的命令视图
+
+    返回：True 表示存在花括号展开形态。
+    另含 CC 的闭括号盈余防御：右括号比左括号多说明引号剥离造成了计数
+    错位，直接判可疑。
     """
     opens = closes = 0
     for i, ch in enumerate(fully):
@@ -370,7 +459,7 @@ def _check_brace_expansion(fully: str) -> bool:
     for i, ch in enumerate(fully):
         if ch != "{" or _is_escaped_at(fully, i):
             continue
-        # 找配对 }（嵌套深度跟踪）
+        # 找配对的 }，用嵌套深度跟踪
         depth = 1
         matching = -1
         for j in range(i + 1, len(fully)):
@@ -384,7 +473,7 @@ def _check_brace_expansion(fully: str) -> bool:
                     break
         if matching == -1:
             continue
-        # 顶层 , 或 .. 触发展开
+        # 括号对最外层出现 , 或 .. 就是会触发展开的形态
         inner_depth = 0
         for k in range(i + 1, matching):
             ck = fully[k]
@@ -399,10 +488,18 @@ def _check_brace_expansion(fully: str) -> bool:
 
 
 def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
-    """引号混写的 flag（"-f" / '--flag' / $'..' / 空引号对 + dash）。
+    """检查「用引号混写把 flag 藏起来」的形态（"-f" / '--flag' / $'..' / 空引号对+横杠）。
 
-    echo 简单命令豁免（对齐 CC echo + 无操作符例外——echo 的 ANSI-C 等
-    形态只影响输出内容，无执行面）。
+    背景：命令行参数解析器通常把引号剥掉再看 flag，安全检查却可能因为
+    引号的存在没认出这是个 flag——两边认知不一致就有绕过的空间。
+
+    参数：
+        command —— 命令原文
+        base    —— 命令的首个词（命令名，如 echo）
+
+    返回：命中时返回中文原因（用于审批提示文案），没命中返回 None。
+    豁免规则（对齐 CC）：纯 echo 且没有管道/分号等操作符时放行——echo 的
+    ANSI-C 之类形态只影响输出的文字内容，没有执行面。
     """
     if base == "echo" and not re.search(r"[|&;]", command):
         return None
@@ -419,7 +516,7 @@ def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
     if _TRIPLE_QUOTE_START_RE.search(command):
         return "词首连续 3+ 引号字符"
 
-    # 引号内容以 dash+flag 字符开头（空白后跟引号，内容 ^-+[a-zA-Z0-9$`]）
+    # 引号内容以 dash+flag 字符开头的情况（空白后跟引号，内容形如 ^-+[a-zA-Z0-9$`]）
     n = len(command)
     in_sq = in_dq = False
     escaped = False
@@ -459,7 +556,16 @@ def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
 
 
 def _zsh_base_command(command: str) -> str:
-    """剥掉 env 赋值和 zsh precommand 修饰符后的首命令。"""
+    """剥掉环境变量赋值和 zsh 前置修饰符，返回真正的首命令名。
+
+    背景：FOO=1 command builtin cmd 这种写法里，真正的命令藏在后面；
+    不剥掉就拿首词去对危险命令表会查错对象。
+
+    参数：
+        command —— 命令原文
+
+    返回：剥完后的首命令词；全是赋值/修饰符时返回空串。
+    """
     for token in command.strip().split():
         if _ENV_ASSIGN_RE.match(token):
             continue
@@ -470,21 +576,27 @@ def _zsh_base_command(command: str) -> str:
 
 
 def check_injection_surface(command: str) -> Optional[str]:
-    """检查命令是否含注入面形态。命中返回中文原因（用于审批提示），否则 None。
+    """主入口：检查命令里有没有注入面形态，有则返回中文原因，没有返回 None。
 
-    这是 R16 #1 的主入口，由 PermissionChecker.check 在闸门 1 之后、
-    只读快速通道之前调用——命中走审批而非硬拒（对齐 CC ask 语义）。
+    背景：这是 R16 安全专项第 1 项的对外入口。调用位置在 PermissionChecker.check
+    里、硬拒绝黑名单（闸门 1）之后、只读快速通道之前——命中走用户审批
+    而不是硬拒（对齐 CC 的 ask 语义：所见非所执行 ≠ 一定是攻击）。
+
+    参数：
+        command —— 待检查的命令原文
+
+    返回：命中时返回中文原因（直接用于审批提示给用户看）；干净返回 None。
     """
     if not command or not command.strip():
         return None
 
-    # 控制字符最先（防后续所有正则被绕过）
+    # 控制字符最先查——它可能让后面所有基于文本的正则全部失灵
     if _CONTROL_RE.search(command):
         return "含非打印控制字符"
     if _UNICODE_WS_RE.search(command):
         return "含 Unicode 空白字符"
 
-    # 未完成片段（tab 开头 / flag 开头 / 操作符续行开头）
+    # 残缺片段（tab 开头 / flag 开头 / 操作符续行开头——多半是拼接命令的半截）
     stripped = command.strip()
     if re.match(r"^\s*\t", command):
         return "以 tab 开头的未完成片段"
@@ -493,15 +605,15 @@ def check_injection_surface(command: str) -> Optional[str]:
     if re.match(r"^\s*(?:&&|\|\||;|>>?|<)", command):
         return "以操作符开头的续行片段"
 
-    # quoted heredoc 正文按字面量剥除后再做模式检查
+    # quoted heredoc 的正文是字面量，剥掉之后再跑模式检查
     heredoc_stripped = _strip_quoted_heredocs(command)
     base = command.split(" ")[0] or ""
     with_dq, fully, _keepq = _extract_quoted_content(
         heredoc_stripped, is_jq=(base == "jq")
     )
-    keepq = _extract_quoted_content(command)[2]  # 词中 # 用原始命令的视图
+    keepq = _extract_quoted_content(command)[2]  # 词中 # 检查要用原始命令的视图
 
-    # jq 危险面（system() 执行任意命令；-f 族读文件进变量）
+    # jq 危险面（system() 能执行任意命令；-f 一族会把文件内容读进变量）
     if base == "jq":
         if _JQ_SYSTEM_RE.search(command):
             return "jq system() 函数（执行任意命令）"
@@ -527,11 +639,11 @@ def check_injection_surface(command: str) -> Optional[str]:
     if _check_quoted_newline_hash(command):
         return "引号内换行且下一行 # 开头"
 
-    # CR 在双引号外（分词差异）
+    # 双引号外的回车（分词差异）
     if _check_carriage_return_outside_dq(command):
         return "双引号外的回车符（\\r 分词差异）"
 
-    # 换行分隔多命令（\<换行> 续行豁免）
+    # 换行分隔多条命令（「反斜杠+换行」的续行写法豁免）
     if _NEWLINE_CMD_RE.search(fully):
         return "换行分隔多条命令"
 
@@ -543,7 +655,7 @@ def check_injection_surface(command: str) -> Optional[str]:
     if _PROC_ENVIRON_RE.search(command):
         return "访问 /proc/*/environ（环境变量泄露面）"
 
-    # 命令替换 / 进程替换 / zsh 展开（with_dq 视图：单引号内不展开）
+    # 命令替换 / 进程替换 / zsh 展开（用 with_dq 视图：单引号内不展开）
     for pattern, desc in _SUBSTITUTION_PATTERNS:
         if pattern.search(with_dq):
             return desc
@@ -558,7 +670,7 @@ def check_injection_surface(command: str) -> Optional[str]:
     if _has_backslash_escaped_operator(command):
         return "反斜杠转义 shell 操作符（隐藏命令结构）"
 
-    # 词中 #（keepq 视图：保留引号字符以捕捉 'x'# 邻接形态）
+    # 词中 #（用 keepq 视图：保留引号字符才能捕捉 'x'# 这种引号挨着 # 的形态）
     if _MID_WORD_HASH_RE.search(keepq):
         return "词中 # （注释剥离差异面）"
 
@@ -573,7 +685,7 @@ def check_injection_surface(command: str) -> Optional[str]:
     if zbase == "fc" and _FC_E_RE.search(command.strip()):
         return "fc -e（经编辑器执行任意命令）"
 
-    # /dev/tcp|udp 网络伪设备
+    # /dev/tcp|udp 网络伪设备（机器上没装网络工具也能往外发数据）
     if _NETWORK_DEVICE_RE.search(fully):
         return "/dev/tcp|udp 网络伪设备（无网络工具外泄面）"
 

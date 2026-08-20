@@ -1,10 +1,15 @@
-"""原子文件写入工具。
+"""原子写文件工具：写文件时读者永远不会看到「写了一半」的内容。
 
-保证读者永远看到完整旧版或完整新版，不会读到半截。
+原理像换招牌：先把新内容写到一个同目录的临时文件，全写好了再用
+「一键替换」（rename）换到正式位置——替换这个动作在操作系统层面是
+一瞬间完成的，不存在半旧半新的状态。
 
-使用场景：Curator 后台线程重建 MEMORY.md 时，Agent 主线程可能同时读取索引
-注入 system prompt。如果直接 write_text，可能读到只写了一半的内容，导致
-LLM 拿到残缺索引。原子写相当于"后台写好新招牌再一键挂上去"。
+为什么需要它：Curator 后台线程重建 MEMORY.md 的时候，Agent 主线程可能
+正在读这个文件往 system prompt 里塞。如果直接 write_text 覆盖，主线程
+可能正好读到只写了一半的内容，LLM 就会拿到残缺的记忆索引。
+
+在项目里的位置：底层公共工具，被 memory_store / usage_tracker /
+settings 等一切「不能读到半截」的关键写入方使用。
 """
 import os
 import tempfile
@@ -20,18 +25,25 @@ def atomic_write_text(
     encoding: str = "utf-8",
     max_replace_retries: int = 10,
 ) -> None:
-    """原子写入文本：tempfile + os.replace。
+    """安全地原子写入文本：先写临时文件，再用 os.replace 一键换过去。
 
-    tempfile 必须在同目录（同文件系统），os.replace 才能原子生效。
-    写入后 fsync 保证崩溃恢复时数据已落盘。
+    背景与要点：
+    - 临时文件必须建在目标同目录（同一块文件系统），os.replace 才是原子操作
+    - 写完调 fsync 把数据真正刷到磁盘——万一程序或机器崩溃，恢复后数据还在
+    - Windows 的坑：目标文件正被别的线程/进程读着时，os.replace 会抛
+      PermissionError（WinError 5）。这是操作系统的行为，重试就能好——
+      读者很快就放开句柄了。Linux/Mac 没这毛病（文件开着也能 rename）
 
-    Windows 限制：os.replace 在目标文件被其他线程/进程读取时会抛
-    PermissionError（WinError 5）。这是 OS 行为，重试可恢复——读者
-    很快释放句柄。POSIX 没有这个限制（rename 即使文件打开也成功）。
-    失败时清理临时文件。
+    参数：
+        path                 —— 目标文件路径（父目录不存在会自动创建）
+        content              —— 要写入的文本内容
+        encoding             —— 文件编码，默认 utf-8
+        max_replace_retries  —— Windows 下 replace 被占读时的最大重试次数
 
-    适用场景：低频关键写入（MEMORY.md / settings.json / config.yaml）。
-    高频小写入请用 atomic_write_text_lite（无 fsync、无重试，更快）。
+    返回：无。失败（重试耗尽等）会抛异常，并清理掉临时文件。
+
+    适用：低频关键写入（MEMORY.md / settings.json / config.yaml）。
+    高频小写入请用 atomic_write_text_lite（不做 fsync、不重试，更快）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +55,7 @@ def atomic_write_text(
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        # Windows 下目标文件被读时 os.replace 抛 PermissionError，短暂重试
+        # Windows 下目标被读时 replace 会抛 PermissionError，短暂重试等读者松手
         last_err: Exception | None = None
         for attempt in range(max_replace_retries + 1):
             try:
@@ -54,7 +66,7 @@ def atomic_write_text(
                 if attempt < max_replace_retries:
                     time.sleep(0.005 * (attempt + 1))  # 5ms, 10ms, 15ms, ...
                 continue
-        # 重试耗尽，抛最后的错误
+        # 重试用完还没成功，把最后一次的错误抛出去
         assert last_err is not None
         raise last_err
     except BaseException:
@@ -71,14 +83,24 @@ def atomic_write_text_lite(
     *,
     encoding: str = "utf-8",
 ) -> None:
-    """原子写入（轻量版）：tempfile + Path.replace，无 fsync、无重试。
+    """原子写入的轻量版：只做「临时文件 + rename」，不 fsync、不重试。
 
-    与 atomic_write_text 的差异：
-    - 不调 fsync（崩溃恢复可能丢最近一次写入，但性能更好）
-    - 不重试 Windows PermissionError（调用方需自行处理或容忍偶发失败）
+    背景：高频小写入（比如每轮对话都落一次盘）如果每次都 fsync、
+    都带重试循环，太慢。这版牺牲一点可靠性换速度。
 
-    适用场景：高频小写入（offload 大输出落盘、transcript 快照）。
-    异常路径下（replace 失败、权限拒绝等）清理临时文件，避免 .tmp 垃圾堆积。
+    与完整版的差异：
+    - 不调 fsync（断电/崩溃恢复时可能丢最近一次写入，但快）
+    - 不处理 Windows 的「目标被读导致 replace 失败」（调用方自己兜底，
+      或者接受偶尔失败）
+
+    参数：
+        path     —— 目标文件路径
+        content  —— 要写入的文本内容
+        encoding —— 文件编码，默认 utf-8
+
+    返回：无。出异常时会清理临时文件。
+
+    适用：高频小写入（大输出落盘、子代理轨迹快照）。
     """
     path = Path(path)
     tmp_path: Optional[Path] = None
@@ -92,9 +114,9 @@ def atomic_write_text_lite(
         ) as tmp:
             tmp.write(content)
             tmp_path = Path(tmp.name)
-        tmp_path.replace(path)  # 原子 rename
+        tmp_path.replace(path)  # 原子 rename，一瞬间完成新旧切换
     except BaseException:
-        # replace 抛异常时清理临时文件，避免磁盘上留下 *.tmp 垃圾
+        # replace 抛异常时把临时文件删掉，别在磁盘上留一堆 .tmp 垃圾
         if tmp_path is not None:
             try:
                 tmp_path.unlink()
