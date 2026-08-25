@@ -230,6 +230,14 @@ class LLMClient:
         重试路径，不存在两个线程同时重建的并发问题。
         """
 
+    def close(self) -> None:
+        """同步释放底层连接（进程退出/收尾打扫用）。
+
+        历史踩坑（精读轮发现）：agent.cleanup() 用 getattr(client, "close")
+        逐个关客户端，但包装类此前一直没实现 close——X3 的「防 HTTP 连接池
+        泄漏」修复对它们是静默 no-op。基类提供无害默认；有连接池的子类重写。
+        """
+
 
 # ---------------------------------------------------------------------------
 # OpenAI 兼容格式的 client（DeepSeek/OpenAI/OpenRouter/本地 Ollama 等都用这套）
@@ -269,6 +277,24 @@ class OpenAICompatClient(LLMClient):
         except Exception:
             pass
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self._api_key)
+
+    def close(self) -> None:
+        """尽力释放底层 SDK 的 HTTP 连接池（同步版，agent.cleanup() 调）。
+
+        底层的 close 是协程：已经在事件循环里就排个任务异步关；没有
+        运行中的循环就起一次性的关掉。关不上也不报错——打扫失败不该
+        影响正事。
+        """
+        try:
+            coro = self.client.close()
+            if asyncio.iscoroutine(coro):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(coro)
+                except RuntimeError:
+                    asyncio.run(coro)
+        except Exception:
+            pass
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
         """非流式调用：直接转交给 AsyncOpenAI SDK，原样返回它的响应对象。
@@ -429,6 +455,24 @@ class AnthropicClient(LLMClient):
         elif self._api_key:
             kwargs["api_key"] = self._api_key
         self.client = AsyncAnthropic(**kwargs)
+
+    def close(self) -> None:
+        """尽力释放底层 SDK 的 HTTP 连接池（同步版，agent.cleanup() 调）。
+
+        底层的 close 是协程：已经在事件循环里就排个任务异步关；没有
+        运行中的循环就起一次性的关掉。关不上也不报错——打扫失败不该
+        影响正事。
+        """
+        try:
+            coro = self.client.close()
+            if asyncio.iscoroutine(coro):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(coro)
+                except RuntimeError:
+                    asyncio.run(coro)
+        except Exception:
+            pass
 
     # effort_level（思考强度）换算成 DeepSeek 的思考参数。
     # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode

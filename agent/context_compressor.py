@@ -154,7 +154,9 @@ async def _summarize_conversation(
         messages：要摘要的对话段
         llm_client：LLM 客户端；None 时走规则总结（不花钱的降级）
         model：主模型名
-        summary_model：摘要专用模型（配了就优先于 model 用）
+        summary_model：摘要专用模型（作为 model 的兜底——只传它时才生效；
+            两者都传时 model 优先。此优先级是锁定 spec，见
+            tests/test_summarize_9section.py「应优先 model」用例）
         session_memory：预提取的会话记忆；非空就直接返回它当摘要
         from_idx：从第几条开始摘要（默认 0 = 从头）
         up_to_idx：摘要到第几条为止（默认 -1 = 到末尾）——两者配合实现局部压缩
@@ -235,7 +237,9 @@ async def _summarize_conversation(
     # 5. PTL 重试（最多 MAX_PTL_RETRIES 次）
     # Task E：用 tokenGap 精确算法取代旧的「丢 20%」粗略丢法
     # 改造点 ② review fix：按 spec 伪代码传 system message（你是技术对话摘要助手）
-    # + model 参数（summary_model 优先于 model）。历史背景：OpenAICompatClient
+    # + model 参数（model 优先于 summary_model——spec 由
+    # tests/test_summarize_9section.py 锁定；旧注释把优先级写反了，精读轮修正）。
+    # 历史背景：OpenAICompatClient
     # 会把 model kwarg 弹掉、用自己构造时绑定的模型，但 aux_llm_router 或
     # 未来的其他 client 实现可能用外部传入的 model——保持与 spec 一致。
     summary_system_prompt = "你是技术对话摘要助手。"

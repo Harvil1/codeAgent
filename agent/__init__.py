@@ -1244,13 +1244,17 @@ class AIAgent:
                 )
                 retried_choice = retried.choices[0]
                 retried_msg = retried_choice.message
-                # 用重试结果整体覆盖（重试拿到的是完整响应）
+                # 用重试结果整体覆盖（重试拿到的是完整响应）。
+                # 历史踩坑（精读轮发现）：旧版只在「重试有 tool_calls」时才覆盖，
+                # 重试结果没有工具调用时会把截断那次的半截 tool_calls 残留进
+                # 最终响应——必须无条件清空。
                 finish_reason = (
                     getattr(retried_choice, "finish_reason", None) or "stop"
                 )
                 full_content = retried_msg.content or ""
-                if getattr(retried_msg, "tool_calls", None):
-                    tool_calls_out = list(retried_msg.tool_calls)
+                tool_calls_out = list(
+                    getattr(retried_msg, "tool_calls", None) or []
+                )
                 # 把重试结果回放给回调（和 fallback 路径同款做法）
                 if retried_msg.content and self._stream_callback is not None:
                     try:
@@ -1261,10 +1265,11 @@ class AIAgent:
                         })
                     except Exception:
                         pass
-                # 更新 usage
+                # 更新 usage：截断那次 + 升级重试这次都真实花过钱，两边加总
+                # （旧版直接覆盖会漏记截断那次的花费）
                 if getattr(retried, "usage", None) is not None:
                     u = retried.usage
-                    final_usage = {
+                    retry_usage = {
                         "prompt_tokens": getattr(u, "prompt_tokens", 0),
                         "completion_tokens": getattr(u, "completion_tokens", 0),
                         "cache_read": (
@@ -1275,6 +1280,11 @@ class AIAgent:
                             getattr(u, "cache_creation_input_tokens", 0)
                             or getattr(u, "prompt_cache_miss_tokens", 0)
                         ),
+                    }
+                    prev_usage = final_usage if isinstance(final_usage, dict) else {}
+                    final_usage = {
+                        k: (prev_usage.get(k, 0) or 0) + (retry_usage.get(k, 0) or 0)
+                        for k in retry_usage
                     }
             except Exception as esc_err:
                 logger.warning(
@@ -2351,6 +2361,8 @@ class AIAgent:
             effective_toolsets, disabled_tools=_disabled, agent=self)
 
         # 失败重试检测：连续 N 次工具失败 → 塞一条「别再用同样方式重试」的提醒
+        # （_ephemeral：临时提醒只给模型看一眼，不落盘——精读轮发现旧版漏标，
+        #   当轮触发压缩时会被历史同步收进正式对话记录）
         if self._tool_failure_streak >= self._failure_threshold:
             messages.append({
                 "role": "user",
@@ -2365,6 +2377,7 @@ class AIAgent:
                     f"**停下来告诉用户**具体问题和解决建议\n"
                     f"</retry_warning>"
                 ),
+                "_ephemeral": True,
             })
             self._tool_failure_streak = 0  # 重置（提醒一次就够）
 

@@ -42,7 +42,8 @@
       "Bash(bash \"C:/Users/Administrator/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/task-brief\" \"docs/superpowers/plans/2026-07-12-phase2a-hooks.md\" 4)",
       "Bash(PYTHONIOENCODING=utf-8 uv run python -c \":*)",
       "Bash(cd:*)",
-      "Bash(bash \"C:/Users/Administrator/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/task-brief\" \"docs/superpowers/plans/2026-07-12-phase2a-hooks.md\" 5)"
+      "Bash(bash \"C:/Users/Administrator/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/task-brief\" \"docs/superpowers/plans/2026-07-12-phase2a-hooks.md\" 5)",
+      "Bash(git push:*)"
     ]
   }
 }
