@@ -112,6 +112,9 @@ class BackgroundManager:
         # P1-3：停滞看门狗超时。0=关闭（走老的单次阻塞等待，兼容旧行为）；
         # >0 开启：用专门的读输出线程 + 主线程定期巡查，超过这个秒数没新输出就发提醒。
         self._stall_timeout = stall_timeout
+        # idle wake（后台唤醒）：任务结束通知入队后要敲一下的回调。
+        # 由 CLI 注册（往输入队列塞唤醒哨兵）；None = 没人注册，行为照旧。
+        self._wake_callback = None
 
     # ---- 启动 ----
     def start(
@@ -528,6 +531,10 @@ class BackgroundManager:
         """把一条任务结束通知塞进队列（内部方法）。
 
         规矩：调用前必须已经拿着 self._lock（方法名 _locked 就是提醒这个）。
+        顺带敲一下 idle wake 回调（注册了才有）：通知到了就提醒主循环
+        "有后台任务收工了，空闲的话来处理"。注意"可能卡住"提醒
+        （_watch_with_stall 里直接 append 的 stall 通知）不走这里——
+        任务还没完，不唤醒。
 
         参数：
         - task：刚结束的任务对象
@@ -543,6 +550,11 @@ class BackgroundManager:
             "command": task.command,
             "ended_at": task.ended_at.isoformat() if task.ended_at else None,
         })
+        if self._wake_callback is not None:
+            try:
+                self._wake_callback()
+            except Exception as e:
+                logger.debug("bg wake 回调失败（fail-open）: %s", e)
 
     # ---- 查询 ----
     def status(self, task_id: str) -> Optional[BackgroundTask]:
@@ -617,6 +629,28 @@ class BackgroundManager:
         return True
 
     # ---- 通知 ----
+    def set_wake_callback(self, fn) -> None:
+        """注册 idle wake 回调：任务结束通知入队后被敲一下（不传参）。
+
+        背景：CLI 用它往输入队列塞唤醒哨兵，实现"主对话空闲时后台任务
+        完成 → 自动跑一轮处理结果"。回调在盯梢线程里执行，必须便宜、
+        非阻塞、永不拖垮通知本身（调用处已 try/except 兜底）。
+
+        参数：
+        - fn：无参回调；传 None 等于注销。
+
+        返回：无。
+        """
+        self._wake_callback = fn
+
+    def has_notifications(self) -> bool:
+        """队列里有没有没取走的通知（给"要不要发起唤醒轮"做预检用）。
+
+        参数：无。返回：True=有通知待取。
+        """
+        with self._lock:
+            return len(self._notifications) > 0
+
     def drain_notifications(self) -> list:
         """主循环每轮调一次：把攒下的通知全部取走并清空队列。
 

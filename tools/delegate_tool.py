@@ -52,11 +52,31 @@ class DelegationCompletionQueue:
     def __init__(self):
         self._queue: List[dict] = []
         self._lock = threading.Lock()
+        # idle wake（后台唤醒）：结果入队后要敲一下的回调（CLI 注册；None=未启用）
+        self._wake_callback = None
+
+    def set_wake_callback(self, fn) -> None:
+        """注册 idle wake 回调：push 后被敲一下（不传参）。
+
+        给 CLI 实现"主对话空闲时异步子代理完成 → 自动跑一轮处理结果"用。
+        回调在子代理后台线程里执行，必须便宜、非阻塞（调用处已兜底）。
+
+        参数：
+        - fn：无参回调；传 None 等于注销。
+
+        返回：无。
+        """
+        self._wake_callback = fn
 
     def push(self, result: dict) -> None:
         """子代理完成时调用：把结果（成功/失败 + 内容）放进信箱。"""
         with self._lock:
             self._queue.append(result)
+        if self._wake_callback is not None:
+            try:
+                self._wake_callback()
+            except Exception as e:
+                logger.debug("delegation wake 回调失败（fail-open）: %s", e)
 
     def drain(self) -> List[dict]:
         """主对话取件：一次性拿走信箱里所有结果并清空，下次从空箱开始。"""
@@ -578,6 +598,7 @@ def _delegate_async(
         "delegation_id": delegation_id,
         "message": (
             f"子代理已启动（ID: {delegation_id}），完成后会通知你"
+            f"（若主对话已空闲，完成时会自动唤醒继续处理，无需轮询）"
             f"。如需中断，调用 subagent_kill(task_id=\"{delegation_id}\")"
         ),
     }, ensure_ascii=False)

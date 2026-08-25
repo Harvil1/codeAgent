@@ -83,7 +83,11 @@ TOOL_USAGE_GUIDANCE = (
     "- **代码输出(跟随 cwd)**:脚本写到当前目录,输出(PPT/Excel/Word 等)写到 "
     "`<cwd>/outputs/`;用户指定别的位置就照做(白名单自动处理审批)\n"
     "- **先查技能**:任何任务前先扫技能索引,判断有无适用流程技能"
-    "(设计先行/调试/写计划等),有就先 load_skill('using-omnimate') 看总纲"
+    "(设计先行/调试/写计划等),有就先 load_skill('using-omnimate') 看总纲\n"
+    "- **后台任务无需轮询**:bg_start / subagent(background=true) 完成时会以 "
+    "<task_notification>/<delegation_completion> 通知你,主对话空闲时会自动唤醒"
+    "继续处理——不要循环查 bg_status;本轮要收工时若仍有后台任务在跑"
+    "(见 <background_tasks_running>),向用户说明完成后会自动跟进"
 )
 
 

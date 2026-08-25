@@ -250,12 +250,20 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
         "task_id": task_id,
         "status": task.status,
         "pid": task.pid,
+        # idle wake 配套：把"跑完会通知/自动唤醒"说清楚，模型就不用轮询了
+        "hint": (
+            "任务在后台运行；完成/失败时会以 <task_notification> 通知你"
+            "（若主对话已空闲会自动唤醒继续处理），无需轮询"
+        ),
     }
     if monitor:
         resp["monitor"] = True
         if task.output_file:
             resp["output_file"] = task.output_file
-        resp["hint"] = "监视器已启动：用 read_file(output_file) 查增量输出；进程退出时会收到通知"
+        resp["hint"] = (
+            "监视器已启动：用 read_file(output_file) 查增量输出；"
+            "进程退出时会收到通知（主对话空闲则自动唤醒）"
+        )
     return json.dumps(resp, ensure_ascii=False)
 
 

@@ -497,7 +497,6 @@ class RuntimeContext:
             from agent.usage_tracker import UsageTracker
             self.usage_tracker = UsageTracker(
                 self.home, self.session_id or "default",
-                default_provider=(self.config.get("model") or {}).get("provider", ""),
             )
             self.agent.set_usage_tracker(self.usage_tracker)
         except Exception as e:
@@ -3672,6 +3671,39 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     except Exception:
         pass
 
+    # === idle wake（后台唤醒）：空闲时后台任务/异步子代理完成 → 自动激活主循环 ===
+    # 机制：生产端（bg 盯梢线程 / 委托线程）把完成通知入队后敲回调，回调把
+    # 哨兵塞进输入队列（与 EOF 哨兵同款：对象地址唯一，用户敲不出来）。
+    # 自愈性：回合还在跑时哨兵会被排队输入回流丢弃——但此时通知本来就会
+    # 被当轮消费，无需唤醒；多余的哨兵由主循环预检跳过（不烧 LLM）。
+    _BG_WAKE_SENTINEL = object()
+    _BG_WAKE_MESSAGE = (
+        "[后台唤醒] 后台任务已完成，请处理本轮注入的 "
+        "task_notification/delegation_completion 通知：继续未完成的工作，"
+        "或向用户汇报结果。"
+    )
+
+    def _on_bg_wake():
+        """后台完成的唤醒回调（在盯梢/委托线程里执行，必须便宜、非阻塞）。"""
+        try:
+            if not ((rt.config.get("bg_task") or {}).get("idle_wake", True)):
+                return  # 配置关了：恢复"等用户下次发消息"的老行为
+        except Exception:
+            pass  # 配置读不出来也照常唤醒（宁可多一次预检，不丢通知）
+        _input_q.put(_BG_WAKE_SENTINEL)
+
+    # 注册到两个生产端：bg 任务管理器 + 主 agent 的委托结果信箱
+    for _producer in (
+        getattr(rt.agent, "bg_manager", None),
+        getattr(rt, "bg_manager", None),
+        getattr(rt.agent, "_delegation_queue", None),
+    ):
+        try:
+            if _producer is not None and hasattr(_producer, "set_wake_callback"):
+                _producer.set_wake_callback(_on_bg_wake)
+        except Exception:
+            pass
+
     # 主循环：读输入 → 处理 → 调 agent → 显示，循环往复
     while True:
         # R30d-C8：优先消费模型运行期间排队的 slash 命令（agent 的排队
@@ -3692,6 +3724,49 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
                 console.print("\n再见！")
                 break
+            continue
+
+        # idle wake（后台唤醒）：后台任务/异步子代理完成时塞进来的哨兵。
+        # 预检没货（通知已被正在跑的回合消费掉了）就静默跳过——防哨兵
+        # 风暴空烧 LLM。这不是用户输入：跳过粘贴转存/输入历史/slash/
+        # 技能等所有用户输入分支，直接走对话执行。
+        if user_input is _BG_WAKE_SENTINEL:
+            if not rt.agent.has_pending_wake_payload():
+                continue
+            console.print("[dim][后台任务完成，自动继续][/dim]")
+            # 唤醒消息按普通 user 消息入会话库（审计可见、恢复后上下文连贯）
+            if rt.session_store and rt.session_id:
+                rt.session_store.append_message(
+                    rt.session_id, "user", _BG_WAKE_MESSAGE,
+                )
+            try:
+                console.print("[bold green]AI:[/bold green]")
+                response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
+                # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
+                if not getattr(rt.agent, "_stream_callback", None):
+                    console.print(response)
+                elif response and response.startswith(
+                    ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+                     "[模型只产出了思考过程", "[LLM 返回了空响应")
+                ):
+                    console.print(f"[yellow]{response}[/yellow]")
+                if rt.session_store and rt.session_id:
+                    rt.session_store.append_message(
+                        rt.session_id, "assistant", response,
+                    )
+                try:
+                    _sl = _render_statusline(rt, rt.agent)
+                    if _sl:
+                        console.print(f"[dim]{_sl}[/dim]")
+                except Exception as _e:
+                    logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+            except KeyboardInterrupt:
+                rt.agent.interrupt()
+                _last_ctrl_c = time.monotonic()  # 同 High-3：给中断信号去重当锚点
+                console.print("[yellow]\n[已中断][/yellow]")
+            except Exception as e:
+                console.print(f"[red]错误: {e}[/red]")
+                logger.exception("agent 运行错误（后台唤醒轮）")
             continue
 
         if not user_input:

@@ -1873,6 +1873,77 @@ class AIAgent:
             "rewake_notifications": rewake_notifications,
         }
 
+    def has_pending_wake_payload(self) -> bool:
+        """预检：有没有"后台完成"类消息待取（给 CLI 的唤醒哨兵用）。
+
+        背景（idle wake）：CLI 收到唤醒哨兵后先问这里——通知已经被
+        正在跑的回合消费掉了就别再空跑一轮 LLM（防哨兵风暴/空唤醒）。
+
+        参数：无。
+
+        返回：True=有 bg 任务通知或异步子代理结果待取；全空/出错返回 False。
+        """
+        try:
+            if self.bg_manager is not None and self.bg_manager.has_notifications():
+                return True
+        except Exception:
+            pass
+        try:
+            queue = getattr(self, "_delegation_queue", None)
+            if queue is not None and queue.has_pending():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _build_bg_running_note(self):
+        """把"仍在跑的后台任务/异步子代理"整理成一段状态说明（没有返回 None）。
+
+        背景（idle wake 配套）：让模型每轮都看得见"还有哪些活儿在后台跑、
+        跑完会自动通知/唤醒"，从而不瞎轮询、收工时会主动向用户交代。
+        只读状态不消费（区别于通知类的一次性注入），每轮现算。
+
+        参数：无。
+
+        返回：说明文本；一个在跑的都没有时返回 None。
+        """
+        lines = []
+        try:
+            if self.bg_manager is not None:
+                for t in self.bg_manager.list_tasks():
+                    if getattr(t, "status", "") != "running":
+                        continue
+                    cmd = " ".join(str(c) for c in (t.command or []))
+                    if len(cmd) > 60:
+                        cmd = cmd[:60] + "…"
+                    lines.append(f"- {t.task_id} (running): {cmd}")
+        except Exception as e:
+            logger.debug("bg running 状态收集失败（fail-open）: %s", e)
+        try:
+            from tools.delegate_tool import _async_tasks
+            for del_id, info in _async_tasks.items():
+                if not isinstance(info, dict):
+                    continue
+                thread = info.get("thread")
+                if thread is None or not thread.is_alive():
+                    continue
+                goal = str(info.get("goal", ""))
+                if len(goal) > 60:
+                    goal = goal[:60] + "…"
+                lines.append(f"- {del_id} (async 子代理): {goal}")
+        except Exception as e:
+            logger.debug("async 子代理状态收集失败（fail-open）: %s", e)
+        if not lines:
+            return None
+        shown = lines[:10]
+        more = f"\n（另有 {len(lines) - 10} 个未列出）" if len(lines) > 10 else ""
+        return (
+            f"以下 {len(lines)} 个后台任务仍在运行，完成后会以 "
+            f"<task_notification>/<delegation_completion> 通知你"
+            f"（主对话空闲时会自动唤醒继续处理，无需轮询）：\n"
+            + "\n".join(shown) + more
+        )
+
     async def _consume_memory_prefetch(self, messages: list) -> list:
         """等记忆检索预取的结果，把它作为临时消息追加到本轮 messages。
 
@@ -2036,6 +2107,21 @@ class AIAgent:
                 logger.warning("rewake 注入异常: %s", e)
         if rewakes:
             injected["rewake_notifications"] = []
+
+        # idle wake 配套：仍在运行的后台任务/异步子代理清单（每轮现算、
+        # 只读状态不消费）。让模型保持"后台还有活儿在跑"的预期——收工时
+        # 向用户交代、完成后等通知/自动唤醒，而不是瞎轮询。
+        bg_running_note = self._build_bg_running_note()
+        if bg_running_note:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "<background_tasks_running>\n"
+                    f"{bg_running_note}\n"
+                    "</background_tasks_running>"
+                ),
+                "_ephemeral": True,  # 状态类临时注入（每轮重算，不进历史）
+            })
 
         # 计划模式提醒（每轮现算重新注入）
         if self.plan_mode:

@@ -171,6 +171,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "default_detach": False,                # bg_start 默认不脱离（detach）
         "stall_timeout": 45.0,                  # 停滞看门狗（秒）。0=禁用；开启后连续这么
                                                 # 多秒输出没动静就弹通知，让模型自己判断咋办
+        "idle_wake": True,                      # 主对话空闲时后台任务/异步子代理完成
+                                                # → 自动唤醒主循环跑一轮处理结果（哨兵走
+                                                # 输入队列；False 恢复"等用户下次发消息"）
     },
 
     # Cron 定时调度：到点自动执行任务

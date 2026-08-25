@@ -218,6 +218,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | cron 任务模板发现 | `agent/templates.py` |
 | Goal 驱动系统（状态机 + token 预算） | `agent/goal.py:GoalState` + `tools/goal_tool.py` |
 | 后台任务 + monitor 监视器 + stall 看门狗 | `agent/background.py:BackgroundManager` |
+| idle wake（空闲时后台完成自动唤醒主循环） | `cli.py`（`_BG_WAKE_SENTINEL` 哨兵分支 + `_on_bg_wake` 回调）+ `agent/__init__.py:has_pending_wake_payload`（空唤醒预检）+ `set_wake_callback`（bg/delegation 两生产端） |
 | Hook 事件（27 种）+ 5 种 handler 类型 | `agent/hooks.py:HookEvent` + `agent/hook_exec.py:dispatch_hook` + `agent/hook_loader.py` |
 | 子任务进度摘要 | `agent/progress.py:ProgressReporter` |
 | 团队协作（同步 bus / 异步 mailbox） | `agent/team/bus.py` + `agent/team/mailbox.py` |
@@ -244,7 +245,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 | preventSleep（Windows 防休眠） | `agent/prevent_sleep.py` |
 | scratchpad 涂鸦区 + coordinator | `agent/scratchpad.py` + `agent/builtin_agents/coordinator.md` |
 | brief（echo 型格式约定工具） | `tools/brief_tool.py` |
-| R24 裁决不补 3 项 | #29 MCP 技能（`skill://` 无 server 生态）/ #43 jobs 模板（skill_bundle + Task System 已覆盖）/ #47 主会话后台化（与输入线程/流式预执行耦合风险大，bg_task + goal continue 已覆盖） |
+| R24 裁决不补 3 项 | #29 MCP 技能（`skill://` 无 server 生态）/ #43 jobs 模板（skill_bundle + Task System 已覆盖）/ #47 主会话后台化——**已窄化推翻**（2026-08-24 用户裁决：空闲时后台任务/异步子代理完成自动唤醒主循环，输入队列对象哨兵方案，见 idle wake 行；rewake/cron/team 仍是"下一轮"语义） |
 | 审批前缀规则派生（curated 表） | `agent/command_prefix.py:derive_approved_prefix` |
 
 ## 已知约束（设计如此，不是 bug）
@@ -335,6 +336,7 @@ uv add <包名> | uv add --dev <包名> | uv sync
 - **notifier 仅 Windows** —— toast；bg title 带 task_id 前 8 位（30s 节流不互吞）。
 - **preventSleep 引用计数语义** —— acquire/release 按 reason，只在忙闲转换时真正调（每轮调会计数无界）；中断路径残留到 atexit 兜底（宁多醒不久睡）。
 - **排队输入不打断当前响应** —— 工具批结束 drain 回流 ephemeral；单用户 FIFO，不做三级优先级。
+- **idle wake 哨兵是自愈设计** —— 后台完成回调往输入队列塞对象哨兵（用户敲不出来）；回合内被 drain 吞掉=通知已被当轮消费（本就无需唤醒），多余哨兵由 `has_pending_wake_payload` 预检静默跳过，**不要加持久 single-flight 标志**（哨兵被吞会永久卡死）。stall 提醒不唤醒（任务没完）；rewake/cron/team 不在唤醒源内。`bg_task.idle_wake=False` 一键关。
 - **粘贴占位符 session 存占位、发送展开** —— 外存文件被清理时保留占位符 fail-open。
 - **scratchpad 是「完全可逆」铁律的显式例外** —— 临时涂鸦区按 mtime 7 天清理（临时区非知识库）；白名单是运行时的不写 settings。
 - **任务全清是标志不是删除** —— `all_done: true` 引导 LLM，不动任务状态（completed 持久可查）。
