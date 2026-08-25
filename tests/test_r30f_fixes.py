@@ -128,20 +128,21 @@ def test_agent_recent_active_tools_h9(tmp_path):
 def test_usage_tracker_record_summary_persist_h8(tmp_path):
     from agent.usage_tracker import UsageTracker
 
-    t = UsageTracker(tmp_path, "s1", default_provider="deepseek")
+    t = UsageTracker(tmp_path, "s1")
     t.record(model="deepseek-chat", prompt=1_000_000, completion=500_000,
              cache_read=200_000, cache_creation=100_000)
     t.record(model="some-unknown-model", prompt=100, completion=100)
 
     s = t.summary()
     assert s["models"]["deepseek-chat"]["calls"] == 1
-    # 已知模型有金额（pricing.py 价表），未知模型只报 token
-    assert "cost_usd" in s["models"]["deepseek-chat"]
+    # 只统计 token，不算金额（价格计算已按用户裁决移除）
+    assert "cost_usd" not in s["models"]["deepseek-chat"]
     assert "cost_usd" not in s["models"]["some-unknown-model"]
+    assert "cost_usd" not in s["totals"]
     assert s["totals"]["calls"] == 2
 
     # 会话持久化：新实例从磁盘恢复
-    t2 = UsageTracker(tmp_path, "s1", default_provider="deepseek")
+    t2 = UsageTracker(tmp_path, "s1")
     assert t2.summary()["models"]["deepseek-chat"]["calls"] == 1
 
 

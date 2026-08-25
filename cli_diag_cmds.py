@@ -428,12 +428,11 @@ def _handle_doctor_cli(args: str, rt) -> bool:
 def _show_usage(rt: RuntimeContext):
     """/usage 命令的展示体：当前会话的迭代预算、历史长度和 token 花销。
 
-    背景：用户想知道"这个会话烧了多少 token、多少钱"。逐块展示（都是
+    背景：用户想知道"这个会话烧了多少 token"。逐块展示（都是
     有数据才显示，出错只写 debug 日志不炸整个命令）：
     - 迭代预算剩余（agent 还能跑几轮）和对话历史条数；
     - LLM token 用量：调用次数、输入/输出/Cache 命中/Cache 写入 tokens；
-    - 按模型分账的用量和成本（usage_tracker 存在时才有）；
-    - 用价表估算的美元成本（pricing.py 没收录该模型则显示未知）。
+    - 按模型分账的用量（usage_tracker 存在时才有；只统计 token 不算钱）。
 
     参数：
         rt：RuntimeContext（取 agent、config、session_store、session_id）
@@ -459,8 +458,8 @@ def _show_usage(rt: RuntimeContext):
                 hit_rate = stats["total_cache_read_tokens"] / total_in * 100
                 console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
 
-            # R30f-H8 加的：按模型分账的用量 + 成本。只在 usage_tracker
-            # 被注入时才有；辅助模型与主模型分开计，金额复用价表算
+            # R30f-H8 加的：按模型分账的用量。只在 usage_tracker
+            # 被注入时才有；辅助模型与主模型分开计（只统计 token 不算钱）
             tracker = getattr(rt, "usage_tracker", None)
             if tracker is not None:
                 try:
@@ -468,47 +467,13 @@ def _show_usage(rt: RuntimeContext):
                     if s.get("models"):
                         console.print(f"\n[bold]按模型（本会话持久累计）：[/bold]")
                         for name, row in s["models"].items():
-                            cost = (f"  ${row['cost_usd']:.4f}"
-                                    if "cost_usd" in row else "  $?")
                             console.print(
                                 f"  [cyan]{name}[/cyan]: {row['calls']} 次 | "
                                 f"in {row['prompt']:,} / out {row['completion']:,} | "
                                 f"cache r{row['cache_read']:,}/w{row['cache_creation']:,}"
-                                f"{cost}"
                             )
                 except Exception as e:
                     logger.debug("per-model 用量展示失败（fail-open）: %s", e)
-
-            # 成本估算（批次 2 的 A3 项）：查价表折算成美元
-            try:
-                from agent.pricing import estimate_cost_usd
-                model_cfg = rt.config.get("model", {})
-                est = estimate_cost_usd(
-                    provider=model_cfg.get("provider", ""),
-                    model=model_cfg.get("name", ""),
-                    prompt_tokens=stats["total_prompt_tokens"],
-                    completion_tokens=stats["total_completion_tokens"],
-                    cache_read_tokens=stats["total_cache_read_tokens"],
-                    cache_creation_tokens=stats["total_cache_creation_tokens"],
-                )
-                if est is not None:
-                    console.print(f"\n[bold]成本估算：[/bold]")
-                    console.print(f"  总成本:    [bold green]${est['cost_usd']:.4f}[/bold green]")
-                    bk = est["breakdown"]
-                    console.print(
-                        f"  [dim]输入:     ${bk['input']:.4f}"
-                        f" | Cache 命中: ${bk['cache_hit']:.4f}"
-                        f" | Cache 写入: ${bk['cache_write']:.4f}"
-                        f" | 输出: ${bk['output']:.4f}[/dim]"
-                    )
-                else:
-                    console.print(
-                        f"\n[dim]成本估算：未知模型 "
-                        f"{model_cfg.get('provider', '?')}/"
-                        f"{model_cfg.get('name', '?')}（pricing.py 未收录）[/dim]"
-                    )
-            except Exception as e:
-                logger.debug("成本估算失败（fail-open）: %s", e)
     if rt.session_store and rt.session_id:
         info = rt.session_store.get_session(rt.session_id)
         if info:
@@ -518,7 +483,7 @@ def _show_stats(rt: RuntimeContext):
 
     背景：单看一个会话不够，用户还想看"我总共聊了多少、哪个工具用得最勤"。
     从 session_store 聚合出：会话/消息总数、时间跨度、消息角色分布、
-    最长会话 Top 5、工具调用 Top 10（带条形图），最后附当前会话成本估算。
+    最长会话 Top 5、工具调用 Top 10（带条形图）。
 
     参数：
         rt：RuntimeContext（取 session_store、agent、config）
@@ -585,30 +550,6 @@ def _show_stats(rt: RuntimeContext):
         console.print(table)
     else:
         console.print(f"\n[dim]暂无工具调用记录[/dim]")
-
-    # === 当前会话成本（复用 pricing 价表估算） ===
-    if rt.agent:
-        agent_stats = rt.agent.llm_usage_stats
-        if agent_stats.get("total_calls", 0) > 0:
-            try:
-                from agent.pricing import estimate_cost_usd
-                model_cfg = rt.config.get("model", {})
-                est = estimate_cost_usd(
-                    provider=model_cfg.get("provider", ""),
-                    model=model_cfg.get("name", ""),
-                    prompt_tokens=agent_stats.get("total_prompt_tokens", 0),
-                    completion_tokens=agent_stats.get("total_completion_tokens", 0),
-                    cache_read_tokens=agent_stats.get("total_cache_read_tokens", 0),
-                    cache_creation_tokens=agent_stats.get("total_cache_creation_tokens", 0),
-                )
-                if est:
-                    console.print(
-                        f"\n[bold]当前会话成本：[/bold] "
-                        f"[bold green]${est['cost_usd']:.4f}[/bold green] "
-                        f"[dim]({agent_stats['total_calls']} 次调用)[/dim]"
-                    )
-            except Exception as e:
-                logger.debug("stats 成本估算失败: %s", e)
 # ---------------------------------------------------------------------------
 # CCAR10 Task 3：statusline（每轮 AI 回答结束后在底部打的一行小状态）
 # ---------------------------------------------------------------------------
