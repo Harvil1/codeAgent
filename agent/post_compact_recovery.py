@@ -164,20 +164,16 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
     # 放最前（最高优先）——这是模型自己刚写的任务进度，比任何摘要都贴近
     # "现在干到哪了"；摘要有 200 字/段的损耗，这个文件原样回读零损耗
     try:
-        from agent.scratchpad import scratchpad_dir
-        progress_file = scratchpad_dir(
+        from agent.scratchpad import read_progress_file
+        ptext = read_progress_file(
             getattr(agent, "session_id", "") or "default",
             getattr(agent, "omnimate_home", None),
-        ) / "PROGRESS.md"
-        if progress_file.exists():
-            ptext = progress_file.read_text(
-                encoding="utf-8", errors="replace",
-            ).strip()
-            if ptext:
-                lines.append(
-                    "## 任务进度文件（你之前写入的中间结论，原样回读）\n"
-                    + ptext[:20000]
-                )
+        )
+        if ptext:
+            lines.append(
+                "## 任务进度文件（你之前写入的中间结论，原样回读）\n"
+                + ptext[:20000]
+            )
     except Exception as e:
         logger.debug("PROGRESS.md 回读失败（fail-open）: %s", e)
 

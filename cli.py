@@ -1053,6 +1053,8 @@ class RuntimeContext:
         self.session_id = session_id
         self.agent.session_id = session_id
         self.agent.invalidate_system_prompt()
+        # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
+        _inject_progress_recovery(self, session_id)
 
         # 重建 checkpoint 管理器（绑定恢复的这个会话 ID）
         try:
@@ -2030,6 +2032,41 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
         last_idx,
     )
     return kept
+
+
+def _inject_progress_recovery(rt, session_id: str) -> None:
+    """resume 后把 PROGRESS.md 进度外存注入 ephemeral 队列（fail-open）。
+
+    进度外存此前只在压缩醒来时被回读；跨进程 /resume（隔天继续长任务）
+    时主动补一次，恢复的模型立刻知道干到哪了。消息走 _pending_ephemeral
+    通道：恢复后的第一次对话组装时被模型看到，不进历史不碰缓存。
+    """
+    try:
+        agent = getattr(rt, "agent", None)
+        queue = getattr(agent, "_pending_ephemeral_messages", None)
+        if queue is None:
+            return
+        from agent.scratchpad import read_progress_file, scratchpad_dir
+        ptext = read_progress_file(session_id, rt.home)
+        if not ptext:
+            return
+        progress_path = scratchpad_dir(session_id, rt.home) / "PROGRESS.md"
+        queue.append({
+            "role": "user",
+            "content": (
+                "<progress_recovery>\n"
+                "（以下是你在本会话较早阶段写入的任务进度外存，"
+                "原样回读帮你恢复上下文）\n"
+                f"{ptext[:20000]}\n"
+                f"（该文件路径：{progress_path}。任务有新进展时请追加更新，"
+                "一行一条、最新在前）\n"
+                "</progress_recovery>"
+            ),
+            "_ephemeral": True,
+        })
+        logger.info("resume: 已注入 PROGRESS.md 进度外存（%d 字符）", len(ptext))
+    except Exception as e:
+        logger.debug("resume PROGRESS.md 回读失败（fail-open）: %s", e)
 
 
 def _cleanup_redundant_summaries(msgs: list) -> list:

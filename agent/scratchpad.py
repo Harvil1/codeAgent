@@ -124,3 +124,23 @@ def cleanup_old_scratchpads(omnimate_home=None, retention_days: int = DEFAULT_RE
         return removed
     except Exception:
         return 0
+
+
+def read_progress_file(session_id: str, omnimate_home=None) -> str:
+    """读会话进度外存 PROGRESS.md 的内容（fail-open）。
+
+    压缩恢复和 /resume 两处共用——同一文件同一读法，避免两门口径不一。
+
+    参数：
+        session_id：会话 id
+        omnimate_home：数据根目录，不传用默认 ~/.OmniMate
+    返回：去空白后的全文；文件不存在/读失败返回空串。
+    """
+    try:
+        p = scratchpad_dir(session_id, omnimate_home) / "PROGRESS.md"
+        if not p.exists():
+            return ""
+        return p.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception as e:
+        logger.debug("PROGRESS.md 读取失败（fail-open）: %s", e)
+        return ""
