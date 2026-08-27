@@ -41,7 +41,7 @@ SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要�
   由 assistant 推测或推断出的内容**不得**写成用户说过的话——如需保留必须
   明确标注"（assistant 推断）"
 - 用 markdown 格式
-- 每段不超过 200 字（除了 user messages 段保留原文）
+- 第 3/4 段（Files and Code Sections / Errors and fixes）各不超过 {files_errors_limit} 字；其余每段不超过 200 字（user messages 段保留原文）
 
 对话内容：
 {dialog}
@@ -64,6 +64,29 @@ _last_summary_degraded = False
 
 # PTL（prompt_too_long）重试上限
 MAX_PTL_RETRIES = 3
+
+# Files/Errors 段字数分档：被摘要消息数过阈值就放宽——长任务一屏
+# 路径+报错 200 字装不下，砍了下次压缩就找不回来（锚定段只保跨代不丢）
+_DEFAULT_SCALE_THRESHOLDS = (60, 150)
+_DEFAULT_FILES_ERRORS_LIMITS = (200, 400, 600)
+
+
+def _files_errors_limit(msg_count: int, thresholds=None, limits=None) -> int:
+    """按被摘要消息数算 Files/Errors 段的字数上限（纯函数）。
+
+    参数：
+        msg_count：本次被摘要的消息条数
+        thresholds：分档阈值（默认 (60, 150)）
+        limits：各档上限（默认 (200, 400, 600)）
+    返回：字数上限。
+    """
+    th = tuple(thresholds) if thresholds else _DEFAULT_SCALE_THRESHOLDS
+    lm = tuple(limits) if limits else _DEFAULT_FILES_ERRORS_LIMITS
+    if msg_count <= th[0]:
+        return lm[0]
+    if msg_count <= th[1]:
+        return lm[1]
+    return lm[2]
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +210,8 @@ async def _summarize_conversation(
     fork_prefix_messages: list = None,
     tools: list = None,
     anchor_note: str = "",
+    scale_thresholds=None,
+    files_limits=None,
 ) -> str:
     """调 LLM 把一段对话历史总结成摘要文本（async；9 段式固定格式）。
 
@@ -253,8 +278,13 @@ async def _summarize_conversation(
     # 先剥媒体块（image/document → [image]/[document] 文本标记），
     # 防多模态消息把压缩调用自己撑爆；纯文本消息不受影响。
     working_messages = strip_media_blocks(to_summarize)  # 不改入参（PTL 重试还要再切片）
+    fe_th = tuple(scale_thresholds) if scale_thresholds else _DEFAULT_SCALE_THRESHOLDS
+    fe_lm = tuple(files_limits) if files_limits else _DEFAULT_FILES_ERRORS_LIMITS
     dialog = _format_dialog_for_summary(working_messages)
-    prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+    prompt = SUMMARIZE_PROMPT_9SECTION.format(
+        dialog=dialog,
+        files_errors_limit=_files_errors_limit(len(working_messages), fe_th, fe_lm),
+    )
     # 锚定提示：三段关键内容由调用方原样拼接，LLM 不必重复罗列（省输出 + 防重写矛盾）
     if anchor_note:
         prompt += "\n\n" + anchor_note
@@ -318,7 +348,13 @@ async def _summarize_conversation(
                 old_drop = max(1, len(working_messages) // 5)
                 working_messages = working_messages[drop_count:]
                 dialog = _format_dialog_for_summary(working_messages)
-                prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+                # 丢消息后按当时的实际条数重算分档
+                prompt = SUMMARIZE_PROMPT_9SECTION.format(
+                    dialog=dialog,
+                    files_errors_limit=_files_errors_limit(
+                        len(working_messages), fe_th, fe_lm,
+                    ),
+                )
                 logger.warning(
                     "PTL 重试 %d/%d：tokenGap 精确算法丢 %d 条（旧 20%% 会丢 %d 条）",
                     retry + 1, MAX_PTL_RETRIES, drop_count, old_drop,

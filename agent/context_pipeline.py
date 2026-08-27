@@ -765,6 +765,8 @@ async def llm_compact(
     from_idx: int = 0,
     up_to_idx: int = -1,
     tools: Optional[list] = None,
+    summary_scale_thresholds=None,
+    summary_files_errors_limits=None,
 ) -> Tuple[list, bool]:
     """L4 第 4 层：前面几层压不下去、仍超 token 阈值时，调 LLM 把旧对话写成摘要。
 
@@ -821,6 +823,8 @@ async def llm_compact(
             fork_prefix_messages=messages,
             tools=tools,
             anchor_note=anchor_note,
+            scale_thresholds=summary_scale_thresholds,
+            files_limits=summary_files_errors_limits,
         )
         if not summary:
             return messages, False
@@ -873,6 +877,8 @@ async def llm_compact(
         fork_prefix_messages=messages,
         tools=tools,
         anchor_note=anchor_note,
+        scale_thresholds=summary_scale_thresholds,
+        files_limits=summary_files_errors_limits,
     )
     if not summary:
         return messages, False
@@ -1385,6 +1391,8 @@ async def compress_if_needed(
             # llm_compact 内部门槛用同一个「下一轮预期水位」判定，避免二次拦截）
             precomputed_tokens=est_tokens + growth,
             tools=tools,  # fork 前缀复用要用
+            summary_scale_thresholds=config.get("summary_scale_thresholds"),
+            summary_files_errors_limits=config.get("summary_files_errors_limits"),
         )
         if c4:
             session_state.record_llm_compact()

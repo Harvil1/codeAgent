@@ -116,6 +116,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # growth_window 轮里最猛的一轮，历史数据不够就用默认值
         "llm_compact_growth_window": 3,
         "llm_compact_growth_default": 8000,
+        # 9 段摘要 Files/Errors 段字数分档：被摘要消息数过 (60, 150) 阈值
+        # 就把上限从 200 放宽到 400/600（长任务路径+报错多，200 字装不下）
+        "summary_scale_thresholds": [60, 150],
+        "summary_files_errors_limits": [200, 400, 600],
         # 压缩后恢复信息的统一 token 预算：计划/异步状态 > 最近文件 >
         # 技能正文，预算不够就按这个优先级从低往高砍
         "post_compact_recovery_budget": 40000,
