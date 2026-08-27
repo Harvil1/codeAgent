@@ -614,6 +614,9 @@ def _delegate_async(
                 "goal": goal,
                 "success": True,
                 "result": result,
+                # spawn 时的摘要长度意图跟着结果走（诊断用；_async_tasks
+                # 条目在完成时已被 pop，花名册不是载体）
+                "summary_len": kwargs.get("summary_len"),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:

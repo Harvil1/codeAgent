@@ -2059,9 +2059,25 @@ class AIAgent:
                 if success:
                     result_text = r.get("result", "")
                     if len(result_text) > 2000:
-                        result_text = result_text[:2000] + (
-                            f"...[truncated {len(result_text)} chars]"
-                        )
+                        # 全文落盘留预览 + 找回路径——深度调研结果不再闷头
+                        # 砍掉（对齐 L2 落盘哲学；maybe_offload 自带 IO 失败
+                        # 降级为截断）
+                        try:
+                            from agent.output_offload import maybe_offload
+                            result_text = maybe_offload(
+                                result_text,
+                                tool_call_id=f"delegation_{delegation_id}",
+                                agent_home=self.omnimate_home,
+                                threshold=2000,
+                                preview_chars=2000,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "async 结果落盘失败（降级截断）: %s", e,
+                            )
+                            result_text = result_text[:2000] + (
+                                f"...[truncated {len(result_text)} chars]"
+                            )
                     text = (
                         f"[后台子代理完成] task_id={delegation_id}\n"
                         f"任务: {goal}\n"
