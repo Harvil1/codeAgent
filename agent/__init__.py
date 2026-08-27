@@ -2225,6 +2225,17 @@ class AIAgent:
         except Exception as e:
             logger.debug("上下文管理提示注入失败（忽略）: %s", e)
 
+    def _is_long_task(self) -> bool:
+        """长任务信号：历史条数 > 100 或本场触发过 L4 压缩。
+
+        F（进度提醒）和 E（批间摘要自启）共用——单一事实源，
+        阈值别在两处各写一份（会漂移）。
+        """
+        return (
+            len(self.conversation_history or []) > 100
+            or self._compress_session_state.llm_compact_count > 0
+        )
+
     def _maybe_inject_progress_reminder(self, messages: list) -> None:
         """长任务里定期提醒更新 PROGRESS.md（双条件节流，ephemeral）。
 
@@ -2240,11 +2251,7 @@ class AIAgent:
             interval = int(cfg.get("progress_reminder_turns", 40))
             if interval <= 0:
                 return
-            long_task = (
-                len(self.conversation_history or []) > 100
-                or self._compress_session_state.llm_compact_count > 0
-            )
-            if not long_task:
+            if not self._is_long_task():
                 return
             turn = self._compress_session_state.current_turn
             if turn - self._last_progress_reminder_turn < interval:
@@ -2265,6 +2272,7 @@ class AIAgent:
                     f"{sp / 'PROGRESS.md'}\n"
                     "（一行一条、最新在前）——上下文压缩时它会原样回读，"
                     "跨会话恢复时也会回读。\n"
+                    "有跨会话价值的用户/项目事实，记得用 memory 工具保存。\n"
                     "</progress_reminder>"
                 ),
                 "_ephemeral": True,
@@ -3228,9 +3236,12 @@ class AIAgent:
         返回：无。
         """
         try:
-            if not (self.config or {}).get("context", {}).get(
-                "tool_batch_summary_enabled", False,
-            ):
+            ctx_cfg = (self.config or {}).get("context", {})
+            flag = ctx_cfg.get("tool_batch_summary_enabled", False)
+            # flag 显式开照旧；flag 关但长任务信号也开
+            # （auto 是独立 kill switch，只关自动开、不影响手动开关语义）
+            auto = ctx_cfg.get("tool_batch_summary_auto_long_task", True)
+            if not flag and not (auto and self._is_long_task()):
                 return
             if self.aux_llm_router is None or self.spawn_depth > 0:
                 return

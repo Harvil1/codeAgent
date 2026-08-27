@@ -135,6 +135,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 工具批间摘要：让辅助模型一句话总结这批工具结果，下一轮再悄悄
         # 注入，把"出结果"和"看结果"的时间差藏起来。默认关
         "tool_batch_summary_enabled": False,
+        # 批间摘要的长任务自启开关：flag 关着但检测到长任务信号
+        # （历史 >100 条或压缩过）时也自动开；False = 只认显式 flag
+        "tool_batch_summary_auto_long_task": True,
         # 对话轨迹落盘
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",
