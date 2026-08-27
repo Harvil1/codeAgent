@@ -630,6 +630,29 @@ def _enforce_per_message_budget(
     return changed
 
 
+def _split_pinned(messages: list) -> tuple:
+    """把「纯文本 pinned 消息」和其余消息分开（各自保持原相对顺序）。
+
+    只认无 tool_calls 的：带 tool_calls 的 assistant 其结果必然已被
+    摘要，原样保留会造成孤儿调用（配对语义断裂）。
+
+    参数：messages：消息列表
+    返回：(pinned 列表, 其余列表)
+    """
+    pinned, rest = [], []
+    for m in messages:
+        content = m.get("content", "")
+        is_pinned = (
+            (isinstance(content, str) and content.startswith("[pinned]"))
+            or bool(m.get("pinned"))
+        )
+        if is_pinned and not m.get("tool_calls"):
+            pinned.append(m)
+        else:
+            rest.append(m)
+    return pinned, rest
+
+
 def apply_context_collapse(
     messages: list,
     *,
@@ -825,6 +848,8 @@ async def llm_compact(
         anchor, anchor_note = _extract_anchor_from_slice(
             conv[from_idx:effective_up_to],
         )
+        # 纯文本 pinned 消息原样保留（不进重组段被摘要掉）
+        pinned_msgs, _ = _split_pinned(conv[from_idx:effective_up_to])
 
         summary = await _summarize_conversation(
             conv,  # 传完整 conv，由 _summarize_conversation 内部按 from/up_to 切片
@@ -857,7 +882,7 @@ async def llm_compact(
                 "[以下是压缩段之后的对话，请继续]"
             ),
         }
-        new_conv = head + [placeholder] + tail
+        new_conv = head + pinned_msgs + [placeholder] + tail
         new_conv = _fix_tool_call_pairs(new_conv)
         new_messages = _reassemble(system, new_conv)
 
@@ -880,6 +905,11 @@ async def llm_compact(
 
     to_summarize = conv[:-keep_recent]
     keep = conv[-keep_recent:]
+
+    # 纯文本 pinned 消息免摘要：从摘要输入里挑出来原样保留
+    # （原文在场，不必再进摘要；带 tool_calls 的不保——结果已被摘要，
+    # 原样保留会造成孤儿调用）
+    pinned_msgs, to_summarize = _split_pinned(to_summarize)
 
     # 被摘要段里若有上一次压缩的摘要 → 提锚定段防代际损耗
     anchor, anchor_note = _extract_anchor_from_slice(to_summarize)
@@ -911,7 +941,7 @@ async def llm_compact(
             "[以下是最近的对话，请继续]"
         ),
     }
-    new_conv = [placeholder] + keep
+    new_conv = pinned_msgs + [placeholder] + keep
     new_conv = _fix_tool_call_pairs(new_conv)
     new_messages = _reassemble(system, new_conv)
 
