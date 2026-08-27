@@ -499,6 +499,9 @@ class AIAgent:
         self._recent_skills: list = []
         # 上下文管理提示：接近上限时建议用户主动 /compact 或 /new，只提示一次
         self._context_tip_shown = False
+        # 上次提醒更新 PROGRESS.md 时的 LLM 轮次号（-10^6 = 从没提醒过；
+        # 首轮即满足节流条件，长任务信号挡住短会话）
+        self._last_progress_reminder_turn = -10**6
 
         # === LLM 用量统计（给 prompt cache 记账）===
         self._llm_usage_stats = {
@@ -2153,6 +2156,8 @@ class AIAgent:
 
         # 上下文管理提示（快到上限时建议用户主动 /compact 或 /new）
         self._maybe_inject_context_tip(messages)
+        # 长任务定期提醒更新进度外存（双条件节流）
+        self._maybe_inject_progress_reminder(messages)
 
         # === 消费待注入临时队列（goal continue 的注入口）===
         # 主循环要继续 goal 时把临时消息塞进这个队列（不进正式历史），
@@ -2219,6 +2224,53 @@ class AIAgent:
                 })
         except Exception as e:
             logger.debug("上下文管理提示注入失败（忽略）: %s", e)
+
+    def _maybe_inject_progress_reminder(self, messages: list) -> None:
+        """长任务里定期提醒更新 PROGRESS.md（双条件节流，ephemeral）。
+
+        进度外存此前只在压缩醒来那一刻被提醒写——两次压缩之间中断
+        的话外存是旧的。这里双条件兜底：
+        1. 长任务信号：历史条数 > 100 或本场触发过 L4 压缩
+        2. 节流：距上次提醒 >= progress_reminder_turns 个 LLM 轮（0 关闭）
+
+        提醒走 ephemeral 临时注入，不进历史不碰缓存。
+        """
+        try:
+            cfg = (self.config or {}).get("context", {})
+            interval = int(cfg.get("progress_reminder_turns", 40))
+            if interval <= 0:
+                return
+            long_task = (
+                len(self.conversation_history or []) > 100
+                or self._compress_session_state.llm_compact_count > 0
+            )
+            if not long_task:
+                return
+            turn = self._compress_session_state.current_turn
+            if turn - self._last_progress_reminder_turn < interval:
+                return
+            self._last_progress_reminder_turn = turn
+
+            from agent.scratchpad import scratchpad_dir
+            sp = scratchpad_dir(
+                getattr(self, "session_id", "") or "default",
+                getattr(self, "omnimate_home", None),
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    "<progress_reminder>\n"
+                    "这是段长任务。如果自上次更新以来有新的关键结论"
+                    "（重要决策/发现/架构判断/已完成步骤），请追加写入\n"
+                    f"{sp / 'PROGRESS.md'}\n"
+                    "（一行一条、最新在前）——上下文压缩时它会原样回读，"
+                    "跨会话恢复时也会回读。\n"
+                    "</progress_reminder>"
+                ),
+                "_ephemeral": True,
+            })
+        except Exception as e:
+            logger.debug("progress reminder 注入失败（fail-open）: %s", e)
 
     async def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
         """快到 token 上限时压缩上下文（整体已异步化）。

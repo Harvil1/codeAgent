@@ -120,6 +120,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 就把上限从 200 放宽到 400/600（长任务路径+报错多，200 字装不下）
         "summary_scale_thresholds": [60, 150],
         "summary_files_errors_limits": [200, 400, 600],
+        # 长任务定期提醒更新 PROGRESS.md：距上次提醒 ≥ 这么多个 LLM 轮才
+        # 再提醒（0 = 关闭）；且只在长任务信号（历史 >100 条或压缩过）后生效
+        "progress_reminder_turns": 40,
         # 压缩后恢复信息的统一 token 预算：计划/异步状态 > 最近文件 >
         # 技能正文，预算不够就按这个优先级从低往高砍
         "post_compact_recovery_budget": 40000,
