@@ -64,14 +64,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 用一个便宜模型跑，省 token。没配置（None）就直接用主模型。
     "aux_model": None,
 
-    # 看图工具（image_analyze / image_ocr）的配置
-    "vision": {
-        "enabled": True,
-        "provider": "",          # 空字符串 = 跟主模型用同一家服务商
-        "model": "",             # 空字符串 = 跟主模型用同一个模型（前提是它支持看图）
-        "max_bytes": 20 * 1024 * 1024,  # 单张图最大 20 MB
-    },
-
     # 输出语言（"zh" 中文 / "en" 英文），影响 system prompt 里
     # "我是谁"和"输出约定"这两段的措辞
     "language": "zh",

@@ -10,7 +10,6 @@
     python main.py                 # 交互模式（启动时提示恢复历史）
     python main.py -c              # 自动恢复最近会话（continue）
     python main.py --continue      # 同上
-    python main.py chat <msg>      # 非交互模式（一次性问答）
 """
 
 import sys
@@ -89,19 +88,17 @@ _init_mcp_safely()
 def main():
     """主入口函数：把启动流程收尾，实际分发交给 cli 模块。
 
-    分工：参数解析和"该进交互模式还是一次性问答"的判断在 cli.main，
+    分工：参数解析和"是否恢复最近会话"的判断在 cli.main，
     这里只转手调用。main.py 本身只负责三件事：输出编码设置、MCP 初始化、
     调用 cli.main。
 
     支持的调用形式：
         python main.py                         # 交互模式
         python main.py -c / --continue         # 自动恢复最近会话
-        python main.py chat <msg>              # 非交互一次性问答
         python main.py --agents '{json}'       # 从命令行注入子代理定义
-        python main.py --agents '{json}' chat <msg>
 
     设计细节：asyncio.run（启动异步事件循环的开关）不在本层调用，而是
-    放在 cli 里的 run_interactive / run_one_shot 内部、紧贴真正要用异步的
+    放在 cli 里的 run_interactive 内部、紧贴真正要用异步的
     run_conversation 调用点。这样 cli.main 保持纯同步，避免出现"事件循环
     里再套事件循环"的嵌套问题。
     """

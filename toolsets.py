@@ -48,8 +48,6 @@ _CORE_TOOLS = [
     # —— 任务系统的看板扩展 ——
     "task_block", "task_unblock", "task_link", "task_comment",
     "task_heartbeat", "task_artifacts",
-    # —— 图片分析（本地图片理解 + 文字识别 OCR）——
-    "image_analyze", "image_ocr",
     # —— 主动压缩上下文（让 LLM 自己管窗口大小）——
     "compact",
     # —— LLM 主动剪掉早期历史（snip）+ 查看上下文现状（ctx_inspect）——
@@ -57,8 +55,6 @@ _CORE_TOOLS = [
     "ctx_inspect",
     # —— 抓网页 ——
     "web_fetch",
-    # —— 搜网络（Tavily 后端，没配 key 自动隐身）——
-    "web_search",
     # —— MCP 工具说明书按需加载 ——
     "tool_search",
     # —— 后台任务（后台组件没起时自动隐身）——

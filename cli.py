@@ -1,7 +1,7 @@
 """CLI（command-line interface，命令行界面——用户在黑窗口里打字交互）主入口。
 
-这个文件是整个程序的"前台总调度"：main() 在这里解析命令行参数，决定进
-交互聊天模式还是一次性问答模式；RuntimeContext 类在这里把所有零件
+这个文件是整个程序的"前台总调度"：main() 在这里解析命令行参数，决定是否
+自动恢复最近会话；RuntimeContext 类在这里把所有零件
 （记忆、会话存档、AI 本体、定时器、后台任务……）装配到一起。
 
 启动时初始化的组件：
@@ -829,27 +829,6 @@ class RuntimeContext:
             self.memory_manager._llm_client = agent.llm_client
             self.memory_manager._llm_model = agent.model
 
-        # === 初始化视觉模型连接（image_analyze / image_ocr 两个工具共用）===
-        vision_cfg = self.config.get("vision", {}) or {}
-        if vision_cfg.get("enabled", True):
-            try:
-                from agent.llm_client import create_llm_client
-                vision_provider = vision_cfg.get("provider") or ""
-                vision_model = vision_cfg.get("model") or ""
-                # 如果 vision.model 为空，不建独立连接（让工具回退用主连接）
-                if vision_model:
-                    agent._vision_client = create_llm_client({
-                        "format": model_cfg.get("format", "openai"),
-                        "base_url": model_cfg.get("base_url"),
-                        "api_key": api_key,
-                        "model": vision_model,
-                    })
-                    logger.info("vision_client 已初始化（model=%s）", vision_model)
-                # 否则 agent._vision_client 保持 None，工具回退用主连接
-            except Exception as e:
-                logger.warning("vision_client 初始化失败（用主 client 回退）: %s", e)
-                agent._vision_client = None
-
         # === 接线 MCP 推送 → 收件箱 ===
         # 把"收件箱推送函数"注册成传输层的 notification handler——
         # 不接线的话 MCP server 推消息时 handler 是 None，消息直接被扔掉，
@@ -1262,6 +1241,7 @@ def _make_ask_user_bridge():
         options = qdata.get("options") or []
         multi = qdata.get("multi", False)
 
+        n = len(options)
         lines = [f"[bold]{question}[/bold]", ""]
         for i, opt in enumerate(options):
             label = opt.get("label", "")
@@ -1269,6 +1249,8 @@ def _make_ask_user_bridge():
             lines.append(
                 f"[cyan]{i + 1}[/cyan]. {label}" + (f" — {desc}" if desc else "")
             )
+        # 永远给一个自己输入的口子——预设选项不可能穷尽用户的想法
+        lines.append(f"[cyan]{n + 1}[/cyan]. ✍ 其他（自己输入）")
         console.print(Panel.fit(
             "\n".join(lines),
             title="❓ 需要你选择",
@@ -1276,19 +1258,32 @@ def _make_ask_user_bridge():
         ))
 
         if multi:
+            # 多选：逗号分隔，数字段选选项、文字段算自定义答案（混着用也行）
             raw = console.input(
-                "[bold]选择序号（逗号分隔，可多选）> [/bold] ",
+                "[bold]选择序号（逗号分隔，也可直接输入文字）> [/bold] ",
             ).strip()
-            idxs = [
-                int(part) - 1
-                for part in raw.replace("，", ",").split(",")
-                if part.strip().isdigit()
-            ]
-        else:
-            raw = console.input("[bold]选择序号 > [/bold] ").strip()
-            idxs = [int(raw) - 1] if raw.strip().isdigit() else []
+            answers = []
+            for part in raw.replace("，", ",").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if part.isdigit() and 1 <= int(part) <= n:
+                    answers.append(options[int(part) - 1]["label"])
+                elif not part.isdigit():
+                    answers.append(part)
+            return answers
 
-        return [options[i]["label"] for i in idxs if 0 <= i < len(options)]
+        # 单选：数字选选项；选「其他」的序号或直接输入文字都算自定义答案
+        raw = console.input("[bold]选择序号（或直接输入你的答案）> [/bold] ").strip()
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= n:
+                return [options[idx - 1]["label"]]
+            if idx == n + 1:
+                custom = console.input("[bold]请输入你的答案 > [/bold] ").strip()
+                return [custom] if custom else []
+            return []
+        return [raw] if raw else []
     return bridge
 
 
@@ -3230,7 +3225,7 @@ def _handle_paste_command(args: str, rt) -> bool:
             raise RuntimeError(f"PowerShell 退出码 {r.returncode}")
         console.print(
             f"[green]已保存剪贴板图片:[/green] {out}\n"
-            "[dim]在消息中引用该路径即可让 AI 分析（image_analyze）[/dim]"
+            "[dim]在消息中引用该路径即可让 AI 分析[/dim]"
         )
     except Exception as e:
         console.print(
@@ -3917,47 +3912,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     rt.shutdown()
 
 
-def run_one_shot(message: str):
-    """一次性问答模式：发一条消息、打印回答、退出（`python main.py chat "你好"`）。
-
-    参数：
-        message: 用户这条消息的内容
-    """
-    try:
-        rt = RuntimeContext()
-        rt.initialize()
-    except SystemExit:
-        return
-    except Exception as e:
-        print(f"初始化失败: {e}", file=sys.stderr)
-        return
-
-    try:
-        # user 消息必须在跑对话之前先入库，保证会话历史顺序：
-        # user → assistant(tool_calls) → tool → ...
-        #（先跑后存的话工具轮次会排在 user 前，恢复会话时
-        #  assistant 的 tool_calls 前面没有 user 消息，违反 API 消息协议）
-        if rt.session_store and rt.session_id:
-            rt.session_store.append_message(rt.session_id, "user", message)
-        # run_conversation 是 async，同步入口用 asyncio.run 驱动。
-        response = asyncio.run(rt.agent.run_conversation(message))
-        # 流式输出（默认开启）过程中已实时打印过内容；
-        # 这里只补个换行收尾，避免重复打印完整回答。非流式模式才打印。
-        streaming_enabled = rt.config.get("streaming", {}).get("enabled", True)
-        if streaming_enabled:
-            print()  # 流式已打印过内容，只补个换行
-        else:
-            print(response)
-        if rt.session_store and rt.session_id:
-            rt.session_store.append_message(rt.session_id, "assistant", response)
-    except Exception as e:
-        print(f"错误: {e}", file=sys.stderr)
-        logger.exception("one-shot 运行错误")
-    finally:
-        # === 退出前清理后台任务 ===
-        rt.shutdown()
-
-
 # ---------------------------------------------------------------------------
 # 主入口函数
 # ---------------------------------------------------------------------------
@@ -3965,13 +3919,13 @@ def run_one_shot(message: str):
 # main.py 只负责 stdout 编码 + MCP 初始化 + 调 cli.main，职责干净。
 #
 # 为什么不在 cli.main 外面再套一层 asyncio.run：
-#   run_interactive / run_one_shot 保持同步签名，内部各自用 asyncio.run
-#   驱动异步的 run_conversation（避免破坏 run_skill_in_fork 等下游同步
-#   调用链）。如果 cli.main 再套一层 asyncio.run，会和内部的 asyncio.run
+#   run_interactive 保持同步签名，内部用 asyncio.run 驱动异步的
+#   run_conversation（避免破坏 run_skill_in_fork 等下游同步调用链）。
+#   如果 cli.main 再套一层 asyncio.run，会和内部的 asyncio.run
 #   嵌套报错："asyncio.run() cannot be called from a running event loop"
 #   （事件循环已在跑时不能再开新的）。所以 asyncio.run 只出现在
-#   run_one_shot / run_interactive 内部（紧贴异步调用点），
-#   cli.main 本身只是个同步分发器。
+#   run_interactive 内部（紧贴异步调用点），cli.main 本身只是个
+#   同步分发器。
 
 def main(argv: list = None) -> None:
     """CLI 主入口（main.py 只负责调用它）。
@@ -3982,16 +3936,14 @@ def main(argv: list = None) -> None:
     支持的调用形式：
         python main.py                         # 交互模式
         python main.py -c / --continue         # 自动恢复最近会话
-        python main.py chat <msg>              # 非交互一次性问答
         python main.py --agents '{json}'       # CLI 注入子代理
-        python main.py --agents '{json}' chat <msg>
     """
     if argv is None:
         argv = sys.argv
     args = argv[1:]
     cli_agents_raw = None
 
-    # 先提取 --agents 参数（拿掉它，不破坏旧的 chat/-c/--continue 逻辑）
+    # 先提取 --agents 参数（拿掉它，不破坏旧的 -c/--continue 逻辑）
     if "--agents" in args:
         idx = args.index("--agents")
         if idx + 1 >= len(args):
@@ -4005,14 +3957,6 @@ def main(argv: list = None) -> None:
             sys.exit(2)
         # 从 args 里删掉 --agents 及其值，让旧逻辑照常工作
         args = args[:idx] + args[idx + 2:]
-
-    # 非交互模式：python main.py chat "你好"（一问一答就退出）
-    if args and args[0] == "chat":
-        if cli_agents_raw:
-            from agent.agent_defs import inject_cli_agents
-            inject_cli_agents(cli_agents_raw)
-        run_one_shot(" ".join(args[1:]))
-        return
 
     # 交互模式：检查 -c / --continue 标志（有就自动恢复最近会话）
     resume_last = "-c" in args or "--continue" in args

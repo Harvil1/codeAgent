@@ -500,10 +500,6 @@ class AIAgent:
         # 上下文管理提示：接近上限时建议用户主动 /compact 或 /new，只提示一次
         self._context_tip_shown = False
 
-        # === 视觉模型客户端（image_analyze / image_ocr 共用） ===
-        # 默认 None；由 CLI 的 RuntimeContext 按 config 注入，或测试手工注入。
-        self._vision_client = None
-
         # === LLM 用量统计（给 prompt cache 记账）===
         self._llm_usage_stats = {
             "total_calls": 0,
@@ -640,7 +636,7 @@ class AIAgent:
             logger.warning("清理 session env 文件失败: %s", e)
 
         # 关闭 LLM 客户端（释放 HTTP 连接池），防进程退出前泄漏
-        for client_attr in ("llm_client", "fallback_llm_client", "_vision_client"):
+        for client_attr in ("llm_client", "fallback_llm_client"):
             client = getattr(self, client_attr, None)
             if client is not None:
                 try:

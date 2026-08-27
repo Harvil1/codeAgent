@@ -34,11 +34,11 @@ MEMORY_SCHEMA = {
         "        默认 general。同一主题下建议用一致的 name，同 name 会自动更新而非堆积。\n\n"
         "⚠️ 写入即维护：保存前先用 action=list 查重，同主题同 name 用 update 更新，\n"
         "   避免记忆无限堆积（索引应保持精简）。\n\n"
-        "CCALS 三级粒度：\n"
-        "  - name: L0 标题层（索引定位用）\n"
-        "  - description: L0.5 一句话钩子（索引行展示）\n"
-        "  - summary: L1 摘要层（80-100 字符，判断相关性用，避免读全文）\n"
-        "  - body: L2 全文层（完整内容，load 时返回）"
+        "记忆的详略分层（索引只进前两层，省 token）：\n"
+        "  - name: 标题（索引定位用）\n"
+        "  - description: 一句话钩子（索引行展示）\n"
+        "  - summary: 摘要（80-100 字符，判断相关性用，避免读全文）\n"
+        "  - body: 全文正文（完整内容，load 时返回）"
     ),
     "parameters": {
         "type": "object",
@@ -52,7 +52,7 @@ MEMORY_SCHEMA = {
             "description": {"type": "string", "description": "save 时必需；update 可选"},
             "summary": {
                 "type": "string",
-                "description": "L1 摘要层（80-100 字符）；save 可选，update 可选",
+                "description": "摘要（80-100 字符，判断相关性用）；save 可选，update 可选",
             },
             "type": {
                 "type": "string",

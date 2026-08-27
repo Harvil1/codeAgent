@@ -498,40 +498,6 @@ async def sc_snip(ctx: Ctx):
     ctx.check(ok, "snip 报告成功", ctx.last[:400])
 
 
-async def sc_image_ocr(ctx: Ctx):
-    """image_ocr / image_analyze 在模型不支持看图时的降级表现（不崩溃）。
-
-    参数：
-        ctx  场景上下文
-
-    返回：无（不通过时由断言抛错）。
-    """
-    # 生成 1x1 PNG
-    import base64
-    png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-    )
-    img = CWD / "probe_img.png"
-    img.write_bytes(png)
-    await ctx.say(
-        "请用 image_ocr 工具识别 probe_img.png 这张图（可能是 1 像素图）。"
-        "无论成功失败都告诉我工具返回了什么。"
-    )
-    ctx.check(len(ctx.last.strip()) > 0, "image 工具有响应不崩溃")
-
-
-async def sc_web_search(ctx: Ctx):
-    """web_search 在没配置搜索 provider 时的表现（要有响应，不能崩）。
-
-    参数：
-        ctx  场景上下文
-
-    返回：无（不通过时由断言抛错）。
-    """
-    await ctx.say("请用 web_search 工具搜索 Python 3.13 新特性，告诉我结果或错误。")
-    ctx.check(len(ctx.last.strip()) > 0, "web_search 有响应不崩溃")
-
-
 # ---------------------------------------------------------------------------
 # 子系统场景
 # ---------------------------------------------------------------------------
@@ -876,8 +842,6 @@ SCENARIOS = {
     "ctx_inspect": sc_ctx_inspect,
     "session_search": sc_session_search,
     "snip": sc_snip,
-    "image_ocr": sc_image_ocr,
-    "web_search": sc_web_search,
     "delegate_explore": sc_delegate_explore,
     "workflow": sc_workflow,
     "goal": sc_goal,
