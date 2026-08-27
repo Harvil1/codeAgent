@@ -1451,38 +1451,9 @@ class AIAgent:
         # === 按需检索记忆并注入（只有主代理做，子代理不做）===
         # 记忆走临时消息注入（保护前缀缓存），不塞进系统提示词。
         # 每条用户消息一次：放在用户输入刚进主循环的地方（不在工具循环里反复做）。
-        # 降级链：没有辅助小模型 → 退回注入记忆索引快照（有实例级标志，只注
-        # 一次，防每轮重复塞同一份索引）。
-        # 检索是并行预取（先发起任务，组装消息时再等结果）——等待
-        # 窗口覆盖压缩（含 LLM 调用）+ 工具集准备，检索延迟大半被并行吸收。
-        if (self.spawn_depth == 0 and self.memory_store is not None
-                and self._pending_ephemeral_messages is not None):
-            from agent.memory_injection import (
-                build_relevant_memories_message, reset_injection_cache,
-                _fallback_snapshot_message,
-            )
-            # 每轮开头清缓存（防上一轮的缓存串到这一轮）
-            reset_injection_cache()
-            try:
-                if self.aux_llm_router is not None:
-                    # 检索路径：并行预取（先不阻塞；组装消息时再等结果）
-                    # 带上「最近在用的工具」降噪 + 已注入过的记忆跨轮去重
-                    self._memory_prefetch_task = asyncio.create_task(
-                        build_relevant_memories_message(
-                            query=user_message, memory_store=self.memory_store,
-                            aux_llm_router=self.aux_llm_router,
-                            active_tools=self._recent_active_tools(),
-                            surfaced=self._surfaced_memory_ids,
-                        )
-                    )
-                elif not self._snapshot_injected:
-                    # 降级路径：没有辅助模型 → 注入一次快照（本会话仅此一次）
-                    msg = _fallback_snapshot_message(self.memory_store)
-                    if msg is not None:
-                        self._snapshot_injected = True
-                        self._pending_ephemeral_messages.append(msg)
-            except Exception as e:
-                logger.debug("记忆注入 fail-open: %s", e)
+        # 检索 query 用「用户消息 + 上下文签名」增强——长任务后期用户常说
+        # 「继续/好」，光靠这几个字查记忆没有信号。细节见 _kick_memory_prefetch。
+        self._kick_memory_prefetch(user_message)
 
         system_prompt = self._get_system_prompt()
 
@@ -1955,6 +1926,48 @@ class AIAgent:
         except Exception as e:
             logger.debug("记忆 prefetch 消费 fail-open: %s", e)
         return messages
+
+    def _kick_memory_prefetch(self, user_message: str) -> None:
+        """按当前用户消息预取相关记忆（检索式注入的发起端）。
+
+        检索 query 用「用户消息 + 上下文签名」增强（build_augmented_query：
+        最近文件/进行中任务/最近回复三信号机械拼接）——长任务后期用户
+        常说「继续/好/下一步」，光靠这几个字查记忆没有信号。
+        检索是并行预取（先发起任务，组装消息时再等结果）——等待窗口覆盖
+        压缩（含 LLM 调用）+ 工具集准备，检索延迟大半被并行吸收。
+        降级链：没有辅助小模型 → 退回注入记忆索引快照（有实例级标志，
+        只注一次，防每轮重复塞同一份索引）。全部 fail-open。
+        """
+        # 主代理 only（spawn_depth==0）；快照降级本会话只注入一次
+        if (self.spawn_depth == 0 and self.memory_store is not None
+                and self._pending_ephemeral_messages is not None):
+            from agent.memory_injection import (
+                build_relevant_memories_message, build_augmented_query,
+                reset_injection_cache, _fallback_snapshot_message,
+            )
+            # 每轮开头清缓存（防上一轮的缓存串到这一轮）
+            reset_injection_cache()
+            try:
+                if self.aux_llm_router is not None:
+                    # 检索路径：并行预取（先不阻塞；组装消息时再等结果）
+                    # 带上「最近在用的工具」降噪 + 已注入过的记忆跨轮去重
+                    self._memory_prefetch_task = asyncio.create_task(
+                        build_relevant_memories_message(
+                            query=build_augmented_query(user_message, self),
+                            memory_store=self.memory_store,
+                            aux_llm_router=self.aux_llm_router,
+                            active_tools=self._recent_active_tools(),
+                            surfaced=self._surfaced_memory_ids,
+                        )
+                    )
+                elif not self._snapshot_injected:
+                    # 降级路径：没有辅助模型 → 注入一次快照（本会话仅此一次）
+                    msg = _fallback_snapshot_message(self.memory_store)
+                    if msg is not None:
+                        self._snapshot_injected = True
+                        self._pending_ephemeral_messages.append(msg)
+            except Exception as e:
+                logger.debug("记忆注入 fail-open: %s", e)
 
     def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
         """组装本轮要发给 LLM 的消息：系统提示词 + 历史 + 各种临时消息。

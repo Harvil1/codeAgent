@@ -34,6 +34,55 @@ def reset_injection_cache() -> None:
     _last_result_var.set(None)
 
 
+def build_augmented_query(user_message: str, agent) -> str:
+    """把裸用户消息增强成带上下文签名的检索 query（纯机械拼接，零 LLM）。
+
+    长任务后期用户常说「继续/好/下一步」——光靠这几个字查记忆没有
+    信号。把三类现成信号拼进 query：最近读的文件、进行中任务、最近
+    一条 assistant 回复尾部。全部为空时原样返回（行为与未增强一致）。
+
+    参数：
+        user_message：当前用户消息原文
+        agent：AIAgent 实例（读 _recent_read_files / conversation_history /
+               omnimate_home）
+    返回：增强后的 query（长度由下游 retrieve_relevant 的 query[:1000]
+          统一截断，这里不另设上限）。
+    """
+    parts = []
+    # 信号 1：最近读的文件（末尾 3 个）
+    try:
+        files = list(getattr(agent, "_recent_read_files", None) or [])[-3:]
+        if files:
+            parts.append("最近文件: " + ", ".join(str(f) for f in files))
+    except Exception:
+        pass
+    # 信号 2：进行中任务（第 1 条；无 home 不碰全局 store）
+    try:
+        home = getattr(agent, "omnimate_home", None)
+        if home:
+            from agent.task_store import get_task_store
+            in_progress = get_task_store(home).list_all(status="in_progress") or []
+            if in_progress:
+                t = in_progress[0]
+                parts.append(f"进行中任务: {t.get('id', '')} {t.get('subject', '')}")
+    except Exception:
+        pass
+    # 信号 3：最近一条有正文的 assistant 回复尾部 200 字
+    try:
+        history = list(getattr(agent, "conversation_history", None) or [])
+        for m in reversed(history):
+            if (isinstance(m, dict) and m.get("role") == "assistant"
+                    and m.get("content") and not m.get("tool_calls")):
+                tail = str(m["content"])[-200:].replace("\n", " ")
+                parts.append(f"最近回复: {tail}")
+                break
+    except Exception:
+        pass
+    if not parts:
+        return user_message
+    return f"{user_message}\n\n[上下文签名]\n" + "\n".join(parts)
+
+
 async def build_relevant_memories_message(
     *, query: str, memory_store, aux_llm_router, max_results: int = 5,
     active_tools=None, surfaced: set = None,
