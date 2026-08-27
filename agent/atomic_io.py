@@ -1,15 +1,9 @@
 """原子写文件工具：写文件时读者永远不会看到「写了一半」的内容。
 
-原理像换招牌：先把新内容写到一个同目录的临时文件，全写好了再用
-「一键替换」（rename）换到正式位置——替换这个动作在操作系统层面是
-一瞬间完成的，不存在半旧半新的状态。
-
-为什么需要它：Curator 后台线程重建 MEMORY.md 的时候，Agent 主线程可能
-正在读这个文件往 system prompt 里塞。如果直接 write_text 覆盖，主线程
-可能正好读到只写了一半的内容，LLM 就会拿到残缺的记忆索引。
-
-在项目里的位置：底层公共工具，被 memory_store / usage_tracker /
-settings 等一切「不能读到半截」的关键写入方使用。
+原理：先把新内容写到同目录的临时文件，全写好后再用 os.replace
+「一键替换」到正式位置——替换在操作系统层面是一瞬间完成的，
+不存在半旧半新的状态。被 memory_store / usage_tracker / settings
+等「不能读到半截」的关键写入方使用。
 """
 import os
 import tempfile
@@ -27,12 +21,11 @@ def atomic_write_text(
 ) -> None:
     """安全地原子写入文本：先写临时文件，再用 os.replace 一键换过去。
 
-    背景与要点：
+    要点：
     - 临时文件必须建在目标同目录（同一块文件系统），os.replace 才是原子操作
     - 写完调 fsync 把数据真正刷到磁盘——万一程序或机器崩溃，恢复后数据还在
-    - Windows 的坑：目标文件正被别的线程/进程读着时，os.replace 会抛
-      PermissionError（WinError 5）。这是操作系统的行为，重试就能好——
-      读者很快就放开句柄了。Linux/Mac 没这毛病（文件开着也能 rename）
+    - Windows 下目标正被别的线程/进程读时，os.replace 会抛 PermissionError
+      （WinError 5），重试等读者放开句柄即可；Linux/Mac 文件开着也能 rename
 
     参数：
         path                 —— 目标文件路径（父目录不存在会自动创建）
@@ -85,10 +78,8 @@ def atomic_write_text_lite(
 ) -> None:
     """原子写入的轻量版：只做「临时文件 + rename」，不 fsync、不重试。
 
-    背景：高频小写入（比如每轮对话都落一次盘）如果每次都 fsync、
-    都带重试循环，太慢。这版牺牲一点可靠性换速度。
-
-    与完整版的差异：
+    给高频小写入用（完整版每次 fsync + 重试循环太慢），牺牲一点
+    可靠性换速度：
     - 不调 fsync（断电/崩溃恢复时可能丢最近一次写入，但快）
     - 不处理 Windows 的「目标被读导致 replace 失败」（调用方自己兜底，
       或者接受偶尔失败）

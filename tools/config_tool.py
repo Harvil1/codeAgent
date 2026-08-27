@@ -17,9 +17,9 @@ config_set（改配置）分三步：
      （按嵌套路径写入——本会话马上生效，不用重启）
   3. 触发 CONFIG_CHANGE hook（钩子，供审计/缓存失效用；hook 出错也不影响写配置）
 
-新值的类型：按现有值的类型强转（现有是 bool 就转成 bool，是 int 就转成 int）。
-背景：LLM 有时会传 JSON 字符串形式的数字（"5" 而不是 5），不转的话落盘后
-类型就漂了，后面按 int 读会出错。
+新值的类型：按现有值的类型强转（现有是 bool 就转成 bool，是 int 就转成 int）——
+LLM 有时会把数字传成 JSON 字符串（"5" 而不是 5），不转的话落盘后类型就漂了，
+后面按 int 读会出错。
 """
 import json
 import logging
@@ -169,7 +169,7 @@ def _set_nested(d: dict, parts: list, value) -> None:
 def _coerce_value(value, current):
     """按现有值的类型把新值"掰"成同类型。
 
-    背景：LLM 可能把数字传成字符串 "5"，不掰的话落盘后类型就乱了。
+    LLM 可能把数字传成字符串 "5"，不掰的话落盘后类型就乱了。
     必须先判 bool 再判 int——因为 bool 是 int 的子类，顺序反了布尔值会被
     误当成整数处理。
 
@@ -189,7 +189,7 @@ def _coerce_value(value, current):
 def _denied_json(key: str) -> str:
     """拒绝白名单外的键，并在错误信息里列出所有合法键。
 
-    背景：把合法键直接告诉 LLM，它下次就能自己改对，不用用户再教。
+    把合法键直接告诉 LLM，它下次就能自己改对。
 
     参数：
         key: 被拒绝的配置键

@@ -44,7 +44,7 @@ def _content_hash(text: str) -> str:
 # 不再重复把全文塞进上下文烧 token，只回一句"文件没变"。
 # 为什么用两个因子（mtime_ns 纳秒级修改时间 + size 文件大小）判断"变没变"：
 # Windows 上修改时间的精度只有 ~15 毫秒，只看时间一个因子会误判"没变"
-# （历史上真踩过这个坑：短时间内写过的文件被误认为没变，消息丢了）。
+# （同一时间窗口内写过的文件被误认为没变，消息丢失）。
 # 本进程自己的写入（write_file/str_replace）写完主动清缓存；
 # 外部写入（比如 terminal 命令改了文件）靠双因子自然对不上而失效。
 # ---------------------------------------------------------------------------
@@ -71,8 +71,8 @@ def _read_range_key(offset: int, limit) -> str:
 def _read_seen_invalidate(path) -> None:
     """自己改了文件后，把该文件的"读过去重"记账划掉。
 
-    背景：刚写完的文件内容肯定变了，去重缓存必须立刻失效，
-    否则下次读会被误判成"文件没变"而不返回内容。
+    刚写完的文件内容肯定变了，去重缓存必须立刻失效，否则下次读会被
+    误判成"文件没变"而不返回内容。
 
     参数：
         path: 刚被写过的文件路径。
@@ -244,7 +244,6 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         # 防"落盘套娃"：如果正在读的文件本身就存放在 offload 目录里，
         # 就不要再为它做一次落盘了——否则会无限循环：读落盘文件 → 又落盘一个
         # 新文件 → 新文件又带一遍行号（1\t1\t1\t 这样叠罗汉）。
-        # 这是压力测试时真踩过的 bug
         _skip_offload = False
         if omnimate_home:
             try:
@@ -331,7 +330,7 @@ WRITE_FILE_SCHEMA = {
 def _track_checkpoint(path, kwargs) -> None:
     """文件改完后，通知"存档追踪器"记一笔，支撑 /rewind（回退到之前版本）功能。
 
-    背景：像游戏存档一样，改过的文件可以退回去（/rewind）。
+    像游戏存档一样，改过的文件可以退回去（/rewind）。
     只追踪编辑工具自己改的文件（write_file/str_replace）；
     bash 命令改的东西不追踪（没法可靠知道它动了哪些文件）。
 
@@ -353,7 +352,6 @@ def _track_checkpoint(path, kwargs) -> None:
 def _trigger_file_changed(path, op: str, kwargs) -> None:
     """文件写入成功后，广播一条"文件变了"事件（FILE_CHANGED hook）。
 
-    背景：广播 file_changed 事件——
     外部可以挂监听器（hook）做 IDE 联动、自动重载、操作记录等。
     纯通知，不关心有没有人听；出问题也不影响写文件本身（fail-open）。
 
@@ -405,7 +403,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     #   - 白名单之外 → 调审批回调问用户（用户同意后可加进持久白名单）
     # 优先用外面注入的检查器（cli.py 注入的带"问用户"能力）；
     # 没注入就用全局默认（没有问询能力，白名单外一律拒）。
-    # 必修 1：子代理（主对话派出去的分身）的权限模式要透传——
+    # 子代理（主对话派出去的分身）的权限模式要透传——
     # 比如 bypassPermissions 模式要能放行白名单外的路径。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
@@ -760,8 +758,8 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
     if new_str is None:
         return json.dumps({"error": "new_str 不能为空(用空串表示删除)"}, ensure_ascii=False)
 
-    # 路径安检（按"写"的严格程度走，和 write_file 同款）
-    # 必修 1：子代理（主对话派出去的分身）的权限模式要透传。
+    # 路径安检（按"写"的严格程度走，和 write_file 同款）：
+    # 子代理（主对话派出去的分身）的权限模式要透传。
     from agent.permission import get_default_checker
     checker = kwargs.get("permission_checker") or get_default_checker()
     mode_override = get_mode_override_from_kwargs(kwargs)

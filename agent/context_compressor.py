@@ -1,7 +1,7 @@
 """上下文压缩的工具函数集（被 context_pipeline 压缩管线调用的零件库）。
 
-背景：压缩的编排调度在 agent/context_pipeline.py 的多层管线里，
-本文件留下的是管线要复用的零件：
+压缩的编排调度在 agent/context_pipeline.py 的多层管线里，
+本文件是管线要复用的零件：
     - ``_summarize_conversation``：调 LLM 做摘要（9 段式格式 + 超长重试 + 熔断器）
     - ``_rule_based_summary``：LLM 不可用时的降级方案（机械抽取，不花钱）
     - ``_fix_tool_call_pairs``：修复压缩切坏了的工具调用配对
@@ -142,7 +142,7 @@ async def _summarize_conversation(
 ) -> str:
     """调 LLM 把一段对话历史总结成摘要文本（async；9 段式固定格式）。
 
-    背景：L4 压缩的核心动作。带四套保命机制：
+    L4 压缩的核心动作，带四套保命机制：
     - **9 段式结构化 prompt**：强制逐字保留文件路径/错误消息/用户原话
     - **PTL 重试**：摘要请求自己报 prompt_too_long 时，丢掉一部分旧消息再试
       （最多 MAX_PTL_RETRIES 次）
@@ -324,8 +324,8 @@ def _format_dialog_for_summary(messages: list) -> str:
 def _strip_analysis_draft(summary: str) -> str:
     """剥掉回复里的 <analysis>…</analysis> 草稿区（模型推敲用的，不是正文）。
 
-    背景：某些模型（如 Claude）习惯先写一段 <analysis>思考过程</analysis>
-    再给答案。这段内部推理不属于摘要内容，需要剥掉。
+    某些模型（如 Claude）习惯先写一段 <analysis>思考过程</analysis>
+    再给答案，这段内部推理不属于摘要内容，剥掉。
 
     参数：
         summary：LLM 原始回复文本
@@ -392,9 +392,9 @@ def _fix_tool_call_pairs(messages: list) -> list:
             for tc in msg["tool_calls"]:
                 seen_tool_call_ids.add(tc.get("id"))
 
-    # 历史踩坑：反向孤儿要按「截至当前位置见过哪些 id」判断（逐步累加）。
-    # 之前用全量集合会漏判错序：结果 B 出现在发起 B 的调用之前也放行了
-    # （因为 B 在全量集合里），导致 API 400。
+    # 反向孤儿要按「截至当前位置见过哪些 id」判断（逐步累加）；
+    # 用全量集合会漏判错序——结果 B 出现在发起 B 的调用之前也会放行
+    # （B 已在全量集合里），导致 API 400。
     seen_so_far = set()
 
     # 第二遍：单遍扫描重建列表，pending 记录当前 assistant(tc) 还缺哪些结果 id。

@@ -65,7 +65,7 @@ _EXCLUDE_RULE = """
 def annotate_index_with_age(index_text: str, link_age_days: dict) -> str:
     """给索引的每一行末尾加上年龄标注 `[age: Nd]`（防召回过期记忆）。
 
-    背景：LLM 看不出哪条记忆是三年前的哪条是今天的，得把"这记忆几天没更新了"
+    LLM 分不清哪条记忆是三年前的哪条是今天的，把"这记忆几天没更新了"
     写在行尾让它自己判断新旧。
 
     参数：
@@ -100,10 +100,9 @@ async def retrieve_relevant(
 ) -> List[str]:
     """让 LLM 从索引里挑出最相关的 N 个记忆 ID。失败返回空列表。
 
-    历史踩坑：本函数必须是 async 并 await 底层调用。
-    用同步方式调一个 async 方法，拿到的是 coroutine 对象，
-    被 except 当 TypeError 捕获后静默返回空列表——记忆检索看起来
-    正常其实一直没工作。
+    本函数必须是 async 并 await 底层调用：用同步方式调 async 方法
+    拿到的是 coroutine 对象，会被 except 捕获后静默返回空列表——
+    记忆检索看起来正常其实一直没工作。
 
     参数：
     - query：当前用户消息（检索的依据）

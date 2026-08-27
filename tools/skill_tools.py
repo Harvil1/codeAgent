@@ -1,6 +1,6 @@
 """技能查看工具包：skills_list（列技能/搜技能）+ skill_view（看某个技能全文）+ load_skill（LLM 按需取技能正文）。
 
-背景：技能（skill）是存在磁盘上的 Markdown 使用说明书，agent 干活时按需翻阅。
+技能（skill）是存在磁盘上的 Markdown 使用说明书，agent 干活时按需翻阅。
 本文件给 LLM 提供三个查询工具：
 - skills_list：列出所有可用技能；带 query 关键词时按相关性排序只返回最像的几条
 - skill_view：查看某个技能的完整原文（给用户视角看，含文件头元信息）
@@ -52,7 +52,7 @@ SKILL_VIEW_SCHEMA = {
 def _get_skills_dirs(kwargs: dict):
     """收集要去哪些目录里找技能文件，返回目录路径列表。
 
-    背景：技能可能放在三个地方——软件自带的（内置）、用户自己的（~/.OmniMate/skills）、
+    技能可能放在三个地方——软件自带的（内置）、用户自己的（~/.OmniMate/skills）、
     插件带来的。列表顺序就是优先级：排后面的同名技能会覆盖排前面的（所以用户能改造内置技能）。
 
     参数：
@@ -75,7 +75,7 @@ def _get_skills_dirs(kwargs: dict):
 def _get_usage_dir(kwargs: dict) -> Path:
     """决定把使用统计写到哪个目录：用户技能目录（列表里第一个非内置的）。
 
-    背景：使用统计（查看/使用次数）不该写进内置目录，写到用户自己的目录才合适。
+    使用统计（查看/使用次数）不写进内置目录，写到用户自己的目录。
 
     参数：
     - kwargs：工具调用上下文，用来算出技能目录列表。
@@ -89,7 +89,7 @@ def _get_usage_dir(kwargs: dict) -> Path:
 def _find_skill_md(name: str, dirs) -> Path:
     """按技能名在多个目录里找到它的 SKILL.md 文件（用户/插件的同名技能优先）。
 
-    背景：同一个技能名可能在多个目录都有，倒着遍历（从优先级高的开始）保证取到覆盖版。
+    同一个技能名可能在多个目录都有，倒着遍历（从优先级高的开始）保证取到覆盖版。
 
     参数：
     - name：技能名（就是技能目录的文件夹名）
@@ -132,9 +132,9 @@ _TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_\-]+|[\u4e00-\u9fff]")
 def _tokenize(text: str) -> list:
     """把一段文字切成一个个「词」（token），供搜索打分用。
 
-    背景：中文没有空格分不出词，所以按单个汉字切（这样查「登录」也能命中「登录页」）；
-    英文按单词切；带连字符的词组（如 release-notes）整体收一份、拆开的部件（release、notes）
-    也各收一份——这样用其中一个词去搜也能找到。
+    中文没有空格分不出词，按单个汉字切（查「登录」也能命中「登录页」）；
+    英文按单词切；带连字符的词组（如 release-notes）整体收一份、拆开的部件
+    （release、notes）也各收一份——用其中一个词去搜也能找到。
 
     参数：
     - text：要切分的文字，可以是空串。
@@ -158,7 +158,6 @@ def _tokenize(text: str) -> list:
 def _skill_search_rank(skills: dict, query: str, top_n: int = 10) -> list:
     """按相关性给技能打分排序，返回最匹配的前 N 个。
 
-    背景：技能多了以后 LLM 需要「按关键词找技能」而不是每次全量翻。
     打分思路（轻量版 TF-IDF）：搜索词在技能的名字/描述里出现越多得分越高（TF），
     且这个词越少见（在越少技能里出现）权重越大（IDF，稀有词更能说明相关性）；
     名字里命中按 3 倍计——名字是最强的信号。
@@ -340,8 +339,8 @@ LOAD_SKILL_SCHEMA = {
 def _handle_load_skill(args: dict, **kwargs) -> str:
     """load_skill 的实际处理函数：取出技能的指令正文交给 LLM 照着执行。
 
-    背景：system prompt 里只放了技能目录（省 token），LLM 判断需要某个技能时调这里取全文。
-    还顺带处理几种特殊情况：技能束（一次加载一组技能）、frontmatter 声明的附件文件、
+    system prompt 里只放技能目录（省 token），LLM 判断需要某个技能时调这里取全文。
+    顺带处理几种特殊情况：技能束（一次加载一组技能）、frontmatter 声明的附件文件、
     context:fork 技能（要在隔离子代理（主对话派出去帮忙干活的分身）里跑）、
     allowed-tools/disallowed-tools（技能触发的临时工具开关）。
 
@@ -417,7 +416,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
 def _load_skill_attachments(skill_dir, files, kwargs: dict) -> list:
     """读取技能声明的附件文件（参考文件），返回内容列表。
 
-    背景：技能除了说明书正文还可以带几个参考文件，加载技能时一起读进来。
+    技能除说明书正文外还可带几个参考文件，加载技能时一起读进来。
 
     参数：
     - skill_dir：技能所在目录（附件相对它找）

@@ -8,8 +8,7 @@
 
 缓存策略：mtime（修改时间）+ size（文件大小）双因子判断"变没变"。
 为什么两个一起看：Windows 上修改时间精度只有约 15 毫秒，同一窗口内改
-文件光看时间会误判"没变"；加上文件大小一起比对才靠谱（历史踩坑，模式
-抄自 agent/templates.py）。
+文件光看时间会误判"没变"；加上文件大小一起比对才靠谱。
 """
 import logging
 from pathlib import Path

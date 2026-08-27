@@ -57,7 +57,7 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
     prompt = PROFILE_PROMPT.format(memories=memories[:5000])
 
     try:
-        # 历史踩坑：aux_llm.chat_completions 是 async 异步版。
+        # aux_llm.chat_completions 是 async 异步版，
         # 而本函数是被 _bg() 后台线程调用的（线程里没有事件循环），
         # 所以必须用 asyncio.run 临时起一个事件循环来驱动它。
         import asyncio

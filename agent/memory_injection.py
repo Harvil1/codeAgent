@@ -1,12 +1,11 @@
 """检索式记忆注入。
 
-记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）怎么送到 LLM 面前？
-旧做法是把整个记忆目录塞进 system prompt——但中途改 system prompt 会让
-前缀缓存失效、成本翻倍。本文件的做法是：每一轮按当前用户问题，用便宜的
-辅助模型（aux_llm）挑出最相关的几条记忆，拼成一条"阅后即焚"的 user 消息
-注入（ephemeral：只在本次 API 请求出现，不进 system prompt 也不进对话
-历史，缓存毫发无伤）。它直接替代了旧的 snapshot 全量注入；用户没配辅助
-模型时降级回 snapshot 模式（见文件末尾的降级函数）。
+记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）不能中途塞进
+system prompt——会让前缀缓存失效、成本翻倍。本文件的做法是：每一轮按
+当前用户问题，用便宜的辅助模型（aux_llm）挑出最相关的几条记忆，拼成
+一条"阅后即焚"的 user 消息注入（ephemeral：只在本次 API 请求出现，
+不进 system prompt 也不进对话历史，缓存毫发无伤）。用户没配辅助
+模型时降级回 snapshot 全量注入（见文件末尾的降级函数）。
 """
 import logging
 from contextvars import ContextVar
@@ -16,10 +15,10 @@ from agent.memory_retriever import retrieve_relevant
 
 logger = logging.getLogger(__name__)
 
-# 同一轮的去重缓存：只记住上一次 (query, 结果) 这一对（相当于容量为 1 的缓存）
-# 历史踩坑：不能用模块级全局变量，同进程里并发的多个 agent
-# （asyncio task / to_thread 里的子代理）会互相看到对方的缓存，串味。
-# 改成 ContextVar 后各并发上下文各持一份副本，互不可见；
+# 同一轮的去重缓存：只记住上一次 (query, 结果) 这一对（相当于容量为 1 的缓存）。
+# 必须用 ContextVar 而不是模块级全局变量——同进程里并发的多个 agent
+# （asyncio task / to_thread 里的子代理）会互相看到对方的缓存，串味；
+# ContextVar 让各并发上下文各持一份副本，互不可见，
 # 主循环自己在同一个 task 里顺序轮次，行为不变。
 _last_query_var: ContextVar[Optional[str]] = ContextVar(
     "memory_injection_last_query", default=None,
@@ -41,7 +40,7 @@ async def build_relevant_memories_message(
 ) -> Optional[dict]:
     """检索相关记忆并拼出一条 ephemeral 注入消息。返回 None 表示本轮不注入。
 
-    背景：这是检索式记忆注入的主入口，主循环每轮调用一次。
+    检索式记忆注入的主入口，主循环每轮调用一次。
 
     参数：
     - query：当前用户消息（检索依据）
@@ -136,8 +135,8 @@ async def build_relevant_memories_message(
 def _fallback_snapshot_message(memory_store) -> Optional[dict]:
     """降级方案：没配辅助模型时，退回把整个记忆索引注入一次。
 
-    背景：本模块的主路径（检索式注入）依赖 aux_llm_router；用户没配时
-    不能让记忆功能整个消失——这是"直接替代 snapshot"决策的保底链。
+    主路径（检索式注入）依赖 aux_llm_router；用户没配时靠这个保底，
+    记忆功能不至于整个消失。
 
     参数：
     - memory_store：记忆库（提供 snapshot_for_prompt 索引快照）

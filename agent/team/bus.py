@@ -5,7 +5,7 @@
 
 为什么用文件 + 锁而不是消息队列中间件：团队成员是各自独立的子进程，
 文件是最简单可靠的共享方式。所有读写都套跨平台文件锁串行化
-（Windows 用 msvcrt，类 Unix 用 fcntl——提前做过技术验证 spike）。
+（Windows 用 msvcrt，类 Unix 用 fcntl）。
 """
 import json
 import logging
@@ -95,10 +95,10 @@ def _with_lock(lock_path: Path, fn):
         lock_path：锁文件路径
         fn：要在锁内执行的操作（无参函数），返回值原样透传
 
-    历史踩坑：锁超时必须 fail-closed——fail-open（超时照干不误）会让
-    read_inbox 的「读全量 + 清空」在无锁并发下丢信：
+    锁超时必须 fail-closed：fail-open（超时照干不误）会让
+    read_inbox 的「读全量 + 清空」在无锁并发下丢信——
     A 和 B 同时读到同一批信，A 先清空，B 再清空时会把 C 刚写进来的
-    新信一起清掉。对邮箱来说，丢信比「这次操作失败」伤害大得多，
+    新信一起清掉。丢信比「这次操作失败」伤害大得多，
     所以超时抛 MessageBusLockTimeout。
     死锁兜底交给调用方：捕获这个异常重试或降级
     （各个调用点外面都已包了 try/except）。
@@ -161,8 +161,8 @@ class MessageBus:
 
         返回：新生成的 message_id。
 
-        历史踩坑：response 不带 request_id 会变成「孤儿回音」
-        ——没人知道它在回复谁，所以强制校验。
+        response 不带 request_id 会变成「孤儿回音」——没人知道它在
+        回复谁，所以强制校验。
         """
         if type_ not in VALID_TYPES:
             raise ValueError(

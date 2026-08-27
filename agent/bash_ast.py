@@ -10,13 +10,13 @@ bash 的语法规则拆成一棵树）能分清"真正的命令分隔符"和"参
 本项目只在权限检查（permission.py / tool_permissions.py）里用它，是唯一的
 解析入口。
 
-容错铁律（fail-open，出错就当没看见、维持老行为）：bashlex 这个库没装、
-或者某条命令解析失败 → parse_info 返回 None → 调用方退回原来的正则判断，
+容错铁律（fail-open，出错就当没看见）：bashlex 这个库没装、
+或者某条命令解析失败 → parse_info 返回 None → 调用方退回正则判断，
 绝不会因为引入它而多拒绝命令。
 
 方向铁律（只收紧不放宽）：AST 的结果只用来"抓坏"——deny/ask 规则逐段
 命中即命中、只读判定仍要求动词在既有白名单表里；从不用来"放行"
-（allow 规则维持整串匹配的老语义）。
+（allow 规则维持整串匹配语义）。
 """
 import logging
 from typing import List, Optional
@@ -41,14 +41,14 @@ def parse_info(command: str) -> Optional[dict]:
         - "has_redirect"：命令里有没有重定向（> >>，会写文件）；
         - "has_substitution"：有没有命令替换/进程替换（$() 或 <()，实际执行
           结果会被拼进命令，属于注入面）。
-    解析失败、bashlex 没装、命令为空时返回 None（调用方退回正则老路）。
+    解析失败、bashlex 没装、命令为空时返回 None（调用方退回正则判断）。
     """
     cmd = (command or "").strip()
     if not cmd:
         return None
-    # 历史踩坑：bash 把 \r 也当命令分隔符，但 bashlex
-    # 不认——不先归一成 \n 的话，"ls \r rm xxx" 会被当成一条命令，危险的后
-    # 半段就溜进只读通道了
+    # bash 把 \r 也当命令分隔符，但 bashlex 不认——
+    # 必须先归一成 \n，否则 "ls \r rm xxx" 会被当成一条命令，
+    # 危险的后半段就溜进只读通道了
     cmd = cmd.replace("\r\n", "\n").replace("\r", "\n")
     try:
         import bashlex
@@ -85,11 +85,10 @@ def parse_info(command: str) -> Optional[dict]:
                     toks.append(text)
             if toks:
                 segments.append(toks)
-        # 历史踩坑：这里不能扫到 command 节点就提前
-        # return——word 子节点的更深层还嵌着命令替换/进程替换/重定向节点，必须
-        # 把整棵树都走完。否则 `echo $(rm -rf /)` 里的替换体漏检，
-        # has_substitution 就永远是 False。副作用（方向正确的收紧）：替换体里
-        # 的嵌套 command 节点也进 segments，逐段 deny/只读判定能逮到它。
+        # 这里不能扫到 command 节点就提前 return——
+        # word 子节点的更深层还嵌着命令替换/进程替换/重定向节点，必须
+        # 把整棵树都走完，否则 `echo $(rm -rf /)` 里的替换体漏检。
+        # 替换体里的嵌套 command 节点也进 segments，逐段 deny/只读判定能逮到它。
         for child in getattr(node, "parts", []):
             _walk(child)
         # 实测注意：命令替换/进程替换节点的子命令挂在 .command 属性（不在
@@ -106,7 +105,7 @@ def parse_info(command: str) -> Optional[dict]:
         return None
 
     if not segments:
-        return None  # 解析成功但一条命令段都没有（比如纯注释）→ 退回正则老路
+        return None  # 解析成功但一条命令段都没有（比如纯注释）→ 退回正则判断
     return {
         "segments": segments,
         "has_redirect": has_redirect,

@@ -44,7 +44,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_model": "opus",                          # 主对话默认用 opus 档
     "default_haiku_model": "haiku",                   # 子代理/辅助任务默认用 haiku 档
 
-    "mcpServers": {},                                 # MCP 配置（从旧 .mcp.json 搬来）
+    "mcpServers": {},                                 # MCP 外部工具服务器配置
 
     # 工具可见性规则：deny 里的整类隐藏，allow 里的可以豁免某条 deny
     "permissions": {
@@ -132,13 +132,12 @@ def mcp_config_path() -> Path:
 def load_settings() -> Dict[str, Any]:
     """加载 settings.json，返回"默认值 + 用户配置"合并后的结果。
 
-    背景：文件不存在时会先尝试从 config.yaml + .env + .mcp.json
-    迁移生成；三样都没有就写入一份纯默认配置。
+    文件不存在时先尝试从 config.yaml + .env + .mcp.json 迁移生成；
+    三样都没有就写入一份纯默认配置。
 
-    历史踩坑（务必保留）：返回值必须是深拷贝。曾经返回浅拷贝，
-    调用方"读→改→写回"时把改动污染进了模块级的 DEFAULT_SETTINGS
-    （比如 extra_allowed_roots 泄漏进后续所有"默认配置"加载），
-    看起来八竿子打不着的会话突然多了一条白名单。
+    返回值必须是深拷贝——浅拷贝会让调用方"读→改→写回"的改动污染进
+    模块级 DEFAULT_SETTINGS（如 extra_allowed_roots 泄进后续所有
+    "默认配置"加载）。
 
     返回：
         配置字典（深拷贝，随便改不伤默认值）。
@@ -157,7 +156,7 @@ def load_settings() -> Dict[str, Any]:
             return copy.deepcopy(DEFAULT_SETTINGS)
         # 必须深拷贝基底再合并：_deep_merge 会原地修改 base 里的嵌套
         # 字典，浅拷贝（dict(...)）等于把用户数据泄进 DEFAULT_SETTINGS
-        # 这个全局默认值里（历史踩坑，同上）
+        # 这个全局默认值里
         return _deep_merge(copy.deepcopy(DEFAULT_SETTINGS), data)
     except Exception as e:
         logger.warning("读取 settings.json 失败，用默认: %s", e)
@@ -241,10 +240,7 @@ def remove_extra_allowed_root(root: str) -> bool:
 
 
 def _same_path(a: str, b: str) -> bool:
-    """判断两条路径字符串是不是指同一个目录。
-
-    背景：同一个目录可以有好几种写法（相对/绝对/~ 简写），
-    直接比字符串会误判成两个目录。
+    """判断两条路径字符串是不是指同一个目录（同一目录可有相对/绝对/~ 简写多种写法，直接比字符串会误判）。
 
     参数：
         a、b：两条路径字符串。
@@ -307,10 +303,8 @@ def persist_project_mcp_approval(key: str) -> None:
 def server_cfg_fingerprint(cfg: dict) -> str:
     """给一份 MCP 服务器配置算"指纹"（规范化 JSON 后取 sha256 前 8 位）。
 
-    背景（安全设计）：审批键里带上指纹之后，如果 git pull 让项目里
-    的 .mcp.json 悄悄变了（比如有人把 command 换成恶意命令），
-    指纹就变了 → 旧批准的键对不上 → 重新问用户。老的没带指纹的
-    批准键会自然失效。失效方向是"多问一次"，绝不会漏拦。
+    审批键里带上指纹后，配置一变指纹就变 → 旧批准的键对不上 → 重新问用户
+    （失效方向是"多问一次"，绝不漏拦）。
 
     参数：
         cfg：MCP 服务器的配置字典。
@@ -343,10 +337,7 @@ def mcp_approval_key(proj_key: str, server_name: str, cfg: Optional[dict] = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """递归合并两个字典（override 的值优先），原地修改 base 并返回。
-
-    背景：用户配置通常只写几个字段，其余要用默认值补齐；
-    整体替换会丢字段，所以逐层下钻合并。
+    """递归合并两个字典（override 的值优先），原地修改 base 并返回——用户配置通常只写几个字段，逐层下钻补齐默认值（整体替换会丢字段）。
 
     参数：
         base：基础字典（会被原地修改，调用方要传拷贝）。
@@ -370,10 +361,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def migrate_from_legacy() -> bool:
-    """把旧的 config.yaml + .env + .mcp.json 搬进 settings.json。
-
-    背景：配置体系升级过一次，老用户的旧文件得无损搬过来。
-    搬完把旧文件改名 .bak 留底（永不删除）。
+    """把旧的 config.yaml + .env + .mcp.json 无损搬进 settings.json，搬完把旧文件改名 .bak 留底（永不删除）。
 
     返回：
         bool——True 表示三个旧文件至少有一个存在、执行了迁移；
@@ -500,7 +488,7 @@ def migrate_from_legacy() -> bool:
 def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
     """拿到当前正在用的那个模型的完整配置。
 
-    支持两种配置模式（新版老版并存）：
+    支持两种配置模式（并存）：
     1. 新模式（推荐）：llm 段扁平配置——所有模型共用一份
        base_url/auth_token，按 opus/sonnet/haiku 三档选模型名。
     2. 老模式（向后兼容）：models 嵌套——每个模型独立配一套
@@ -632,9 +620,6 @@ def add_model(name: str, config: Dict[str, Any]) -> bool:
 
 
 def ensure_default_settings() -> None:
-    """settings.json 不存在时创建它（顺带完成旧配置迁移）。
-
-    背景：程序启动时调用一次，保证配置文件总是存在的。
-    """
+    """settings.json 不存在时创建它（顺带完成旧配置迁移）——程序启动时调用一次，保证配置文件总是存在。"""
     if not settings_path().exists():
         load_settings()  # 走 load 的"不存在"分支：迁移或写默认

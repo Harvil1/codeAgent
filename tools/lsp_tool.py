@@ -1,6 +1,6 @@
 """「代码导航」工具：跳转到定义 / 查所有引用。
 
-背景：查"这个函数在哪定义、谁在用它"，用文本搜索（grep）会被重名坑
+查"这个函数在哪定义、谁在用它"时，文本搜索（grep）会被重名坑
 （两个不同类都有 run 方法）。LSP（Language Server Protocol，代码编辑器
 背后那套"懂语法"的服务）能分清重名，只返回真正的定义点/引用点。
 
@@ -9,31 +9,20 @@
 用户没装 pylsp 时工具自动从模型可见列表里消失（check_fn 门控：注册了
 但按运行时条件决定显不显示）。
 
-设计取舍（"核心是窄腰"裁决）：做成核心工具 + 门控显隐，而不是把
-pylsp 塞进项目依赖——想用的人自己 `pipx install python-lsp-server`。
+设计取舍：做成核心工具 + 门控显隐，而不是把 pylsp 塞进项目依赖——
+想用的人自己 `pipx install python-lsp-server`。
 标记为不可并发：与子进程的 stdin/stdout 对话是有状态的，两个请求
 同时读写会把对话搅乱，保守排队执行。
 
-相对任务简报的四处实现修正（行为不变，原因逐条说明）：
-1. rootUri（工作区根目录）改用顶部 `import pathlib` 正规计算。
-   简报里在函数内临时 __import__ 加海象运算符的写法是演示代码，
-   按任务要求清理成常规写法。
-2. "起进程 + initialize 握手"合并进 _ensure_ready()（必须已持锁，
-   返回布尔）：pylsp 不在 PATH 时返回 False 而不是抛异常——handler
-   拿 False 就跳过 didOpen，这样测试里用假 _rpc_request 替身时不必
-   真的启动 pylsp；真实路径下 _rpc_request 遇到 False 会抛异常，
-   由 handler 的 except 统一兜成 lsp_error 错误返回。顺带修正了
-   消息顺序为 initialize → didOpen → request（简报的原实现把
-   didOpen 发在握手之前，违反 LSP 的生命周期规定）。
-3. 子进程管道用二进制模式（简报是 text=True + encoding）。历史踩坑：
-   Windows 的文本模式包装会把换行自动转换——读方向把 \\r\\n 变 \\n
-   （导致 "\\r\\n\\r\\n" 这个报头分界永远匹配不上），写方向把 \\n 变
-   \\r\\n（导致报头变 "\\r\\r\\n"），Content-Length 帧协议（按字节数
-   定界的通信格式）直接坏掉。二进制 + 手工 encode/decode 才和
-   Content-Length 的"按字节计数"语义严格一致。
-4. _read 按响应编号（id）对号入座、跳过通知帧。历史踩坑：didOpen 一发，
-   server 必然回一条 publishDiagnostics 通知（没有 id），如果"读一条
-   就当响应"会错拿到通知的空结果——生产环境必然查不到东西。
+实现要点：
+1. 消息顺序必须是 initialize → didOpen → request（LSP 生命周期规定）。
+2. 子进程管道用二进制模式（不能开 text=True）：Windows 文本模式会把换行
+   自动转换（\\r\\n ↔ \\n），Content-Length 帧协议（按字节数定界的通信
+   格式）直接坏掉；二进制 + 手工 encode/decode 才和"按字节计数"语义
+   严格一致。
+3. _read 按响应编号（id）对号入座、跳过通知帧：didOpen 一发，server
+   必然回一条 publishDiagnostics 通知（没有 id），"读一条就当响应"会错
+   拿到通知的空结果。
 
 已知边界（接受）：server 挂死且一个字节都不吐时，逐字节读会卡住，
 10 秒超时只能兜住"慢速滴流"和"进程崩了立刻 EOF"两种场景；
@@ -63,10 +52,9 @@ def _lsp_available() -> bool:
 
 
 def _reset_server() -> None:
-    """关掉 pylsp 子进程、清空就绪标记。
+    """关掉 pylsp 子进程、清空就绪标记（下次查询会自动重新拉起）。
 
-    背景：怀疑进程状态不对（比如出过错）或测试需要干净环境时调用，
-    下次查询会自动重新拉起。
+    进程状态不对（比如出过错）或测试需要干净环境时调用。
     """
     with _SERVER["lock"]:
         proc = _SERVER.get("proc")
@@ -92,8 +80,8 @@ def _ensure_server() -> bool:
     exe = shutil.which("pylsp")
     if exe is None:
         return False
-    # 故意用二进制管道（不开 text=True）：Windows 文本模式会自动转换换行符
-    # 直接弄坏帧协议（历史踩坑详见模块头第 3 条）
+    # 故意用二进制管道（不开 text=True）：Windows 文本模式会自动转换换行符，
+    # 直接弄坏帧协议（详见模块头"实现要点"）
     proc = subprocess.Popen(
         [exe, "--stdio"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -107,8 +95,7 @@ def _ensure_server() -> bool:
 def _ensure_ready() -> bool:
     """确保 pylsp 进程已启动且完成过"握手"（initialize，必须在已持锁时调用）。
 
-    背景：LSP 协议规定先握手才能正经问事；握手只在第一次做，
-    之后靠 init 标记跳过。
+    LSP 协议规定先握手才能正经问事；握手只在第一次做，之后靠 init 标记跳过。
 
     返回：False = pylsp 不可用（不抛异常，调用方自己降级处理）。
     """
@@ -130,9 +117,8 @@ def _ensure_ready() -> bool:
 def _rpc_request(method: str, params: dict) -> Optional[object]:
     """给 pylsp 发一条正式请求并等对应答案（同步、按字节帧收发）。
 
-    背景：对外的主力入口——首次调用会自动完成进程启动和握手
-    （工作区根目录用当前目录）。测试时可以用替身换掉本函数，
-    不必真起 pylsp。
+    对外的主力入口——首次调用会自动完成进程启动和握手（工作区根目录用
+    当前目录）。测试时可以用替身换掉本函数，不必真起 pylsp。
 
     参数：
     - method：LSP 方法名（如 "textDocument/definition"）
@@ -166,8 +152,8 @@ def _send_notification(proc, method: str, params: dict) -> None:
 def _write_frame(proc, body: str) -> None:
     """按 Content-Length 帧格式写一条消息。
 
-    背景：帧格式就是"报头写明正文有多少字节 + 正文"，
-    必须按 utf-8 编码后的字节数算，不能按字符数。
+    帧格式就是"报头写明正文有多少字节 + 正文"，必须按 utf-8 编码后的
+    字节数算，不能按字符数。
     """
     payload = body.encode("utf-8")
     header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
@@ -212,9 +198,8 @@ def _read_frame(proc, deadline: float) -> Optional[bytes]:
 def _read(proc, rid: int) -> Optional[object]:
     """一直收帧，直到等到编号对得上的那条答案，取出 result 字段。
 
-    背景：server 会主动塞各种通知（logMessage、publishDiagnostics，
-    都没有编号），还可能有迟到的旧答案，必须对号入座——只认
-    id == rid 的那条。
+    server 会主动塞各种通知（logMessage、publishDiagnostics，都没有编号），
+    还可能有迟到的旧答案，必须对号入座——只认 id == rid 的那条。
 
     参数：
     - proc：pylsp 子进程
@@ -245,8 +230,8 @@ def _read(proc, rid: int) -> Optional[object]:
 def _handle_lsp(args: dict, **kwargs) -> str:
     """查某个符号的定义位置或所有引用点，返回 JSON。
 
-    背景：模型给出文件+行列位置，本函数先确认 pylsp 在、文件在，
-    再把文件内容同步给 server（didOpen）然后发查询。
+    模型给出文件+行列位置，本函数先确认 pylsp 在、文件在，再把文件内容
+    同步给 server（didOpen）然后发查询。
 
     参数：
     - args：工具参数字典。action 二选一（definitions=跳定义 /

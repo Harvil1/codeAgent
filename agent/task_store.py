@@ -175,7 +175,7 @@ class TaskStore:
         return self.update(task_id, status=status)
 
     # ------------------------------------------------------------------
-    # 阻塞记录与升级：任务卡住了就记一笔，反复卡住就升级等人工（06 轮新增）
+    # 阻塞记录与升级：任务卡住了就记一笔，反复卡住就升级等人工
     # ------------------------------------------------------------------
 
     def mark_blocked(
@@ -187,9 +187,9 @@ class TaskStore:
     ) -> dict:
         """记一笔"这个任务卡住了"，卡太多次会自动升级成 triage（分诊态）。
 
-        背景：如果只标 blocked，调度器下轮还会把它捞出来重试，反复卡反复试
-        就是死循环。所以同一类阻塞攒够 TRIAGE_THRESHOLD（3）次就升级到
-        triage，find_ready 从此跳过它，等人工或上级 agent 来处理。
+        同一类阻塞攒够 TRIAGE_THRESHOLD（3）次就升级到 triage，find_ready
+        从此跳过它（只标 blocked 会被调度器反复捞出重试、原地打转），
+        等人工或上级 agent 来处理。
 
         参数：
             task_id：任务 id。
@@ -296,9 +296,8 @@ class TaskStore:
     def can_start(self, task_id: str) -> bool:
         """检查挡在这个任务前面的依赖是不是都完成了，决定它能否开工。
 
-        背景：一个依赖被软删除、或它的 JSON 文件没了，以前会让这个任务
-        永远卡在 blocked 且没有任何解除办法（历史踩坑）。
-        现在这类"人去楼空"的依赖直接当作已满足，自动解链。
+        被软删除或 JSON 文件缺失的依赖直接当作已满足（自动解链，
+        不让任务永远卡在 blocked）。
 
         参数：
             task_id：任务 id。
@@ -382,9 +381,7 @@ class TaskStore:
         return task
 
     def add_artifacts(self, task_id: str, paths: List[str]) -> Optional[dict]:
-        """把这个任务产出的文件路径记到 artifacts 清单里（重复的不记）。
-
-        背景：artifacts 是"这个任务做出了哪些东西"的索引，方便事后查看。
+        """把这个任务产出的文件路径记到 artifacts 清单里（产出物索引，方便事后查看；重复的不记）。
 
         参数：
             task_id：任务 id。
@@ -457,8 +454,8 @@ class TaskStore:
     ) -> Optional[dict]:
         """加一条"child 要等 parent"的依赖边。
 
-        背景：如果 A 等 B、B 又等 A，两个任务互相等就都永远动不了（成环）。
-        所以默认先检查：parent 如果已经直接或间接依赖 child，这条边会被拒。
+        默认先做成环检查（A 等 B、B 又等 A 就互相等死）：parent 如果已经
+        直接或间接依赖 child，这条边会被拒。
 
         参数：
             child_id：被挡的任务 id（它要等别人）。
@@ -487,11 +484,9 @@ class TaskStore:
         return child
 
 
-# 按 home 路径分格缓存的实例池。
-# 历史踩坑：实例池不能做成"传了 omnimate_home 就顶替全局唯一实例"，
-# 否则测试或团队协调器一带 home 进来，后面所有不传 home 的调用拿到的都是
-# 别人的目录（互相污染）。按 home 分格：同一个 home 复用同一个
-# 实例，不同 home 各用各的、互不可见。
+# 按 home 路径分格缓存的实例池：同一个 home 复用同一个实例，不同 home
+# 各用各的、互不可见（不做全局唯一实例，否则传过 home 的调用会污染
+# 后面不传 home 的调用拿到的目录）。
 _task_stores: Dict[str, TaskStore] = {}
 
 

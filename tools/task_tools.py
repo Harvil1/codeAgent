@@ -3,14 +3,8 @@
 这个文件是干嘛的：给 LLM 提供一套任务管理工具（建任务、改状态、标完成、列清单、
 留言、记交付物、标记卡住/解除卡住、加依赖）。底层存储在 agent/task_store.py
 （每个任务一个 JSON 文件，放在 ~/.OmniMate/.tasks/ 下），关掉会话再开，
-任务还在——这就是「持久化」。
-
-历史背景（为什么不直接用清单）：早期有个内存版清单工具 TodoWrite，只在单个
-会话里活着、结构是平的，已经被删掉了。现在这套的区别：
-  - TodoWrite（已废弃）：存内存里，关会话就没了，平铺结构
-  - task_create/update/complete：存文件，跨会话保留，支持 DAG 依赖
-    （DAG = 有向无环图，说白了就是「任务之间的先后顺序图」：任务 B 可以
-    声明「我要等任务 A 做完才能开始」）
+任务还在——这就是「持久化」。任务支持 DAG 依赖（DAG = 有向无环图，说白了
+就是「任务之间的先后顺序图」：任务 B 可以声明「我要等任务 A 做完才能开始」）。
 
 提供的工具一览：
   task_create(subject, description, blocked_by)  创建任务
@@ -36,7 +30,7 @@ MAX_ARTIFACT_SIZE = 100 * 1024 * 1024  # 单个交付物文件的上限：100MB�
 def _ownership_denied(msg: str) -> str:
     """把「越权操作任务」的报错包成工具协议要求的 JSON 错误串。
 
-    背景：团队协作里一个工人（worker）可能被绑定到某个任务上，只准操作自己
+    团队协作里一个工人（worker）可能被绑定到某个任务上，只准操作自己
     那个任务。越权时 assert_owned 会抛 TaskOwnershipError，本函数把异常文字
     转成统一格式（error_type=permission_denied）返回给 LLM。
 
@@ -55,8 +49,7 @@ def _ownership_denied(msg: str) -> str:
 def _get_owned_task(args: dict, kwargs: dict):
     """三合一检查：id 非空 → 没越权 → 任务真的存在，然后取出任务对象。
 
-    背景：所有「写任务」的工具开头都要做这三步一样的检查，抽成一个公共函数
-    免得每个工具抄一遍。
+    所有「写任务」的工具开头都要做这三步一样的检查，抽成一个公共函数。
 
     参数：
         args：LLM 传来的工具参数（从里面取 id）。
@@ -87,9 +80,8 @@ def _get_owned_task(args: dict, kwargs: dict):
 def with_owned_task(fn):
     """装饰器（套在函数外面的公共包装）：先自动做三合一检查，再把任务对象递给函数。
 
-    背景：7 个写任务的工具（update/complete/heartbeat/comment/artifacts/block/unblock）
-    开头的三步检查（id 非空、没越权、任务存在）一模一样，抽成装饰器省掉
-    约 21 行重复代码。
+    7 个写任务的工具（update/complete/heartbeat/comment/artifacts/block/unblock）
+    开头的三步检查（id 非空、没越权、任务存在）一模一样，抽成装饰器共用。
 
     参数：
         fn：被包装的原工具 handler。
@@ -126,8 +118,8 @@ def _infer_author(kwargs: dict) -> str:
 def _validate_artifact_path(path: str) -> Optional[str]:
     """检查一个交付物文件路径能不能登记进任务。
 
-    背景：交付物（artifacts）就是「这个任务做出来的文件在哪」，登记前要确认
-    文件真实存在、能读、不是目录、没超大小上限，防止登记一堆死链。
+    交付物（artifacts）就是「这个任务做出来的文件在哪」，登记前确认
+    文件真实存在、能读、不是目录、没超大小上限，防止登记死链。
 
     参数：
         path：待检查的文件路径。
@@ -567,8 +559,7 @@ def _all_done_cleanup(store) -> dict:
 
     设计取舍：「清空清单」只是显示层的概念，这里只加一个 all_done=true
     的标志来提示 LLM「全部做完了，别再列任务」。**不真去删任务**——
-    completed 状态留着随时可查；真删的话会破坏 test_task_complete_allows_
-    matching_id 等既有行为语义（裁决过：不删）。
+    completed 状态留着随时可查。
 
     参数：
         store：任务仓库。
@@ -646,9 +637,9 @@ def _handle_task_list(args: dict, **kwargs) -> str:
 def _handle_task_heartbeat(args: dict, task, **kwargs) -> str:
     """task_heartbeat 的实现：报平安——「我这活还活着，别当我挂了」。
 
-    背景：长任务（训练模型、跑编码、爬数据）一跑几十分钟，外面需要有办法
-    区分「还在干活」和「已经死了」。定期调一次这个工具，就是刷新任务的
-    最后心跳时间戳（last_heartbeat_at）。
+    长任务（训练模型、跑编码、爬数据）一跑几十分钟，外面靠最后心跳时间戳
+    （last_heartbeat_at）区分「还在干活」和「已经死了」；定期调一次这个
+    工具就是刷新它。
 
     参数：
         args：LLM 传的参数——id（任务 ID）、note（可选，附带的说明文字，
@@ -799,8 +790,7 @@ def _handle_task_unblock(args: dict, task, **kwargs) -> str:
 def _assert_dual_ownership(parent_id: str, child_id: str) -> Optional[str]:
     """涉及两个任务 ID 时的越权检查（task_link 这种「甲依赖乙」的操作用）。
 
-    背景：普通操作只查一个任务有没有越权，但加依赖这种操作牵扯两边，
-    两个 ID 都得过检查——只查一边会留漏洞。
+    加依赖这种操作牵扯两边，两个 ID 都得过检查——只查一边会留漏洞。
 
     参数：
         parent_id：被依赖的任务 ID（甲方）。

@@ -13,10 +13,9 @@ agent_id 长这样：sub-{父会话id前8位}-{YYYYMMDD-HHMMSS}-{随机8位}
 
 status 状态流：running（在跑）→ completed（完成）/ failed（失败）/ interrupted（被中断）
 
-历史踩坑：只在 on_response 回调里记最终响应不行——
-子代理中途被打断就一点轨迹都没有，没法 resume。必须每轮追加：
-_run_child 给子代理挂一个独立 HookRegistry 的 POST_LLM_CALL 程序式 hook，
-LLM 每回一次话就立刻落盘该轮 assistant 文本。
+轨迹必须每轮追加（不能只存最终响应——子代理中途被打断就一点轨迹
+都没有，没法 resume）：_run_child 给子代理挂一个独立 HookRegistry 的
+POST_LLM_CALL 程序式 hook，LLM 每回一次话就立刻落盘该轮 assistant 文本。
 口径约束：轨迹只存 user 指令 + 每轮 assistant 文本；tool_calls / tool result
 绝不落盘——孤儿 tool_call 没有配对 result 会让 API 报 400，
 而只存文本的话，resume 时的 initial_messages 天然不会出现配对残缺。

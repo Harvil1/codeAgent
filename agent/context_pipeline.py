@@ -8,8 +8,7 @@ contextCollapse（按 token 占用比例把早期对话整段折叠成占位提�
 （前面都不够时才花钱调 LLM 把旧对话写成有损摘要），外加 reactive 紧急通道
 （API 报「对话超长」时立刻保命截断）。
 
-背景：它取代了旧的单层方案——context_compressor.maybe_compress 一上来就调
-LLM 摘要，又贵又容易丢信息。项目里的位置：被 agent 主循环（AIAgent）每轮调用；
+项目里的位置：被 agent 主循环（AIAgent）每轮调用；
 干活的零件来自 agent/context_compressor.py，落盘能力来自 agent/output_offload.py。
 """
 import asyncio
@@ -67,10 +66,7 @@ def _is_tool_result(msg: dict) -> bool:
 
 
 def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[list, bool]:
-    """按时间清旧工具结果：距最后一次助手回复超过 N 分钟没动静，就把更早的工具结果内容清空。
-
-    背景：用户放着一两个小时没说话，中间那一大堆工具输出基本不会再被用到，
-    与其占着上下文，不如换成一句「旧工具结果已清空」的标记。
+    """按时间清旧工具结果：距最后一次助手回复超过 N 分钟没动静，就把更早的工具结果内容清空——用户放着一两个小时没说话时，中间的工具输出基本不会再被用到，换成一句「旧工具结果已清空」的标记。
 
     在 compress_if_needed 的流水线里最先跑（不看 token 超没超），排在 L1 之前。
 
@@ -159,7 +155,7 @@ def strip_internal_fields(messages: list) -> list:
         messages：消息列表
     返回：洗净内部字段后的消息列表（没脏消息就原样返回）。
 
-    历史补充：`_ephemeral` 标记「这条消息只在本轮临时用」；
+    补充：`_ephemeral` 标记「这条消息只在本轮临时用」；
     洗掉标记本身，但消息的 content/role 照常保留——LLM 需要内容，
     不需要我们的记账标记。
     """
@@ -199,7 +195,7 @@ def snip_compact(
     system, conv = _split_system(messages)
     # 已有占位 → 不二次裁（幂等：重复跑结果一样）
     # 判定「已有占位」要三重限定：前缀 "[snip_compact:" + role 是 user + 内容以它开头
-    # 历史踩坑：不能只搜裸字符串 "snip_compact"——用户消息里提到这词会误判；
+    # 不能只搜裸字符串 "snip_compact"——用户消息里提到这词会误判；
     # 也不能只搜 "[snip_compact:"——工具读到含这子串的源码/输出同样误判。
     # 真实占位长什么样见下方构造处：role 是 user，content 以 "[snip_compact:" 开头
     placeholders = [
@@ -231,7 +227,7 @@ def snip_compact(
     # 尾部边界成对保护：尾部开头若是工具结果，它对应的 assistant(tool_calls) 一定在
     # 尾部之外（第一条就是结果，说明发起调用的消息在更前面）——留着就是孤儿，API 会拒。
     # 无条件跳过这些孤儿结果（L1 无损，原文可从 transcript 找回）。
-    # 历史踩坑：原逻辑以为「前一条正好是 assistant(tc)」就算配对完整——但那条在尾部之外，
+    # 注意：就算尾部开头的前一条正好是 assistant(tc) 也不算配对完整——那条在尾部之外，
     # 尾部内的结果依然是孤儿，照样报 400。
     tail_start = len(conv) - keep_last
     while tail_start < len(conv) and _is_tool_result(conv[tail_start]) and tail_start > head_end:
@@ -352,7 +348,7 @@ def _already_micro_placeheld(msg: dict) -> bool:
 
 
 def _already_offloaded(msg: dict) -> bool:
-    """判断某条工具消息是不是已经落过盘（P1-2 的 output_offload 占位）。
+    """判断某条工具消息是不是已经落过盘（output_offload 占位形态）。
 
     落盘占位的 JSON 里有 "truncated": true 和 "full_at" 两个字段；
     已是这种形态就不要再落一次盘。
@@ -470,9 +466,7 @@ _OFFLOAD_DECISIONS_LIMIT = 1000  # 表大小上限（简易 LRU 淘汰），防�
 
 
 def _record_decision(tc_id: str, preview: str, file_path: str = None) -> None:
-    """把一条落盘决策记进全局表，表满了就淘汰最老的（简易 LRU）。
-
-    背景：dict 从 Python 3.7 起按插入顺序排列，删第一个元素就是删最早插入的。
+    """把一条落盘决策记进全局表，表满了就淘汰最老的（简易 LRU——dict 从 Python 3.7 起按插入顺序排列，删第一个元素就是删最早插入的）。
 
     参数：
         tc_id：工具调用的唯一 id
@@ -489,7 +483,7 @@ def _record_decision(tc_id: str, preview: str, file_path: str = None) -> None:
 def reset_offload_decisions() -> None:
     """清空全局落盘决策表（测试之间隔离用）。
 
-    历史踩坑：不要在新建 agent 时调这个——这张表是同进程内
+    不要在新建 agent 时调这个——这张表是同进程内
     所有 agent（主代理 + 并发子代理）共享的，新建 agent 就清空，
     会把别的正在跑的 agent 的冻结决策一起抹掉，重放内容对不上、打穿 prompt cache。
     生产路径靠 1000 条上限的淘汰机制控内存；跨会话也不怕泄漏
@@ -604,9 +598,7 @@ def apply_context_collapse(
     context_window: int = 128_000,
     keep_recent_turns: int = 3,
 ) -> Tuple[list, bool]:
-    """L3.5 contextCollapse：按 token 占用比例，把早期对话整段折叠成一条占位说明。
-
-    背景：这一层**轻量、无损、可逆**——比 L4 花 LLM
+    """L3.5 contextCollapse：按 token 占用比例，把早期对话整段折叠成一条占位说明。这一层**轻量、无损、可逆**——比 L4 花 LLM
     读一遍写摘要的有损压缩便宜得多，所以排在 L1/L2 之后、L4 之前当缓冲垫。
 
     触发：估算 token 数 ÷ 模型上下文窗口大小 > threshold_ratio。
@@ -747,10 +739,10 @@ async def llm_compact(
         model：模型名
         keep_recent：全量模式下末尾保护条数（最近这么多条不进摘要）
         token_threshold：token 阈值，超过才压
-        msg_threshold：遗留参数，当前逻辑不用（压缩只看 token，不看消息条数）
+        msg_threshold：当前逻辑不用（压缩只看 token，不看消息条数）
         precomputed_tokens：调用方已算好的 token 数（省得重复遍历）；None 时内部自己算
         session_memory：预提取的会话记忆；有值就直接用它当摘要，
-                        不调 LLM。获取接口尚未实现，目前永远传 None（Phase 2 接入）
+                        不调 LLM。获取接口尚未实现，目前永远传 None
         from_idx：局部压缩起始条数——只压这一段，
                   段外原文保留；默认 0
         up_to_idx：局部压缩的结束条数；默认 -1 = 压到末尾。两者都取默认值时
@@ -918,7 +910,7 @@ def estimate_tokens_hybrid(
 ) -> int:
     """混合 token 计数——真实值打底，新增部分粗估。
 
-    背景：全靠估算会越估越偏，真实值又只有调完 API 才拿得到（账单里的数）。
+    全靠估算会越估越偏，真实值又只有调完 API 才拿得到（账单里的数）。
     折中：拿最近一次主调用返回的真实输入 token 数（usage 里的 prompt +
     cache_read + cache_creation）当「锚点」，锚点之后新加的消息才用粗估——
     阈值判定的误差从「全程都在估」缩小到「只估增量」。
@@ -1024,9 +1016,8 @@ def reactive_compact(
 def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000) -> int:
     """预估「下一轮大概还要多烧多少 token」（防压缩震荡）。
 
-    背景：如果等对话真顶到
-    线才压，会出现「压完 → 下一轮一波大工具结果又顶线 → 再压」的来回震荡。
-    所以提前量 = 最近 window 轮里**最大单轮 token 量**——取最大值是因为
+    等对话真顶到线才压会出现「压完 → 下一轮一波大工具结果又顶线 → 再压」
+    的来回震荡，所以提前量 = 最近 window 轮里**最大单轮 token 量**——取最大值是因为
     一轮大工具结果就能直接把下一轮顶过线。
 
     一轮的定义：一条 user 消息 + 它后面的 assistant/tool 消息，直到下一条 user。
@@ -1104,7 +1095,7 @@ async def compress_if_needed(
     - L3.5：feature flag context_collapse 开启时按
       占用比例触发，无损可逆、不碰 system 和钉住消息；排在 L4 前当缓冲，
       能省下 LLM 摘要调用
-    - 历史踩坑：本函数是 async，内部必须 await llm_compact。
+    - 本函数是 async，内部必须 await llm_compact。
     """
     # PRE_COMPACT hook（可 abort）
     if hooks_registry is not None:
@@ -1201,9 +1192,8 @@ async def compress_if_needed(
             logger.info("L2.5 per-message 聚合 offload: 按 user 边界分组落盘")
 
     # L2.6 总量预算：全部工具结果加起来仍超预算 → 挑最大的再落盘（全局兜底）
-    # 历史踩坑：L2.6 的预算曾与 message_offload_threshold
-    #   共用一个值，但两者语义不同——后者是「一段」的阈值，前者是全局总量上限。
-    #   现已解耦：L2.6 读 tool_result_total_budget（默认 20 万字符）
+    # L2.6 的预算与 message_offload_threshold 语义不同——后者是「一段」的
+    #   阈值，前者是全局总量上限；L2.6 读 tool_result_total_budget（默认 20 万字符）
     c26 = False
     TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
@@ -1278,9 +1268,9 @@ async def compress_if_needed(
             )
 
     # L4 llm（出手条件：冷却期已过 + 超阈值 + 没熔断）
-    # 历史踩坑：曾有「每会话最多压 3 次」的总量帽，长会话第 3 次
-    # 压缩后就永久失去 L4，退化成频繁紧急截断；现已取消（只留
-    # 冷却期 + 连续失败熔断）。成功压缩受冷却期和 token 阈值双重门控，
+    # 不设「每会话最多压 N 次」的总量帽——设了的话长会话压满次数后
+    # 永久失去 L4，退化成频繁紧急截断；只用冷却期 + 连续失败熔断控制。
+    # 成功压缩受冷却期和 token 阈值双重门控，
     # 不会失控烧钱。llm_compact_count 只用于展示统计。
     c4 = False
     cooldown = config.get("llm_compact_cooldown_turns", 5)
@@ -1292,7 +1282,7 @@ async def compress_if_needed(
     # 方向 1：自适应压缩阈值（1M 大窗口模型放宽到 70 万）
     # 1M 窗口留 30% 给输出（30 万）、70% 给输入（70 万）
     # 压不压完全由 token 决定（接近窗口才压），不按消息条数——
-    # 历史踩坑：曾因「消息数 > 100 就压」导致一个长会话被压了 51 次、agent 反复失忆。
+    # 按条数压（如「消息数 > 100 就压」）会让长会话被反复压缩、agent 反复失忆。
     token_threshold = config.get("llm_compact_token_threshold", 100000)
     if model and "[1m]" in str(model):
         token_threshold = max(token_threshold, 700000)

@@ -5,6 +5,10 @@
 函数都带一个 rt（RuntimeContext，cli.py 聚合的运行时上下文，里面有
 session_store / agent 等），终端输出统一走 cli_ui 的共享 console。
 """
+# 注解延迟求值：rt: RuntimeContext 的 RuntimeContext 定义在 cli.py，
+# 直接 import 会循环依赖；3.14+ 天然延迟，低版本靠 future 注解
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -24,8 +28,8 @@ logger = logging.getLogger(__name__)
 def _handle_resume_command(args: str, rt) -> bool:
     """/resume_bundle 命令：跨项目列出或加载"会话移交包"（bundle）。
 
-    背景：bundle 是把一段对话打包存的文件（handoff 机制），可以在另一
-    个项目/另一台场景里接着聊。这个命令管两种用法：
+    bundle 是把一段对话打包存的文件（handoff 机制），可以跨项目/跨机器
+    接着聊。这个命令管两种用法：
     - 不带参数：列出最近 10 个 bundle（扫描所有项目，不分当前项目）；
     - 带 id：加载指定 bundle，把里面的对话记录直接替换当前会话历史。
 
@@ -144,9 +148,6 @@ def _list_sessions(rt: RuntimeContext):
 def _maybe_prompt_resume(rt: RuntimeContext):
     """启动时问问用户："发现历史会话，要恢复哪个吗？"
 
-    背景：交互模式刚启动时本来是个空新会话，但如果之前聊过，给用户一个
-    选择恢复的机会，体验更顺。
-
     参数：
         rt：RuntimeContext（取 session_store 和当前 session_id）
 
@@ -190,11 +191,9 @@ def _maybe_prompt_resume(rt: RuntimeContext):
         else:
             console.print(f"[yellow]序号超出范围，已开始新对话[/yellow]")
 def _resume_and_cleanup_empty(rt: RuntimeContext, target_session_id: str) -> None:
-    """恢复到指定会话，并顺手删掉刚创建的那个空会话。
+    """恢复到指定会话，并顺手删掉刚创建的那个空会话（不删会污染会话列表）。
 
-    背景：用户在新会话里改选了"恢复历史"，那刚创建的空会话就成了垃圾，
-    不删会一直污染会话列表。删除失败也不阻塞——顶多列表里多一条空记录，
-    留条 debug 日志方便排查就行。
+    删除失败不阻塞——顶多列表里多一条空记录，留条 debug 日志方便排查。
 
     参数：
         rt：RuntimeContext（从中拿当前 session_id 并执行恢复）
@@ -213,7 +212,7 @@ def _resume_and_cleanup_empty(rt: RuntimeContext, target_session_id: str) -> Non
 def _resume_session_interactive(rt: RuntimeContext, args: str):
     """/resume 命令主体：交互式恢复一个历史会话。
 
-    背景：用户想接着之前的对话聊。三种用法：
+    三种用法：
       /resume           列出历史，让用户输序号选
       /resume 0         直接恢复序号 0（就是最近的一个）
       /resume <id前缀>  按会话 id 的前几位匹配恢复
@@ -278,8 +277,7 @@ def _resume_session_interactive(rt: RuntimeContext, args: str):
 def _search_sessions(rt: RuntimeContext, query: str):
     """/search 命令主体：在历史对话里搜关键词。
 
-    背景：用户想找"之前哪次聊过 XX"。搜索词后面还能跟 key=value 形式的
-    过滤条件（可组合）：
+    搜索词后面还能跟 key=value 形式的过滤条件（可组合）：
       role=<user|assistant|tool>       只看某种角色的消息
       tool=<tool_name>                 只看调过某工具的（如 tool=terminal）
       since=<YYYY-MM-DD>               起始日期
@@ -369,8 +367,7 @@ def _search_sessions(rt: RuntimeContext, query: str):
 
 def _print_message_list(msgs, *, char_limit: int = 300, header: Optional[str] = None):
     """把一组对话消息回放到终端：用户的话青色、AI 的话绿色（tool 消息跳过）。
-
-    背景：恢复会话、看移交包等多处都要"回放对话"，抽成一个统一函数。
+    恢复会话、看移交包等多处共用的统一回放函数。
 
     参数：
         msgs：消息列表（role/content 结构的 dict）

@@ -10,8 +10,8 @@ LLM、都花 token，可见性必须有人为控制。位于工具体系的可�
 from typing import Dict, List
 
 
-# 核心工具集：agent 默认装备，全部对 LLM 可见（浏览器的教训：不塞进 core，
-# 想用浏览器就走 MCP 接外部服务——"能力放边缘"的设计原则）
+# 核心工具集：agent 默认装备，全部对 LLM 可见（浏览器不进 core，
+# 需要时走 MCP 接外部服务——"能力放边缘"的设计原则）
 _CORE_TOOLS = [
     # —— 文件与命令 ——
     "terminal",        # 跑 shell 命令
@@ -34,7 +34,7 @@ _CORE_TOOLS = [
     # —— 会话搜索 ——
     "session_search",
     # —— 委托 ——
-    "subagent",  # 子代理（主对话派出去帮忙干活的分身；老名字 delegate_task 也能用）
+    "subagent",  # 子代理（主对话派出去帮忙干活的分身；别名 delegate_task 也能用）
     # —— 确定性工作流编排（批量派分身 + 执行日志断点续跑 + 花费封顶）——
     "workflow",
     "subagent_kill",  # 中断正在后台跑的子代理
@@ -198,8 +198,7 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
 def resolve_toolset(toolset_name: str) -> List[str]:
     """把一个工具集名展开成具体的工具名清单。
 
-    背景：套餐可以用 includes 说"我还捎带另一个套餐"，所以要一层层
-    递归展开直到拿到全部工具名。
+    套餐可用 includes 捎带其他套餐，递归展开直到拿到全部工具名。
 
     参数：
         toolset_name: 套餐名（如 "core"、"minimal"）。

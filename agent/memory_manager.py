@@ -9,7 +9,7 @@
 2. 手下管着至多一个外部 provider（外包记忆服务，如有配置）
 3. 在合适的时机调用各自的接口（会话开始、每轮前后、会话结束）
 4. 写入类操作全部扔到后台线程做，主对话循环不等它
-5. 上下文压缩前自动让 LLM 顺手提炼几条稳定事实存起来（batch2-T1 特性）
+5. 上下文压缩前自动让 LLM 顺手提炼几条稳定事实存起来
 
 关键限制：同时只激活一个外部 provider——多了会在工具层面和记忆后端层面
 打架（两边都写、内容冲突）。
@@ -27,7 +27,7 @@ from agent.memory_store import MemoryStore
 logger = logging.getLogger(__name__)
 
 
-# batch2-T1 特性用的提取 prompt：压缩前让 LLM 从对话里挑值得长期记的事实
+# 提取 prompt：压缩前让 LLM 从对话里挑值得长期记的事实
 _EXTRACTION_PROMPT = """从以下对话中提取值得长期记住的稳定事实（用户偏好、环境细节、项目约定）。忽略临时任务进度和一次性操作。输出 JSON 数组 [{{type, name, description, body}}]，最多 5 条。无则输出 []。
 
 type 必须是以下之一: user, feedback, project, reference, other
@@ -65,9 +65,7 @@ class MemoryManager:
         llm_client: Any = None,
         llm_model: Optional[str] = None,
     ):
-        """组装调度员。
-
-        背景：主循环只需要面对这一个对象，不必关心底下是内置库还是外部服务。
+        """组装调度员（主循环只面对这一个对象，不关心底下是内置库还是外部服务）。
 
         参数：
         - memory_store：内置文件记忆库（必填，自家数据）
@@ -77,7 +75,7 @@ class MemoryManager:
         """
         self.memory_store = memory_store
         self.external_provider = external_provider
-        # batch2-T1：on_pre_compress（压缩前钩子）做 LLM 提取要用，可选
+        # on_pre_compress（压缩前钩子）做 LLM 提取要用，可选
         self._llm_client = llm_client
         self._llm_model = llm_model
 
@@ -87,9 +85,7 @@ class MemoryManager:
         self._session_id: Optional[str] = None
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        """会话开始时初始化外部 provider。
-
-        背景：外部服务需要先建立连接、准备资源才能用。
+        """会话开始时初始化外部 provider（建连接、准备资源）。
 
         参数：
         - session_id：本次会话的 ID，传给 provider 做会话隔离
@@ -107,10 +103,7 @@ class MemoryManager:
                 logger.warning("外部记忆 provider 初始化失败: %s", e)
 
     def on_pre_compress(self, snapshot_path, messages: list) -> None:
-        """钩子：上下文压缩前被调用，让 LLM 从对话里提炼稳定事实存档（batch2-T1）。
-
-        背景：压缩会把旧对话摘要掉，里面的长期信息（用户偏好、项目约定）
-        如果不先捞出来就永久丢了。所以在压缩前抢救一次。
+        """钩子：上下文压缩前被调用，让 LLM 从对话里提炼稳定事实存档（压缩会把旧对话摘要掉，长期信息不先捞出来就丢了）。
 
         做法：
         - 消息少于 6 条（太短没东西可提炼）直接返回
@@ -208,9 +201,7 @@ class MemoryManager:
 
     @staticmethod
     def _serialize_messages(messages: list) -> str:
-        """把消息列表摊平成"[角色] 内容"的纯文本，供 LLM 阅读。
-
-        背景：LLM 只需要文本；工具调用等复杂结构取其中的文字部分即可。
+        """把消息列表摊平成"[角色] 内容"的纯文本，供 LLM 阅读（复杂结构只取文字部分）。
 
         参数：
         - messages：对话历史（OpenAI 消息格式）
@@ -235,10 +226,7 @@ class MemoryManager:
 
     @staticmethod
     def _parse_facts(content: str) -> List[Dict[str, Any]]:
-        """把 LLM 回复解析成事实列表，容忍 JSON 外的多余文字。
-
-        背景：模型经常在 JSON 前后加解释，先试整体解析，不行再从文本里
-        捞出 [ ... ] 片段解析。
+        """把 LLM 回复解析成事实列表：先试整体 JSON 解析，失败再从文本里捞 [ ... ] 片段（容忍 JSON 外的多余文字）。
 
         参数：
         - content：LLM 的原始回复文本
@@ -263,12 +251,7 @@ class MemoryManager:
             return []
 
     def build_system_prompt(self) -> str:
-        """拼出要塞进 system prompt 的记忆部分。
-
-        背景：内置记忆的固定快照已经从
-        system prompt 里退役——中途改 prompt 会击穿缓存。现在只保留
-        外部 provider 的静态块（这个块在会话开始时确定，之后不变，
-        不伤缓存）。
+        """拼出要塞进 system prompt 的记忆部分——只含外部 provider 的静态块（会话开始时确定、之后不变，不伤 prompt 缓存；内置记忆不进 prompt）。
 
         返回：拼接后的文本；没有可用内容时返回空串。
         """

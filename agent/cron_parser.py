@@ -24,9 +24,9 @@ FIELD_RANGES = {
 def parse_field(expr: str, min_val: int, max_val: int) -> Set[int]:
     """把一个字段的写法翻译成一个数字集合。
 
-    背景：判断"现在该不该触发"最简单的办法，就是把字段展开成所有
-    允许的数字（比如 "1-5" 变成 {1,2,3,4,5}），再看当前时间在不在里面。
-    支持的写法：'*'、'N'、'*/N'、'N-M'、'N,M,K'、'N-M/S'。
+    把字段展开成所有允许的数字（比如 "1-5" 变成 {1,2,3,4,5}），
+    再看当前时间在不在里面。支持的写法：'*'、'N'、'*/N'、'N-M'、
+    'N,M,K'、'N-M/S'。
 
     参数：
     - expr：字段原文，如 "*/5" 或 "1,15"
@@ -110,8 +110,7 @@ def _check_range(val: int, min_val: int, max_val: int, raw: str):
 def cron_match(cron_expr: str, dt: datetime) -> bool:
     """判断"dt 这个时间点"是否命中 cron 表达式（该不该触发）。
 
-    背景：调度器每分钟都会拿当前时间来问一次，这里返回 True 就表示
-    到点了、该触发任务了。
+    调度器每分钟拿当前时间来问一次，返回 True 表示到点该触发任务。
 
     参数：
     - cron_expr：5 字段 cron 表达式原文

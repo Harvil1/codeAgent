@@ -10,7 +10,7 @@ system prompt；素材来自记忆、技能目录、项目 OMNIMATE.md 等。
 3. 记忆是开工那一刻拍的照片（frozen 快照），本次会话中途不刷新
 4. 技能只列"名字 + 一句话描述"，正文等模型自己调 load_skill 按需取
 
-三层结构（05 轮升级，目的是让缓存命中率最大化）：
+三层结构（目的是让缓存命中率最大化）：
 - stable：跨会话都不变（身份、各种指导文案）——缓存几乎永远命中
 - context：单个会话内不变（记忆、技能索引、OMNIMATE.md）——会话内命中
 - volatile：每轮都可能变（todo、提醒）——不指望命中缓存
@@ -114,7 +114,7 @@ DELEGATE_GUIDANCE = (
 
 
 # ---------------------------------------------------------------------------
-# 三层结构的数据容器（05 轮引入）
+# 三层结构的数据容器
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -140,7 +140,7 @@ class SystemPromptLayers:
 
 
 # ---------------------------------------------------------------------------
-# 主构建函数（05 轮的三层版，新代码都用这个）
+# 主构建函数（三层版，新代码都用这个）
 # ---------------------------------------------------------------------------
 
 def build_system_prompt_layers(
@@ -160,9 +160,8 @@ def build_system_prompt_layers(
     # === 输出风格节的文本（拼进 context 层；空=未启用风格）===
     output_style_text: str = "",
 ) -> SystemPromptLayers:
-    """组装出三层 system prompt。
+    """组装出三层 system prompt——缓存按"前缀一致"复用，把不变的内容排前面、易变的排后面。
 
-    背景：缓存按"前缀一致"复用，所以要把不变的内容排前面、易变的排后面。
       - stable：跨会话不变（同版本同一台机器，几乎 100% 命中缓存）
       - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内大部分轮次命中）
       - volatile：每轮可变（todo / 提醒），不指望命中缓存
@@ -198,9 +197,8 @@ def build_system_prompt_layers(
 
     # ---- context 层（单会话内不变的东西）----
     context_parts = []
-    # 先注入当前工作目录。历史踩坑（log.log 案例）：新会话里模型被记忆检索
-    # 结果中别的项目的条目带偏，跑去翻记忆里的旧项目。明确告诉它当前目录
-    # 是哪个、"以当前为准"
+    # 先注入当前工作目录——明确告诉模型当前目录是哪个、"以当前为准"
+    # （防被记忆检索结果里别的项目的条目带偏，跑去翻旧项目）
     try:
         from agent.workspace_context import get_workspace_cwd
         context_parts.append(
@@ -222,11 +220,10 @@ def build_system_prompt_layers(
         skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
-    # 记忆索引不再拼进 system prompt（否则每条新记忆
-    # 都会让整个前缀缓存报废）。改成"用完即扔"的临时注入（ephemeral）：
-    # 每轮按当前问题检索相关记忆再注入消息里；没有辅助 LLM 路由时就退回
-    # 老办法——开工时拍一次快照、一次性注入。
-    # memory_store 参数只为了兼容旧调用签名，不再注入任何内容。
+    # 记忆索引不拼进 system prompt（否则每条新记忆都会让整个前缀缓存
+    # 报废），改成"用完即扔"的临时注入（ephemeral）：每轮按当前问题检索
+    # 相关记忆再注入消息里；没有辅助 LLM 路由时退回开工快照一次性注入。
+    # memory_store 参数只为兼容旧调用签名，不注入任何内容。
     if memory_manager:
         try:
             ext_block = memory_manager.build_system_prompt()
@@ -257,10 +254,9 @@ def build_system_prompt_layers(
     except Exception as e:
         logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
 
-    # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 OMNIMATE.md
-    # 历史踩坑：Path.cwd() 读的是整个进程的当前目录，
-    # 多个子代理并发跑时会互相踩。改用 get_workspace_cwd()（每个任务
-    # 各自独立的上下文变量，互不干扰）。
+    # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 OMNIMATE.md。
+    # cwd 用 get_workspace_cwd() 而不是 Path.cwd()——后者读的是整个进程的
+    # 当前目录，多个子代理并发跑会互相踩（前者是每个任务独立的上下文变量）。
     # omit_project_memory=True 时跳过这整段（子代理省 token 用）
     if not omit_project_memory:
         try:
@@ -325,11 +321,7 @@ def build_system_prompt(
     include_guidance: bool = True,
     output_style_text: str = "",
 ) -> str:
-    """组装 system prompt 并拍平成单个字符串（给老调用方用的兼容壳）。
-
-    背景：老代码只收一个字符串，不认三层结构。这里内部调
-    build_system_prompt_layers 拿三层再拼平。新代码应直接调
-    build_system_prompt_layers，能享受分层缓存的好处。
+    """组装 system prompt 并拍平成单个字符串——给只收单字符串的调用方用的兼容壳，内部调 build_system_prompt_layers 拿三层再拼平（新代码应直接调三层版，享受分层缓存的好处）。
 
     参数：
         memory_store: 记忆仓库（现在只是签名兼容，不注入内容）
@@ -364,9 +356,9 @@ def _current_cwd() -> str:
 def _paths_match(paths: list, cwd: str) -> bool:
     """判断当前目录是否命中技能 frontmatter 里的 paths 条件（简化版通配匹配）。
 
-    背景：技能可以声明"只在这些路径下生效"（paths 字段），本函数检查当前
+    技能可声明"只在这些路径下生效"（paths 字段），本函数检查当前
     工作目录是否匹配。支持三种写法：目录前缀（src/**）、扩展名（*.py）、
-    星号通配。实现上用简化的"字符串前缀"判断（沿用 brief 的语义），并额外
+    星号通配。实现上用简化的"字符串前缀"判断，并额外
     兼容绝对路径形式的 cwd：检查目录名是否作为完整路径段出现。
 
     参数：
@@ -382,7 +374,7 @@ def _paths_match(paths: list, cwd: str) -> bool:
         # src/** 形态：当前目录在 src/ 下面就算匹配
         if pat.endswith("/**"):
             base = pat[:-3]
-            # 沿用 brief 的原始语义：按字符串前缀匹配（会接受 srcfoo 这种
+            # 按字符串前缀匹配（会接受 srcfoo 这种
             # 边界误命中，是已知的可接受风险）
             if cwd_norm.startswith(base):
                 return True
@@ -402,10 +394,7 @@ def _expand_imports(
     depth: int = 0,
     _visited: Optional[set] = None,
 ) -> str:
-    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）。
-
-    背景：项目记忆里写一行 @docs/api.md，
-    读的时候自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
+    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）——写一行 @docs/api.md，读取时自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
 
     规则：
     - `@path/to/file` 相对 base_dir 解析，引用里还有引用就递归展开（最深 5 层）
@@ -498,10 +487,7 @@ def _expand_imports(
 
 
 def _scan_project_memory_files(cwd: Path) -> List[Path]:
-    """从当前目录一路向上扫，收集沿途所有 OMNIMATE.md（项目的说明文件）。
-
-    背景：项目每层目录都可以有自己的说明文件，从当前目录向上递归
-    收集起来全给模型看。
+    """从当前目录一路向上扫，收集沿途所有 OMNIMATE.md（每层目录都可以有自己的说明文件，全给模型看）。
 
     停止规则：遇到含 .git 的目录（仓库根）就停，含这一层，不再往上。
     这是对 monorepo（一个大仓多个子项目）友好的设计：在子项目里跑时，
@@ -534,10 +520,7 @@ def _scan_project_memory_files(cwd: Path) -> List[Path]:
 
 
 def _build_skill_index(skills_dirs) -> str:
-    """构建拼进 prompt 的技能索引：每行一个"技能名 + 一句话描述"。
-
-    背景：system prompt 只放索引不放正文（省 token），模型看索引决定
-    要不要调 load_skill 取正文。支持多个技能目录（内置 + 用户自定义）。
+    """构建拼进 prompt 的技能索引：每行一个"技能名 + 一句话描述"。system prompt 只放索引不放正文（省 token），模型看索引决定要不要调 load_skill 取正文。支持多个技能目录（内置 + 用户自定义）。
 
     规则：只列启用中的技能，归档的不列。多个目录按列表顺序扫，
     同名技能后扫的覆盖先扫的（用户目录排在后面 = 用户说了算）。
@@ -549,7 +532,7 @@ def _build_skill_index(skills_dirs) -> str:
     """
     import json
 
-    # 老调用可能只传一个目录，包成列表统一处理
+    # 调用方可能只传单个目录，包成列表统一处理
     if isinstance(skills_dirs, (str, Path)):
         skills_dirs = [skills_dirs]
 

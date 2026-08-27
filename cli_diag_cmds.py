@@ -5,6 +5,11 @@
 销、/stats 看跨会话统计。它们都被 cli.py 的主分发调用，输出统一走
 cli_ui 的共享 console。
 """
+# 注解延迟求值：文件里 rt: RuntimeContext 注解只在 3.14+ 天然延迟，
+# 低版本（3.11-3.13）会立即求值——而 RuntimeContext 定义在 cli.py，
+# 这里 import 会循环依赖，所以用 future 注解统一延迟
+from __future__ import annotations
+
 import importlib
 import json
 import logging
@@ -30,9 +35,7 @@ logger = logging.getLogger(__name__)
 def _sync_history_after_compact(agent, new_messages: list) -> None:
     """压缩做完后，把新历史写回 agent 并作废 system prompt 缓存。
 
-    背景：手动压缩后对话内容变了，但 agent 身上的旧历史和旧 prompt 缓存
-    还留着，不处理的话下一次调用 LLM 用的还是压缩前的旧东西。这里的收尾
-    动作和主循环里自动压缩（AIAgent._run_context_compression）保持一致：
+    收尾动作和主循环里自动压缩（AIAgent._run_context_compression）保持一致：
     - 去掉开头的 system 消息（压缩函数的输入本就不该含 system，这里是
       防御性兜底）；
     - 去掉带 ``_ephemeral`` 标记的消息（临时消息只活一轮，不能进持久历史）；
@@ -51,7 +54,7 @@ def _sync_history_after_compact(agent, new_messages: list) -> None:
         # 防御性兜底：正常压缩输入不含 system，万一有就去掉
         msgs = msgs[1:]
     agent.conversation_history = [m for m in msgs if not m.get("_ephemeral")]
-    # 用 getattr 探测而不是直接调：老版本 agent 可能还没有这个方法
+    # 用 getattr 探测而不是直接调：agent 实例可能没有这个方法（防御性）
     invalidate = getattr(agent, "invalidate_system_prompt", None)
     if callable(invalidate):
         try:
@@ -81,10 +84,10 @@ def _print_compact_delta(
         f"（节省 ~{saved}）"
     )
 def _handle_compact_cli(args: str, rt) -> bool:
-    """/compact 命令：用户手动触发一次上下文压缩。
+    """/compact 命令：用户手动触发一次上下文压缩（平时是自动压缩，
+    这个命令让用户"现在就压"）。
 
-    背景：上下文（对话历史）太长会撑爆模型窗口、烧钱。平时是自动压缩，
-    这个命令让用户"现在就压"。三条路：
+    三条路：
     - ``--yes`` 参数跳过确认；不加就交互式问一句（EOF 或输入异常当作拒绝）；
     - 正常路径用 llm_compact 走 L4（用 LLM 把早期对话总结成摘要），
       token_threshold 传 0 绕过"够不够长才压"的自动判定——手动压缩的
@@ -182,8 +185,7 @@ def _handle_compact_cli(args: str, rt) -> bool:
 def _handle_context_cli(args: str, rt) -> bool:
     """/context 命令：用一张表显示当前上下文（对话历史）的占用情况。
 
-    背景：用户想知道"现在上下文有多满、压缩发生了几次"，这张 Rich 表给
-    出全景：
+    这张 Rich 表给出全景：
     - 消息按角色（system/user/assistant/tool）各有多少条；
     - 用 estimate_message_tokens 估算的总 token 数；
     - 压缩会话状态（当前第几轮 / LLM 压缩次数 / 被动压缩次数）；
@@ -258,8 +260,7 @@ def _status_row(label: str, fn):
 def _handle_status_cli(args: str, rt) -> bool:
     """/status 命令：一张表看全当前运行状态。
 
-    背景：排查问题时用户需要一眼看到"用的什么模型、MCP 连没连上"。这张
-    Rich 表逐项展示，每一项单独兜底——某一项读挂了只影响那一行：
+    这张 Rich 表逐项展示，每一项单独兜底——某一项读挂了只影响那一行：
     - 主模型（rt.config 的 model 段）和 aux LLM（辅助小模型）配没配；
     - goal（目标驱动状态：目标前 30 字 + 状态 + 迭代次数）；
     - 当前项目的记忆键（rt._statusline_project_key，标识记忆隔离用的项目）；
@@ -332,8 +333,7 @@ def _handle_status_cli(args: str, rt) -> bool:
 def _handle_doctor_cli(args: str, rt) -> bool:
     """/doctor 命令：给环境做 6 项体检，帮用户定位"为什么跑不起来"。
 
-    背景：类似医生问诊，一项项查常见病因，每项独立判定（一项挂不影响
-    其他项继续查），最后给出通过/失败汇总：
+    每项独立判定（一项挂不影响其他项继续查），最后给出通过/失败汇总：
     1. 配置能正常加载（load_config 不抛错）；
     2. 模型服务商的 API key 环境变量已设置（读 config 的
        model.api_key_env，默认 DEEPSEEK_API_KEY）；
@@ -428,8 +428,7 @@ def _handle_doctor_cli(args: str, rt) -> bool:
 def _show_usage(rt: RuntimeContext):
     """/usage 命令的展示体：当前会话的迭代预算、历史长度和 token 花销。
 
-    背景：用户想知道"这个会话烧了多少 token"。逐块展示（都是
-    有数据才显示，出错只写 debug 日志不炸整个命令）：
+    逐块展示（有数据才显示，出错只写 debug 日志不炸整个命令）：
     - 迭代预算剩余（agent 还能跑几轮）和对话历史条数；
     - LLM token 用量：调用次数、输入/输出/Cache 命中/Cache 写入 tokens；
     - 按模型分账的用量（usage_tracker 存在时才有；只统计 token 不算钱）。
@@ -481,7 +480,6 @@ def _show_usage(rt: RuntimeContext):
 def _show_stats(rt: RuntimeContext):
     """/stats 命令的展示体：跨所有会话的汇总统计。
 
-    背景：单看一个会话不够，用户还想看"我总共聊了多少、哪个工具用得最勤"。
     从 session_store 聚合出：会话/消息总数、时间跨度、消息角色分布、
     最长会话 Top 5、工具调用 Top 10（带条形图）。
 
@@ -559,9 +557,8 @@ def _show_stats(rt: RuntimeContext):
 # 出任何异常都返回空串，主循环看到非空才打印（fail-open）。
 
 def _format_tokens(n: int) -> str:
-    """把 token 数缩写成好读的形式：12300 → '12.3K'；1234567 → '1.2M'；0 → '0'。
-
-    背景：statusline 地方小，几万几十万的数字太占宽度。
+    """把 token 数缩写成好读的形式（statusline 地方小）：12300 → '12.3K'；
+    1234567 → '1.2M'；0 → '0'。
 
     参数：
         n：token 数（容错：传了不能转成 int 的东西就当 0）

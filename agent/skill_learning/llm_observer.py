@@ -93,8 +93,8 @@ class _RecordingStore:
 def _strip_code_fence(text: str) -> str:
     """剥掉 LLM 回答外面可能裹的 ```json ... ``` 代码围栏。
 
-    背景：你让它「只输出 JSON」，它经常还是习惯性套一层 Markdown 代码块，
-    直接 json.loads 会炸，所以先剥掉。
+    LLM 经常在 JSON 外习惯性套一层 Markdown 代码块，直接 json.loads
+    会炸，先剥掉。
 
     参数：
         text：LLM 的原始回答。
@@ -163,7 +163,7 @@ def _build_observer_prompt(user_text: str, tool_calls, tool_results) -> str:
 def _extract_content(response) -> str:
     """从 LLM 的响应对象里把文本抠出来。
 
-    背景：aux router 有时返回 SDK 的对象（属性访问）、有时返回字典
+    aux router 有时返回 SDK 的对象（属性访问）、有时返回字典
     （键访问），两种都得认。
 
     参数：
@@ -209,7 +209,7 @@ def _parse_instincts(raw: str) -> List[dict]:
             continue  # 关键字段缺的条目直接丢——宁缺毋滥，不猜
         try:
             conf = float(it.get("confidence"))
-            # 历史踩坑：NaN 不能直接走 min/max 收敛——
+            # NaN 不能直接走 min/max 收敛——
             # min(1.0, nan) 会返回 1.0（nan 参与比较是 False，方向反了），
             # 把最不可信的值洗成满分。所以 NaN/Infinity 先拦下，落保守默认值。
             if math.isnan(conf) or math.isinf(conf):

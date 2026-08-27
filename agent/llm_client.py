@@ -1,12 +1,10 @@
 """LLM 调用的「翻译官」层：把两家画风不同的 API 统一成一副面孔。
 
-背景：市面上的大模型 API 主要分两种格式——OpenAI 兼容格式（DeepSeek、
+市面上的大模型 API 主要分两种格式——OpenAI 兼容格式（DeepSeek、
 OpenRouter、本地 Ollama 等都用这套）和 Anthropic 原生格式（Claude 官方）。
-如果让上层对话主循环直接面对两种 SDK，就得处处写「如果是 A 家就……」。
-
-所以本文件提供两个 client（可以理解为「接线员」），都实现同一个方法
+本文件提供两个 client（可以理解为「接线员」），都实现同一个方法
 chat_completions()，返回的响应统一长成 OpenAI 的样子（从
-response.choices[0].message 里取 content 和 tool_calls）。这样上层
+response.choices[0].message 里取 content 和 tool_calls）——上层
 AIAgent 主循环完全不用关心底层接的是哪家 API。
 
 用哪个 client 由 model_config（模型配置字典）里的 "format" 字段决定：
@@ -23,7 +21,7 @@ import logging
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-# 历史踩坑：AsyncOpenAI 必须在模块顶层 import，测试才能用
+# AsyncOpenAI 必须在模块顶层 import，测试才能用
 # patch("agent.llm_client.AsyncOpenAI") 把它换成假对象。
 # （写在函数内部的局部 import，unittest.mock.patch 找不到、也换不了）
 from openai import AsyncOpenAI
@@ -51,8 +49,7 @@ async def _iterate_with_watchdog(
 ):
     """给流式输出套一个「闹钟」：太久没下一段内容就中止并报超时。
 
-    背景：流式回答就像水龙头滴水，正常情况一段接一段地来。如果网络或
-    服务器卡住，普通写法会永远干等。本函数在每次等下一段时设一个
+    网络或服务器卡住时普通写法会永远干等；本函数在每次等下一段时设一个
     idle_timeout 秒的闹钟，超时还没等到就关掉流、抛 LLMStreamIdleTimeout。
 
     做法：Python 的 `async for` 语法没法直接加超时，所以改成手工调
@@ -103,13 +100,11 @@ async def _iterate_with_watchdog(
 def _extract_openai_usage(usage_obj) -> Optional[dict]:
     """把 OpenAI 兼容 SDK 的「用量统计对象」翻译成统一格式的字典。
 
-    背景：「这轮对话花了多少 token」这类统计，DeepSeek 和 OpenAI 官方
-    各有一套字段名（比如缓存命中，一个叫 prompt_cache_hit_tokens，一个
-    叫 cache_read_input_tokens）。这里把两种叫法都兜住，输出统一的 5 个
-    字段：prompt_tokens（输入）/ completion_tokens（输出）/ total_tokens
-    （总计）/ cache_read（命中缓存省下的）/ cache_creation（新写缓存的）。
-
-    流式和非流式两条路都要做这件事，抽出来共用，避免抄两遍。
+    DeepSeek 和 OpenAI 官方各有一套字段名（比如缓存命中，一个叫
+    prompt_cache_hit_tokens，一个叫 cache_read_input_tokens），这里把
+    两种叫法都兜住，输出统一的 5 个字段：prompt_tokens（输入）/
+    completion_tokens（输出）/ total_tokens（总计）/ cache_read（命中
+    缓存省下的）/ cache_creation（新写缓存的）。流式和非流式两条路共用。
 
     参数：
         usage_obj：SDK 响应里的 usage 对象（可能为 None）
@@ -132,7 +127,7 @@ def _extract_openai_usage(usage_obj) -> Optional[dict]:
 def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
     """把 Anthropic SDK 的用量统计翻译成上面 OpenAI 那套统一格式。
 
-    背景：Anthropic 把输入/输出叫做 input_tokens/output_tokens，而且
+    Anthropic 把输入/输出叫做 input_tokens/output_tokens，而且
     不直接给总数——这里改名映射，总数自己加出来。
 
     参数：
@@ -221,10 +216,10 @@ class LLMClient:
         }
 
     def reset_client(self) -> None:
-        """把底下的 HTTP 连接池整个换新（历史踩坑修复）。
+        """把底下的 HTTP 连接池整个换新。
 
-        背景：连接一旦被重置弄坏，在坏连接池上重试大概率还是失败，
-        所以重试逻辑会先调这个方法重建 client 再试。
+        连接被重置弄坏后，在坏连接池上重试大概率还是失败，所以重试
+        逻辑会先调这个方法重建 client 再试。
 
         基类里什么都不做（no-op）；需要的子类自己重写。调用方是串行的
         重试路径，不存在两个线程同时重建的并发问题。
@@ -233,9 +228,9 @@ class LLMClient:
     def close(self) -> None:
         """同步释放底层连接（进程退出/收尾打扫用）。
 
-        历史踩坑（精读轮发现）：agent.cleanup() 用 getattr(client, "close")
-        逐个关客户端，但包装类此前一直没实现 close——X3 的「防 HTTP 连接池
-        泄漏」修复对它们是静默 no-op。基类提供无害默认；有连接池的子类重写。
+        基类提供无害默认；有连接池的子类必须重写——agent.cleanup() 是用
+        getattr(client, "close") 逐个关客户端的，不实现就是静默 no-op、
+        连接池泄漏。
         """
 
 
@@ -257,7 +252,7 @@ class OpenAICompatClient(LLMClient):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
-        # 历史踩坑：把密钥自己存一份。SDK 不保证让你读回
+        # 把密钥自己存一份：SDK 不保证让你读回
         # 旧 client 的密钥，重建时没存就得不偿失。
         self._api_key = api_key
         # 流式看门狗的空闲秒数；小于等于 0 表示关掉看门狗
@@ -424,8 +419,8 @@ class AnthropicClient(LLMClient):
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
-        # 历史踩坑：把密钥/地址各存一份，
-        # reset_client 重建时直接用，不指望 SDK 让你读回旧值
+        # 把密钥/地址各存一份，reset_client 重建时直接用
+        # （SDK 不保证让你读回旧值）
         self._api_key = api_key
         self._auth_token = auth_token
         self._base_url = base_url
@@ -433,7 +428,7 @@ class AnthropicClient(LLMClient):
         self.stream_idle_timeout = stream_idle_timeout
 
     def reset_client(self) -> None:
-        """扔掉可能坏掉的连接池，按原来的配置重建 AsyncAnthropic。"""
+        """扔掉可能坏掉的连接池，按同一份配置重建 AsyncAnthropic。"""
         try:
             # 尽力关掉旧 client；它已经坏了也无所谓，反正要扔
             import asyncio as _aio
@@ -508,9 +503,8 @@ class AnthropicClient(LLMClient):
     ) -> Dict[str, Any]:
         """拼装一次 Anthropic 请求的全部参数（流式和非流式共用）。
 
-        背景：发请求前要做的翻译活不少——拼系统提示词、转消息格式、
-        转工具格式、配思考模式和强度。流式/非流式两个方法都要这一套，
-        抽成公共函数免得抄两遍（能省 25 行左右）。
+        翻译活包括：拼系统提示词、转消息格式、转工具格式、配思考模式
+        和强度；抽成公共函数免得两个方法各抄一遍。
 
         参数：
             messages：OpenAI 格式的消息列表
@@ -762,7 +756,7 @@ class AnthropicClient(LLMClient):
                 anthropic_tools.append({
                     "name": func["name"],
                     "description": func.get("description", ""),
-                    # 历史坑：本项目内部 schema 用的键是 input_schema，
+                    # 本项目内部 schema 用的键是 input_schema，
                     # 跟 OpenAI 的 parameters 不是同一个名字。两种都认：
                     # 先试 parameters，再试 input_schema，都没有就给个空壳
                     "input_schema": func.get("parameters") or func.get("input_schema") or {

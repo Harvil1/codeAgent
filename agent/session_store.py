@@ -11,7 +11,7 @@
   └── <session_id>.jsonl.bak  # 删除会话时只是改名为 .bak 备份（可恢复，不真删）
 
 设计权衡（为啥不用 SQLite 数据库）：
-  - Windows 上 SQLite 的文件锁反复出过问题（历史踩坑：rowid bug 等）
+  - Windows 上 SQLite 的文件锁出过问题
   - 符合项目"文件优先"的哲学（memory/tasks 也都是纯文件）
   - 用户可以直接用记事本打开看/改 JSONL
   - 跨平台行为一致
@@ -34,16 +34,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 兼容老接口的存根（SQLite 时代的函数名，别的模块可能还在 import，留着占位）
+# 兼容老接口的存根（老函数名，别的模块可能还在 import，留着占位）
 # ---------------------------------------------------------------------------
 
 def is_fts5_available() -> bool:
-    """兼容老接口：SQLite 时代查 FTS5 全文搜索扩展是否可用，JSONL 版用不上，恒返回 False。"""
+    """兼容老接口：查 FTS5 全文搜索扩展是否可用——JSONL 存储用不上，恒返回 False。"""
     return False
 
 
 def is_trigram_available() -> bool:
-    """兼容老接口：SQLite 时代查 trigram 索引是否可用，JSONL 版用不上，恒返回 False。"""
+    """兼容老接口：查 trigram 索引是否可用——JSONL 存储用不上，恒返回 False。"""
     return False
 
 
@@ -53,11 +53,9 @@ def _contains_cjk(s: str) -> bool:
 
 
 class SessionStore:
-    """会话存储管理器（JSONL 文件实现）。
+    """会话存储管理器（JSONL 文件实现）：负责会话的增删查改、消息追加、搜索、统计、fork。
 
-    背景：负责会话的增删查改、消息追加、搜索、统计、fork。
-    所有接口与原 SQLite 版本兼容（cli.py / agent/__init__.py 等调用方
-    无需改动）。__init__ 接受 db_path 也是为了兼容老接口，实际当目录用：
+    __init__ 接受 db_path 是兼容老接口，实际当目录用：
     - 传的是文件路径（如 sessions.db）→ 自动改用它旁边的 .sessions/ 目录
     - 传的是目录路径 → 直接用
 
@@ -89,7 +87,7 @@ class SessionStore:
         # 读盘 + JSON 解析太慢；文件一变（mtime/size 变）缓存自动失效。
         # 为什么键用 mtime+size 双因子：Windows 的 mtime 精度只有 ~15ms，
         # 同一时间窗内 append 前后 mtime 可能一样，单看 mtime 会误判
-        # "文件没变"而漏读新消息（历史踩坑）。
+        # "文件没变"而漏读新消息。
         self._msgs_cache: dict = {}
         # 如果发现老的 SQLite 库就自动迁移
         self._maybe_migrate_sqlite()
@@ -142,12 +140,11 @@ class SessionStore:
         return self._sessions_dir / f"{session_id}.jsonl"
 
     def _read_session_msgs(self, session_id: str) -> List[dict]:
-        """（内部）读某个会话 .jsonl 里的全部消息（只读，不动 index）。
+        """（内部）读某个会话 .jsonl 里的全部消息（只读，不动 index）。带 (mtime, size) 缓存。
 
-        背景（热路径优化）：search/get_messages/get_stats/fork
-        每次都全量读盘 + 逐行 JSON 解析，是热路径——上万条消息时一次
-        要 100ms 以上。所以加了缓存：记下 (mtime, size)，文件没变就
-        直接用上次解析好的结果；调用方拿到后只做只读遍历，不会互相污染。
+        search/get_messages/get_stats/fork 是热路径（上万条消息全量读盘
+        一次要 100ms 以上），文件没变就直接用上次解析好的结果；调用方
+        拿到后只做只读遍历，不会互相污染。
         文件不存在时返回空列表；个别行 JSON 坏了就跳过那行。
 
         参数：
@@ -181,10 +178,7 @@ class SessionStore:
         return msgs
 
     def _compute_turn_index(self, session_id: str, role: str) -> int:
-        """（内部）算新消息的轮次编号：每来一条 user 消息就开一个新轮次。
-
-        背景：turn_index 用来给消息分组（一问多答算一轮），方便 UI 展示
-        和后续按轮检索。
+        """（内部）算新消息的轮次编号：每来一条 user 消息就开一个新轮次（一问多答算一轮，方便 UI 展示和按轮检索）。
 
         参数：
             session_id：会话 ID
@@ -203,9 +197,7 @@ class SessionStore:
     # ------------------------------------------------------------------
 
     def _maybe_migrate_sqlite(self) -> None:
-        """检测有没有老的 sessions.db，有且 index 为空时一次性迁移到 JSONL。
-
-        背景：老版本用 SQLite 存会话，升级后首次启动要无缝把老数据搬过来。
+        """检测有没有老的 sessions.db（SQLite 格式），有且 index 为空时一次性迁移到 JSONL。
 
         参数：无。
 
@@ -296,11 +288,11 @@ class SessionStore:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """兼容老接口：SQLite 时代要关连接，JSONL 版没有连接，什么都不做。"""
+        """兼容老接口的空操作：JSONL 存储没有连接要关，什么都不做。"""
         pass
 
     def __del__(self):
-        # 兼容老接口：SQLite 时代析构要关连接，现在没有连接要关
+        # 兼容老接口：现在没有连接要关
         try:
             pass
         except Exception:
@@ -350,10 +342,7 @@ class SessionStore:
         tool_call_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> str:
-        """往会话末尾追加一条消息（像在档案袋里再加一张纸条）。
-
-        背景：agent 主循环每产生一条 user/assistant/tool 消息都落盘一次，
-        崩溃/重启后才能完整恢复对话。
+        """往会话末尾追加一条消息（像在档案袋里再加一张纸条）——主循环每产生一条消息都落盘，崩溃/重启后才能完整恢复对话。
 
         参数：
             session_id：往哪个会话追加
@@ -383,7 +372,7 @@ class SessionStore:
             # PIPE_BUF 时天然原子，不会被别的进程写穿插）
             with self._session_file(session_id).open("a", encoding="utf-8") as f:
                 f.write(json.dumps(line_obj, ensure_ascii=False) + "\n")
-            # 历史踩坑：写完必须主动踢掉消息缓存——mtime 精度只有 ~15ms，
+            # 写完必须主动踢掉消息缓存——mtime 精度只有 ~15ms，
             # 同一窗口内连续 append 时 mtime 可能没变，缓存会误判"文件
             # 没变"而漏掉刚写的消息（回归用例 test_fork_session_does_not_mutate_source 盯着）
             self._msgs_cache.pop(session_id, None)
@@ -490,7 +479,7 @@ class SessionStore:
 
         这是项目"完全可逆"铁律的体现，符合数据永不真删的约定。
 
-        历史踩坑：要从目录卡片移除和文件改名这两步在
+        从目录卡片移除和文件改名这两步必须在
         同一把锁里做完，否则中途被打断会出现两步只做一半的脏状态。
 
         参数：
@@ -565,7 +554,7 @@ class SessionStore:
         return new_id
 
     # ------------------------------------------------------------------
-    # 全文搜索（用 Python 正则扫描，替代 SQLite 时代的 FTS5 全文索引）
+    # 全文搜索（用 Python 正则扫描）
     # ------------------------------------------------------------------
 
     def search(
@@ -579,11 +568,8 @@ class SessionStore:
         since: Optional[str] = None,
         until: Optional[str] = None,
     ) -> List[dict]:
-        """在所有会话的消息里做全文搜索（Python 正则实现）。
+        """在所有会话的消息里做全文搜索（Python 正则实现：re.escape + 忽略大小写扫所有 .jsonl）。
 
-        背景（相比 SQLite FTS5 的降级说明）：
-        - 之前用 FTS5 全文索引 + trigram 兜底 + snippet 函数
-        - 现在用 re.escape + 忽略大小写扫所有 .jsonl
         - 性能：一万条消息约 100ms（单用户场景够用）
         - 中文子串：直接子串匹配（re.search 天然支持）
         - snippet：截取关键词周围若干字符的上下文片段
@@ -677,9 +663,7 @@ class SessionStore:
     # ------------------------------------------------------------------
 
     def get_stats(self) -> dict:
-        """汇总统计整个会话库：会话数/消息数/各工具被调了多少次/角色分布等。
-
-        背景：给 /stats 命令做数据源，帮用户了解自己的使用情况。
+        """汇总统计整个会话库：会话数/消息数/各工具被调了多少次/角色分布等（给 /stats 命令做数据源）。
 
         参数：无。
 

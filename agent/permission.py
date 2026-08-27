@@ -581,7 +581,7 @@ def clear_extra_allowed_roots() -> None:
 
 
 def remove_extra_allowed_root(root) -> bool:
-    """运行时从额外白名单里移除一条(T5 的 /approved remove-root 命令用)。
+    """运行时从额外白名单里移除一条（/approved remove-root 命令用）。
 
     参数:
         root: 要移除的目录路径。
@@ -601,10 +601,10 @@ def default_allowed_roots() -> List[Path]:
     为什么是这三处:工作目录是用户项目的地盘,~/.OmniMate 是 AI 自己的家
     (记忆/技能等数据),/add-dir 是用户显式授权的额外目录。
 
-    历史踩坑(Round 1 修复):Path.cwd() 是进程级的(等于 os.getcwd)——
-    多个子代理(主对话派出去干活的分身)并发跑时,一个切了目录,别的都
-    会踩到别人的工作目录。所以改用 get_workspace_cwd()(线程私有的
-    ContextVar 变量):子代理在自己的 worktree(git 工作副本)里写文件时,
+    工作目录必须用 get_workspace_cwd() 取而不是 Path.cwd()——后者是
+    进程级的(等于 os.getcwd),多个子代理(主对话派出去干活的分身)并发
+    跑时,一个切了目录,别的都会踩到别人的工作目录;前者是线程私有的
+    ContextVar 变量:子代理在自己的 worktree(git 工作副本)里写文件时,
     白名单里包含的是它自己的 worktree 路径,不会被 safe_path 误拒。
 
     返回:Path 列表(无参数)。
@@ -684,8 +684,8 @@ def safe_path(
             resolved.relative_to(root)
             return PermissionResult(True, "白名单内", "ok")
         except (OSError, ValueError):
-            # 历史踩坑(X17 修复):OSError 和 ValueError 要合并在一个 except 里
-            # ——之前写成两段连续的 except,第二段是死代码(轮不到执行)
+            # OSError 和 ValueError 要合并在一个 except 里
+            # ——写成两段连续的 except 时,第二段是死代码(轮不到执行)
             continue
 
     return PermissionResult(
@@ -835,8 +835,8 @@ def _is_readonly_command(command: str) -> bool:
     if not command or not command.strip():
         return False
     # 含替换形态($() 反引号 <() >())的命令不许走正则快速通道直通——必须
-    # 交 AST 裁决。历史踩坑:引号里的字面 $() AST 能分清,而实测曾经漏掉
-    # `cat <(ls)` 让它免审通过(Critical 级修复)
+    # 交 AST 裁决(引号里的字面 $() AST 能分清;`cat <(ls)` 这类形态一旦
+    # 免审直通就是 Critical 级放行)
     has_sub_form = bool(_SUBSHELL_RE.search(command) or _PROCSUB_RE.search(command))
     regex_ok = True
     for seg in _COMPOUND_SPLIT_RE.split(command):
@@ -1033,7 +1033,7 @@ def _parse_classify_response(text: str) -> Dict[str, Any]:
         return {"error": f"输出非 JSON: {t[:80]}"}
     if not isinstance(parsed, dict):
         return {"error": "输出非对象"}
-    # 兼容旧版两态格式(safe: true/false)
+    # 兼容两态格式(safe: true/false)
     if "verdict" not in parsed and "safe" in parsed:
         parsed["verdict"] = "allow" if parsed["safe"] else "deny"
     verdict = str(parsed.get("verdict", "")).lower()
@@ -1155,7 +1155,7 @@ def is_dangerous_removal_path(resolved_path) -> bool:
 # 删除类动词(看命令第一个词;Remove-Item 不在此列,它由闸门 2 的
 # 破坏性审批兜底)
 _REMOVAL_VERBS = frozenset({"rm", "rmdir", "del", "erase", "rd"})
-# 复合命令切段正则(与只读通道的 _COMPOUND_SPLIT_RE 同款)。历史踩坑:
+# 复合命令切段正则(与只读通道的 _COMPOUND_SPLIT_RE 同款)。
 # 要补上 & 后台分隔和 \r\n 换行——否则 "echo hi\nrm -rf /"
 # 会被当成一段,动词是 echo,危险的后半段漏过本闸门
 _CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
@@ -1266,7 +1266,7 @@ class PermissionChecker:
         whitelist_file=None,
         paths_whitelist_file=None,
         mode: str = "default",  # "default" | "bypassPermissions" | "acceptEdits" | "autoDeny"
-        hooks_registry=None,  # round3 D2 NEW: 权限审计 hook
+        hooks_registry=None,  # 权限审计 hook
     ):
         """
         参数：
@@ -1366,7 +1366,7 @@ class PermissionChecker:
         self._config_provider = provider
 
     def _readonly_fastpath_enabled(self) -> bool:
-        """T7:只读快速通道的开关(config security.readonly_fastpath_enabled,默认开)。
+        """只读快速通道的开关(config security.readonly_fastpath_enabled,默认开)。
 
         返回:True 表示启用。读不到配置时也返回 True(fail-open,
         读不到配置就按默认值来,别把功能弄没了)。
@@ -1381,7 +1381,7 @@ class PermissionChecker:
             return True  # fail-open:读不到配置默认开
 
     def _deny(self, command: str, reason: str, deny_type: str = "deny") -> "PermissionResult":
-        """round3 D2 新增:统一的拒绝 helper。
+        """统一的拒绝 helper。
 
         干什么:所有"拒绝"都从这儿出——先触发 PERMISSION_DENIED 审计 hook
         (hook 出错不影响拒绝本身,fail-open),再返回 PermissionResult(False)。
@@ -1422,7 +1422,7 @@ class PermissionChecker:
     def _save_whitelist(self):
         """把持久化白名单写回 JSON 文件（原子写；快照+写盘整段加锁）。
 
-        历史踩坑：只锁"拍快照"那一下不够——rename 的落盘时机可能
+        只锁"拍快照"那一下不够——rename 的落盘时机可能
         晚于别人更早的快照。场景：线程 T 拍了快照慢慢写盘，线程 Y 这时
         加了条目并先落盘，T 的旧快照随后落盘把 Y 的更新覆盖 → Y 白加了。
         所以要把"快照到 rename"整段锁住，让所有 save 排成全序，
@@ -1521,7 +1521,7 @@ class PermissionChecker:
         # autoDeny 短路(fail-closed,直接拒):
         # - fatal 底线(rm -rf / 等)在闸门 0 已经拒了,走不到这里
         # - 黑名单(sudo 等)在闸门 1 已经拒了,走不到这里
-        # - 历史踩坑:必须用 effective_mode——全局共享的那个 checker
+        # - 必须用 effective_mode——全局共享的那个 checker
         #   (get_default_checker() 返回的实例)的 self.mode 永远是 "default",
         #   子代理的 autoDeny 是通过 mode_override 传进来的,只有
         #   effective_mode 能反映真实模式。
@@ -1810,10 +1810,10 @@ class PermissionChecker:
         try:
             verdict = asyncio.run(_classify_bash_command(command, aux_llm))
         except RuntimeError as e:
-            # 历史踩坑:在 async 上下文里(已经有事件循环
-            # 在跑)直接调 check,asyncio.run 会抛 RuntimeError——之前碰到这
-            # 个异常直接 fail-open 跳过分类,等于安全层在那条执行路径上无声
-            # 消失了。修复:降级到独立工作线程里跑事件循环(阻塞等结果,
+            # 在 async 上下文里(已经有事件循环
+            # 在跑)直接调 check,asyncio.run 会抛 RuntimeError——直接
+            # fail-open 跳过分类会让安全层在那条执行路径上无声消失。
+            # 所以降级到独立工作线程里跑事件循环(阻塞等结果,
             # 保住 check() 的同步契约);还不行才 fail-open。
             logger.warning(
                 "bash_llm_classifier: 事件循环线程直调，转工作线程执行: %s", e,
@@ -1892,11 +1892,11 @@ class PermissionChecker:
                  弹窗问用户(批了以后父目录进会话缓存,同目录不再问) →
                  没配 callback 就拒。
 
-        历史踩坑:闸门 3 的白名单语义曾被放开成"其他全通过",导致 /add-dir
-        加的额外目录对 write_file/str_replace 不生效——它们走的是
-        check_path 而不是 safe_path。白名单必须统一从
+        闸门 3 的白名单必须统一从
         default_allowed_roots() 取(工作目录 + ~/.OmniMate
-        + _EXTRA_ALLOWED_ROOTS,和 safe_path 同一个来源)。
+        + _EXTRA_ALLOWED_ROOTS,和 safe_path 同一个来源)——write_file/
+        str_replace 走的是 check_path 而不是 safe_path,白名单语义放开成
+        "其他全通过"会让 /add-dir 加的额外目录对它们不生效。
         顺序铁律:闸门 1/2 排在前——就算往白名单里加了整个家目录,
         ~/.ssh 也照样写不了。
 
@@ -1929,7 +1929,7 @@ class PermissionChecker:
 
         # 闸门 2:写保护路径(项目代码目录)→ 拒
         # bypassPermissions 模式下也保留这道检查(防 AI 改自身源码)。
-        # 历史踩坑:这个块必须排在 acceptEdits 分支前面——
+        # 这个块必须排在 acceptEdits 分支前面——
         # 闸门 2 是全模式硬底线,acceptEdits 不能绕过
         # (否则工作目录恰好是 AI 自己的代码库时,"cwd 内自动放行"会把它
         # 自己的源码也一起批出去)。

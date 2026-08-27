@@ -35,10 +35,9 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 def _extract_quoted_content(command: str, is_jq: bool = False):
-    """生成三种「引号视图」，返回 (with_dq, fully, keepq) 三个字符串。
+    """生成三种「引号视图」，返回 (with_dq, fully, keepq) 三个字符串，把命令按引号状态拆出三种看法供不同检查器选用。
 
-    干什么：把命令按引号状态拆出三种看法，供不同检查器选用。
-    背景：bash 里单引号内容完全不展开、双引号内容部分展开，检查器必须
+    bash 里单引号内容完全不展开、双引号内容部分展开，检查器必须
     区分「引号里的字符」和「裸字符」，否则会被引号骗过。
 
     参数：
@@ -100,8 +99,8 @@ _HEREDOC_OPEN_RE = re.compile(
 def _strip_quoted_heredocs(command: str) -> str:
     r"""把「带引号/转义定界符」的 heredoc 正文从命令里拿掉，返回剩余部分。
 
-    背景：heredoc 定界符加了引号（<<'EOF'）或反斜杠（<<\EOF）时，正文是
-    纯字面量、不会被 shell 展开——里面的 $() 之类的可疑形态是纸老虎，
+    定界符加了引号（<<'EOF'）或反斜杠（<<\EOF）时，正文是纯字面量、
+    不会被 shell 展开——里面的 $() 之类的可疑形态是纸老虎，
     拿掉可以少误报。没加引号的 heredoc（<<EOF）正文会展开 $() 和反引号，
     必须留给检查器看。找不到闭合定界符时整段保留（宁可多查不漏查）。
     """
@@ -209,9 +208,7 @@ _SHELL_OPERATORS = frozenset(";|&<>")
 
 
 def _has_unescaped_char(content: str, char: str) -> bool:
-    r"""看内容里有没有出现「未被反斜杠转义」的指定单字符。
-
-    背景：反斜杠转义对（\\x）要整对跳过，否则会把 `\`` 误当成真反引号。
+    r"""看内容里有没有出现「未被反斜杠转义」的指定单字符（转义对 \\x 要整对跳过，否则会把 `\`` 误当成真反引号）。
 
     参数：
         content —— 要查的字符串
@@ -231,10 +228,7 @@ def _has_unescaped_char(content: str, char: str) -> bool:
 
 
 def _scan_quotes(command: str):
-    """逐字符扫描命令，边扫边维护引号状态，逐个产出 (idx, char, in_sq, in_dq)。
-
-    背景：多个检查器都需要知道「当前字符在不在引号里」，抽成公共生成器
-    避免每个检查器各写一套容易出错的引号状态机。
+    """逐字符扫描命令，边扫边维护引号状态，逐个产出 (idx, char, in_sq, in_dq)——公共生成器，多个检查器共用（各写一套引号状态机容易出错）。
 
     参数：
         command —— 要扫描的命令
@@ -261,10 +255,7 @@ def _scan_quotes(command: str):
 
 
 def _has_backslash_escaped_whitespace(command: str) -> bool:
-    r"""检查引号外有没有「反斜杠+空格/tab」的写法。
-
-    背景：`\ ` 在 bash 里把空格粘进一个词，但基于文本的解析器可能把它
-    切成两个词——两边分词不一致就可能被钻空子。
+    r"""检查引号外有没有「反斜杠+空格/tab」的写法——`\ ` 在 bash 里把空格粘进一个词，基于文本的解析器可能把它切成两个词，两边分词不一致就可能被钻空子。
 
     参数：
         command —— 命令原文
@@ -290,10 +281,7 @@ def _has_backslash_escaped_whitespace(command: str) -> bool:
 
 
 def _has_backslash_escaped_operator(command: str) -> bool:
-    r"""检查引号外有没有「反斜杠+操作符」（\; \| \& \< \>）的写法。
-
-    背景：转义的操作符能把命令的真实结构藏起来，让检查器看不出这里
-    其实有分隔/管道。
+    r"""检查引号外有没有「反斜杠+操作符」（\; \| \& \< \>）的写法——转义的操作符能把命令的真实结构藏起来，让检查器看不出这里其实有分隔/管道。
 
     参数：
         command —— 命令原文
@@ -325,10 +313,7 @@ def _has_backslash_escaped_operator(command: str) -> bool:
 
 
 def _check_carriage_return_outside_dq(command: str) -> bool:
-    """检查回车符（\r）是否出现在双引号外。
-
-    背景：bash 的默认分隔符列表里没有 \r，会把带 \r 的内容当普通字符并进
-    词里，而很多解析器按换行符家族切分——两边分词结果不同。
+    """检查回车符（\r）是否出现在双引号外——bash 的默认分隔符列表里没有 \r（带 \r 的内容并进词里），很多解析器却按换行符家族切分，两边分词结果不同。
 
     参数：
         command —— 命令原文
@@ -344,10 +329,7 @@ def _check_carriage_return_outside_dq(command: str) -> bool:
 
 
 def _check_comment_quote_desync(command: str) -> bool:
-    """检查未加引号的 # 注释内容里是否藏了引号字符。
-
-    背景：如果注释里出现引号，简单的「跟踪引号开合」的解析器会把注释里
-    的引号当真，之后所有引号状态全部错位（失步），后续检查全被带偏。
+    """检查未加引号的 # 注释内容里是否藏了引号字符——注释里的引号会被简单的「跟踪引号开合」解析器当真，之后所有引号状态全部错位（失步），后续检查全被带偏。
 
     参数：
         command —— 命令原文
@@ -399,10 +381,7 @@ def _check_comment_quote_desync(command: str) -> bool:
 
 
 def _check_quoted_newline_hash(command: str) -> bool:
-    """检查「引号内的换行 + 下一行以 # 开头」的组合。
-
-    背景：按行逐行检查的工具会把 # 行当注释跳过，但这段其实在引号里、
-    是真参数——参数被藏在检查器看不见的地方。
+    """检查「引号内的换行 + 下一行以 # 开头」的组合——按行逐行检查的工具会把 # 行当注释跳过，但这段其实在引号里、是真参数。
 
     参数：
         command —— 命令原文
@@ -431,11 +410,7 @@ def _is_escaped_at(content: str, pos: int) -> bool:
 
 
 def _check_brace_expansion(fully: str) -> bool:
-    """检查是否存在未加引号的花括号展开（{a,b} / {1..5}）。
-
-    背景：bash 会把 {a,b} 展开成多个词——检查器看到的参数形态和实际执行的
-    不一样。fully 视图已经把引号内容剥掉（引号内不展开），所以这里查到的
-    都是裸花括号。
+    """检查是否存在未加引号的花括号展开（{a,b} / {1..5}）——bash 会把 {a,b} 展开成多个词，检查器看到的参数形态和实际执行的不一样。fully 视图已经把引号内容剥掉（引号内不展开），这里查到的都是裸花括号。
 
     参数：
         fully —— 剥掉全部引号内容后的命令视图
@@ -485,10 +460,7 @@ def _check_brace_expansion(fully: str) -> bool:
 
 
 def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
-    """检查「用引号混写把 flag 藏起来」的形态（"-f" / '--flag' / $'..' / 空引号对+横杠）。
-
-    背景：命令行参数解析器通常把引号剥掉再看 flag，安全检查却可能因为
-    引号的存在没认出这是个 flag——两边认知不一致就有绕过的空间。
+    """检查「用引号混写把 flag 藏起来」的形态（"-f" / '--flag' / $'..' / 空引号对+横杠）——命令行参数解析器通常把引号剥掉再看 flag，安全检查却可能因为引号的存在没认出这是个 flag，两边认知不一致就有绕过的空间。
 
     参数：
         command —— 命令原文
@@ -553,10 +525,7 @@ def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
 
 
 def _zsh_base_command(command: str) -> str:
-    """剥掉环境变量赋值和 zsh 前置修饰符，返回真正的首命令名。
-
-    背景：FOO=1 command builtin cmd 这种写法里，真正的命令藏在后面；
-    不剥掉就拿首词去对危险命令表会查错对象。
+    """剥掉环境变量赋值和 zsh 前置修饰符，返回真正的首命令名——FOO=1 command builtin cmd 这种写法里真正的命令藏在后面，不剥掉就拿首词对危险命令表会查错对象。
 
     参数：
         command —— 命令原文
@@ -575,9 +544,9 @@ def _zsh_base_command(command: str) -> str:
 def check_injection_surface(command: str) -> Optional[str]:
     """主入口：检查命令里有没有注入面形态，有则返回中文原因，没有返回 None。
 
-    背景：本模块的对外入口。调用位置在 PermissionChecker.check
-    里、硬拒绝黑名单（闸门 1）之后、只读快速通道之前——命中走用户审批
-    而不是硬拒（ask 语义：所见非所执行 ≠ 一定是攻击）。
+    调用位置在 PermissionChecker.check 里、硬拒绝黑名单（闸门 1）之后、
+    只读快速通道之前——命中走用户审批而不是硬拒（ask 语义：所见非所执行
+    ≠ 一定是攻击）。
 
     参数：
         command —— 待检查的命令原文

@@ -37,7 +37,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # 默认停滞超时（秒）：连续这么久标准输出没有新增一个字节，
-# 就判定为"可能卡在交互提示"。0 表示禁用这功能（兼容老行为）；
+# 就判定为"可能卡在交互提示"。0 表示禁用这功能；
 # BackgroundManager 构造时显式传 45.0 才真正启用。
 DEFAULT_STALL_TIMEOUT = 45.0
 
@@ -243,7 +243,7 @@ class BackgroundManager:
           - 本线程定期巡查三件事：进程结束没 / 卡住没 / 总超时到没
           - 超过 stall_timeout 秒没有新输出 → 发"可能卡住"提醒
             （只提醒不杀进程——怎么办交给 LLM 决定）
-        stall_timeout == 0 时走老的单次阻塞等待路径（兼容旧行为）。
+        stall_timeout == 0 时走单次阻塞等待路径（无看门狗）。
         监视模式任务（task.monitor=True）也走轮询路径（要实时抄送输出），
         但**跳过卡住提醒**（持续观察类命令安静是常态）。
 
@@ -267,7 +267,7 @@ class BackgroundManager:
     def _watch_classic(
         self, task_id: str, proc: subprocess.Popen, timeout: float,
     ):
-        """老路径：一次性阻塞等到命令结束或超时（看门狗关闭时用，兼容旧行为）。
+        """一次性阻塞等到命令结束或超时（看门狗关闭时用）。
 
         参数：
         - task_id：任务编号
@@ -281,7 +281,7 @@ class BackgroundManager:
             exit_code = proc.returncode
             with self._lock:
                 task = self._tasks.get(task_id)
-                # 历史踩坑：stop() 抢先把状态改了（不再是 running）时，
+                # stop() 抢先把状态改了（不再是 running）时，
                 # 这里绝不能再覆盖状态、再发一条重复通知
                 if task is None or task.status != "running":
                     return
@@ -389,7 +389,7 @@ class BackgroundManager:
 
         try:
             while True:
-                # 历史踩坑：发现 stop() 已抢先改状态，立刻退出别再抢
+                # 发现 stop() 已抢先改状态，立刻退出别再抢
                 with self._lock:
                     task = self._tasks.get(task_id)
                     if task is None or task.status != "running":
@@ -560,8 +560,7 @@ class BackgroundManager:
     def status(self, task_id: str) -> Optional[BackgroundTask]:
         """查一个任务现在的状态。
 
-        历史踩坑：返回的是拷贝而不是原件——不然调用方正读着，
-        守护线程改一半，读到自相矛盾的数据。
+        返回拷贝而非原件——防调用方读到守护线程改一半的自相矛盾数据。
 
         参数：
         - task_id：任务编号
@@ -601,8 +600,8 @@ class BackgroundManager:
                 return False
             if task.status in ("completed", "failed", "stopped"):
                 return True
-            # 历史踩坑：先把状态标成 "stopping"，这样盯梢线程
-            # 醒来一看状态不是 running 就知道别人抢先了，不会覆盖结果、重复发通知
+            # 先把状态标成 "stopping"：盯梢线程看到非 running
+            # 就知道别人抢先了，不会覆盖结果、重复发通知
             task.status = "stopping"
             proc = task._proc
         if proc is not None:
@@ -632,7 +631,7 @@ class BackgroundManager:
     def set_wake_callback(self, fn) -> None:
         """注册 idle wake 回调：任务结束通知入队后被敲一下（不传参）。
 
-        背景：CLI 用它往输入队列塞唤醒哨兵，实现"主对话空闲时后台任务
+        CLI 用它往输入队列塞唤醒哨兵，实现"主对话空闲时后台任务
         完成 → 自动跑一轮处理结果"。回调在盯梢线程里执行，必须便宜、
         非阻塞、永不拖垮通知本身（调用处已 try/except 兜底）。
 

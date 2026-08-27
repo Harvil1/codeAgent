@@ -1,15 +1,10 @@
 """两件事：跨会话的输入历史 + 大段粘贴的"引用协议"。
 
-两个能力分别是：跨会话召回旧输入（↑↓ 键语义），以及
-大段粘贴先存盘、消息里只留占位符（要用时再展开）。
-适配说明：OmniMate 用的是纯 rich console，没有 readline 那种按键级行编辑，
-所以做了相应变形：
-
-- **输入历史**：追加写 ~/.OmniMate/history.jsonl（和最近一条重复就不记），
-  倒着读；召回靠 `/history` 命令（列表 + `/history N` 打印第 N 条原文）。
-  ↑↓ 键绑定留到以后做 TUI 再说——rich 的 console.input 没有行编辑能力，
-  硬塞终端 hack 不值得
-- **粘贴引用**：超过 1024 字符的大段输入存到 ~/.OmniMate/.paste/ 外面，
+- **输入历史**：跨会话召回旧输入。追加写 ~/.OmniMate/history.jsonl（和最近
+  一条重复就不记），倒着读；召回靠 `/history` 命令（列表 + `/history N`
+  打印第 N 条原文）。纯 rich console 没有按键级行编辑，不做 ↑↓ 键绑定。
+- **粘贴引用**：大段粘贴先存盘、消息里只留占位符（要用时再展开）。
+  超过 1024 字符的大段输入存到 ~/.OmniMate/.paste/ 外面，
   消息里只留 `[Pasted text #N +M lines]` 占位符（会话存占位符省空间），
   发给 agent 前再展开成原文（expand_paste_references）；对应文件找不到就
   保留占位符（fail-open——外存被清理也不耽误对话）
@@ -30,15 +25,13 @@ PASTE_THRESHOLD = 1024
 # 输入历史最多留多少条（100 条上限）
 HISTORY_LIMIT = 100
 
-# 占位符里的 id 既认 hex（内容寻址 id），也认旧的纯数字编号
+# 占位符 id 兼容两种形态：hex（内容寻址 id）和纯数字编号
 _PASTE_REF_RE = re.compile(r"\[Pasted text #([A-Za-z0-9]+)(?: \+\d+ lines)?\]")
 
 
 @contextmanager
 def _file_lock(lock_path: Path, timeout: float = 5.0):
-    """跨平台的独占文件锁（Windows 用 msvcrt，Linux/macOS 用 fcntl，与团队协作 bus 同一套方案）。
-
-    背景：多个进程同时读写 history.jsonl 会互相覆盖丢数据，需要一把锁排队。
+    """跨平台的独占文件锁（Windows 用 msvcrt，Linux/macOS 用 fcntl，与团队协作 bus 同一套方案）——防多进程并发读写互相覆盖。
 
     参数：
         lock_path：锁文件路径
@@ -100,10 +93,9 @@ class GlobalHistory:
     def append(self, text: str) -> None:
         """记一条输入（和最近一条一模一样就不记；条数超了裁旧的）。全程 fail-open。
 
-        历史踩坑：追加和"软裁剪"（超上限时整文件重写）必须都
-        放进文件锁里——重写不加锁会把别的进程刚追加进去的数据覆盖丢掉。
-        折中策略：等锁等到超时时，追加照做（追加风险低），裁剪放弃
-        （重写必须持锁，宁可不裁也不能丢数据）。
+        约束：追加和"软裁剪"（超上限时整文件重写）必须持文件锁——重写不加锁
+        会覆盖别的进程刚追加的数据；等锁超时时追加照做、裁剪放弃（宁可不裁
+        也不丢数据）。
 
         参数：
             text：用户这次输入的文本（空白不记）
@@ -120,8 +112,7 @@ class GlobalHistory:
                 with self._path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
                 # 软裁剪：超过 2 倍上限才动手重写、只留最新 HISTORY_LIMIT 条（不用每条都裁，省事）
-                # 历史踩坑：splitlines 会把换行符剥掉——重写时必须补回去，
-                # 否则所有记录粘成一行，整个历史文件就废了
+                # 注意：splitlines 剥掉了换行符，重写时必须补回去，否则记录会粘成一行
                 if locked:
                     lines = self._read_all()
                     if len(lines) > HISTORY_LIMIT * 2:
@@ -187,11 +178,7 @@ def _paste_dir(home) -> Path:
 
 
 def _paste_id_for(text: str) -> str:
-    """给一段粘贴内容算 id：取内容 sha256 的前 8 位 hex。
-
-    背景：这叫"内容寻址"——内容相同算出的 id 就相同，
-    同一段东西粘十次也只占一个文件。
-    """
+    """给一段粘贴内容算 id：取内容 sha256 的前 8 位 hex（内容寻址——同样内容算出同样 id，重复粘贴复用同一个文件）。"""
     return hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()[:8]
 
 
@@ -201,7 +188,7 @@ def store_paste_if_large(text: str, home) -> Tuple[str, Optional[str]]:
     超过 PASTE_THRESHOLD 字符时：原文存 .paste/text_<hash8>.txt（内容寻址——
     同样内容重复粘贴复用同一个文件），
     消息替换成 `[Pasted text #<hash8> +M lines]`；没超长就原样返回 (text, None)。
-    早期数字编号的占位符（text_5.txt）在展开那边仍然认识（正则做了兼容）。
+    数字编号形态的占位符（text_5.txt）在展开那边也认识（正则做了兼容）。
 
     参数：
         text：用户输入的原文
@@ -243,7 +230,7 @@ def expand_paste_references(text: str, home) -> str:
 
     def _expand(m: "re.Match") -> str:
         try:
-            # id 是字母数字串，hex（内容寻址）和旧数字编号都能对上
+            # id 是字母数字串，hex（内容寻址）和数字编号都能对上
             pid = m.group(1)
             path = _paste_dir(home) / f"text_{pid}.txt"
             if path.exists():

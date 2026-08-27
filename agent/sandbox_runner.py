@@ -130,8 +130,8 @@ def reset_availability_cache() -> None:
 def uses_job_object() -> bool:
     """当前平台沙箱是不是走 Windows 的 Job Object 路线。
 
-    背景：bwrap/Seatbelt 是"先包装命令再启动"，而 Job Object 是"先正常
-    启动再套笼子"——调用方需要知道走哪条路，所以提供这个判断。
+    bwrap/Seatbelt 是"先包装命令再启动"，Job Object 是"先正常启动再套
+    笼子"——调用方按这个判断分流。
     """
     return sys.platform == "win32"
 
@@ -167,10 +167,7 @@ def run_with_job_object(
     input=None,
     errors=None,
 ) -> subprocess.CompletedProcess:
-    """Windows Job Object 模式下跑一条命令的完整流程（统一入口）。
-
-    背景：terminal 工具和 hook 执行都要走同一套流程，这里抽成公共函数。
-    流程是：启动进程 → 套笼子 → 收输出 → 关笼子。
+    """Windows Job Object 模式下跑一条命令的统一入口（terminal 工具和 hook 执行共用）。流程：启动进程 → 套笼子 → 收输出 → 关笼子。
 
     参数：
         cmd: 要跑的命令。terminal 传的是字符串并配 shell=True；
@@ -185,7 +182,7 @@ def run_with_job_object(
 
     返回：CompletedProcess（含返回码、stdout、stderr）。
 
-    几个关键细节（都是历史踩坑换来的，别改）：
+    几个关键细节（别改）：
       - 命令不做任何包装，照常 Popen 启动（输出走管道、按文本模式、
         强制 utf-8 解码）
       - 套笼子失败（返回 None）只警告不阻断——没笼子也继续跑
@@ -297,7 +294,7 @@ def _bwrap_wrap(
             argv += ["--ro-bind", d, d]
 
     # /tmp 用沙箱内部的临时内存盘，和宿主机的 /tmp 隔开
-    # 历史踩坑：当 cwd 本身就在 /tmp 下时跳过这一步——
+    # 注意：当 cwd 本身就在 /tmp 下时跳过这一步——
     # 下面又要往沙箱里挂真正的 /tmp/cwd，和这里的临时盘会打架
     _cwd_str = str(cwd)
     if not (_cwd_str == "/tmp" or _cwd_str.startswith("/tmp/")):
@@ -365,11 +362,7 @@ def wrap_command(
 
 # 下面是 Seatbelt 规则文件的辅助函数
 def _seatbelt_escape_path(p: str) -> str:
-    """把路径里的特殊字符转义掉，防止有人往规则文件里夹带私货（防注入）。
-
-    背景：Seatbelt 的规则文件用的是 Scheme 语言语法；往里面插的路径
-    可能来自用户或 agent，如果路径里带反斜杠或双引号，会破坏规则文件的
-    语法结构，甚至注入额外的放行规则。所以先转义。
+    """把路径里的特殊字符转义掉再插进 Seatbelt 规则文件（Scheme 语法）——路径里带反斜杠或双引号会破坏规则文件语法、甚至注入额外的放行规则（防注入）。
 
     参数：
         p: 要插进规则文件的路径
@@ -410,11 +403,7 @@ def _write_seatbelt_profile(
     cwd: str,
     writable_roots: List[str],
 ) -> Path:
-    """把规则内容写成一份 .sb 规则文件，存到 ~/.OmniMate/.sandbox/ 下。
-
-    背景：macOS 的 sandbox-exec 需要"先有规则文件，再按文件执行"，所以
-    每次跑命令前都要现写一份。文件名带随机编号（uuid），多条命令并发跑
-    时互不覆盖。
+    """把规则内容写成一份 .sb 规则文件，存到 ~/.OmniMate/.sandbox/ 下（sandbox-exec 按文件执行，每次跑命令现写一份；文件名带随机编号，并发互不覆盖）。
 
     参数：
         cwd: 工作目录（会成为第一个允许写入的目录）
@@ -432,7 +421,7 @@ def _write_seatbelt_profile(
     sandbox_dir = get_omnimate_home() / ".sandbox"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
 
-    # 历史问题修复（X15）：写新规则文件前顺手清掉 7 天前的老文件——
+    # 写新规则文件前顺手清掉 7 天前的老文件——
     # 每条命令都生成一份 .sb，不清就会无限堆积
     try:
         _cleanup_old_seatbelt_profiles(sandbox_dir, max_age_days=7)

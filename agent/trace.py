@@ -230,7 +230,7 @@ def _register_trace_hooks(hooks_registry, sink: "TraceSink") -> None:
         ),
         name="trace_post_tool_use",
     )
-    # 历史踩坑：POST_TOOL_USE_FAILURE 的回调签名是 fn(payload: dict)（见
+    # POST_TOOL_USE_FAILURE 的回调签名是 fn(payload: dict)（见
     # hooks.py 的注册处），不是 (tool_name, args, result)——
     # 写错参数签名就是静默失效
     hooks_registry.register_post_tool_use_failure(
@@ -275,8 +275,8 @@ def _estimate_messages_tokens(messages: Optional[list]) -> int:
     返回：
         估算的 token 总数。任何异常都返回 0（fail-open，估算器不能崩）。
 
-    历史踩坑：以前不分中英文统一按 4 字符/token 算，但中文实际 1-2 字符就是
-    一个 token，等于把中文成本低估了 2.5 倍以上，/trace 看成本完全失真。
+    不能不分中英文统一按 4 字符/token 算——中文实际 1-2 字符就是
+    一个 token，统一估算会把中文成本低估 2.5 倍以上。
     """
     try:
         ascii_chars = 0

@@ -1,8 +1,7 @@
 """prompt 缓存（LLM 服务商对"开头不变的部分"打折复用的机制）的破坏检测器。
 
-背景：缓存命中省钱
-又提速，一旦开头内容变了缓存就全废（费用翻倍），所以要有个"哨兵"盯着
-每次调用、发现缓存掉了就报告是哪里变了。
+缓存命中省钱又提速，一旦开头内容变了缓存就全废（费用翻倍）——本模块
+盯着每次调用，发现缓存掉了就报告是哪里变了。
 
 工作流程（三步）：
 1. 调 API 前：record_prompt_state 给 prompt 的各个维度拍快照
@@ -106,10 +105,7 @@ def record_prompt_state(
     betas: Optional[dict] = None,
     **kwargs,
 ) -> PromptState:
-    """调 API 前给 prompt 各维度拍快照（12 维度 + 每工具哈希）。
-
-    背景：check_cache_break 要拿"上一次的快照"和这一次对比，所以每次
-    调用前都得先来这儿登记一遍。
+    """调 API 前给 prompt 各维度拍快照（12 维度 + 每工具哈希），供 check_cache_break 与上一次对比。
 
     参数：
         system_prompt: 系统提示（字符串，或多个文本块的列表）
@@ -184,10 +180,7 @@ def check_cache_break(
     cache_read_tokens: int,
     query_source: str = "",
 ) -> Optional[str]:
-    """调 API 后检查缓存是不是被破坏了，是就查出根因。
-
-    背景：LLM 返回的响应里带着"这次命中了多少缓存 token"，拿它跟上一次
-    对比——掉了说明缓存失效了，得找出是哪个维度的变化干的。
+    """调 API 后检查缓存是不是被破坏了，是就查出根因——拿响应里"这次命中了多少缓存 token"跟上一次对比，掉了就查是哪个维度的变化干的。
 
     判定标准：读到的缓存 token 比上次降了 5% 以上**并且**绝对量超过
     2000 tokens，才算真破坏（小抖动忽略，避免误报）。
@@ -375,9 +368,7 @@ def _diff_tool_hashes(current: List[ToolHashEntry], prev: List[ToolHashEntry]) -
 def _write_break_diff(
     prev: PromptState, cur: PromptState, reasons: List[str],
 ) -> Optional[str]:
-    """缓存被破坏时，把前后差异写进 ~/.OmniMate/.cache-breaks/ 下的文件。
-
-    背景：光看日志里一行原因不够直观，落个文件方便事后翻查对比。
+    """缓存被破坏时，把前后差异写进 ~/.OmniMate/.cache-breaks/ 下的文件（比日志一行原因直观，方便事后翻查）。
 
     参数：
         prev: 破坏前的快照
@@ -440,9 +431,7 @@ def _write_break_diff(
 
 
 def _enforce_diff_lru_limit() -> None:
-    """控制 diff 文件总量不超上限（默认 100 个，超了删最旧的）。
-
-    背景：diff 文件会越攒越多，得有人扫地，删的时候留新的删旧的。
+    """控制 diff 文件总量不超上限（默认 100 个，超了删最旧的，防越攒越多）。
 
     返回：无。删任何文件失败都静默忽略，整体绝不抛异常。
     """
@@ -481,10 +470,10 @@ _diff_limit: int = 100
 def _read_diff_limit() -> int:
     """读 diff 文件数量上限（默认 100）。
 
-    背景：本模块拿不到 config 实例，也不直接 import config（避免循环
-    依赖），所以把上限存在模块级变量 _diff_limit 里，由 AIAgent.__init__
-    读配置（约定键 DEFAULT_CONFIG["context"]["max_cache_break_diff_files"]）
-    后调 set_diff_limit 写进来。
+    上限存模块级变量 _diff_limit（本模块不直接 import config，避免循环
+    依赖），由 AIAgent.__init__ 读配置（键
+    DEFAULT_CONFIG["context"]["max_cache_break_diff_files"]）后调
+    set_diff_limit 写进来。
 
     返回：上限值；读不到时 100。
     """
@@ -510,8 +499,8 @@ def set_diff_limit(limit: int) -> None:
 def notify_compaction() -> None:
     """打个招呼：下次缓存下降是我们自己干的，别报警。
 
-    背景：压缩（compact）会改写消息历史，下次读到的缓存 token 必然掉一截，
-    但这不是"缓存被破坏"。做完压缩后调一下本函数，check_cache_break
+    压缩（compact）会改写消息历史，下次读到的缓存 token 必然掉一截，
+    但这不是"缓存被破坏"——做完压缩后调本函数，check_cache_break
     就会跳过下一次的破坏判定。
     """
     global _pending_compaction

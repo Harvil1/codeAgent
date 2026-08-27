@@ -1,6 +1,6 @@
 """workflow 工具：确定性工作流引擎暴露给 LLM 的入口。
 
-背景：workflow 引擎（agent/workflow_engine.py）能用受约束的 Python 脚本
+workflow 引擎（agent/workflow_engine.py）能用受约束的 Python 脚本
 并发驱动一批子代理，本文件把它包装成一个工具给 LLM 调。共五个 action：
 run（name=脚本名 或 script=内联代码）/ resume（只信 run 目录里的快照）/
 list / status / kill。DSL 具体写法见 skills/workflow-dsl/SKILL.md
@@ -37,9 +37,8 @@ _KEEP_MAX_RUNS = 50
 def _cleanup_old_runs(base) -> int:
     """run 目录超过上限时删掉最旧的一批。
 
-    背景：run 目录会越攒越多，按"最久没动过先删"（LRU）控制总量；
-    还在跑的 run 绝不能删。删失败了也不报错（fail-open），清理是
-    顺手的事，不该影响主流程。
+    run 目录会越攒越多，按"最久没动过先删"（LRU）控制总量；
+    还在跑的 run 绝不能删。删失败了也不报错（fail-open）。
 
     参数：
         base: 存 run 目录的根路径（~/.OmniMate/.workflows）
@@ -70,7 +69,7 @@ def _cleanup_old_runs(base) -> int:
 def _notify_completion(run_id: str, args: dict, kwargs: dict, out_json: str):
     """后台 run 跑完后，把结果推进 delegation 队列当后台通知（模型下一轮能看到）。
 
-    背景：detached run 不在主循环里等结果，只能靠通知机制把结果送回来。
+    detached run 不在主循环里等结果，靠通知机制把结果送回来。
     通知失败只记日志不报错（fail-open）。
     """
     try:
@@ -89,7 +88,7 @@ def _notify_completion(run_id: str, args: dict, kwargs: dict, out_json: str):
 
 def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
                      budget_total=None, resume=False, declared_total=None) -> str:
-    """C3：把 run 丢到后台线程跑，立刻返回"已启动"的 JSON（不堵主循环）。
+    """把 run 丢到后台线程跑，立刻返回"已启动"的 JSON（不堵主循环）。
 
     参数：
         run_id: 本次 run 的 ID
@@ -146,8 +145,7 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
 async def _handle_workflow(args: dict, **kwargs) -> str:
     """工具 handler：按 action 分发到 run / resume / status / list / kill 五条路。
 
-    背景：workflow 的所有 LLM 入口都走这里，五个 action 的详细语义
-    见文件头说明。
+    workflow 的所有 LLM 入口都走这里，五个 action 的详细语义见文件头说明。
 
     参数：
         args: LLM 传入的工具参数（action / name / script / run_id / wait 等）
@@ -181,8 +179,8 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         run_id = f"wf_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         run_dir = get_omnimate_home() / ".workflows" / run_id
         journal = WorkflowJournal.create(run_dir, source)
-        _cleanup_old_runs(run_dir.parent)  # C3：超上限时 LRU 清理旧目录
-        if not bool(args.get("wait", True)):  # C3：后台模式立即返回
+        _cleanup_old_runs(run_dir.parent)  # 超上限时 LRU 清理旧目录
+        if not bool(args.get("wait", True)):  # 后台模式立即返回
             return _launch_detached(run_id, run_dir, source, journal, args, kwargs)
         return await _execute(run_id, run_dir, source, journal, args, kwargs)
 
@@ -208,7 +206,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
                 "error_type": "budget_exceeded",
                 "run_id": run_id,
             }, ensure_ascii=False)
-        if not bool(args.get("wait", True)):  # C3：后台模式 resume
+        if not bool(args.get("wait", True)):  # 后台模式 resume
             return _launch_detached(run_id, run_dir, source, journal, args, kwargs,
                                     budget_total=remaining, resume=True,
                                     declared_total=total)
@@ -222,7 +220,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         if not run_dir.exists():
             return json.dumps({"error": f"run 不存在: {run_id}",
                                "error_type": "invalid_run_id"}, ensure_ascii=False)
-        # 只读加载——status 绝不能触发 hash 截断副作用（终审修复）
+        # 只读加载——status 绝不能触发 hash 截断副作用
         j = WorkflowJournal(run_dir)
         meta = j.load_meta()
         return json.dumps({
@@ -298,7 +296,7 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
     max_conc = int(args.get("max_concurrency")
                    or delegation.get("max_concurrent_children", 5))
 
-    ev = cancel_event or threading.Event()  # C3：要跨线程可 set；detached 复用预注册的
+    ev = cancel_event or threading.Event()  # 要跨线程可 set；detached 复用预注册的
     _ACTIVE_RUNS[run_id] = ev
     try:
         out = await WE.run_workflow(
@@ -306,8 +304,8 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
             args=args.get("args") if isinstance(args.get("args"), dict) else {},
             agent_runner=WE.make_agent_runner(kwargs),
             # 故意不传全局 validator：引擎对没写 schema 的 agent() 也会套
-            # validator（W1 契约），纯文本产出会被误判 dead；结构化输出
-            # 由引擎内建的 _json_parseable 在有 schema 的调用上把关（蓝图 §5）
+            # validator，纯文本产出会被误判 dead；结构化输出由引擎内建的
+            # _json_parseable 在有 schema 的调用上把关
             validator=None,
             budget_total=budget,
             max_concurrency=max_conc,

@@ -71,7 +71,7 @@ def main():
 
     if args.autonomous:
         # === autonomous 模式 ===
-        # 历史踩坑：lifecycle.run 必须 try/except 包住，
+        # lifecycle.run 必须 try/except 包住，
         # 否则异常会让进程静默崩掉，主 agent 完全不知情
         from agent.team.lifecycle import AutonomousLifecycle
         team_cfg = config.get("team", {})
@@ -85,7 +85,7 @@ def main():
             为什么清空历史：规范 §9.3 要求每个 WORK 周期独立——
             上一轮的对话不该渗进这一轮。
 
-            历史踩坑：run_conversation 是 async，但
+            run_conversation 是 async，但
             lifecycle 的 work_fn 签名要求同步函数（lifecycle.run 是同步
             状态机），所以这里用 asyncio.run 桥接。每个周期各起一个
             独立 event loop（跑完即弃），不存在嵌套 loop 的风险。
@@ -122,7 +122,7 @@ def main():
     else:
         # 一次性模式：跑完一个任务就退，不进入轮询等活
         try:
-            # 历史踩坑：run_conversation 是 async。worker 是 CLI
+            # run_conversation 是 async。worker 是 CLI
             # 子进程入口（由 coordinator.spawn 启动），main 必须保持同步签名，
             # 所以在调用点用 asyncio.run 驱动。
             response = asyncio.run(agent.run_conversation(args.task))

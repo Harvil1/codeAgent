@@ -23,7 +23,7 @@ worktree（隔离目录 + 独立分支，好比给主对话临时开了间独立
       钩子（没传 agent_ref 或没配钩子就跳过，fail-open）
     - session_id：捎带给钩子 payload 的会话 ID
 
-两个关键设计（都是历史踩坑换来的）：
+两个关键设计：
     1. isConcurrencySafe=False：这俩工具改的是会话级全局目录 + 建/删
        worktree，必须排队执行，不能并发。
     2. handler 是 async def（注册时 is_async=True）：会话目录底层是
@@ -102,7 +102,7 @@ def _reset_session_worktree() -> None:
 
 # ---------------------------------------------------------------------------
 # schema（工具说明书；注意参数键必须是 OpenAI 的 "parameters"——
-# 用错键 LLM 就看不见参数定义，历史上因此翻过多次车）
+# 用错键 LLM 就看不见参数定义）
 # ---------------------------------------------------------------------------
 
 WORKTREE_ENTER_SCHEMA = {
@@ -239,7 +239,7 @@ def _create_session_worktree(name: str):
 async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
     """worktree_enter 的实现：把主对话搬进一个 worktree（建/复用 + 切目录 + 发通知）。
 
-    为什么必须是 async def（关键坑，评审定级 Critical）：
+    为什么必须是 async def：
     registry.dispatch 对同步 handler 会走 asyncio.to_thread——那会把当前
     context **拷贝**一份到工作线程。`set_session_workspace_cwd` 底层的
     ContextVar 一 set，改的只是拷贝，主循环毫无感知（enter 看似成功实则
@@ -315,7 +315,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
     """worktree_exit 的实现：把主对话搬回原目录，按需清理 worktree。
 
     为什么 async def：理由同 _handle_worktree_enter——clear 底层的
-    ContextVar reset 必须和当初的 set 在同一个 context 里执行，否则
+    ContextVar reset 必须和配对的 set 在同一个 context 里执行，否则
     在 to_thread 的拷贝 context 里 reset 必炸。
 
     参数：
@@ -383,7 +383,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
 # is_async=True 的原因：handler 是 async def——dispatch 会直接 await（同一个
 # 任务同一个 context），不走 to_thread 的 context 拷贝。会话目录的
 # set/reset 必须在主循环 context 里执行，否则 enter 静默失效 + exit 的
-# reset 跨 context 直接炸 ValueError（详见 handler docstring 里的踩坑说明）
+# reset 跨 context 直接炸 ValueError（详见 handler docstring）
 registry.register(
     name="worktree_enter",
     toolset="core",

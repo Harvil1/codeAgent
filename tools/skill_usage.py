@@ -1,7 +1,7 @@
 """技能使用统计和来龙去脉记录。
 
-背景：agent 需要知道每个技能「多久没用、被看过/用过几次、是谁创建的」，才能决定
-哪些技能该归档、哪些值得推荐。这些数字单独存在 ~/.OmniMate/skills/.usage.json 里
+记录每个技能「多久没用、被看过/用过几次、是谁创建的」，供决定哪些技能
+该归档、哪些值得推荐。这些数字单独存在 ~/.OmniMate/skills/.usage.json 里
 （键是技能名），不写进技能文件本身。
 
 谁来用：计数由 skill_view / skill_manage 等工具在干活时顺手触发；
@@ -85,7 +85,7 @@ def save_usage(skills_dir: Path, data: Dict[str, Dict[str, Any]]) -> None:
 def flush_usage(skills_dir: Path = None) -> None:
     """把攒在内存里改过的统计真正写进磁盘文件。
 
-    背景：平时只动内存缓存，由本函数在收尾时机（agent 退出、每轮对话结束）统一落盘。
+    平时只动内存缓存，由本函数在收尾时机（agent 退出、每轮对话结束）统一落盘。
 
     参数：
     - skills_dir：只写这个目录的缓存；传 None 表示把所有目录的都写一遍
@@ -135,7 +135,7 @@ def _ensure_record(data: Dict, skill_name: str) -> Dict:
 def bump_view(skills_dir: Path, skill_name: str) -> None:
     """把某技能的「被查看次数」加一，并记下这次查看的时间。
 
-    背景：skill_view 工具看技能时调用，给推荐排序和闲置判定提供数据。
+    skill_view 工具看技能时调用，给推荐排序和闲置判定提供数据。
 
     参数：
     - skills_dir：技能目录路径
@@ -156,7 +156,7 @@ def bump_view(skills_dir: Path, skill_name: str) -> None:
 def bump_use(skills_dir: Path, skill_name: str) -> None:
     """把某技能的「实际使用次数」加一，并记下这次使用的时间。
 
-    背景：技能被当成斜杠命令（在输入框里打 /技能名 触发）真正执行时调用。
+    技能被当成斜杠命令（在输入框里打 /技能名 触发）真正执行时调用。
 
     参数：
     - skills_dir：技能目录路径
@@ -177,7 +177,7 @@ def bump_use(skills_dir: Path, skill_name: str) -> None:
 def bump_patch(skills_dir: Path, skill_name: str) -> None:
     """把某技能的「被修改次数」加一，并记下这次修改的时间。
 
-    背景：skill_manage 工具做 patch（小修）或 edit（重写）后调用。
+    skill_manage 工具做 patch（小修）或 edit（重写）后调用。
 
     参数：
     - skills_dir：技能目录路径
@@ -198,8 +198,8 @@ def bump_patch(skills_dir: Path, skill_name: str) -> None:
 def mark_agent_created(skills_dir: Path, skill_name: str) -> None:
     """把技能标记为「agent 创建」，从此受后台维护工人（curator）自动管理。
 
-    背景/关键区分：只有 curator 在后台自主审查时创建的技能才标记；
-    用户当面让 agent 建的不标记——用户亲手要的东西，后台不该自作主张去归档或改它。
+    关键区分：只有 curator 在后台自主审查时创建的技能才标记；用户当面让
+    agent 建的不标记——用户亲手要的东西，后台不该自作主张去归档或改它。
 
     参数：
     - skills_dir：技能目录路径
@@ -249,7 +249,7 @@ def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
 def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
     """给技能钉上/取消「钉住」（pinned）标记。被钉住的技能免疫所有自动转换。
 
-    背景：这是用户表达「这个技能我要留着，别动」的开关——用户的明确意图优先于算法。
+    这是用户表达「这个技能我要留着，别动」的开关——用户的明确意图优先于算法。
 
     参数：
     - skills_dir：技能目录路径
@@ -274,7 +274,7 @@ def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
 def archive_skill(skills_dir: Path, skill_name: str) -> tuple:
     """把技能整个目录挪到 .archive/ 目录下（回收站式的「软删除」）。
 
-    背景：项目铁律「完全可逆」——永不真删除，归档的东西随时能捞回来。
+    永不真删除，归档的东西随时能捞回来（项目铁律「完全可逆」）。
 
     参数：
     - skills_dir：技能目录路径
@@ -364,7 +364,7 @@ def set_rating(skills_dir: Path, skill_name: str, rating: int) -> tuple:
 def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
     """算出最值得推荐的技能，按综合分从高到低返回前几个。
 
-    背景：给「你现在可能用得上哪些技能」提供排序依据。
+    给「你现在可能用得上哪些技能」提供排序依据。
     综合分公式 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1
     （评分权重最大，因为那是用户的直接喜好；查看只值 0.1，看过不等于有用。）
 

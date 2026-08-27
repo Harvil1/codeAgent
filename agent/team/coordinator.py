@@ -53,7 +53,7 @@ class TeamCoordinator:
         self._registry_lock = self._team_dir / "registry.lock"
         self._team_dir.mkdir(parents=True, exist_ok=True)
         self._bus = MessageBus(team_dir=self._team_dir)
-        # 历史踩坑：必须把 Popen 对象存下来，
+        # 必须把 Popen 对象存下来，
         # shutdown_all 靠它们才能找到子进程去 terminate——只记 pid 不够
         self._processes: dict = {}
 
@@ -121,7 +121,7 @@ class TeamCoordinator:
             name：成员名
             role：角色
             task：给它的任务文本
-            depth：嵌套层级（防子进程再 spawn 子进程无限套娃，Phase 4b 引入），
+            depth：嵌套层级（防子进程再 spawn 子进程无限套娃），
                 主 agent 是 0，默认 1（第一层子 agent）
             task_id：可选，绑定的任务 ID。给了就做两件事：
                 1. 启动前先到任务库 claim（认领，owner 写成成员名，持久化）

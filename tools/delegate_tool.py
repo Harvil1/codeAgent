@@ -124,10 +124,10 @@ def _resolve_delegation_queue(kwargs) -> DelegationCompletionQueue:
 def inline_mcp_spawn_allowed(agent_def, server_name: str, server_cfg: dict) -> bool:
     """spawn 子代理时，检查「项目来源」的内联 MCP 服务器有没有获得首次连接审批。
 
-    背景：子代理定义（.md 文件）里可以内嵌 MCP 外部工具服务器。如果这个定义
-    来自项目目录（source="project"，即从 <cwd>/.omnimate/agents/ 扫出来的），
-    它算不可信来源——必须用户批准过首次连接才允许连，否则跳过（fail-closed，
-    出错宁可不放行）。用户级/CLI 注入的定义默认按 user 信任源处理，不拦。
+    子代理定义（.md 文件）里可以内嵌 MCP 外部工具服务器。来自项目目录
+    （source="project"，即从 <cwd>/.omnimate/agents/ 扫出来的）的定义算不可信
+    来源——必须用户批准过首次连接才允许连，否则跳过（fail-closed，出错宁可
+    不放行）。用户级/CLI 注入的定义默认按 user 信任源处理，不拦。
 
     参数：
       - agent_def：子代理定义对象（agent/agent_defs.py 的 AgentDefinition）
@@ -255,8 +255,8 @@ DELEGATE_TASK_SCHEMA = {
 def _handle_delegate_task(args: dict, **kwargs) -> str:
     """subagent 工具的总入口：解析 LLM 传来的参数，分发给对应的委托模式。
 
-    背景：LLM 调用 subagent 工具时会传一批参数（任务描述、角色、是否后台等），
-    这个函数负责把参数整理清楚，再决定走批量、异步还是同步三条路。
+    把 LLM 传来的参数（任务描述、角色、是否后台等）整理清楚，
+    再决定走批量、异步还是同步三条路。
 
     参数：
       - args：LLM 传来的工具参数（goal/prompt、tasks、background、role、
@@ -317,8 +317,8 @@ def _delegate_sync(
 ) -> str:
     """同步委托：主对话原地等子代理干完活，带超时（防止永远卡死）。
 
-    背景：同步模式下子代理在后台线程跑，主线程 join 等待。如果子代理卡住，
-    主线程不能无限陪等，所以有两级退出机制（用「取消信号」协作式中断，
+    同步模式下子代理在后台线程跑，主线程 join 等待。子代理卡住时主线程
+    不能无限陪等，所以有两级退出机制（用「取消信号」协作式中断，
     而不是「直接扔下不管」）：
     1. 超时后主线程按下取消信号（cancel_event），子代理在每轮调 LLM 前会检查
        这个信号 → 优雅退出，并返回 _extract_partial_result() 保留已完成的部分；
@@ -453,7 +453,7 @@ def _delegate_async(
 ) -> str:
     """异步委托：立刻返回一个任务 ID，子代理在后台慢慢跑，结果稍后送回。
 
-    背景：后台子代理跑在后台线程里，用户不在旁边盯着，所以有两道安全限制：
+    后台子代理跑在后台线程里，用户不在旁边盯着，所以有两道安全限制：
 
     1. 工具白名单（ASYNC_AGENT_ALLOWED_TOOLS）：
        后台子代理没法让用户实时审批危险操作，所以只给它安全工具——
@@ -489,7 +489,7 @@ def _delegate_async(
     kwargs["cancel_event"] = cancel_event
 
     # === 工具白名单 ===
-    # fail-open：白名单逻辑出错也不崩，退回原来的行为
+    # fail-open：白名单逻辑出错也不崩，退回未过滤的行为
     try:
         from toolsets import (
             ASYNC_AGENT_ALLOWED_TOOLSETS,
@@ -580,7 +580,7 @@ def _delegate_async(
                               name=f"delegate-async-{delegation_id}")
     thread.start()
     # 登记进花名册，让 subagent_kill 工具能找到它
-    # 额外记下 goal/开始时间（核心机制对齐 T2）：上下文被压缩后，
+    # 额外记下 goal/开始时间：上下文被压缩后，
     # post_compact_recovery 能列出还在跑的子代理，防模型「失忆」忘了自己派过人
     _async_tasks[delegation_id] = {
         "thread": thread,
@@ -611,10 +611,10 @@ def _start_progress_ticker(
 ) -> "threading.Thread":
     """多个子代理并行跑的时候，每隔 interval 秒写一条进度播报。
 
-    背景：2 个以上子代理并行时用户只能干等没反馈——这个小闹钟线程让进度可见：
-    有辅助小模型（aux）就让它把状态归纳成 1-2 句人话；没有就直接机械拼一行状态。
-    写进 scratchpad 涂鸦区的 progress.md（涂鸦区 7 天自动清理）+ 打一条 logger.info。
-    出错全吞（fail-open）：进度播报绝不能反过来影响子代理本身。
+    让并行等待时进度可见：有辅助小模型（aux）就让它把状态归纳成 1-2 句人话；
+    没有就直接机械拼一行状态。写进 scratchpad 涂鸦区的 progress.md（涂鸦区
+    7 天自动清理）+ 打一条 logger.info。出错全吞（fail-open）：进度播报绝不
+    能反过来影响子代理本身。
 
     参数：
       - children_state：各子代理的状态字典（名字 → {status, goal...}）
@@ -673,9 +673,8 @@ def _start_progress_ticker(
 def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     """批量并行委托：一次派出多个子代理同时干活，等全干完一起收结果。
 
-    背景：LLM 传 tasks=[...] 时走这里，用线程池真并行（比一个个串行调
-    subagent 快得多）。每个任务各配一个取消信号，Ctrl+C 时全部
-    按下，让所有子代理在下次调 LLM 前退出。
+    LLM 传 tasks=[...] 时走这里，用线程池真并行。每个任务各配一个取消信号，
+    Ctrl+C 时全部按下，让所有子代理在下次调 LLM 前退出。
 
     参数：
       - tasks：任务字典列表，每项含 goal/prompt、context、role
@@ -802,7 +801,7 @@ def _run_child(
 ) -> str:
     """创建并跑起一个子代理——同步/异步/批量三条路最终都汇聚到这个函数。
 
-    背景：子代理是一个全新的 AIAgent 实例，跟主对话各过各的，自带：
+    子代理是一个全新的 AIAgent 实例，跟主对话各过各的，自带：
     - 会话 ID
     - 迭代预算（最多循环多少轮，默认 50）
     - 工具集（leaf 角色受限）
@@ -882,7 +881,7 @@ def _run_child(
             if haiku_cfg:
                 sub_cfg = haiku_cfg
             elif haiku_name and haiku_name in config.get("models", {}):
-                # 老配置形态：config["models"][小模型名]
+                # 旧式配置（仍兼容）：config["models"][小模型名]
                 sub_cfg = config["models"][haiku_name]
             else:
                 # 都没有 → 退回主模型配置段
@@ -896,7 +895,7 @@ def _run_child(
                 api_key = sub_cfg.get("api_key") or ""
             if not auth_token:
                 auth_token = sub_cfg.get("auth_token") or ""
-            # 向后兼容：老 config.yaml 用 api_key_env 写环境变量名，去环境里取真值
+            # 向后兼容：旧式 config.yaml 用 api_key_env 写环境变量名，去环境里取真值
             if not api_key and not auth_token:
                 api_key_env = sub_cfg.get("api_key_env") or ""
                 if api_key_env:
@@ -1175,7 +1174,7 @@ def _run_child(
                         parent_sysprompt, child_role=role,
                     )
                     # fork 覆盖了 system_prompt，得再补一次关键提醒
-                    # （重要修复：critical_reminder 常是安全提醒，fork 路径不能丢）
+                    # （critical_reminder 常是安全提醒，fork 路径不能丢）
                     if custom_def and custom_def.critical_reminder:
                         system_prompt += (
                             f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
@@ -1483,10 +1482,9 @@ def _run_child(
 def _review_handoff(result: str, parent_agent) -> str:
     """交接复审：辅助 LLM 检查子代理要交回来的产出，发现危险内容就在前面贴警告。
 
-    背景：放权模式下子代理产出直接进父代理上下文，没人把关——这一步让辅助
-    LLM 当安检员。判安全、辅助模型不可用或出错，都原样返回（fail-open，
-    不拦路）。接口是同步的（_run_child 在线程里跑、没有事件循环，内部用
-    asyncio.run 搭桥——跟 _summarize_child_result 同一个套路）。
+    放权模式下子代理产出直接进父代理上下文，这一步让辅助 LLM 当安检员。
+    判安全、辅助模型不可用或出错，都原样返回（fail-open，不拦路）。接口是
+    同步的（_run_child 在线程里跑、没有事件循环，内部用 asyncio.run 搭桥）。
 
     参数：
       - result：子代理的产出文本
@@ -1530,7 +1528,7 @@ def _review_handoff(result: str, parent_agent) -> str:
 def _summarize_child_result(result: str, client, model: str) -> str:
     """用 LLM 把子代理的结果压成 300 字以内的摘要。
 
-    背景：子代理动辄输出几千字，全文塞回主对话太费上下文——超长结果先摘要。
+    子代理动辄输出几千字，全文塞回主对话太费上下文——超长结果先摘要。
     摘要失败就返回原文（不能因为压缩失败把整个委托卡死）。
 
     参数：
@@ -1570,14 +1568,14 @@ def _summarize_child_result(result: str, client, model: str) -> str:
 def _build_child_system_prompt(goal: str, context: str, role: str, override: str = None) -> str:
     """拼出子代理的 system prompt（开场设定词）。
 
-    背景：每个子代理都需要一段开场白告诉它「你是谁、要干什么、守什么规矩」。
+    告诉子代理「你是谁、要干什么、守什么规矩」。
 
     参数：
       - goal：任务描述
       - context：父代理给的补充背景
       - role：leaf / orchestrator 角色
       - override：自定义子代理 .md 里写的 system_prompt；非空时以它为底，
-        只在后面补上下文/约束/角色提示；None 时走默认模板（跟历史行为一致）
+        只在后面补上下文/约束/角色提示；None 时走默认模板
 
     返回：拼好的 system prompt 字符串。
     """
@@ -1618,8 +1616,8 @@ def _build_child_system_prompt(goal: str, context: str, role: str, override: str
 def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
     """按运行时状态给 subagent 工具的说明文字追加「还剩几个坑位」。
 
-    背景：并发子代理有上限，LLM 若不知道当前剩几个位置，可能白派一次
-    被拒、浪费一整轮。这里把实时槽位数写进工具描述让它提前知道。
+    并发子代理有上限，把实时槽位数写进工具描述，让 LLM 提前知道，
+    避免白派一次被拒、浪费一整轮。
 
     参数：
       - schema：原工具 schema
@@ -1756,11 +1754,10 @@ def _handle_subagent_kill(args: dict, **kwargs) -> str:
 def _subagent_kill_check_fn() -> bool:
     """可见性开关：按 config.delegation.async_kill_enabled 决定 subagent_kill 对 LLM 显不显示。
 
-    背景：工具注册（登记）和暴露给 LLM（可见）是两步，这个 check_fn 就是
-    那个动态开关——True（默认）→ 工具对 LLM 可见；False → 隐藏。
-
-    历史踩坑提醒：registry._check_fn_cached 调用 fn() 时不传任何参数——
-    必须用无参签名（跟其他 check_fn 保持一致）。
+    工具注册（登记）和暴露给 LLM（可见）是两步，这个 check_fn 就是那个
+    动态开关——True（默认）→ 工具对 LLM 可见；False → 隐藏。
+    注意：registry._check_fn_cached 调用 fn() 时不传任何参数，必须用
+    无参签名（跟其他 check_fn 保持一致）。
 
     返回：bool，是否可见；读配置出错时返 True（fail-open）。
     """

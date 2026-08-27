@@ -71,9 +71,9 @@ def run_skill_in_fork(
             except Exception:
                 pass
         try:
-            # 历史踩坑：AIAgent.chat 是 async，而本函数是
-            # 同步的、从 cli.py 直接调（那里没有事件循环）——漏了 asyncio.run
-            # 驱动会直接拿到协程对象而不是结果，等于白跑。
+            # AIAgent.chat 是 async，而本函数是
+            # 同步的、从 cli.py 直接调（那里没有事件循环）——必须用
+            # asyncio.run 驱动，否则直接拿到协程对象而不是结果，等于白跑。
             import asyncio
             result = asyncio.run(child.chat(user_query))
             _fork_success = True

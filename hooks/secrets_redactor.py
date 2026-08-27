@@ -58,7 +58,7 @@ def redact(text: str) -> str:
 def main():
     """入口：从 stdin 读工具结果，脱敏后有改动才输出新结果。
 
-    背景：没改动就不输出——主程序把"无输出"理解为"保持原样"。
+    没改动就不输出——主程序把"无输出"理解为"保持原样"。
     """
     try:
         payload = json.load(sys.stdin)

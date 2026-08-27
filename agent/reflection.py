@@ -84,8 +84,7 @@ REFLECTION_PROMPT_TEMPLATE = """你是经验提炼助手。从以下对话轨迹
 def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
     """把消息列表压缩成给反思引擎看的"轨迹文本"（纯文本流水账）。
 
-    背景：完整对话太长也太杂，反思只需要"谁说了什么、调了什么工具"
-    的梗概。
+    完整对话太长也太杂，反思只需要"谁说了什么、调了什么工具"的梗概。
 
     压缩策略：
     - 从最新往回取，累计不超过 max_chars 个字符
@@ -126,8 +125,8 @@ def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
 def build_memory_manifest(memory_store) -> str:
     """已有记忆的清单文本（给 LLM 看，防止它重复存储）。
 
-    背景（auto_extract 也用这个公共函数）：
-    LLM 在生成新记忆前先看到"已经有什么"，才知道别写重复的。
+    auto_extract 也用这个公共函数。LLM 在生成新记忆前先看到
+    "已经有什么"，才知道别写重复的。
 
     参数：
     - memory_store：记忆库（读 list_all）
@@ -187,9 +186,9 @@ def run_reflection(
         kwargs = {}
         if model:
             kwargs["model"] = model
-        # 历史踩坑：llm_client.chat_completions 是 async 的，
-        # 而本函数经 apply_reflection 在 _bg() 守护线程里跑（那里没有事件循环），
-        # 所以要用 asyncio.run 驱动；和 agent/user_profile.py 的做法同款。
+        # llm_client.chat_completions 是 async 的，
+        # 而本函数经 apply_reflection 在 _bg() 守护线程里跑（没有事件循环），
+        # 必须用 asyncio.run 驱动。
         import asyncio
         response = asyncio.run(llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
@@ -271,10 +270,9 @@ def apply_reflection(
     existing = memory_store.list_all()
     existing_keys = {(e.type, e.name) for e in existing}
 
-    # 历史踩坑（X14 修复）：必须两阶段——先把整批全部 save 完，再统一处理
-    # supersedes（推翻旧记忆）。之前在 save 循环里边写边 supersede，
-    # 导致"同批刚写入的"不在 existing 快照里——同批后写入的经验想推翻
-    # 同批刚写入的会失效。
+    # 必须两阶段——先把整批全部 save 完，再统一处理 supersedes（推翻旧记忆）：
+    # 边写边 supersede 的话，"同批刚写入的"不在 existing 快照里，
+    # 同批后写入的经验想推翻同批刚写入的会失效。
     written = 0
     written_records = []  # [(经验, 记忆ID)]：记下本批写入的，阶段 2 推翻时要用
     for ins in insights:
@@ -304,14 +302,14 @@ def apply_reflection(
             continue
         target_id = None
         target_body = ""
-        # 先在旧记忆里找；X5 修复：必须 name + type 都匹配（同名不同类不算）
+        # 先在旧记忆里找；必须 name + type 都匹配（同名不同类不算）
         for old_entry in existing:
             if (old_entry.name == supersedes
                     and old_entry.type == ins["type"]):
                 target_id = old_entry.id
                 target_body = old_entry.body or ""
                 break
-        # X14 修复：旧记忆里没有，再在本批刚写入的里找（同批之间也能推翻）
+        # 旧记忆里没有，再在本批刚写入的里找（同批之间也能推翻）
         if target_id is None:
             for other_ins, other_id in written_records:
                 if (other_ins["name"] == supersedes

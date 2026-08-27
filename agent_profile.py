@@ -1,6 +1,5 @@
 """Profile（画像）系统：让一个 agent 能开多个互相隔离的"分身账号"。
 
-背景：有时想要两套互不干扰的 agent（比如一个工作用、一个生活用）。
 每个 profile（分身账号）都有自己独立的一套家当：
   - config.yaml（配置）
   - .env（密钥等环境变量）
@@ -43,10 +42,8 @@ def list_profiles() -> List[str]:
 
 
 def apply_profile(profile_name: str) -> None:
-    """切换到指定账号：把家目录环境变量指过去。
-
-    背景：隔离的原理就是把 OMNIMATE_HOME 指到该账号的文件夹，
-    之后所有读写都落在它自己的地盘里。
+    """切换到指定账号：把家目录环境变量指过去（OMNIMATE_HOME 指到该账号
+    的文件夹，之后所有读写都落在它自己的地盘里）。
 
     ⚠️ 必须在任何 import 之前调用（晚了家目录就被别人读走了）！
 
@@ -69,9 +66,7 @@ def apply_profile(profile_name: str) -> None:
 
 
 def create_profile(name: str, *, clone_from: str = None) -> Path:
-    """新建一个分身账号（建好骨架目录）。
-
-    背景：新账号要有基本目录结构（技能库、日志、.env）才能正常跑。
+    """新建一个分身账号（建好技能库、日志、.env 等骨架目录才能正常跑）。
 
     参数：
         name: 新账号名。

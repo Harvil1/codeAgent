@@ -4,6 +4,10 @@
 /memory 看和编辑记忆、/skill-learning 管控行为学习管线。被 cli.py 的主
 分发调用，输出统一走 cli_ui 的共享 console。
 """
+# 注解延迟求值：rt: RuntimeContext 的 RuntimeContext 定义在 cli.py，
+# 直接 import 会循环依赖；3.14+ 天然延迟，低版本靠 future 注解
+from __future__ import annotations
+
 import logging
 import os
 import subprocess
@@ -23,7 +27,7 @@ logger = logging.getLogger(__name__)
 def _handle_skill_learning_command(args: str, rt) -> bool:
     """/skill-learning 命令：管理 skillLearning 行为学习管线。
 
-    背景：skillLearning 是"agent 从使用中攒经验"的系统——平时观察用户行为
+    skillLearning 是"agent 从使用中攒经验"的系统——平时观察用户行为
     存成 instinct（本能条目），攒够一簇相似的就演化成正式技能。这个命令
     管五个子命令：
     - status：看开关状态 + instinct 总数 / global 簇数 / 已进化技能数；
@@ -149,8 +153,7 @@ def _handle_skills_command(rt: RuntimeContext, args: str):
 def _list_skills(rt: RuntimeContext):
     """/skills list 列表体：用 Rich 表展示所有未归档的技能。
 
-    背景：技能是 agent 的"怎么做"知识（每个技能一个目录 + SKILL.md）。
-    这个表列出每个技能的命令名、描述、使用次数和用户评分；已归档的
+    列出每个技能的命令名、描述、使用次数和用户评分；已归档的
     （state=archived）不显示。
 
     参数：
@@ -202,8 +205,7 @@ def _list_skills(rt: RuntimeContext):
 def _rate_skill(rt: RuntimeContext, args: str):
     """/skills rate 子命令：给某个技能打 1-5 星的评分。
 
-    背景：用户的评价是最直接的信号（pinned 的技能也免疫自动归档），
-    评分会记进使用统计，参与推荐排序。
+    评分记进使用统计，参与推荐排序（pinned 的技能免疫自动归档）。
 
     参数：
         rt：RuntimeContext（保持签名一致）
@@ -233,8 +235,7 @@ def _rate_skill(rt: RuntimeContext, args: str):
 def _recommend_skills(rt: RuntimeContext):
     """/skills recommend 子命令：按综合分推荐 Top 5 技能。
 
-    背景：综合分 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1（置顶
-    pinned 的技能额外 +10），帮用户发现值得用/值得信的技能。
+    综合分 = 使用次数 × 1.0 + 评分 × 2.0 + 查看次数 × 0.1（pinned 额外 +10）。
 
     参数：
         rt：RuntimeContext（保持签名一致，实际数据从使用统计读）
@@ -279,7 +280,7 @@ def _recommend_skills(rt: RuntimeContext):
 def _show_memory(rt: RuntimeContext):
     """/memory 命令主体：展示记忆条目 + 提供编辑入口。
 
-    背景：记忆分两摊展示——agent 笔记（MEMORY.md 相关，project/reference
+    记忆分两摊展示——agent 笔记（MEMORY.md 相关，project/reference
     等类型）和用户画像（USER.md 相关，user/feedback 类型）。看完后弹出
     小菜单：按 m 编辑 MEMORY.md、按 u 编辑 USER.md。
 
@@ -345,10 +346,8 @@ def _open_in_editor(path: Path) -> None:
         console.print(f"[red]打开编辑器失败: {e}[/red]")
         console.print(f"[yellow]手动编辑：{path}[/yellow]")
 def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
-    """输入以 `#` 开头时的快捷存记忆：弹菜单选类型，直接存 MemoryStore。
-
-    背景：`#` 快捷键——用户一句话就能存，不用
-    等模型来调工具。
+    """输入以 `#` 开头时的快捷存记忆：弹菜单选类型，直接存 MemoryStore
+    （一句话就能存，不用等模型来调工具）。
 
     参数：
         rt：RuntimeContext（取 memory_store 用）

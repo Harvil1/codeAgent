@@ -26,8 +26,8 @@ _tools_discovered = False
 def ensure_tools_discovered():
     """确保所有工具模块已被加载。
 
-    背景：每个工具文件在被 import 的那一刻会自动把自己登记进 registry
-    （"自注册"机制），但 import 不会自动发生，需要有人推一把。
+    工具模块在被 import 的那一刻会自动把自己登记进 registry（"自注册"
+    机制），但 import 不会自动发生，需要有人推一把。
     幂等：重复调用没有副作用，第一次之后的调用直接跳过。
     """
     global _tools_discovered
@@ -43,10 +43,8 @@ def get_tool_definitions(
     disabled_tools: List[str] = None,
     agent=None,
 ) -> List[dict]:
-    """拿到本轮要发给 LLM 的"工具说明书"列表。
-
-    背景：不是把所有工具一股脑全发给 LLM——每份说明书都要花 token，
-    所以要按场景筛选出真正该可见的那批。
+    """拿到本轮要发给 LLM 的"工具说明书"列表（每份说明书都花 token，
+    按场景筛选出真正该可见的那批，不全量发）。
 
     流程（大白话）：
     1. 先确保工具都登记好了（推一把 import）
@@ -282,11 +280,8 @@ async def handle_function_call(
 
 
 def _coerce_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """修正 LLM 传参数时的常见类型错误。
-
-    背景：LLM 偶尔会把整数写成字符串、把列表写成单个值，这类小错
-    在这里统一矫正。设计上每个工具可以登记自己的矫正规则，但当前
-    是简化版。
+    """修正 LLM 传参数时的常见类型错误（整数写成字符串、列表写成单值等；
+    设计上每个工具可登记自己的矫正规则，当前是简化版）。
 
     参数：
         name: 工具名（用来查该工具自己的矫正规则）。
@@ -299,10 +294,8 @@ def _coerce_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_last_resolved_tool_names() -> List[str]:
-    """看一眼最近一次发给 LLM 的工具名清单。
-
-    背景：get_tool_definitions 会把筛选结果暂存在模块变量里，
-    这里取出来给调试或 UI 展示用。
+    """看一眼最近一次发给 LLM 的工具名清单（get_tool_definitions 的筛选结果
+    暂存在模块变量里，这里取出来给调试或 UI 展示用）。
 
     返回：工具名列表的副本（改它不影响内部状态）。
     """

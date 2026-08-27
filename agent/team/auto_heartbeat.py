@@ -60,7 +60,7 @@ def maybe_heartbeat() -> bool:
 def reset_for_test() -> None:
     """测试专用：把节流计时器归零。
 
-    背景：模块级变量记录着上次打卡时间，不重置的话连续测试会被 60 秒
+    模块级变量记录着上次打卡时间，不重置的话连续测试会被 60 秒
     节流挡住。无返回值。
     """
     global _last_attempt

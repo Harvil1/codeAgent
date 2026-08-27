@@ -65,10 +65,9 @@ MAILBOX_CLEAR_SCHEMA = {
 def _resolve_mailbox_ctx(kwargs: dict):
     """从工具调用的上下文里提取「信箱 + 自己的名字」这两样东西。
 
-    背景：中央注册表分发工具时会把 agent_ref（AIAgent 实例）放在
-    kwargs 里透传。信箱挂在 agent 的 _mailbox 字段、
-    名字挂在 _agent_name 字段。所有「拿不到怎么办」的兜底逻辑集中在
-    这一个函数里，三个 handler 不用各写一遍。
+    注册表分发时把 agent_ref（AIAgent 实例）放在 kwargs 里透传；信箱挂在
+    _mailbox 字段、名字挂在 _agent_name 字段。兜底逻辑集中在这一个函数里，
+    三个 handler 不用各写一遍。
 
     参数：
     - kwargs：框架透传的上下文字典。
@@ -156,10 +155,8 @@ def _handle_mailbox_clear(args: dict, **kwargs) -> str:
 
 
 # 模块顶部注册：import 本文件即自动登记进中央注册表
-# 历史踩坑：LLM 能不能看到工具由 toolsets._CORE_TOOLS 清单决定——
-# 曾漏列 mailbox，导致只有 CLI 的 /mailbox 命令能用，LLM 调不到。
-# 另外 mailbox_send 列入了 ASYNC_AGENT_DISALLOWED_TOOLS（后台子代理
-# 不许发信，和 team_send 同一个道理：防止分身乱传消息）。
+# 注意：LLM 能否看到工具由 toolsets._CORE_TOOLS 清单决定；mailbox_send 还
+# 列入了 ASYNC_AGENT_DISALLOWED_TOOLS（后台子代理不许发信，防止分身乱传消息）。
 registry.register(
     name="mailbox_send",
     schema=MAILBOX_SEND_SCHEMA,

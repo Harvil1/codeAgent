@@ -9,8 +9,7 @@ from typing import Optional
 def get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
     """从工具调用的附加参数里，取出子代理（主对话派出去帮忙干活的分身）的权限模式。
 
-    背景：子代理可能带着和主对话不一样的权限模式在干活（比如允许跳过审批），
-    工具做权限检查时要按"这次是谁在调用"来用对应的模式，而不是一律用全局默认。
+    子代理可携带与主对话不同的权限模式，权限检查需按实际调用方取模式。
 
     参数：
         kwargs: 工具调用时带上的命名上下文（里面有 agent_ref，即发起调用的 agent 引用）。
@@ -24,9 +23,7 @@ def get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
     if agent_ref is None:
         return None
     mode = getattr(agent_ref, "permission_mode", None)
-    # 注意：四种模式都必须在这里透传——漏了 acceptEdits 的话模式会悄悄退回
-    # default，功能等于没生效；漏了 autoDeny 的话 async 子代理的破坏性命令
-    # 会悄悄降级到 default 去走用户审批，"自动拒绝"这条短路根本不触发
+    # 四种模式都必须在此透传——漏了任一种，对应调用方会悄悄退回 default（功能失效）
     if mode in ("default", "bypassPermissions", "acceptEdits", "autoDeny"):
         return mode
     return None

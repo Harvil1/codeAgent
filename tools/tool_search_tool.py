@@ -1,12 +1,8 @@
 """tool_search 工具：MCP 工具的详细参数定义按需加载，省 token。
 
-背景：LLM 平时只看到 MCP 工具的
-精简目录条目（名字 + 一句话描述），真要用某个工具时调本工具按关键字
-搜索，拿回完整参数定义（schema）。
-
-省 token 的原理：N 个 MCP 工具如果每次 API 调用都全量发 schema，
-会吃掉很多 token（每个工具约 300 tokens × N）。ToolSearch 把它们压成
-短目录条目（每个约 20 tokens × N），只有 LLM 真要用时才回完整 schema。
+LLM 平时只看到 MCP 工具的精简目录条目（名字 + 一句话描述，约 20 tokens/个），
+要用某个工具时调本工具按关键字搜索，拿回完整参数定义（schema，约 300
+tokens/个）——避免每次 API 调用全量发送。
 
 内置工具不走这个机制，仍每次发完整 schema（数量少、又是高频工具，
 不值得多一跳）。
@@ -23,15 +19,14 @@ logger = logging.getLogger(__name__)
 def _check_mcp_connected() -> bool:
     """运行时门控：至少有一个 MCP server 连着，才把 tool_search 露给 LLM。
 
-    背景：没有 MCP server 时这个工具毫无用处，暴露出去只会浪费 token。
-    fail-open 哲学：任何异常（比如 mcp_client 还没初始化）都返回 False
-    把工具藏起来，而不是报错。
+    没有 MCP server 时这个工具毫无用处；任何异常（比如 mcp_client 还没
+    初始化）都返回 False 把工具藏起来（fail-open），而不是报错。
     """
     try:
         from agent.mcp_client import get_mcp_manager
         mgr = get_mcp_manager()
         with mgr._lock:
-            # 历史踩坑：MCPClient 的状态属性叫 is_connected，不是 connected
+            # 注意：MCPClient 的状态属性叫 is_connected，不是 connected
             return any(c.is_connected for c in mgr._clients.values())
     except Exception:
         return False
@@ -57,10 +52,7 @@ TOOL_SEARCH_SCHEMA = {
 
 
 def _handle_tool_search(args: dict, **kwargs) -> str:
-    """handler：按关键字模糊匹配 mcp__ 开头的工具，返回完整参数定义。
-
-    背景：MCP 工具平时只露目录条目，这里补一条"按名搜详情"的路。
-    """
+    """handler：按关键字模糊匹配 mcp__ 开头的工具，返回完整参数定义。"""
     query = (args.get("query") or "").strip().lower()
     if not query:
         return json.dumps({"error": "query 不能为空"}, ensure_ascii=False)
@@ -70,10 +62,9 @@ def _handle_tool_search(args: dict, **kwargs) -> str:
     # 只搜 mcp__ 前缀的工具（内置工具本来就发完整 schema，不需要搜）
     mcp_names = [n for n in registry.list_all() if n.startswith("mcp__")]
 
-    # 必须尊重 child 的 mcp_server_filter（自定义子代理 mcpServers 字段）：
-    # 规格书第 286 行承诺 ToolSearch 只搜"可见"的 mcp__ 工具（过滤后的子集）。
-    # 历史踩坑：不过滤的话，LLM 拿到完整 schema 去调用一个被 filter 掉的
-    # 工具，registry.dispatch 依然命中 → 实际执行了本不该跑的工具。
+    # 必须尊重 child 的 mcp_server_filter（自定义子代理 mcpServers 字段），
+    # 只搜"可见"的 mcp__ 工具：不过滤的话，LLM 拿到完整 schema 去调用一个
+    # 被 filter 掉的工具，registry.dispatch 依然命中 → 实际执行本不该跑的工具。
     agent = kwargs.get("agent_ref") or kwargs.get("agent")
     mcp_filter = None
     if agent and isinstance(getattr(agent, "config", None), dict):

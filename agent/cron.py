@@ -34,7 +34,7 @@ class CronJob:
     - message：到点要通知的内容
     - enabled：开关；False=暂停这条任务但不删除
     - catch_up：补跑开关——True 时，程序重启后会补一次停机期间错过的触发
-    - created_at：创建时间（ISO 格式字符串）；老版本 jobs.json 没这个字段，读取时自动补当前时间
+    - created_at：创建时间（ISO 格式字符串）；缺失时读取自动补当前时间
     - recurring：True=循环任务（到点每次都响）；False=一次性任务，响一次就自动停用（不删除）
     - last_fired_at：上次真正触发的时间（精确到分钟）；空=还没触发过
     """
@@ -44,7 +44,7 @@ class CronJob:
     enabled: bool = True
     catch_up: bool = False  # 补跑开关：True 时启动会补跑错过的一次触发
     # === 任务生命周期字段 ===
-    created_at: str = ""    # ISO 时间戳；老 jobs.json 缺时 _parse_job 自动补当前时间
+    created_at: str = ""    # ISO 时间戳；缺失时 _parse_job 自动补当前时间
     recurring: bool = True  # False = 一次性，触发后自动停用（不删除，留档可查）
     # === 补跑相关字段 ===
     last_fired_at: str = ""  # 上次实际触发时间（ISO 格式精确到分钟）；空=从没触发过
@@ -117,8 +117,8 @@ class CronScheduler:
     ):
         """启动时补跑：把停机期间错过的一次触发补上通知。
 
-        背景：比如闹钟定的是每小时响，但电脑关了一晚，重开后总得告诉用户
-        "你错过了"。做法是逐分钟扫停机时间段，找到第一个该触发的点就补一条通知。
+        停机期间可能错过触发（闹钟定的是每小时响、电脑关了一晚）：
+        逐分钟扫停机时间段，第一个该触发的点就补一条通知。
 
         对每条"启用 + 开了补跑"的任务：
           - 从没触发过（last_fired_at 为空）→ 不补（没基线可对）
@@ -255,8 +255,8 @@ class CronScheduler:
         """新增一条定时任务（自动生成编号 + 立刻存盘）。
 
         先拿 cron_match 试解析一次表达式做校验——写错的直接抛 ValueError
-        （历史踩坑：错误被 try/except 吞掉的话，工具层就转不成
-        invalid_cron_expr 报错，用户看不到为什么失败）。
+        （错误不能被 try/except 吞掉——否则工具层转不成 invalid_cron_expr
+        报错，用户看不到为什么失败）。
         显式传了 job_id 且已存在时也抛 ValueError（防止悄悄覆盖旧任务）。
 
         参数：
@@ -366,8 +366,8 @@ class CronScheduler:
     def _parse_job(self, h: dict) -> Optional[CronJob]:
         """把一个 dict 转成 CronJob 对象，缺关键字段就丢弃。
 
-        背景：jobs.json 是给人也是给程序改的，字段可能缺——
-        id/cron/message 三样缺任何一个都不安全，记条 warning 后丢弃。
+        jobs.json 是给人也是给程序改的，字段可能缺——
+        id/cron/message 三样缺任何一个都记条 warning 后丢弃。
 
         参数：
         - h：单个任务的原始 dict
@@ -386,11 +386,11 @@ class CronScheduler:
         if not message:
             logger.warning("cron job '%s' 缺 message 字段，跳过", job_id)
             return None
-        # === 老格式文件的字段兼容 ===
+        # === 字段缺省兜底（jobs.json 可能缺这些字段） ===
         # created_at 默认用 UTC 时间——不然跨时区/夏令时会让"任务年龄"跳来跳去
         created_at = h.get("created_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
         recurring = h.get("recurring", True)
-        # last_fired_at 兼容——老文件没这个字段就当空（首次触发后才写上）
+        # last_fired_at 缺省就当空（首次触发后才写上）
         last_fired_at = h.get("last_fired_at", "")
         return CronJob(
             id=job_id,

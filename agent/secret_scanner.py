@@ -38,9 +38,7 @@ SECRET_RULES_RE = re.compile(
 
 
 def scan_text(text: str) -> List[Dict[str, Any]]:
-    """扫描一段文本，返回命中列表。
-
-    背景：所有链路的扫描都走这一个函数。
+    """扫描一段文本，返回命中列表（所有链路的扫描都走这一个函数）。
 
     参数：
     - text：待扫描的文本
@@ -78,7 +76,7 @@ def find_secrets_in(*texts: str) -> List[Dict[str, Any]]:
 def redact_value(value: Any) -> Any:
     """把值里命中的秘密替换成 [REDACTED:规则名]，其余原样保留。
 
-    背景：给 trace 日志用——日志不能因为含秘密就丢，但秘密也不能进日志。
+    给 trace 日志用——日志不能因为含秘密就丢，但秘密也不能进日志。
 
     参数：
     - value：任意值（非字符串的不动，直接返回）

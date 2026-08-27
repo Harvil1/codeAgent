@@ -42,7 +42,7 @@ _EVIDENCE_CLIP = 80
 
 # 信号 1 的正则（用户纠错，中英文都认）：
 # 「不要/别/don't/stop」+「用/使用/use/using」+ X ……（中间 ≤20 字）……「改用/换成/用/use」+ Y
-# 两个历史调参点（踩坑换来的，别改回去）：
+# 两个易错点（别改回去）：
 # 1. 空白从 `\s+` 放宽为 `\s*`——中文「不要用grep」中间没有空格，要求空格会漏；
 # 2. 英文动词候选按「长的在前」排——"using" 不排在 "use" 前面的话，
 #    匹配到 "use" 会把剩下的 "ing" 当成工具名。
@@ -171,7 +171,7 @@ def _param_diff(old_args, new_args, tool_name: str) -> str:
 def _detect_failure_recovery(tool_calls, tool_results, store) -> int:
     """信号 2：失败恢复。某工具报错后同一个工具紧接着成功了。
 
-    背景：先错后对说明 agent 自己摸出了绕过办法（改了参数或重试），
+    先错后对说明 agent 自己摸出了绕过办法（改了参数或重试），
     这种经验值得记下来下次直接用。
 
     参数：

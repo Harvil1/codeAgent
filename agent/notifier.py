@@ -55,11 +55,10 @@ def _reset_throttle_for_test() -> None:
 
 
 def notify(title: str, message: str) -> bool:
-    """弹一个 Windows toast 桌面通知。
+    """弹一个 Windows toast 桌面通知（重要事件"跳到眼前"的提醒）。
 
-    背景：用户可能切去别的窗口干活，重要事件（任务完成、等审批）需要一条
-    "跳到眼前"的提醒。注意"成功投递"只代表命令交给 PowerShell 了，不保证
-    用户真的看到气泡（Windows 通知设置可能关了）。
+    注意"成功投递"只代表命令交给 PowerShell 了，不保证用户真的看到气泡
+    （Windows 通知设置可能关了）。
 
     参数：
         title: 通知标题（建议 30 字以内，太长显示不全）

@@ -1,8 +1,7 @@
 """工具大输出的"搬仓库"模块：输出超过阈值就整份写到磁盘，对话里只留预览。
 
-背景：有的工具一口气吐几万字符（比如列出一整个目录），全塞进对话历史
-会把上下文撑爆。这里是分层压缩管线的旁路 L3（设计文档见
-docs/superpowers/specs/2026-07-12-claude-code-improvements-design.md §3）。
+有的工具一口气吐几万字符（比如列出一整个目录），全塞进对话历史会把
+上下文撑爆。本模块是分层压缩管线的旁路 L3。
 
 设计目标（三条底线）：
 - 信息不丢：完整内容躺在磁盘上，模型需要时可用 read_file 工具读回来
@@ -67,7 +66,7 @@ def maybe_offload(
     target_path = None
     try:
         target_path = _resolve_unique_path(offload_dir, safe_id)
-        # I3 修复留下的规矩：写文件前必须过 safe_path 路径安全检查
+        # 写文件前必须过 safe_path 路径安全检查
         from agent.permission import safe_path
         perm = safe_path(target_path, write=True, allowed_roots=[offload_dir.resolve()])
         if not perm.allowed:
@@ -95,9 +94,8 @@ def maybe_offload(
 def _resolve_unique_path(offload_dir: Path, tool_call_id: str) -> Path:
     """挑一个没被占用的落盘文件路径；同名文件已存在就加 _1、_2 编号。
 
-    背景：正常情况下同一个调用 ID 不会落盘两次（有决策冻结机制兜着），
-    这个分支几乎走不到；万一撞名就编号重试。上限试 1000 次——防止病态
-    情况下无限循环，超了抛 OSError。
+    同一个调用 ID 正常不会落盘两次（有决策冻结机制兜着）；万一撞名就
+    编号重试。上限试 1000 次——防病态情况下无限循环，超了抛 OSError。
 
     参数：
         offload_dir: 落盘目录（不存在会自动建）
@@ -126,8 +124,7 @@ def finalize_tool_output(
 ) -> str:
     """所有工具 handler 共用的收尾步骤：超阈值的大输出自动走落盘。
 
-    背景：如果每个工具模块都自己写一遍"判断大小→写盘→留预览"就太啰嗦了，
-    统一在返回前调这一个函数。
+    统一收口，免得每个工具模块都自己写一遍"判断大小→写盘→留预览"。
 
     规则：
     - tool_call_id 或 agent_home 缺了：原样返回（不落盘，比如测试场景）

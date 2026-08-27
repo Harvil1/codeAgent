@@ -63,8 +63,8 @@ class GoalState:
     def pause(self, reason: str = "manual") -> None:
         """把目标暂停。
 
-        背景：网络断、预算花超、用户手动叫停，最后都走这一个入口，
-        顺便在这里统一发桌面通知（统一收口在这一个入口，别再散落到各处）。
+        网络断、预算花超、用户手动叫停都走这一个入口，
+        并在这里统一发桌面通知（收口在一个入口）。
 
         参数：
         - reason：暂停原因，manual（手动）/ network（断网）/ budget_exceeded（超预算）
@@ -123,9 +123,7 @@ class GoalState:
         tokens_used: int = 0,
         all_tasks_done: bool = False,
     ) -> str:
-        """每跑完一轮就调一次，由状态机自己判断"接下来干嘛"。
-
-        背景：goal 模式不需要人盯，靠这个方法在每轮结束后自动做裁判。
+        """每跑完一轮就调一次，由状态机自己判断"接下来干嘛"（goal 模式无人盯守的裁判入口）。
 
         参数：
         - tokens_used：这一轮实际花掉的 token 数（累加进 token_budget）
@@ -153,10 +151,8 @@ class GoalState:
     def should_nudge(self, recent_tool_success: bool) -> bool:
         """判断要不要"踢一脚"（nudge）让 agent 继续干而不是提前收工。
 
-        背景：典型场景——goal 要求修 20 个文件，agent 修了
-        14 个就宣布"完成了"。如果预算还剩 10% 以上、且最近一轮还有成功的
-        工具调用（说明没在空转），就值得注入一条催促消息让它接着干，
-        而不是等用户重新下命令（"预算未满 + 无收益递减 → nudge"）。
+        判定：预算还剩 10% 以上、且最近一轮还有成功的工具调用（说明没在
+        空转）时注入一条催促消息让它接着干（"预算未满 + 无收益递减 → nudge"）。
 
         参数：
         - recent_tool_success：最近一轮是否有成功的工具调用
@@ -226,8 +222,8 @@ class GoalState:
 def goal_persist_path(agent) -> Path:
     """算出 agent 的 goal 存档文件路径（一般是 ~/.OmniMate/.goal/current.json）。
 
-    背景：调用方传来的 agent 对象能力不一（可能是真 AIAgent，也可能是
-    测试替身），所以按三档优先级依次试：
+    调用方传来的 agent 对象能力不一（可能是真 AIAgent，也可能是
+    测试替身），按三档优先级依次试：
 
     1. agent._goal_state_path() —— AIAgent 实例方法，最准
     2. agent.omnimate_home —— AIAgent 字段，次选
@@ -263,7 +259,7 @@ def start_goal_agent(
     1. 如果旧 goal 还在跑，先把它暂停（原因记为 superseded_by_new_goal）并落盘
     2. 建一个新的 GoalState，落盘，挂到 agent 身上
 
-    ⚠️ 历史踩坑提醒：本函数故意不碰 conversation_history（对话消息列表）。
+    ⚠️ 约束：本函数故意不碰 conversation_history（对话消息列表）。
     CLI 在会话循环外追加 `[goal_start]` user 消息没问题；但工具路径是在
     assistant(tool_calls) 之后、tool 结果还没回填的节骨眼上，这时插一条
     user 消息会破坏"工具调用和结果必须严格交替"的规矩，直接 API 400。
@@ -309,10 +305,7 @@ async def decompose_with_llm(
     objective: str,
     aux_llm_router,
 ) -> List[str]:
-    """用辅助小模型（aux_llm——干杂活用的便宜模型）把目标拆成几条子任务，存进任务库。
-
-    背景：大目标直接干容易乱，先让小模型拆成 1-5 条可独立执行的小任务，
-    goal 跑的时候就能逐条对账"还剩几个没干完"。
+    """用辅助小模型（aux_llm——干杂活用的便宜模型）把目标拆成 1-5 条可独立执行的子任务，存进任务库（goal 跑的时候逐条对账"还剩几个没干完"）。
 
     设计取舍（一切求稳，拆解失败不影响 goal 本身）：
     - 辅助模型不可用 → 返回空列表（goal 照跑，只是没有子任务追踪）

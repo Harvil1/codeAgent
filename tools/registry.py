@@ -57,7 +57,7 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 def _module_registers_tools(module_path: Path) -> bool:
     """检查一个 .py 文件的顶层有没有 registry.register() 调用。
 
-    背景：自动发现工具时要先"隔着门缝看一眼"，只把真正登记了工具的文件 import 进来，
+    自动发现工具时先"隔着门缝看一眼"，只把真正登记了工具的文件 import 进来，
     免得把只是帮忙的辅助模块也误当成工具模块加载。
 
     参数：
@@ -160,8 +160,8 @@ _check_fn_cache_lock = threading.Lock()
 def _check_fn_cached(fn: Callable) -> bool:
     """带缓存地调一次可用性检查函数，返回"工具现在可用吗"。
 
-    背景：check_fn 查的都是慢变化的外部状态，每次真调太浪费；
-    而偶发失败又要宽容处理（刚成功过就当是抖动），所以走这个包装。
+    check_fn 查的都是慢变化的外部状态，每次真调太浪费；偶发失败宽容处理
+    （刚成功过就当是抖动），所以走这个包装。
 
     参数：
         fn: 可用性检查函数；None 表示没有检查（永远算可用）。
@@ -274,9 +274,8 @@ class ToolRegistry:
     def unregister(self, name: str) -> bool:
         """把一个工具从户口本上划掉（注销）。
 
-        背景：这个接口主要是给测试用的——测试临时登记的工具
-        跑完要清掉，免得污染其他测试。生产代码不该用它（工具登记是启动期
-        一次性的事，运行中撤工具不是设计内的玩法）。
+        主要是给测试用的——测试临时登记的工具跑完要清掉，免得污染其他测试；
+        生产代码不该用它（工具登记是启动期一次性的事）。
 
         参数：
             name: 工具名。
@@ -293,8 +292,8 @@ class ToolRegistry:
     async def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """把 LLM 发起的工具调用转交给对应的干活函数，返回 JSON 字符串结果。
 
-        背景：主程序是异步的（async），但工具函数有同步有异步，
-        两种要都能跑而且不能卡住整个事件循环。
+        主程序是异步的（async），但工具函数有同步有异步，两种都要能跑
+        且不能卡住整个事件循环。
 
         怎么跑：
         - async handler（如 MCP / delegate 这些）：直接 await
@@ -343,12 +342,10 @@ class ToolRegistry:
                 result = await handler(args, **kwargs)
             else:
                 # 同步 handler：丢线程池跑。
-                # 为什么用 asyncio.to_thread 而不是 anyio.to_thread.run_sync：
-                # asyncio.to_thread 会自动把当前的 context（上下文变量，比如
-                # workspace_cwd 这种"当前工作目录是哪"的记号）复制到工作线程里。
-                # 用错了库的话，跑在隔离工作区（worktree）里的子代理（主对话派出去
-                # 帮忙干活的分身）拿到的还是主进程的目录，而不是它自己的工作区目录。
-                # （anyio 的版本默认不带回 context，而且 4.x 连 API 都改了）
+                # 必须用 asyncio.to_thread（而不是 anyio.to_thread.run_sync）：
+                # 它会自动把当前 context（上下文变量，如 workspace_cwd）复制到
+                # 工作线程，否则 worktree 子代理拿到的还是主进程目录而非自己的
+                # 工作区目录（anyio 版本默认不带回 context）。
                 import asyncio as _asyncio
                 result = await _asyncio.to_thread(handler, args, **kwargs)
             return self._normalize_result(name, result)
@@ -364,8 +361,8 @@ class ToolRegistry:
     def _normalize_result(name: str, result) -> str:
         """把 handler 的返回值统一整理成 JSON 字符串。
 
-        背景：契约要求所有工具返回 JSON 字符串，但难免有人返回 dict 或别的类型，
-        这里是兜底出口：字符串原样过，dict 帮你转 JSON，别的类型报契约错误。
+        契约要求所有工具返回 JSON 字符串，这里做兜底：字符串原样过，
+        dict 帮你转 JSON，别的类型报契约错误。
 
         参数：
             name: 工具名（出错时写进错误信息里）
@@ -386,8 +383,7 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[ToolEntry]:
         """按工具名查档案；查不到返回 None。
 
-        背景：测试和并发分组逻辑需要直接拿到工具档案，
-        比如读"能不能并发跑"这个字段。
+        测试和并发分组逻辑用它直接拿工具档案（如读"能不能并发跑"字段）。
 
         参数：
             name: 工具名。
@@ -457,9 +453,8 @@ class ToolRegistry:
     def get_catalog_entry(self, name: str) -> Optional[dict]:
         """给某个工具出一张"名片"：名字 + 一句话简介 + 怎么查详情的提示。
 
-        背景：给 ToolSearch（工具搜索）用的。MCP 外部工具数量可能很多，
-        全部附上详细说明书太占 token。所以先只发名片——LLM 看目录知道有这号工具，
-        真需要时再调 tool_search 取完整说明书。
+        给 ToolSearch（工具搜索）用的：MCP 外部工具数量可能很多，全部附详细
+        说明书太占 token，先只发名片，LLM 需要时再调 tool_search 取完整说明书。
         和 get_definitions 的分工：
         - get_definitions 给全量说明书（含详细 parameters）—— 用于内置工具
         - get_catalog_entry 只给名片（parameters 是空壳）—— 用于 MCP 工具

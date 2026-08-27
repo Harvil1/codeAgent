@@ -73,8 +73,8 @@ MEMORY_SCHEMA = {
 def _handle_memory(args: dict, **kwargs) -> str:
     """memory 工具的总入口：按 action 分发到 store 的对应操作。
 
-    背景：所有工具 handler 都要遵守统一契约——参数从 args 拿，
-    命名上下文（这里是 memory_store）从 kwargs 拿，返回 JSON 字符串。
+    遵守统一契约：参数从 args 拿，命名上下文（这里是 memory_store）从 kwargs 拿，
+    返回 JSON 字符串。
 
     参数：
         args: LLM 传来的工具参数，核心是 action（save/update/delete/load/list），
@@ -171,7 +171,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
             summaries = [
                 {
                     "id": e.id, "name": e.name, "description": e.description,
-                    "type": e.type, "summary": e.summary,  # 列表也带 summary（CCALS-P0-1），一眼判断相关性
+                    "type": e.type, "summary": e.summary,  # 列表也带 summary，一眼判断相关性
                 }
                 for e in entries
             ]

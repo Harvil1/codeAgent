@@ -141,9 +141,9 @@ class ProgressReporter:
                 f"已经过了约 {self._tick_count * self.interval:.0f} 秒。"
                 f"用 10 个字以内简短描述一个等待中的进度提示（不要复述任务）："
             )
-            # 历史踩坑：aux_llm_router.chat_completions 是异步函数，
-            # 而本函数跑在守护线程里（线程里没有事件循环），漏了
-            # 用 asyncio.run 驱动会直接失效。
+            # aux_llm_router.chat_completions 是异步函数，
+            # 而本函数跑在守护线程里（线程里没有事件循环），
+            # 必须用 asyncio.run 驱动，否则会直接失效。
             import asyncio
             resp = asyncio.run(self.aux_llm_router.chat_completions(
                 [{"role": "user", "content": prompt}],

@@ -1,8 +1,5 @@
-"""skill_manage 工具：agent 自己动手创建、修改、归档技能。
-
-背景：技能（skill）是存在磁盘上的 Markdown 使用说明书。「越用越聪明」的关键一环
-就是 agent 干完活后把可复用的方法沉淀成技能文件，下次直接翻出来照着做——
-本文件就是干这个的工具端实现。
+"""skill_manage 工具：agent 自己动手创建、修改、归档技能——把可复用的方法
+沉淀成磁盘上的 Markdown 技能文件（skill），下次直接翻出来照着做。
 
 一个工具七种用法（由 action 参数区分）：
   create      - 创建新技能
@@ -83,7 +80,7 @@ SKILL_MANAGE_SCHEMA = {
 def _get_skills_dir_from_context(kwargs: dict) -> Path:
     """算出本次操作该把技能写到哪个目录。
 
-    背景：技能目录跟着数据主目录走，而主目录可以被自定义，所以每次都要现算。
+    技能目录跟数据主目录走（主目录可自定义），所以每次都要现算。
 
     参数：
     - kwargs：工具调用上下文；优先取里面的 omnimate_home（自定义数据主目录）

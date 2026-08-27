@@ -1,9 +1,9 @@
-"""声明式 hook 的 if 条件过滤（P3.5 引入）——让 hook 只在"特定工具/特定参数"被调用时才跑。
+"""声明式 hook 的 if 条件过滤——让 hook 只在"特定工具/特定参数"被调用时才跑。
 
 比如配置 hook 时写 if: "terminal(git *)"，就只有 agent 执行 git 开头的 terminal 命令时
 这个 hook 才触发，其他命令直接跳过（不用白起一个子进程，省资源）。
 
-写法（语法借鉴 claude-code-main 的 prepareIfConditionMatcher，形如权限规则）：
+写法（形如权限规则）：
   - "ToolName(arg_pattern)"，例如 "terminal(git *)" / "read_file(*.py)"
   - 只写 tool 名不带括号 = 只要工具名对得上就匹配，不管参数
   - 条件为空 / None = 无条件，hook 永远跑
@@ -15,10 +15,8 @@
   - arg_pattern 用 fnmatch（文件名通配符那套 * 和 ?）对所有参数值做匹配，任何一个值命中就算匹配
   - 条件语法写错（括号不配对等）→ fail-open（放行返回 True，不让配置笔误把 hook 静默废掉）
 
-设计取舍（OmniMate 的简化）：
-  - claude-code-main 是解析权限规则 + 按字段分别匹配（tool 名 + 各参数字段）
-  - OmniMate 简化成：tool 名 + 对 args 的所有值统一做 fnmatch（不区分是哪个字段）
-  - 好处是对用户更直观："terminal(git *)" 能命中任何值里带 "git " 前缀的参数
+设计取舍：tool 名精确匹配 + 对 args 的所有值统一做 fnmatch（不区分是哪个字段），
+对用户更直观——"terminal(git *)" 能命中任何值里带 "git " 前缀的参数。
 """
 import fnmatch
 import logging
@@ -39,7 +37,7 @@ def match_if_condition(
 ) -> bool:
     """判断当前这次工具调用是否命中 hook 的 if 条件。
 
-    背景：hook 执行前先过这道筛子，不命中就不必起子进程，省资源。
+    hook 执行前先过这道筛子，不命中就不必起子进程，省资源。
 
     参数：
         tool_name：当前调用的工具名（如 "terminal"）
@@ -121,8 +119,8 @@ _IF_CONDITION_EVENTS = frozenset({
 def is_if_condition_applicable(event_str: str) -> bool:
     """判断某个事件支不支持挂 if 条件。
 
-    背景：对齐 claude-code-main 的做法——只有 4 个工具相关事件
-    （工具调用前后、失败后、权限请求时）才有"参数"可过滤，别的事件挂了也白挂。
+    只有 4 个工具相关事件（工具调用前后、失败后、权限请求时）才有
+    "参数"可过滤，别的事件挂了也白挂。
 
     参数：
         event_str：事件名字符串（如 "pre_tool_use"）

@@ -28,10 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_feature_enabled(config: Dict[str, Any], name: str) -> bool:
-    """快速判断某个功能开关是否打开。
-
-    背景：新功能先挂开关再上线，运行时到处要问「这个开关开了吗」，
-    这个函数就是那个统一的问法。
+    """快速判断某个功能开关是否打开（运行时统一的问法）。
 
     参数：
         config —— 配置字典（通常是 RuntimeContext.config 或 agent.config）
@@ -72,8 +69,8 @@ def is_feature_enabled(config: Dict[str, Any], name: str) -> bool:
 def get_feature_config(config: Dict[str, Any], name: str) -> Dict[str, Any]:
     """拿到某个开关的完整配置（enabled 之外还带参数的情况用这个）。
 
-    背景：有些开关不只是开/关，还带自己的配置项（如白名单、阈值），
-    开关值是一个 dict，这里把整个 dict 取出来。
+    有些开关还带自己的配置项（白名单、阈值等），开关值是一个 dict，
+    这里把整个 dict 取出来。
 
     参数：
         config —— 配置字典

@@ -44,7 +44,7 @@ DEFAULT_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 def _infer_mime(filename: str) -> Optional[str]:
     """看文件名后缀，查出它对应的 MIME 类型（如 .png → "image/png"）。
 
-    背景：调 vision API 时要在请求里声明图片是什么格式，格式名就从后缀查表来。
+    调 vision API 时要在请求里声明图片是什么格式，格式名从后缀查表来。
     后缀统一转小写再查，所以 ".PNG" 和 ".png" 等价。
 
     参数：
@@ -59,8 +59,7 @@ def _infer_mime(filename: str) -> Optional[str]:
 def _check_image_file(path_str: str, max_bytes: int) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
     """图片文件的四步预检：格式对不对、路径让不让读、文件在不在、是不是太大。
 
-    背景：真正调 API 之前先把"明显不行"的情况挡掉，每一步失败都能给出
-    具体原因，省得模型瞎猜为什么错。
+    真正调 API 之前先把"明显不行"的情况挡掉，每一步失败都给出具体原因。
 
     参数：
         path_str：图片路径字符串。
@@ -105,8 +104,8 @@ def _check_image_file(path_str: str, max_bytes: int) -> Tuple[Optional[Path], Op
 def _get_vision_client(agent) -> Tuple[Optional[object], Optional[str]]:
     """从主对话对象（agent）身上找到能看图的模型客户端和它的模型名。
 
-    背景：可以给视觉任务单独配一个模型（省得用昂贵的主模型），没配时
-    就退回用主模型顶上。按优先级找：
+    可以给视觉任务单独配一个模型（省得用昂贵的主模型），没配时就退回用
+    主模型顶上。按优先级找：
     1. agent._vision_client——专门配的视觉模型客户端
     2. agent.llm_client——没有专配就借用主模型客户端
 
@@ -141,7 +140,7 @@ def _call_vision_llm(
 ) -> str:
     """把"问题 + 图片"打包发给看得懂图的模型，拿回它对图片的描述/回答。
 
-    背景：图片不能直接当文字发，要按 OpenAI 兼容接口的格式编码成
+    图片不能直接当文字发，要按 OpenAI 兼容接口的格式编码成
     data:image/png;base64,xxx 这样的内嵌地址放进消息里。
 
     参数：
@@ -311,9 +310,8 @@ def _handle_image_analyze(args: dict, **kwargs) -> str:
 def _handle_image_ocr(args: dict, **kwargs) -> str:
     """从图片里抠文字（OCR）——image_analyze 的"提取文字特化版"。
 
-    背景：提取文字是个高频需求，单独做个工具免得模型每次自己想提示词；
-    内部就是拼一条 OCR 专用提示词，然后复用 image_analyze 的整套
-    检查和调用流程，不重复造轮子。
+    内部拼一条 OCR 专用提示词（省得模型每次自己想），然后复用
+    image_analyze 的整套检查和调用流程。
 
     参数：
         args：工具参数字典，来自模型——image_path（本地图片路径）、

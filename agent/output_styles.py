@@ -68,7 +68,7 @@ def _parse_style_file(path: Path) -> Optional[OutputStyle]:
 def _project_roots(cwd: str):
     """列出从当前目录一路向上到 git 仓库根（含）的所有目录。
 
-    背景：和 OMNIMATE.md 的收集规则保持一致——每层目录都可能藏着
+    和 OMNIMATE.md 的收集规则保持一致——每层目录都可能藏着
     项目级风格文件，得挨个看一遍。
 
     参数：

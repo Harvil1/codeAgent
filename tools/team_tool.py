@@ -198,9 +198,9 @@ def _handle_team_members(args: dict, **kwargs) -> str:
 def _handle_team_spawn(args: dict, **kwargs) -> str:
     """招一个新帮手：启动一个子代理进程去干指定的活（一次性，干完自动退出）。
 
-    背景：子代理是独立进程，不继承主对话的记忆，只靠 task 参数里写的
-    指令干活。可选绑定一个任务 ID，绑了之后帮手只能操作那个任务——
-    这是防 prompt 注入的安全设计（防止被指令诱导去乱动别的任务）。
+    子代理是独立进程，不继承主对话的记忆，只靠 task 参数里写的指令干活。
+    可选绑定一个任务 ID，绑了之后帮手只能操作那个任务——防 prompt 注入
+    跨任务操作的安全设计。
 
     参数：
     - args：工具参数，name（新成员名字，不能重名）和 task（交给它干的
@@ -222,7 +222,7 @@ def _handle_team_spawn(args: dict, **kwargs) -> str:
     if not name or not task:
         return _err("name 和 task 必需", "invalid_args")
 
-    # 嵌套深度检查（P4b-T2 引入）：帮手也能再招帮手，但不能无限套娃——
+    # 嵌套深度检查：帮手也能再招帮手，但不能无限套娃——
     # 当前层数达到上限就直接拒绝
     current_depth = getattr(agent, "spawn_depth", 0) if agent else 0
     max_depth = config.get("team", {}).get("max_depth", 2)
@@ -288,8 +288,8 @@ def _handle_team_shutdown(args: dict, **kwargs) -> str:
 def _handle_idle(args: dict, **kwargs) -> str:
     """帮手声明「我没活了」：进入待命（IDLE）状态等新任务。
 
-    背景：自动干活的帮手（autonomous worker）忙完一轮后调这个工具
-    说一声「闲了」，等协调员派新活。
+    自动干活的帮手（autonomous worker）忙完一轮后调这个工具说一声
+    「闲了」，等协调员派新活。
 
     参数：
     - args：工具参数（本工具不需要参数）。

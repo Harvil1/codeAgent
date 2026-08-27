@@ -1,8 +1,6 @@
-"""「剪掉旧对话」工具：让 AI 自己决定什么时候裁剪历史。
-
-背景：对话越长，每次调模型的 token 账单越贵。项目里已有一套"超过阈值就
-自动压缩"的机制，但那是死板的水位线；这个工具让模型在自然的任务分界点
-（比如"代码结构摸清楚了，准备动手写"）自己动手剪掉前面对话的细节。
+"""「剪掉旧对话」工具：让 AI 自己决定什么时候裁剪历史——在自然的任务
+分界点（比如"代码结构摸清楚了，准备动手写"）主动剪掉前面对话的细节，
+不必等"超过阈值就自动压缩"的水位线触发。
 
 和 compact 工具的分工（一个快一个聪明）：
 - compact = 让模型把旧对话读一遍总结成摘要（有损、要再调一次模型、慢）
@@ -58,8 +56,8 @@ SNIP_SCHEMA = {
 def _handle_snip(args: dict, **kwargs) -> str:
     """把早期对话消息剪掉、换成占位提示，返回执行结果 JSON。
 
-    背景：模型主动调这个工具来瘦身对话历史。任何一步出问题都不能
-    把主对话搞崩（fail-open：出错就返回带 error 的 JSON，不抛异常）。
+    任何一步出问题都不把主对话搞崩（fail-open：出错就返回带 error 的 JSON，
+    不抛异常）。
 
     参数：
     - args：工具参数字典。reason 是模型给的理由（只用于日志和返回信息）；
@@ -98,10 +96,9 @@ def _handle_snip(args: dict, **kwargs) -> str:
         ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
         keep_first = ctx_cfg.get("snip_keep_first", 3)
 
-        # 历史踩坑（无损承诺兑现）：剪之前必须先把对话原文存档到 transcript
-        # （force=True 强制存）。项目里的自动压缩管线（compress_if_needed）
-        # 只在自己调 LLM 摘要前会存档；本工具走的是捷径、绕过了它，
-        # 所以必须自己补这一步——否则被剪掉的消息原文就真找不回来了。
+        # 剪之前必须先把对话原文存档到 transcript（force=True 强制存）：
+        # 自动压缩管线（compress_if_needed）只在调 LLM 摘要前存档，本工具
+        # 绕过了它，不补这步被剪掉的消息原文就找不回来（无损承诺就破了）。
         agent_home_raw = getattr(agent, "omnimate_home", None)
         session_id = getattr(agent, "session_id", None) or ""
         transcript_enabled = ctx_cfg.get("transcript_enabled", True)

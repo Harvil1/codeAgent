@@ -150,7 +150,7 @@ class CheckpointManager:
         return snaps
 
     def restore_files(self, snapshot_id: str) -> list:
-        """回滚文件：把指定快照里存的文件副本复制回原来的路径。
+        """回滚文件：把指定快照里存的文件副本复制回原路径。
 
         参数：
             snapshot_id：要回到哪个快照

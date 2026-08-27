@@ -5,8 +5,8 @@ MCP 标准服务，就用同一套协议对接（tools/list 列工具 + tools/ca
 工具），不用为每个外部服务重写工具代码。上层是 tools/mcp_tool.py
 （把 MCP 工具注册进工具表），被 cli.py 聚合使用。
 
-Phase 5 升级：从只支持 stdio 一种连法扩展到四种 transport（传输方式）：
-- stdio：在本机启动一个子进程，通过它的标准输入/输出对话（原有方式）
+支持四种 transport（传输方式）：
+- stdio：在本机启动一个子进程，通过它的标准输入/输出对话
 - http：发 JSON POST 请求、收 JSON 响应（用 httpx 库），支持 OAuth 令牌自动刷新
 - sse：Server-Sent Events（服务器单向流式推送），httpx 的 SSE 实现，独立 transport
 - websocket：长连接双向 JSON-RPC（用 websockets 库）
@@ -70,9 +70,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class MCPTransport(ABC):
-    """所有传输方式的共同抽象（迭代 08 引入）。
+    """所有传输方式的共同抽象。
 
-    背景：stdio/HTTP/SSE/WebSocket 四种连法底层完全不同，但对上层
+    stdio/HTTP/SSE/WebSocket 四种连法底层完全不同，但对上层
     （MCPClient）要长得一样，所以定一个统一接口。每种 transport 必须实现：
       - connect(): 建立连接 + 完成 MCP initialize 握手（先互相自报家门）
       - send_request(method, params) -> Optional[dict]：发一个请求，等一个响应
@@ -233,7 +233,7 @@ class StdioTransport(MCPTransport):
             env=full_env,
             text=True,
             encoding="utf-8",
-            # 历史踩坑：server 输出
+            # server 输出
             # 里可能混坏字节（GBK 日志/二进制），不能让 reader 线程炸——
             # replace 成 U+FFFD 替换符后当"非 JSON 行"跳过（fail-open），
             # 否则一条 UnicodeDecodeError 就让整条连接永久失效
@@ -282,7 +282,7 @@ class StdioTransport(MCPTransport):
         - handler 抛异常 → 记日志，不影响继续读
         - readline 返回空（EOF，管道关闭）→ 退出循环
 
-        ⚠️ 历史踩坑：
+        ⚠️ 注意：
         循环条件绝不能带 self._connected——握手期间（本线程被懒启动时）
         _connected 还是 False（connect() 要等握手成功才置 True），带上它
         reader 会立刻退出 → 响应永远读不到 → 握手 60s 超时。线程的退出
@@ -318,9 +318,9 @@ class StdioTransport(MCPTransport):
     def _resolve_command_argv(self) -> List[str]:
         """（内部）算出真正用来启动子进程的命令行参数（处理跨平台差异）。
 
-        Windows 上有个经典坑（历史踩坑）：配置里写 `npx`，但 Windows 创建
+        Windows 上的经典坑：配置里写 `npx`，但 Windows 创建
         进程时找不到这个裸名字——实际可执行文件叫 npx.cmd，而且
-        CreateProcess 不认 .cmd/.bat 脚本。修复办法：
+        CreateProcess 不认 .cmd/.bat 脚本。处理办法：
           - 用 shutil.which 把命令解析成全路径（按 PATHEXT 自动补
             .exe/.cmd/.bat 后缀）
           - 解析出来是 .cmd/.bat 时，外面套一层 cmd.exe 来跑
@@ -442,11 +442,11 @@ class StdioTransport(MCPTransport):
 
 
 # ---------------------------------------------------------------------------
-# HTTP transport（Phase 5：从 requests 库换成了 httpx 库）
+# HTTP transport（基于 httpx 库）
 # ---------------------------------------------------------------------------
 
 class HTTPTransport(MCPTransport):
-    """HTTP 传输（Phase 5 升级：基于 httpx 库）。
+    """HTTP 传输（基于 httpx 库）。
 
     支持三种玩法：
     - 普通：发 JSON POST，收一个 JSON 响应
@@ -572,9 +572,8 @@ class HTTPTransport(MCPTransport):
             return False, f"预检异常: {type(e).__name__}: {e}"
 
     def _refresh_access_token(self) -> None:
-        """（内部）用 refresh_token 换一张新的 access_token（OAuth 刷新流程）。
+        """（内部）用 refresh_token 换一张新的 access_token（OAuth 刷新流程）——access_token 是短期门票，refresh_token 是长期身份证。
 
-        背景：access_token 是短期门票，refresh_token 是长期身份证。
         做法：向 token_url 发
         POST（grant_type=refresh_token），拿回新 access_token 和有效期
         expires_in；记下过期时间，提前 60 秒主动刷新，不等它真过期。
@@ -671,7 +670,7 @@ class HTTPTransport(MCPTransport):
     def _parse_sse_response(self, text: str) -> Optional[dict]:
         """（内部）从 SSE 流文本里抠出最后一个 JSON-RPC result。
 
-        背景：SSE（Server-Sent Events，服务器单向流式推送）每行是一条
+        SSE（Server-Sent Events，服务器单向流式推送）每行是一条
         "data: {...}" 事件，可能推多条，取最后那条有效结果；遇到 error
         事件直接抛。
 
@@ -731,11 +730,11 @@ class HTTPTransport(MCPTransport):
 
 
 # ---------------------------------------------------------------------------
-# SSE transport（Phase 5 新增：专用的 SSE 流式 transport）
+# SSE transport（专用的 SSE 流式 transport）
 # ---------------------------------------------------------------------------
 
 class SSETransport(MCPTransport):
-    """SSE（Server-Sent Events，服务器单向流式推送）专用 transport（Phase 5）。
+    """SSE（Server-Sent Events，服务器单向流式推送）专用 transport。
 
     和 HTTPTransport 里"POST 完收一个 SSE 响应"的 streamable-http 玩法不同：
     这个类用 GET 建一条长连接、持续读 SSE 事件流，请求则从另一条
@@ -977,15 +976,15 @@ class SSETransport(MCPTransport):
 
 
 # ---------------------------------------------------------------------------
-# WebSocket transport（Phase 5 新增：用 websockets 库）
+# WebSocket transport（用 websockets 库）
 # ---------------------------------------------------------------------------
 
 class WebSocketTransport(MCPTransport):
-    """WebSocket transport（Phase 5）。
+    """WebSocket transport。
 
     用 websockets 库建立一条长连接，JSON-RPC 消息双向收发（像打电话，
     两边都能随时开口）。websockets 库原生是 async 异步的，这里用
-    asyncio.run 桥接成同步接口（项目 Plan 2A 定下的统一桥接模式）。
+    asyncio.run 桥接成同步接口。
 
     适用场景：需要低延迟双向通信的 MCP server（比如实时协作工具）。
     """
@@ -1186,17 +1185,14 @@ class WebSocketTransport(MCPTransport):
 # ---------------------------------------------------------------------------
 
 class MCPClient:
-    """单个 MCP server 的客户端连接（Phase 5：支持 4 种 transport）。
-
-    背景：上层（tools/mcp_tool.py）不想关心底下是子进程还是 HTTP，
-    这个类挑好具体 transport 再包一层统一接口。
+    """单个 MCP server 的客户端连接（支持 4 种 transport）——上层（tools/mcp_tool.py）不想关心底下是子进程还是 HTTP，这个类挑好具体 transport 再包一层统一接口。
 
     用哪种 transport 的判定顺序：
     1. 配置里明写了 transport 字段（"stdio" / "http" / "sse" / "websocket"）
     2. 有 url → 看网址开头（ws/wss → websocket，其余当 http）
     3. 有 command → stdio
 
-    Feature flag 门控（Phase 5 集成）：
+    Feature flag 门控：
     - websocket 要开 mcp_websocket_transport
     - 显式写 sse 要开 mcp_http_transport
     - http 不设门槛（向后兼容，保住老配置的行为）
@@ -1240,7 +1236,7 @@ class MCPClient:
         self.exclude = exclude
         self._connected = False
 
-        # 先查功能开关（Phase 5 集成）
+        # 先查功能开关
         from agent.feature_flags import is_feature_enabled
         cfg = config or {}
         http_enabled = is_feature_enabled(cfg, "mcp_http_transport")

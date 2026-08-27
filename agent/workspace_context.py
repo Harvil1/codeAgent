@@ -1,11 +1,10 @@
 """子代理的工作目录（cwd）隔离机制——用 ContextVar 取代 os.chdir。
 
-背景（为什么需要这个文件）：
-    子代理跑在独立的 git worktree（工作副本目录）里，以前 _run_child 用
-    os.chdir(workspace_path) 切过去。但 os.chdir 改的是整个进程共用的
-    "当前目录"，就好比全家共用一块白板：线程 A 刚写上自己的目录，线程 B
-    一擦写上自己的，A 的就被踩了。ThreadPoolExecutor 并发跑子代理时
-    必然互相打架：
+为什么需要：
+    子代理跑在独立的 git worktree（工作副本目录）里，而 os.chdir 改的是
+    整个进程共用的"当前目录"，就好比全家共用一块白板：线程 A 刚写上自己
+    的目录，线程 B 一擦写上自己的，A 的就被踩了。ThreadPoolExecutor
+    并发跑子代理时必然互相打架：
 
         线程 A: chdir(/worktree_A) → cwd = /worktree_A
         线程 B: chdir(/worktree_B) → cwd = /worktree_B（A 已经被踩了）
@@ -44,7 +43,7 @@ def get_workspace_cwd() -> str:
         当前目录路径。
 
     优先级：先看本线程的 ContextVar 设没设；没设就用 os.getcwd()
-    （老代码路径，保持向后兼容）。并发子代理每线程一份 ContextVar，
+    （向后兼容）。并发子代理每线程一份 ContextVar，
     各拿各的答案互不干扰。
     """
     return _workspace_cwd.get() or os.getcwd()

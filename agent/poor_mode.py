@@ -1,6 +1,6 @@
 """Poor Mode（省钱模式）：一键关掉所有"额外花 LLM token"的功能。
 
-背景：平时跑的很多功能（反思、摘要、记忆提取……）都要额外调 LLM，每次调用都花钱。
+平时跑的很多功能（反思、摘要、记忆提取……）都要额外调 LLM，每次调用都花钱。
 用户想省 token 时打开这个模式，7 个烧钱开关一次性全关。
 
 关闭清单（都是"锦上添花"型功能，关了不影响核心对话）：
@@ -28,10 +28,9 @@ logger = logging.getLogger(__name__)
 
 
 # 7 个开关：点号分隔的配置键 → 要设成的值（这里全是 False = 全关）
-# 历史踩坑：reactive_compact 真正被读取的开关是
-# features.reactive_compact.enabled（agent/__init__.py 用 is_feature_enabled 读）。
-# 早期写的旧键 context.reactive_compact_enabled 在整个仓库里没有任何代码读它——
-# 属于"写了也白写"的死配置。所以这里改写 features 键，语义保持一致：
+# reactive_compact 真正被读取的开关是
+# features.reactive_compact.enabled（agent/__init__.py 用 is_feature_enabled 读）；
+# context.reactive_compact_enabled 是没人读的死键。所以这里写 features 键——
 # poor mode 是"全关"，即使用户之前手动开过，也强制压回 False。
 POOR_PRESET: dict[str, Any] = {
     "reflection.enabled": False,
@@ -47,8 +46,8 @@ POOR_PRESET: dict[str, Any] = {
 def _set_dotted(d: dict, dotted_key: str, value: Any) -> None:
     """把 "a.b.c" 这种点号键写进嵌套字典，相当于 d[a][b][c] = value。
 
-    背景：配置项是多层嵌套字典，而开关清单里用的是点号写法，需要这个工具
-    把点号键"展开"成一层层的字典赋值；中间某一层不存在时先建一个空字典再往下走。
+    点号键"展开"成一层层的字典赋值；中间某一层不存在时先建一个
+    空字典再往下走。
 
     参数：
         d: 要写入的目标字典（直接在它上面改）
@@ -67,8 +66,8 @@ def _set_dotted(d: dict, dotted_key: str, value: Any) -> None:
 def apply_poor_preset(config: dict, on: bool = True) -> dict:
     """生成一份"省钱模式"的新配置并返回。
 
-    背景：不能直接改调用方手里的配置字典（别处可能还在用），所以深拷贝一份
-    再改，原配置原封不动。
+    深拷贝一份再改（不直接动调用方手里的配置字典，别处可能还在用），
+    原配置原封不动。
 
     参数：
         config: 当前完整配置字典

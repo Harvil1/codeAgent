@@ -56,8 +56,7 @@ class IterationBudget:
     def refund(self) -> None:
         """退还 1 个名额（最多退到没超支的程度）。
 
-        背景：程序化工具调用（如 execute_code）花的这轮不该算在模型
-        头上，用完退回来。
+        程序化工具调用（如 execute_code）花的这轮不算在模型头上，用完退回。
         """
         with self._lock:
             if self._consumed > 0:
@@ -67,7 +66,7 @@ class IterationBudget:
         """清零重新计数（开始新会话时调用）。
 
         参数：
-            total —— 新的总名额；不传则沿用原来的总数
+            total —— 新的总名额；不传则沿用当前总数
         """
         with self._lock:
             self._total = max(0, int(total)) if total is not None else self._total

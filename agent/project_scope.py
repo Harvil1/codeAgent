@@ -1,6 +1,6 @@
 """记忆项目区的分区键计算。
 
-背景：记忆（AI 沉淀的事实条目）分两类存放——user/feedback 类是用户全局的，
+记忆（AI 沉淀的事实条目）分两类存放——user/feedback 类是用户全局的，
 所有项目共享；project/reference 类按项目分家，各项目互相看不见。
 本文件负责算"这是哪个项目的"那把钥匙。
 
@@ -45,7 +45,7 @@ def _git_toplevel(base: str) -> Optional[str]:
 
     返回：主仓库根路径字符串；失败 None。
 
-    历史踩坑：`--git-common-dir` 可能返回相对路径（如 `.git`），必须
+    注意：`--git-common-dir` 可能返回相对路径（如 `.git`），必须
     基于 base 解析——用主进程 cwd 去拼会拼到错误的目录上。
     """
     try:

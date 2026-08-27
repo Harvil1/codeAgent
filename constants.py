@@ -1,15 +1,11 @@
 """常量和路径函数——整个项目最底层的模块，谁都不依赖、谁都用到它。
 
-这个文件是干嘛的：集中提供各种数据文件的路径（agent home、技能目录、
-记忆文件、会话数据库等），让全项目"问一个地方"就能拿到统一路径。
+集中提供各种数据文件的路径（agent home、技能目录、记忆文件、会话
+数据库等），让全项目"问一个地方"就能拿到统一路径。
 
 所有数据（API key、记忆、工具、技能、会话、任务）统一放在 ~/.OmniMate/ 下：
   - Linux/macOS: ~/.OmniMate/
   - Windows:     C:\\Users\\<user>\\.OmniMate\\
-
-设计取舍：故意让三个平台用同一个目录名（而不是 Windows 走 AppData），
-避免自动迁移带来路径漂移的坑。未来若真做成 Windows 安装包，
-可以重新启用 AppData 定位 + 一次性迁移。
 
 支持 OMNIMATE_HOME 环境变量覆盖默认位置（测试和多配置隔离用）。
 """
@@ -46,8 +42,7 @@ def _default_logs_dir() -> Path:
 def get_omnimate_home() -> Path:
     """拿到 agent home 目录（全项目数据的根目录）。
 
-    背景：每次调用都重新读一遍 OMNIMATE_HOME 环境变量而不是
-    启动时记死——这样测试代码可以随时临时切换目录。
+    每次调用都重新读 OMNIMATE_HOME 环境变量（测试可随时切换目录）。
 
     返回：
         Path 对象，指向 agent home 目录。
@@ -79,11 +74,7 @@ def skills_dir() -> Path:
 def builtin_skills_dir() -> Path:
     """内置技能目录（项目代码自带，跟着 git 走）。
 
-    背景：内置技能和用户技能故意分开存——
-    - 内置：本项目的 skills/ 目录（开发者维护，装哪台机器内容都一样）
-    - 用户：~/.OmniMate/skills/（用户/agent 维护，换机器要跟着搬）
-
-    两边有同名技能时用户目录优先（用户可以覆盖内置的）。
+    与用户技能分开存；两边有同名技能时用户目录优先（可覆盖内置的）。
 
     返回：
         Path 对象，指向项目根下的 skills/。
@@ -93,10 +84,7 @@ def builtin_skills_dir() -> Path:
 
 
 def project_root() -> Path:
-    """项目根目录（constants.py 所在目录）。
-
-    背景：用途是写保护——agent 不能修改程序自身的代码，
-    判断"是不是程序自己"就靠这个路径。
+    """项目根目录（constants.py 所在目录），用于 agent 自身代码的写保护判定。
 
     返回：
         Path 对象，指向项目根。
@@ -107,10 +95,8 @@ def project_root() -> Path:
 def all_skills_dirs() -> list:
     """列出所有要扫描的技能目录（内置 + 用户 + 已启用插件）。
 
-    背景：技能可能来自三个地方，扫描顺序决定优先级——
-    返回 [内置, 用户, 插件1/skills, ...]，排在后面的同名技能
-    覆盖前面的（即用户/插件能盖过内置）。插件通过各自
-    plugin.json 的 enabled 字段控制是否参与。
+    返回 [内置, 用户, 插件1/skills, ...]，排在后面的同名技能覆盖前面的；
+    插件通过各自 plugin.json 的 enabled 字段控制是否参与。
 
     返回：
         Path 列表，顺序即优先级（低→高）。
@@ -161,10 +147,7 @@ def logs_dir() -> Path:
 
 
 def archive_dir() -> Path:
-    """归档目录——技能管理员（curator）把不用的技能挪到这里，永不删除。
-
-    背景：项目的铁律是"完全可逆"，自动整理只搬家不删东西，
-    用户后悔了随时能从这儿捞回来。
+    """归档目录——curator 把不用的技能挪到这里，只搬家不删除（完全可逆）。
 
     返回：
         Path 对象，指向 <agent home>/skills/.archive。
@@ -191,7 +174,7 @@ def user_file() -> Path:
 
 
 def config_path() -> Path:
-    """config.yaml 的路径（旧配置文件，现在主要做迁移源）。
+    """config.yaml 的路径（主要作为迁移源使用）。
 
     返回：
         Path 对象，指向 <agent home>/config.yaml。
@@ -211,11 +194,9 @@ def sessions_db_path() -> Path:
 def session_dir() -> Path:
     """会话级临时数据目录（放各会话自己的 env 文件等）。
 
-    背景：每个会话有一个专属 env 文件（路径放在 OMNIMATE_ENV_FILE
-    环境变量里传给 hook），SessionStart hook 可以往里追加
-    `export K=V` 这类行；之后 terminal 工具执行命令时会把
-    这个文件的内容合并进子进程的环境变量——相当于"会话开始时
-    记下的环境设置，之后每条命令都自动带上"。
+    每个会话一个专属 env 文件（路径经 OMNIMATE_ENV_FILE 传给 hook）：
+    SessionStart hook 追加 `export K=V` 行，terminal 执行命令时把内容
+    合并进子进程的环境变量。
 
     返回：
         Path 对象，指向 <agent home>/.session。

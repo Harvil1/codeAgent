@@ -132,8 +132,8 @@ def _format_frontmatter(meta: dict) -> str:
 def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
     """memory 目录的安全校验。
 
-    背景：memory 目录的位置来自配置/环境变量，如果被指到敏感位置（比如 ~/.ssh），
-    记忆系统就等于拿到了敏感目录的写权限，所以要先把关。
+    memory 目录的位置来自配置/环境变量，可能被指到敏感位置（比如 ~/.ssh）
+    ——记忆系统会因此拿到敏感目录的写权限，必须先把关。
 
     返回：通过返回 None；不通过返回中文的拒绝原因。两条规则：
     1. **受保护路径拒绝**：memory_dir（解析软链后的真实路径）落在 ~/.ssh、
@@ -205,10 +205,9 @@ class MemoryStore:
         # 更新/删除这种低频操作才整文件重写，新建直接往文件尾追加（最快）。
         # 缓存靠文件修改时间失效：别的实例（比如 curator 自建的）改了文件会自动重读。
         self._rows_cache: dict = {}  # topic -> (mtime_at_load, rows)
-        # 性能优化（压测第 3 轮踩的坑）：写入时只做个"索引脏了"的标记，等真要读
-        # 索引时才重建。原来每存一条就把所有主题全扫一遍再重写 MEMORY.md，
-        # 批量存 n 条是 n² 的开销（实测 500 条要 2.45 秒，一万条估摸 100 秒起步）。
-        # 这样做不改变语义：记忆本来就要等下次会话才注入（保护 prompt cache 的设计），
+        # 惰性索引重建：写入时只做"索引脏了"标记，真要读索引时才重建
+        # （每存一条就全量重扫重写的话，批量存 n 条是 n² 开销）。
+        # 不改变语义：记忆本来就要等下次会话才注入（保护 prompt cache 的设计），
         # 下次会话构造时会调 build_index_text 强制刷新索引。
         self._index_dirty = False
         # 记住上次重建索引用的项目键，
@@ -249,7 +248,7 @@ class MemoryStore:
     def _topic_path(self, topic: str, *, zone_dir: Optional[Path] = None) -> Path:
         """算某个主题的 jsonl 文件路径（主题名会先清洗成安全文件名）。
 
-        zone_dir 为 None 走全局 .memory/（老行为），否则走 zone_dir 指向的项目区。
+        zone_dir 为 None 走全局 .memory/（默认），否则走 zone_dir 指向的项目区。
 
         参数：
         - topic：主题名
@@ -379,7 +378,7 @@ class MemoryStore:
         """按记忆类型决定写到哪个分区。
 
         project/reference → 项目区目录（按当前工作目录动态算出来）。
-        user/feedback/other → None（全局区，老行为）。
+        user/feedback/other → None（全局区）。
 
         每次调用都现算项目键（不缓存在实例字段里），这样子代理通过 contextvars
         切了工作目录的场景也能算对。
@@ -603,9 +602,9 @@ class MemoryStore:
             )
 
         atomic_write_text(self._index_path, "\n".join(lines) + "\n")
-        # 缓存 snapshot 时去掉头部说明（标题、空行、说明文字不算正文）。
-        # 原来是固定跳过前 4 行，后来头部多了一行说明，固定行数容易错位，
-        # 改成找到第一个 "## " 开头的行、从那里开始截。
+        # 缓存 snapshot 时去掉头部说明（标题、空行、说明文字不算正文）：
+        # 找到第一个 "## " 开头的行、从那里开始截
+        # （不按固定行数跳——头部行数变了会错位）。
         head_end = 0
         for i, ln in enumerate(lines):
             if ln.startswith("## "):
@@ -754,7 +753,7 @@ class MemoryStore:
                     if row.get("name") == name and row.get("state", "active") != "archived":
                         return self._row_to_entry(topic, row, zone_dir=zone)
                 return None
-            # 跨区查找（老行为）：先全局区，再当前项目区
+            # 跨区查找：先全局区，再当前项目区
             for row in self._read_topic_rows(topic, zone_dir=None):
                 if row.get("name") == name and row.get("state", "active") != "archived":
                     return self._row_to_entry(topic, row)
@@ -836,7 +835,7 @@ class MemoryStore:
                 self._mark_index_dirty()
                 return f"{topic}#{existing['id']}"
 
-            # 历史踩坑：新建也必须用 _now_iso()（UTC）——新建用
+            # 新建也必须用 _now_iso()（UTC）——新建用
             # 本地时间、更新用 UTC 混着来，东八区新记忆的年龄会虚大 8 小时
             # （curator 的年龄判定跟着一起错）
             now = _now_iso()

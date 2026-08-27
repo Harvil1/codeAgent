@@ -1,8 +1,8 @@
 """真实对话探针：在完全隔离的环境里，用真实 LLM 跑多轮对话逐项验证功能。
 
-背景：单元测试用假 LLM，测不出「模型真的会不会调对工具」。这个脚本补上
-那一环——每个场景就是一段自然语言对话剧本，跑完后用断言检查结果。比单测
-慢、要花 token，所以只在做整体验收时用。
+单元测试用假 LLM，测不出「模型真的会不会调对工具」；这个脚本补上那一环
+——每个场景就是一段自然语言对话剧本，跑完后用断言检查结果。比单测慢、
+要花 token，所以只在做整体验收时用。
 
 用法（bash）：
     # 1) 准备隔离 home（防止污染真实 ~/.OmniMate）
@@ -201,7 +201,7 @@ async def sc_terminal_readonly(ctx: Ctx):
 async def sc_terminal_deny(ctx: Ctx):
     """terminal 破坏性命令（rm -rf）在无人审批的情况下应该被拒绝。
 
-    背景：探针是非交互运行，审批弹窗读到 EOF 等于拒绝，正好测拒路径。
+    探针是非交互运行，审批弹窗读到 EOF 等于拒绝，正好测拒路径。
 
     参数：
         ctx  场景上下文
@@ -221,7 +221,7 @@ async def sc_terminal_deny(ctx: Ctx):
 async def sc_file_roundtrip(ctx: Ctx):
     """write_file 写文件 + read_file 读回，一来一回内容要一致。
 
-    背景：写入发生在 cwd（工作目录白名单内），不需要审批。
+    写入发生在 cwd（工作目录白名单内），不需要审批。
 
     参数：
         ctx  场景上下文
@@ -426,7 +426,7 @@ async def sc_brief(ctx: Ctx):
 async def sc_config_tools(ctx: Ctx):
     """config_get / config_set：白名单内的配置键能改、能读、能落盘。
 
-    背景：只有白名单里的键才允许运行时改（防止写出没人读的死配置）。
+    只有白名单里的键才允许运行时改（防止写出没人读的死配置）。
 
     参数：
         ctx  场景上下文
@@ -632,7 +632,7 @@ async def sc_bg(ctx: Ctx):
 async def sc_plan_mode(ctx: Ctx):
     """plan mode 计划模式：先只读调研，再提交计划等审批，批完自动退出。
 
-    背景：计划模式下 agent 不能改文件，只能出方案；这里审批回调直接给过。
+    计划模式下 agent 不能改文件，只能出方案；这里审批回调直接给过。
 
     参数：
         ctx  场景上下文
@@ -653,7 +653,7 @@ async def sc_plan_mode(ctx: Ctx):
 async def sc_interrupt(ctx: Ctx):
     """中断机制：对话跑到一半按下「停止」开关（cancel_event），要优雅收场。
 
-    背景：中断后应返回已生成的部分文本，而不是抛异常崩掉。
+    中断后应返回已生成的部分文本，而不是抛异常崩掉。
 
     参数：
         ctx  场景上下文
@@ -707,7 +707,7 @@ async def sc_compress(ctx: Ctx):
 async def sc_memory_inject(ctx: Ctx):
     """检索式记忆注入：提前塞一条独特记忆，对话中 agent 应能「想起」它。
 
-    背景：记忆不进 system prompt（保缓存），而是每轮按话题检索临时注入。
+    记忆不进 system prompt（保缓存），而是每轮按话题检索临时注入。
 
     参数：
         ctx  场景上下文
@@ -742,7 +742,7 @@ async def sc_sandbox(ctx: Ctx):
 async def sc_worktree(ctx: Ctx):
     """worktree 隔离：进入独立工作区干活（用相对路径写文件），再退出来。
 
-    背景：进入隔离区后当前目录就变了，写入走相对路径才落在隔离区内。
+    进入隔离区后当前目录就变了，写入走相对路径才落在隔离区内。
 
     参数：
         ctx  场景上下文
@@ -899,7 +899,7 @@ SCENARIOS = {
 def _deep_merge(dst: dict, src: dict):
     """把 src 字典的内容合并进 dst，嵌套的子字典递归合并而不是整块覆盖。
 
-    背景：PROBE_CONFIG_JSON 提供的是「局部覆盖配置」，只有提到的键才改，
+    PROBE_CONFIG_JSON 提供的是「局部覆盖配置」，只有提到的键才改，
     其余保持默认——整块覆盖会把没提的配置弄丢。
 
     参数：

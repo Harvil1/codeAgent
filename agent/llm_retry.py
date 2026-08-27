@@ -1,9 +1,8 @@
 """LLM 调用的「防摔垫」：失败了怎么办的整套预案。
 
-背景：调 LLM API 就像打电话——对面可能占线（429 限流）、可能机房出事
-（5xx 服务器错误）、可能信号不好（连接断/超时）。这些「再打一次也许
-就通了」的错，值得自动重试；而打错号码级别的错（400 参数错、401 认证
-错）重打一百次也没用，得立刻报出来。
+调 LLM API 会遇到「再打一次也许就通了」的错（429 限流、5xx 服务器错误、
+连接断/超时——值得自动重试）和「重打一百次也没用」的错（400 参数错、
+401 认证错——得立刻报出来）。
 
 本模块的策略：
   - 可重试错误（429/5xx/连接问题）：按「越等越久」的节奏自动重试
@@ -57,10 +56,7 @@ HEARTBEAT_CHUNK_SECONDS = 30.0
 
 
 async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
-    """把漫长的等待切成小段睡，每段之间报一次「还活着」的心跳。
-
-    背景：无人值守模式一次可能等好几分钟，全程无动静会让人以为程序
-    挂了。所以把等待切成最长 30 秒的小段，每段睡完调一次回调汇报进度。
+    """把漫长的等待切成最长 30 秒的小段睡，每段之间报一次「还活着」的心跳（无人值守模式一等好几分钟，全程无动静会让人以为程序挂了）。
 
     参数：
         total：总共要等的秒数
@@ -126,11 +122,11 @@ def is_retryable(error: Exception) -> bool:
     except ImportError:
         pass
 
-    # 历史踩坑：httpx 的传输层错误（连接被重置/管道断裂/
-    # 各种网络毛病的总类）一律可重试。openai SDK 通常会把它包装成
-    # APIConnectionError（上面已经命中），但其它路径可能裸着抛出来——
-    # 这种异常的类名里不含 "connection"/"timeout" 字样，光靠名字兜底
-    # 会漏判，所以这里按类型兜底。
+    # httpx 的传输层错误（连接被重置/管道断裂/各种网络毛病的总类）
+    # 一律可重试。openai SDK 通常会把它包装成 APIConnectionError
+    # （上面已经命中），但其它路径可能裸着抛出来——这种异常的类名里
+    # 不含 "connection"/"timeout" 字样，光靠名字兜底会漏判，
+    # 所以这里按类型兜底。
     try:
         import httpx
         if isinstance(error, httpx.TransportError):
@@ -146,10 +142,7 @@ def is_retryable(error: Exception) -> bool:
 
 
 def get_retry_after(error: Exception) -> Optional[float]:
-    """从错误里读出服务器建议的「多久后再来」（Retry-After，单位秒）。
-
-    背景：429 限流时规范的服务器会在响应头里写明「请 X 秒后再试」，
-    照着等比自己瞎猜礼貌也高效。
+    """从错误里读出服务器建议的「多久后再来」（Retry-After，单位秒）——429 限流时服务器会在响应头里写明，照着等比自己瞎猜高效。
 
     参数：
         error：要检查的异常
@@ -179,10 +172,8 @@ _RESET_NAMES = ("connectionreset", "brokenpipe", "remoteprotocol", "readerror", 
 
 
 def _is_connection_reset(error: Exception) -> bool:
-    """判断是不是「连接被掐断」类错误（看异常名和它引发错误的整条链）。
-
-    道理：这类错误说明底下的电话线断了，在原来的线上重拨只会再听到
-    忙音——得换根线（重建 client）再拨。
+    """判断是不是「连接被掐断」类错误（看异常名和它引发错误的整条链）——
+    这类错误在坏掉的连接池上重试大概率还是同样的错，重试前应先重建 client。
 
     参数：
         error：要判断的异常
@@ -290,7 +281,7 @@ async def call_with_retry(
       - 重试次数视为无限（不会数满退出，只受时间限制）
       - 设一个「截止时刻」（默认 24 小时后），到点收手
       - 其余逻辑（普通重试/529 早切/备胎）照旧
-      - 开关没开或不传 config，完全走原来的按次数重试（兼容旧用法）
+      - 开关没开或不传 config，完全走按次数重试
 
     参数：
         llm_client：主 LLM client（需要有 async 的 chat_completions 方法）
@@ -320,14 +311,13 @@ async def call_with_retry(
     抛错：所有尝试都失败时，抛最后一次遇到的那个异常。
     """
     last_error: Optional[Exception] = None
-    # 历史踩坑：max_retries<=0 时下面的循环一次都不进，
-    # 最后会变成「raise None」，报出让人摸不着头脑的 TypeError——
-    # 所以提前拦下给个说得清的错误。
+    # max_retries<=0 时下面的循环一次都不进，最后会变成「raise None」的
+    # 莫名 TypeError——提前拦下给个说得清的错误。
     # 注意：无人值守模式下重试次数视为无限，不走这个校验（原值被忽略）。
 
     # ── 无人值守持久重试模式的接入 ──
     # 开关开：重试次数无限，只受截止时刻约束
-    # 开关没开 / 没传 config：完全走原来的按次数逻辑
+    # 开关没开 / 没传 config：完全走按次数逻辑
     unattended_enabled = False
     deadline: Optional[float] = None
     if config is not None:
@@ -430,7 +420,7 @@ async def call_with_retry(
                     except Exception as re:
                         logger.debug("reset_client 失败（按原样重试）: %s", re)
 
-            # 529 连续失败计数（P1-1）：过载期间服务器可能 529/500 交替着抛，
+            # 529 连续失败计数：过载期间服务器可能 529/500 交替着抛，
             # 所以所有 5xx 都算「过载嫌疑」往计数器上加——不然出现
             # "529→500→529" 的交替就把计数清零了，永远凑不满阈值。
             # 只有遇到跟过载无关的错（429 限流/连接问题/超时）才清零。
@@ -495,9 +485,8 @@ async def call_with_retry(
 class MaxTokensEscalator:
     """「输出上限调节器」：记住当前该用多大的 max_tokens。
 
-    背景：当回答因为输出上限（max_tokens）被拦腰截断时，有两种补救——
-    先把上限调大重发一次原请求（模型能一口气说完，思路连贯）；调大后
-    还不够，才发「请继续」让模型接着写（接续的地方容易接歪）。
+    回答被输出上限截断时先调大上限重发原请求（一口气说完思路连贯）；
+    调大后仍不够，才由调用方发「请继续」续写（接续处容易接歪）。
     本类就是记住「现在到哪一步了」的小账本。
 
     用法示例：
@@ -594,9 +583,8 @@ def _compute_backoff(
         jitter_ratio：抖动比例（0 = 不要抖动，兼容旧用法）
         max_backoff：等待上限（不传用默认 60 秒）
 
-    历史踩坑：早期没有上限——Retry-After 很大或重试次数多时会一等
-    几小时，用户以为程序挂了（X7 修复加了帽）；后来又按模式分了档：
-    普通模式 60 秒、无人值守长跑模式 5 分钟。
+    等待必须封顶且分两档：普通模式 60 秒、无人值守长跑模式 5 分钟
+    （不封顶时 Retry-After 很大或重试次数多会一等几小时）。
 
     返回：实际该睡的秒数。
     """

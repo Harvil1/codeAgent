@@ -1,11 +1,11 @@
 """计划模式（Plan Mode）的工具端：exit_plan_mode（提交计划求审批）+ plan_mode_v2_dispatch（多 Agent 并行调研）。
 
-背景：计划模式下 LLM 只做调研出方案、不许直接动手改东西；调研完调 exit_plan_mode
+计划模式下 LLM 只做调研出方案、不许直接动手改东西；调研完调 exit_plan_mode
 把计划交给用户审批，批了才切到执行模式。注意 handler 本身并不真正「完成」任务，
 而是返回一个特殊错误码 error_type="plan_approval_required"，由 agent 主循环
 捕获后调用审批回调走人工审批流程——相当于工具和主循环之间约定的暗号。
 
-历史出处（P6，spec 设计文档 §7.6，功能开关 plan_mode_v2_parallel）新增的并行版：
+并行版（功能开关 plan_mode_v2_parallel）：
 - plan_mode_v2_dispatch 工具：父 Agent 把大任务拆成 N 份 → 同时派 N 个 Plan 子代理
   （主对话派出去帮忙干活的分身）各自调研 → 把 N 份子计划合并成一份 → 交回父 Agent
   （之后仍可再调 exit_plan_mode 提交审批）
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def handle_exit_plan_mode(args: dict, **kwargs) -> str:
     """exit_plan_mode 的实际处理函数：校验计划文本，然后发「等审批」暗号。
 
-    背景：计划不能是空的，空计划说明 LLM 还没想清楚。
+    计划不能是空的——空计划说明 LLM 还没想清楚。
 
     参数：
     - args：LLM 传的工具参数，只看必填的 plan（完整实施计划文本）
@@ -56,7 +56,7 @@ def handle_exit_plan_mode(args: dict, **kwargs) -> str:
 
 
 # ============================================================================
-# 历史出处（P6.1）：多 Agent 并行调度（功能开关 plan_mode_v2_parallel）
+# 多 Agent 并行调度（功能开关 plan_mode_v2_parallel）
 # ============================================================================
 
 # 并发数硬上限：配置文件就算写 100 也只放到这么多，防止把机器资源打爆
@@ -66,10 +66,9 @@ _ABS_MAX_PARALLEL = 8
 def _run_parallel_planners(subtasks: List[str], max_n: int, **kwargs) -> List[str]:
     """同时派出 N 个 Plan 子代理分头调研，收回每份子计划的文本。
 
-    背景（spec 设计文档 §7.6）：计划模式 V2 开启时，父 Agent 把大任务拆开，
-    同时启动 N 个 Plan 子代理（N 不超过配置的 max_parallel_agents，默认 3），
-    等全部跑完再汇总。用线程池并行；子代理内部的异步逻辑由 _run_child
-    自己用 asyncio.run 驱动（Plan 2A 批次打下的基础）。
+    计划模式 V2 开启时，父 Agent 把大任务拆开，同时启动 N 个 Plan 子代理
+    （N 不超过配置的 max_parallel_agents，默认 3），等全部跑完再汇总。
+    用线程池并行；子代理内部的异步逻辑由 _run_child 自己用 asyncio.run 驱动。
 
     参数：
     - subtasks：子任务描述列表，每条是一段调研目标 + 范围
@@ -136,7 +135,7 @@ def _run_parallel_planners(subtasks: List[str], max_n: int, **kwargs) -> List[st
 
 
 # ============================================================================
-# 历史出处（P6.2）：子计划合并逻辑（PLAN_MERGE_PROMPT_TEMPLATE 提示词 + _merge_plans）
+# 子计划合并逻辑（PLAN_MERGE_PROMPT_TEMPLATE 提示词 + _merge_plans）
 # ============================================================================
 
 PLAN_MERGE_PROMPT_TEMPLATE = """你是 OmniMate 的计划合并器。
@@ -180,7 +179,7 @@ PLAN_MERGE_PROMPT_TEMPLATE = """你是 OmniMate 的计划合并器。
 def _merge_plans(sub_plans: List[str], llm_client, model: str) -> str:
     """用 LLM 把 N 份子计划揉成一份连贯的最终计划。
 
-    背景：多个子代理各写各的，直接堆一起会有重复和冲突，需要一个「编辑部统稿」环节。
+    多个子代理各写各的，直接堆一起会有重复和冲突，需要一个「编辑部统稿」环节。
 
     参数：
     - sub_plans：子计划文本列表（失败的那时已剔除，至少 1 份）
@@ -237,7 +236,7 @@ def handle_plan_mode_v2_dispatch(args: dict, **kwargs) -> str:
     - kwargs：运行时上下文（config、agent_ref、base_url 等会转交子代理）
 
     返回：JSON 字符串，含 merged_plan（合并后的计划）和成功/总数统计。
-    功能开关没开时返回 feature_disabled（LLM 看到提示会改走原来的单 Agent 路径）；
+    功能开关没开时返回 feature_disabled（LLM 看到提示会改走常规的单 Agent 路径）；
     子任务参数不合法返回 invalid_args；所有子代理都挂了返回 all_subagents_failed。
     """
     config = kwargs.get("config") or {}
@@ -262,7 +261,7 @@ def handle_plan_mode_v2_dispatch(args: dict, **kwargs) -> str:
             "error_type": "invalid_args",
         }, ensure_ascii=False)
 
-    # 并发数 N 由 LLM 自己定（当时的设计决策 6）：subtasks 数组多长就派几个，
+    # 并发数 N 由 LLM 自己定：subtasks 数组多长就派几个，
     # 但会被 max_parallel_agents 上限压住（在 _run_parallel_planners 里钳制）
     flag_cfg = get_feature_config(config, "plan_mode_v2_parallel")
     max_n = int(flag_cfg.get("max_parallel_agents", 3))
@@ -331,9 +330,9 @@ registry.register(
 )
 
 
-# 历史出处（P6）：多 Agent 并行调度工具（功能开关 plan_mode_v2_parallel 门控）
+# 多 Agent 并行调度工具（功能开关 plan_mode_v2_parallel 门控）
 # 注册到 plan 工具集：进入计划模式后 LLM 才看得见它。开关没开时 handler 返回
-# feature_disabled，LLM 会看到提示改走原来的单 Agent 路径（/plan + exit_plan_mode）。
+# feature_disabled，LLM 会看到提示改走常规的单 Agent 路径（/plan + exit_plan_mode）。
 registry.register(
     name="plan_mode_v2_dispatch",
     toolset="plan",

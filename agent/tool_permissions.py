@@ -47,9 +47,9 @@ tool_matches 里永远匹配不到工具名）。内容有三种写法：
 同工具的整级规则（裸的 "Bash"/"Terminal"）deny/ask 盖住，就永远不会生效
 ——加载时用 logger.warning 提醒用户（detect_shadowed_command_rules）。
 
-历史踩坑（缓存）：settings.json 用 mtime+size 双因子判断变没变。Windows
-的 mtime 精度只有 ~15ms，同一段时间窗口内写的文件，只看 mtime 的单因子
-缓存会误判"没变"导致读到旧内容——真踩过。
+缓存（mtime+size 双因子）：settings.json 用 mtime+size 双因子判断变没变。
+Windows 的 mtime 精度只有 ~15ms，同一段时间窗口内写的文件，只看 mtime
+的单因子缓存会误判"没变"导致读到旧内容。
 """
 import fnmatch
 import logging
@@ -80,8 +80,8 @@ def load_tool_permission_rules() -> Dict[str, List[str]]:
     干什么：把用户配置的权限规则从磁盘读进内存（带缓存）。
 
     为什么需要：工具可见性和命令内容级判定（见本文件其他函数）都以这份
-    规则为准。缓存用 mtime+size 双因子判断文件变没变（原因见模块头的历史
-    踩坑说明），没变就直接用上次的解析结果。
+    规则为准。缓存用 mtime+size 双因子判断文件变没变（原因见模块头
+    说明），没变就直接用上次的解析结果。
 
     返回：{"allow": [...], "deny": [...], "ask": [...]}（ask 是
     内容级强制审批规则）。文件不存在或读取出错时返回三个空列表
@@ -344,7 +344,7 @@ def _normalize_command_for_rules(command: str, *, aggressive: bool = False) -> s
     剥离形态（循环剥直到剥不动为止）：
       - ``NAME=value`` 赋值 token。含引号/命令替换等可疑字符时按 aggressive
         分流：默认（allow 匹配用）整条停手不剥——剥一半会造出更怪的形态，
-        保守返回原命令；aggressive=True（deny/ask 匹配用）照样剥——历史踩坑：
+        保守返回原命令；aggressive=True（deny/ask 匹配用）照样剥——
         不剥的话 ``FOO="x" rm -rf data`` 就绕过了
         ``deny Bash(rm:*)``。这是不对称语义：收紧方向（deny/ask）
         永不因剥不动而放行
@@ -435,7 +435,7 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
     返回："deny" / "ask" / "allow" / "none" 之一，优先级 deny > ask > allow。
     工具可见性条目（read_file 这类不带括号的）不参与——解析时返回 None。
 
-    几条重要的匹配规则（历史演进攒下的取舍）：
+    几条重要的匹配规则：
     - 匹配前先剥掉 env 前缀/安全包装词——FOO=bar rm xxx 绕不过
       deny(rm)。
     - 剥离是不对称的——deny/ask 用激进剥离（可疑 env token 也剥），
@@ -487,8 +487,7 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
         # 顶层复合命令（&&/;/| 且无命令替换）上 allow 整串命中也不放宽——
         # 否则前缀规则会盖到 && 后面的段（"allow 须覆盖全部段"）。
         # AST 解析失败（info is None）：没法证明"allow 覆盖了全部段"，同样
-        # 不放宽（fail-safe，宁可升审批也不误放行；历史踩坑：
-        # 此前 fail-open 直接放行是一个绕过面）。
+        # 不放宽（fail-safe，宁可升审批也不误放行）。
         # 含命令替换时（rm -rf x $(gen)）维持整串 allow 的现状（fail-open，
         # 不为了收紧 allow 引入新的拒绝面）。
         whole = "none"

@@ -1,8 +1,7 @@
 """memory_recall 工具：让 LLM 在对话中途主动去翻历史记忆。
 
-背景：会话开始时会把记忆索引塞进 system prompt（系统提示词），但那是一次性的。
-如果 LLM 中途突然想「用户上次是不是提过 X？」，就需要一个能随时查的工具——
-这就是本工具。它是按需查询，不会改动 system prompt，所以不会破坏 prompt cache
+会话开始时记忆索引一次性注入 system prompt（系统提示词）；本工具提供
+按需查询，不改动 system prompt，所以不会破坏 prompt cache
 （提示词前缀缓存——缓存一失效，同样内容的请求就要重新算一遍，费用翻倍）。
 
 实现路径：调 agent/memory_retriever.py 的 retrieve_relevant（它内部用辅助小模型
@@ -55,7 +54,7 @@ MEMORY_RECALL_SCHEMA = {
 async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
     """memory_recall 的处理函数：查索引选记忆，再逐条取正文拼结果。
 
-    背景：retrieve_relevant 是 async（异步），所以本 handler 也必须 async，
+    retrieve_relevant 是 async（异步），所以本 handler 也必须 async，
     否则拿到的是 coroutine「欠条」而不是真结果。
 
     签名要遵守 registry.dispatch 的统一契约：dispatch(args, **dispatch_kwargs)。

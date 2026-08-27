@@ -1,4 +1,4 @@
-"""工作流引擎——把一串步骤写成一个受限 Python 脚本，一次跑完（设计蓝图在 .superpowers/sdd/r28-workflow-blueprint.md）。
+"""工作流引擎——把一串步骤写成一个受限 Python 脚本，一次跑完。
 
 在项目里的位置：由 tools/workflow_tool.py 包成工具暴露给 LLM，跑腿的
 子代理走 tools/delegate_tool.py 的 _run_child；执行日志（journal）由
@@ -18,7 +18,7 @@ __import__、双下划线名字（dunder），内置函数也只放开一小撮�
 在校验层就直接拒绝，但别指望它当安全边界用。
 
 预算口径：只统计子代理最终产出的文本量（按 len(text)//4 粗算 token）；
-workflow 里子代理的花销不往 goal 的账上累加，两边天然隔离（蓝图 §3）。
+workflow 里子代理的花销不往 goal 的账上累加，两边天然隔离。
 """
 import ast
 import asyncio
@@ -38,13 +38,13 @@ class WorkflowBudgetExceeded(Exception):
 
 @dataclass
 class WorkflowBudget:
-    """整个工作流共享的一个 token 预算池（估算口径，蓝图 §1）。
+    """整个工作流共享的一个 token 预算池（估算口径）。
 
-    历史踩坑：不能纯事后记账（子代理跑完才扣钱）——
-    一次远超剩余额度的调用会先把 token 真实花掉才报超限；而且几路
-    agent 并发时，大家能同时通过"余额还大于 0"的检查，各自都超额。
-    所以用"事前预留 + 事后结算"：调用前先 reserve（预留）一笔额度，
-    能同时开几路受剩余额度约束；跑完 settle（结算）实际花费、多退少补。
+    不能纯事后记账（子代理跑完才扣钱）——一次远超剩余额度的调用
+    会先把 token 真实花掉才报超限；而且几路 agent 并发时，大家能
+    同时通过"余额还大于 0"的检查，各自都超额。所以用"事前预留 +
+    事后结算"：调用前先 reserve（预留）一笔额度，能同时开几路受剩余
+    额度约束；跑完 settle（结算）实际花费、多退少补。
     因为输出长度没法提前精确知道，超支上限约等于单次预留额度——这已经
     是估算口径下能做到的最紧约束。
     """
@@ -60,7 +60,7 @@ class WorkflowBudget:
     def reserve(self, tokens: int) -> int:
         """跑之前先预留一笔额度，返回实际批下来的数（可能比要的少）。
 
-        背景：有了预留，并发开的路数自然被剩余额度卡住，也不会"先花后报"。
+        有了预留，并发开的路数自然被剩余额度卡住，也不会"先花后报"。
 
         参数：
             tokens：想预留的额度。
@@ -84,7 +84,7 @@ class WorkflowBudget:
             granted：当初 reserve 批下来的额度（原数归还）。
             actual：这次实际花了多少（按产出文本估算）。
         异常：结算后发现总花费超过总额度时抛 WorkflowBudgetExceeded——
-            钱已经花掉了，抛错是为了让脚本立刻停下来（跟原来 spend() 的
+            钱已经花掉了，抛错是为了让脚本立刻停下来（与 spend() 的
             语义一致）。调用方在异常/收尾路径用 actual=0 结算不会误触发。
         """
         self.reserved = max(0, self.reserved - granted)
@@ -94,7 +94,7 @@ class WorkflowBudget:
                 f"预算耗尽：{self.spent}/{self.total}")
 
     def spend(self, tokens: int) -> None:
-        """兼容旧写法的入口（脚本或旧测试会直接调）：效果等于 settle(0, tokens)。
+        """兼容入口（脚本或测试会直接调）：效果等于 settle(0, tokens)。
 
         参数：
             tokens：要记的花费。
@@ -242,7 +242,7 @@ async def run_workflow(
         # 先预留再跑：预算耗尽在开跑前就拒；并发路数也被剩余额度卡住
         granted = budget.reserve(reserve_per_call)
 
-        # 结构化输出：把 schema 的 JSON 拼在 prompt 末尾，让子代理照着格式答（蓝图 §5）
+        # 结构化输出：把 schema 的 JSON 拼在 prompt 末尾，让子代理照着格式答
         if schema is not None:
             full = prompt + (
                 "\n\n最终回答必须只输出符合此 JSON Schema 的 JSON（不要其他文字）：\n"
@@ -435,7 +435,7 @@ def make_agent_runner(delegate_kwargs: dict):
     - role="leaf"（叶子角色，只给最小工具集）+ summary_only=False（结构化
       输出要原文，不能被摘要压缩）
     - 额外禁掉 subagent/workflow 两个工具，防止工作流里再开工作流/子代理
-      无限套娃（蓝图 §6 的递归禁令）
+      无限套娃（递归禁令）
 
     参数：
         delegate_kwargs：传给 _run_child 的基础参数（含 config 等），会被复制后修改。

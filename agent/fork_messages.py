@@ -26,14 +26,14 @@ def build_forked_messages(
 ) -> List[dict]:
     """给 fork 出来的子代理拼一份初始 messages（对话消息列表）。
 
-    背景：fork 子代理要继承父代理的对话上下文来共享 prompt cache，
-    但又不能让它看到父代理工具调用的真实结果（fork 语义：只继承"说过什么"，
-    不继承"看到过什么"），所以工具结果统一换成占位符。
+    fork 子代理继承父代理的对话上下文来共享 prompt cache，但不看
+    父代理工具调用的真实结果（fork 语义：只继承"说过什么"，不继承
+    "看到过什么"），工具结果统一换成占位符。
 
     默认结构（full_history=False）：
     [父最近 N 轮 assistant 回复 + 各自的占位 tool_result] + [child_directive]
 
-    全量结构（full_history=True，T10 引入）：
+    全量结构（full_history=True）：
     [父完整的 user/assistant 对话流（tool result 换占位符）] + [child_directive]
     —— 复杂任务需要完整上下文时用（调用方写 subagent fork: "full"），
     assistant 轮数超过 full_history_max_turns 会截断（防上下文失控），
@@ -59,7 +59,7 @@ def build_forked_messages(
         forked.append(_make_directive(child_directive))
         return forked
 
-    # === T10：全量模式 ===
+    # === 全量模式 ===
     if full_history:
         try:
             return _build_full_history_fork(
@@ -77,7 +77,7 @@ def build_forked_messages(
             if isinstance(m, dict) and m.get("role") == "assistant"
         ]
     except TypeError:
-        # 历史踩坑防御：parent_messages 不是正常的 dict 列表时不硬撑，降级成只给任务说明
+        # parent_messages 不是正常的 dict 列表时不硬撑，降级成只给任务说明
         logger.warning("build_forked_messages: parent_messages 类型异常，返回纯 directive")
         forked.append(_make_directive(child_directive))
         return forked
@@ -109,7 +109,7 @@ def _build_full_history_fork(
     child_directive: str,
     max_turns: int,
 ) -> List[dict]:
-    """全量 fork（T10 引入）：父代理完整 user/assistant 对话流照搬，工具真实结果换占位符。
+    """全量 fork：父代理完整 user/assistant 对话流照搬，工具真实结果换占位符。
 
     参数：
         parent_messages：父代理对话历史

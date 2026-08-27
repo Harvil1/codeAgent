@@ -100,10 +100,10 @@ PayloadFn = Callable[[dict], Optional[dict]]
 class HookScriptConfig:
     """声明式 hook 的配置（一个 hook 可以由 5 种不同的"执行器"来跑）。
 
-    背景：声明式 hook 就是写在配置里的 hook，不用写 Python 代码。
+    声明式 hook 就是写在配置里的 hook，不用写 Python 代码。
     具体怎么执行由 handler_type 决定，共 5 种：
-    - command:  起一个本地子进程跑（最老的方式，向后兼容——老的
-      hook_loader 加载配置时总会填这个字段）
+    - command:  起一个本地子进程跑（默认值——hook_loader
+      加载配置时总会填这个字段）
     - http:     往 url 发一个 POST JSON 请求，解析响应
     - mcp_tool: 调一个 MCP 外部工具（mcp_server 服务器上的 mcp_tool）
     - prompt:   让辅助小模型（aux_llm）单轮评估一次
@@ -348,9 +348,8 @@ class HookRegistry:
     # ---- 执行：用户提交问题事件 ----
     def run_user_prompt_submit(self, prompt: str, *, session_id: str) -> str:
         """把用户输入的 prompt 依次过一遍所有 hook（像流水线，每个 hook
-        都能看到并改写前一个的输出），返回最终版本的 prompt。
-
-        背景：可以在问题送进模型之前做改写、过滤、注入上下文等。
+        都能看到并改写前一个的输出），返回最终版本的 prompt——送进模型
+        前可做改写、过滤、注入上下文等。
         单个 hook 出异常就记条日志跳过（fail-open，当它不存在）。
 
         参数：
@@ -405,7 +404,7 @@ class HookRegistry:
                          session_id: str):
         """工具执行前把所有匹配的 hook 跑一遍，汇总出"要不要拦、要不要改参数"。
 
-        背景：这是唯一能"否决"工具调用的 hook 事件，所以要考虑多个 hook
+        这是唯一能"否决"工具调用的 hook 事件，所以要考虑多个 hook
         意见不一致时听谁的。返回 (deny_reason, modified_args)：
         deny_reason 非 None 就拒绝执行工具；modified_args 非 None 就替换参数。
 
@@ -422,8 +421,8 @@ class HookRegistry:
         - ask 档：本项目 pre_tool_use 没有通用的
           审批界面，ask 就按"宁可拒绝"（fail-closed）处理，报错里注明
           是 ask（用户可以去调整 hook 规则）。
-        - 配了 fail_closed 的 hook 出异常按 deny 汇总（历史踩坑：
-          此前异常被吞掉，fail_closed 分支根本走不到，语义必须保留）。
+        - 配了 fail_closed 的 hook 出异常按 deny 汇总（异常不能吞——
+          吞掉的话 fail_closed 分支根本走不到）。
 
         参数：
         - tool_name：要执行的工具名
@@ -500,9 +499,9 @@ class HookRegistry:
                 if not isinstance(mod, dict):
                     logger.warning("hook %s modify_args 非 dict，忽略", hook.name)
                     continue
-                # 历史踩坑：多个 hook 改参数必须按注册顺序
-                # 叠加合并（outcomes 本身就是按注册序收集的）——旧实现是
-                # 后到者整体替换，先到的 hook 改的东西会静默丢掉。合并规则：
+                # 多个 hook 改参数必须按注册顺序叠加合并
+                # （outcomes 本身就是按注册序收集的）——后到者整体替换会让
+                # 先到的 hook 改的东西静默丢掉。合并规则：
                 # 第一个 hook 的完整返回做基底，后面的按键覆盖（同键后到胜、异键并集）
                 if modified_args is None:
                     modified_args = dict(mod)
@@ -545,10 +544,10 @@ class HookRegistry:
             "tool_name": tool_name,
             "args": args,
         }
-        # 历史踩坑：这里必须传 propagate_error=True——fail_closed
+        # 必须传 propagate_error=True——fail_closed
         # 的 hook 执行失败时异常要向上抛，让 run_pre_tool_use 的 except 分支
-        # 转成 deny。此前 dispatch_hook 内部把一切异常都吞了，fail_closed
-        # 分支永远走不到，等于白配
+        # 转成 deny（不传的话 dispatch_hook 内部把一切异常都吞了，fail_closed
+        # 分支永远走不到，等于白配）
         result = dispatch_hook(hook, payload, propagate_error=True)
         if result is None:
             return None
@@ -622,7 +621,7 @@ class HookRegistry:
     def run_stop(self, *, session_id: str, max_fires: int = 3) -> Optional[str]:
         """模型答完一轮时挨个问 hook"要不要让它继续"。
 
-        背景与规则：任何一个 hook 返回了消息就立刻以它为准（第一个
+        规则：任何一个 hook 返回了消息就立刻以它为准（第一个
         非 None 胜出），这条消息会喂回模型让它继续干活。为防止 hook
         之间互相触发形成死循环，触发超过 max_fires 次后强制返回 None
         （不再继续）。
@@ -674,10 +673,9 @@ class HookRegistry:
 
     def _invoke_declarative_script(self, hook, session_id: str, event: str,
                                    timeout_cap: float = None, **extra) -> Optional[dict]:
-        """跑声明式 hook 的统一入口：拼好 payload 交给 dispatch_hook 执行。
+        """跑声明式 hook 的统一入口：拼好 payload 交给 dispatch_hook 执行——通知型事件（会话开始/结束等）的声明式 hook 都从这里走，免得每个事件重复拼 payload。
 
-        背景：通知型事件（会话开始/结束等）的声明式 hook 都从这里走，
-        免得每个事件重复拼 payload。payload 固定带 event/session_id/
+        payload 固定带 event/session_id/
         timestamp/hook_name 四个字段，事件自己的字段用 extra 传
         （注意别塞超大内容，只传摘要信息——子进程间传大块数据太亏）。
         dispatch_hook 会按 hook.script.handler_type 挑对应的执行器

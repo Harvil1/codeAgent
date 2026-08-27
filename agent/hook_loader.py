@@ -45,7 +45,7 @@ _snapshot_settings_path: Optional[Path] = None
 def load_declarative_hooks(registry, settings_path: Path) -> int:
     """从 settings.json 读取用户声明的 hooks 并逐个注册进 registry。
 
-    背景：这是会话启动时 hook 系统的装载动作，只跑一次；跑完把原始配置
+    会话启动时 hook 系统的装载动作，只跑一次；跑完把原始配置
     存进 SnapshotCache 锁定（运行期改磁盘文件不生效，防篡改）。
 
     参数：
@@ -109,7 +109,7 @@ def get_snapshot() -> Dict:
 def get_disk_version() -> Dict:
     """现场重读一遍磁盘上的 hook 配置，返回当前磁盘版本。
 
-    背景：/hooks diff 命令用它和内存快照对比，让用户看出
+    /hooks diff 命令用它和内存快照对比，让用户看出
     "我改了配置文件但还没重启会话，改动尚未生效"。
 
     返回：dict；文件不存在或解析失败时返回 {}（对比命令不能因此崩）。
@@ -127,7 +127,7 @@ def get_disk_version() -> Dict:
 def reset_snapshot() -> None:
     """清空内存里的配置快照，回到"从未加载"状态。
 
-    背景：主要给测试用——每个测试用例都要从干净的快照状态开始，否则上一个个例子的配置会串场。
+    主要给测试用——每个测试用例都要从干净的快照状态开始，否则上一个个例子的配置会串场。
     """
     global _snapshot_cache, _snapshot_settings_path
     _snapshot_cache = None

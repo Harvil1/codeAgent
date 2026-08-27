@@ -28,7 +28,7 @@ from tools.skill_usage import load_usage, set_pinned, restore_skill
 def _cmd_memory(args):
     """处理 memory 子命令：curator memory status|run [--dry-run|--no-llm]|pause|resume。
 
-    背景：Memory Curator（记忆维护工人）分两个阶段干活——
+    Memory Curator（记忆维护工人）分两个阶段干活——
     第 1 阶段跑 apply_automatic_transitions：按固定规则做状态转换
     （比如长期没用的记忆标记为过期、归档），纯机械逻辑，不花钱调 LLM。
     第 2 阶段调用 run_memory_review：让主模型做记忆合并和矛盾检测，
@@ -127,7 +127,7 @@ def _cmd_memory(args):
 def curator_cli(args: list, skills_dir: Path = None):
     """curator 命令的总分发器：看第一个词是什么，转给对应的处理函数。
 
-    背景：CLI 层（cli.py / main）收到 curator 命令后调这里；每个动词
+    CLI 层（cli.py / main）收到 curator 命令后调这里；每个动词
     （status/run/pause/...）各有一个小处理函数，这里只做路由。
 
     参数：
@@ -223,9 +223,7 @@ def _show_status(skills_dir: Path):
 
 
 def _run_curator(skills_dir: Path, dry_run: bool = False):
-    """立刻跑一轮技能审查（不用等自动周期），并打印审查报告。
-
-    背景：curator 平时按 7 天周期自动跑；这个函数用于手动触发或排错。
+    """立刻手动跑一轮技能审查（curator 平时按 7 天周期自动跑），并打印报告。
 
     参数：
         skills_dir  技能库目录

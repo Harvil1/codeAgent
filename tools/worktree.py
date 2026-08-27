@@ -2,7 +2,7 @@
 
 这个文件是干嘛的：当多个子代理（主对话派出去帮忙干活的分身）同时干活时，
 如果都挤在同一个目录里改文件，会互相把对方的改动踩掉。本模块提供
-「一人一间屋」的隔离机制——这是从业界借鉴的 worktree 任务隔离做法。
+「一人一间屋」的 worktree 隔离机制。
 
 两种情况：
     git 仓库：用 git worktree 建（worktree = git 自带的「一库多目录」功能，
@@ -18,7 +18,7 @@ hook_registry（钩子登记本，用户配置的附加动作），在 worktree 
 用法示例：
     path, cleanup = create_isolated_workspace(name="task-x")
     try:
-        # 历史踩坑提醒：千万别用 os.chdir 切目录——它是整个进程共享的全局
+        # 注意：千万别用 os.chdir 切目录——它是整个进程共享的全局
         # 开关，并发的子代理会互相踩对方的当前目录。
         # 要用 workspace_cwd_context（contextvars.ContextVar 实现，
         # 线程之间互相看不见对方的值，天然隔离）
@@ -43,12 +43,10 @@ logger = logging.getLogger(__name__)
 
 
 def _run_git(argv: List[str], cwd, timeout: float = 10) -> subprocess.CompletedProcess:
-    """跑一条 git 命令的统一入口（本模块所有 git 操作都从这走）。
+    """跑一条 git 命令的统一入口（本模块和 worktree_tool 的 git 操作都从这走）。
 
-    背景：Windows 命令行默认用 GBK 编码，git 输出里的中文会变乱码，
-    所以强制 utf-8 文本模式，遇到解码不了的坏字节就用替换符顶替，
-    不让程序崩。抽成统一入口后，本模块和 worktree_tool 共用一份
-    （原来有 10 处复制粘贴的 subprocess 样板代码）。
+    Windows 命令行默认用 GBK 编码，git 输出里的中文会变乱码，所以强制
+    utf-8 文本模式，遇到解码不了的坏字节就用替换符顶替，不让程序崩。
 
     参数：
         argv：git 子命令及参数（如 ["worktree", "add", ...]）。
@@ -156,7 +154,7 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
 def _resolve_events_path(workspace_or_repo) -> Path:
     """算出事件流水账文件该放哪。
 
-    背景：worktree 的创建/清理事件统一记在仓库根目录下的
+    worktree 的创建/清理事件统一记在仓库根目录下的
     .worktrees/.events.jsonl（一行一条 JSON，追加写入）。
 
     参数：

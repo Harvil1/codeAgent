@@ -23,8 +23,8 @@ _TIMEOUT = 15.0
 def _html_to_text(html: str, max_chars: int = _MAX_TEXT_CHARS) -> str:
     """把 HTML 网页代码变成干净的纯文字——扔掉所有标签，跳过 script/style 里的代码和样式。
 
-    背景：模型不需要看 <div>、<a href> 这些标签，只要正文文字；脚本和样式
-    代码更是纯噪音，必须整段跳过。用 Python 标准库 html.parser 实现，不引第三方依赖。
+    模型只需要正文文字；脚本和样式代码是纯噪音，整段跳过。用 Python 标准库
+    html.parser 实现，不引第三方依赖。
 
     参数：
         html：网页的 HTML 源码字符串。
@@ -168,8 +168,8 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
 async def _refine_with_aux(aux_router, url: str, prompt: str, content: str) -> str:
     """让便宜的小模型按"关注点"从网页正文里挑出相关内容，压缩后返回。
 
-    背景：网页全文动辄上万字，直接塞给主模型太费上下文额度；让便宜的小模型
-    先筛一遍，只回跟关注点相关的部分，性价比高得多。
+    网页全文动辄上万字，直接塞给主模型太费上下文额度；让便宜的小模型先筛
+    一遍，只回跟关注点相关的部分。
 
     参数：
         aux_router：小模型的路由器（有 chat_completions 方法可发对话请求）。

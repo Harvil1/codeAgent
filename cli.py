@@ -8,7 +8,8 @@
   - MemoryStore（记忆仓库：多个 JSONL 文件存记忆条目，MEMORY.md 当索引；
     对话中按需临时注入，注入完就丢、不留在历史里）
   - MemoryManager（记忆编排器，可以接外部 provider）
-  - SessionStore（会话存档：JSONL 文件保存对话，接口保持兼容旧 SQLite 版）
+  - SessionStore（会话存档：JSONL 文件保存对话；传 .db 路径会自动落到
+    .sessions/ 目录）
   - AIAgent（AI 本体，所有组件都塞给它）
   - curator 检查（知识库"维护工人"，到期后在后台线程自动整理）
 
@@ -106,12 +107,9 @@ from cli_diag_cmds import (  # noqa: F401（回导入：测试/内部引用兼�
 def _validate_model_config(config: dict) -> None:
     """启动最早检查模型配置齐不齐，缺了就用红字告诉用户怎么补，然后退出。
 
-    背景：直接取 config["model"]["name"]，
-    配置缺字段时会抛 KeyError（Python 报的"键不存在"错误），用户看到一串
-    英文 traceback 完全不知道该改哪里——而 api_key 缺失反而有友好提示，
-    两边不一致。这里补齐：缺 name/provider 或值为空 → SystemExit(2)
-    （带退出码 2 的程序终止）+ 红字提示该编辑哪个文件、填什么。
-    配置完整就什么都不做。
+    缺 name/provider 或值为空 → SystemExit(2)（带退出码 2 的程序终止）
+    + 红字提示该编辑哪个文件、填什么（避免裸 KeyError traceback 让用户
+    不知道改哪里）。配置完整就什么都不做。
 
     参数：
         config: 整个配置字典（load_config() 读出来的）
@@ -143,9 +141,8 @@ def _validate_model_config(config: dict) -> None:
 def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
     """记忆维护工人（memory curator）跑一轮，无论成败都把"上次运行时间"写盘。
 
-    背景：这活儿若放在后台线程函数里，
-    中途一崩"上次运行时间"就没存下来，下次启动会重复跑一遍——白白烧 LLM
-    tokens。所以提取成独立函数并用 try/finally 兜底：跑完、跑挂都先写盘。
+    try/finally 兜底：跑完、跑挂都先写盘（否则中途崩掉，下次启动会
+    重复跑一遍，白烧 LLM tokens）。
 
     store 参数要直接用主 agent 的记忆实例——
     两个实例各拿各的锁，锁就不生效了（跨实例 race）。
@@ -216,9 +213,9 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
 def _thread_llm_client(config: dict):
     """给"后台线程"专用的 LLM 连接对象：每次调用独立建连，跨事件循环安全。
 
-    背景：主 LLM client 绑定在主线程的事件循环上，
-    后台线程（如 curator）借用它会在别的循环里调异步代码而出错。所以
-    用 ThreadedLLMClient——每次请求单独建连接，跟哪个循环都不绑定。
+    主 LLM client 绑定在主线程的事件循环上，后台线程（如 curator）借用它
+    会在别的循环里调异步代码而出错，所以用 ThreadedLLMClient——每次请求
+    单独建连接，跟哪个循环都不绑定。
 
     注意：这里是主 client 构造的"镜像"。改 RuntimeContext 里主 client
     的构造逻辑时，这里要同步改，否则两边的模型配置会对不上。
@@ -362,8 +359,8 @@ class RuntimeContext:
     def _make_memory_review_agent_factory(self):
         """造一个"工厂函数"：调用它就新建一个专门做记忆复审的 AI 实例。
 
-        背景：记忆维护的第 2 阶段要 LLM 复审记忆内容。不能借用主对话的
-        agent（会污染主对话历史），所以临时造一个一次性的：
+        记忆维护的第 2 阶段要 LLM 复审记忆内容，用一次性实例（不借用主
+        对话的 agent，避免污染主对话历史）：
 
         - 用主模型
         - 不带任何工具（纯文本问答，LLM 输出 YAML 指令、由 Python 执行）
@@ -454,7 +451,7 @@ class RuntimeContext:
             db_path = Path(db) if db else sessions_db_path()
             self.session_store = SessionStore(db_path)
 
-        # 1b. MemoryStore（记忆仓库，纯文件存储，不再往 SQLite 双写）
+        # 1b. MemoryStore（记忆仓库，纯文件存储，无 SQLite 双写）
         if self.config.get("memory", {}).get("enabled", True):
             self.memory_store = MemoryStore(
                 omnimate_home=self.home,
@@ -550,7 +547,7 @@ class RuntimeContext:
         # 6. 后台触发 curator（在守护线程里跑，不拖慢启动）
         self._maybe_trigger_curator()
 
-        # === Memory Curator 后台触发（沿用 skill curator 的同款模式）===
+        # === Memory Curator 后台触发 ===
         try:
             from constants import get_omnimate_home
             from agent.memory_curator import should_run_now_memory
@@ -581,7 +578,7 @@ class RuntimeContext:
                 # 不拷贝 context）。项目分区键依赖 workspace_cwd 这个 ContextVar，
                 # 不带过去就会退化用 os.getcwd()——多项目场景下，别的项目的
                 # project/reference 记忆就永远不会被维护到。
-                # 修法：在主线程里 copy_context()，线程入口用 ctx.run 包一层。
+                # 做法：在主线程里 copy_context()，线程入口用 ctx.run 包一层。
                 _curator_ctx = contextvars.copy_context()
                 threading.Thread(
                     target=lambda: _curator_ctx.run(_run_memory_curator),
@@ -655,8 +652,8 @@ class RuntimeContext:
     def _create_agent(self) -> AIAgent:
         """按配置创建 AIAgent 实例，并把所有外围组件挂上去。
 
-        背景：这是全文件最重的装配点——凭证推导、辅助模型路由、流式输出、
-        邮箱、视觉模型、MCP 收件箱……全在这一步接好线。
+        全文件最重的装配点——凭证推导、辅助模型路由、流式输出、邮箱、
+        视觉模型、MCP 收件箱……全在这一步接好线。
         凭证优先用 settings.json 里的 api_key 字段；为空时退回环境变量找。
 
         参数：无。
@@ -854,9 +851,9 @@ class RuntimeContext:
                 agent._vision_client = None
 
         # === 接线 MCP 推送 → 收件箱 ===
-        # 背景：光有传输层的 set_notification_handler 和读循环还不够，
-        # 得把"收件箱推送函数"注册成 handler——否则 MCP server 推消息时
-        # handler 是 None，消息直接被扔掉，/inbox 永远是空的。这里做接线。
+        # 把"收件箱推送函数"注册成传输层的 notification handler——
+        # 不接线的话 MCP server 推消息时 handler 是 None，消息直接被扔掉，
+        # /inbox 永远是空的。
         # 宽松失败：任何异常只记 warning，不影响 agent/MCP 本身。
         try:
             from agent.channel_inbox import ChannelInbox
@@ -981,14 +978,13 @@ class RuntimeContext:
     def new_session(self):
         """开始新会话：新建会话档案 + 把 agent 的会话级状态全部清回初始。
 
-        背景：会话级状态要清理到位，漏一项就出错——
+        会话级状态要清理到位，漏一项就出错——
         - checkpoint 管理器必须重建绑定新会话，否则还指向旧会话，之后的快照
           全写进旧目录、/rewind 会回滚错对象（做法跟 resume_session 一致）
         - 压缩状态 / 自动提取游标 / 记忆注入去重 / 上下文提示 /
           中断残留 / 临时消息队列等也都要归零
-        裁决（故意不清的）：审批缓存不清——虽然名义上是"会话内缓存"，
-        但用户批过的命令跨 /new 还反复问，坏处大于好处
-        （用户的明确判断优先于算法，见 CLAUDE.md 设计原则 4）。
+        - 故意不清：审批缓存——用户批过的命令跨 /new 还反复问，坏处大于
+          好处（用户的明确判断优先于算法，见 CLAUDE.md 设计原则 4）。
 
         参数：无。返回：无。
         """
@@ -1036,8 +1032,8 @@ class RuntimeContext:
     def resume_session(self, session_id: str) -> bool:
         """恢复历史会话：把存档里的消息装回 agent 的对话历史。
 
-        背景：agent 的 system prompt（系统提示词）会重建——记忆快照从
-        当前的 .md 文件重新读，保证恢复后看到的是最新记忆。
+        agent 的 system prompt（系统提示词）会重建——记忆快照从当前的
+        .md 文件重新读，保证恢复后看到的是最新记忆。
 
         参数：
             session_id: 要恢复的会话 ID
@@ -1058,8 +1054,8 @@ class RuntimeContext:
         #（会话库只追加不删改，不裁的话会载入全部旧历史；
         # 旧会话没有边界标记就保守全量载入）
         conv = _truncate_at_last_compact_boundary(conv)
-        # 清理多余的摘要占位（只留最近一个）——压缩频率修复前的长会话可能
-        # 存了几十个"[之前的对话已自动总结]"占位，全塞进上下文会撑爆且混乱
+        # 清理多余的摘要占位（只留最近一个）——长会话可能存了
+        # 一堆"[之前的对话已自动总结]"占位，全塞进上下文会撑爆且混乱
         conv = _cleanup_redundant_summaries(conv)
         # 孤儿工具结果修复
         # 保存时中断可能留下"缺了一半"的悬空工具结果（assistant 发了
@@ -1109,8 +1105,8 @@ class RuntimeContext:
     def shutdown(self):
         """关机清理：触发会话结束钩子 + 停后台任务、定时器、团队，关连接。
 
-        背景：后台任务和定时器不关会变"僵尸进程"，
-        Windows 上会话库连接不关会锁住文件。
+        后台任务和定时器不关会变"僵尸进程"；Windows 上会话库连接不关会
+        锁住文件。
 
         参数：无。返回：无（每一步都容错，单步失败不影响其余清理）。
         """
@@ -1143,7 +1139,7 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("cron_scheduler shutdown 失败: %s", e)
 
-        # === P4a-T7 新增: 主 agent 标记 stopped + 清理它拉起的子进程 ===
+        # === 主 agent 标记 stopped + 清理它拉起的子进程 ===
         if hasattr(self, "team_coordinator") and self.team_coordinator:
             try:
                 self.team_coordinator.shutdown_all()
@@ -1154,7 +1150,7 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("team_coordinator shutdown 失败: %s", e)
 
-        # === ⑪c 新增: agent 自己的资源清理（MCP 连接等）===
+        # === agent 自己的资源清理（MCP 连接等）===
         if hasattr(self, "agent") and self.agent:
             try:
                 self.agent.cleanup()
@@ -1169,9 +1165,8 @@ class RuntimeContext:
 def _make_approval_callback(aux_provider=None):
     """造一个"问用户批不批准"的回调（危险命令执行前、白名单外写文件前都会用到）。
 
-    背景：权限检查器在后台拦截风险操作，但它不知道怎么跟用户对话——
-    所以 CLI 预先造好这个回调塞给它。回调收到一个字符串，自动判断
-    是命令还是路径，显示不同的提问。
+    供权限检查器使用（它不懂怎么跟用户对话）。回调收到一个字符串，
+    自动判断是命令还是路径，显示不同的提问。
 
     批准的效果范围（如实说明，别夸大）：
     - 命令 → 同意后记入 ~/.OmniMate/approved_commands.json，
@@ -1213,9 +1208,8 @@ def _make_approval_callback(aux_provider=None):
             console.print(f"[dim]（解释失败: {e}）[/dim]")
 
     def callback(item: str):
-        # 审批入口：命令/路径的判定提取成 _is_path_item
-        #（旧启发式会把 del /s /q tmp 误判成"路径审批"；而 check_path 发来的
-        # 内容恒带"文件写入审批: "前缀，优先按这个约定识别，不再瞎猜）
+        # 审批入口：命令/路径的判定用 _is_path_item
+        #（check_path 发来的内容恒带"文件写入审批: "前缀，按这个约定识别）
         if _is_path_item(item):
             console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
             console.print(f"[bold]{item}[/bold]")
@@ -1254,8 +1248,8 @@ def _make_approval_callback(aux_provider=None):
 def _make_ask_user_bridge():
     """造 ask_user 工具的 CLI 桥接：AI 想问用户选择题时，由它画面板、收答案。
 
-    背景：agent 内部有 ask_user 工具，但它不懂终端交互——这个桥接
-    负责把问题渲染成漂亮面板、读用户输入的序号。
+    agent 内部的 ask_user 工具不懂终端交互，这个桥接负责把问题渲染成
+    漂亮面板、读用户输入的序号。
     bridge(qdata) 返回选中选项的文字列表。
     异常（EOFError/KeyboardInterrupt——输入流关闭/用户按 Ctrl+C）由
     ask_user 的 handler 统一捕获。
@@ -1308,10 +1302,8 @@ def _ts() -> str:
 
 
 def _make_tool_call_callback(config: dict):
-    """造工具调用进度回调——把"要不要显示进度"的配置读一次存进闭包。
-
-    背景：如果每次工具调用都现读 settings.json，一次对话能读几十遍，
-    纯浪费。这里构造时读一次，闭包记住结果。
+    """造工具调用进度回调——把"要不要显示进度"的配置读一次存进闭包
+    （免得每次工具调用都现读 settings.json）。
 
     参数：
         config: 配置字典（读 display.show_tool_progress 开关）
@@ -1337,11 +1329,11 @@ def _make_tool_call_callback(config: dict):
     return callback
 
 
-# 向后兼容的老接口：模块级函数仍然能用，但每次调用都重读配置文件（不推荐新代码用）
+# 向后兼容的接口：模块级函数仍然能用，但每次调用都重读配置文件（不推荐新代码用）
 def _on_tool_call(name: str, args: dict):
-    """工具调用时的进度打印（老版本：每次现读 config）。
+    """工具调用时的进度打印（兼容接口：每次现读 config）。
 
-    保留它只为兼容旧引用；新代码请用 _make_tool_call_callback。
+    保留它只为兼容既有引用；新代码请用 _make_tool_call_callback。
 
     参数：
         name: 工具名
@@ -1359,8 +1351,7 @@ def _on_tool_call(name: str, args: dict):
 def _make_cli_stream_callback():
     """造 CLI 的流式输出回调（04）：模型每吐一段字就立刻打到屏幕上。
 
-    背景：没有流式时用户要等全部生成完才看到输出；有了它就是打字机
-    效果，第一个字出现 < 500 毫秒。
+    打字机效果——第一个字出现 < 500 毫秒，不用等全部生成完。
     工具调用开始时打一行简短提示。
     流结束时不打印（换行收尾留给主流程）。
 
@@ -1645,7 +1636,7 @@ def _handle_handoff_command(args: str, rt) -> bool:
 def cli_plan_approval_callback(plan: str) -> tuple:
     """计划模式（Plan Mode）的审批回调：打印 AI 写的计划，问用户批不批。
 
-    背景：计划模式下 AI 只做调研、不动手，调研完把计划交给用户审。
+    计划模式下 AI 只做调研、不动手，调研完把计划交给用户审。
     返回 (是否批准, 修订意见, 是否清空上下文) 三元组：
     - y/yes → (True, "", False) 批准，保留上下文继续执行
     - c/clear → (True, "", True) 批准并清空上下文再执行（设计考量：调研
@@ -2016,11 +2007,8 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
 def _truncate_at_last_compact_boundary(msgs: list) -> list:
     """恢复会话时，从最后一条"[COMPACT_BOUNDARY]"（压缩边界标记）起截断。
 
-    背景：压缩发生时，摘要占位消息会带着
-    边界标记存进会话库。恢复载入时，标记之前的旧消息全部裁掉——
-    它们已经被总结进摘要了，再载入一遍既撑上下文又跟摘要重复。
-    标记行本身剥掉，摘要正文保留。找不到标记就原样返回
-    （保守处理——旧会话/没压缩过的会话行为不变）。
+    标记之前的旧消息已被总结进摘要，载入只会撑上下文，全部裁掉；
+    标记行本身剥掉，摘要正文保留。找不到标记就原样返回。
 
     参数：
         msgs: 从会话库读出的消息列表
@@ -2052,10 +2040,8 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
 def _cleanup_redundant_summaries(msgs: list) -> list:
     """清理历史里多余的摘要占位（只保留最近一个）。
 
-    背景：压缩频率修复前，长会话可能被压几十次，库里存了一堆
-    "[之前的对话已自动总结]"占位。恢复时全注入会让上下文被占位符
-    撑爆且混乱——留最近一个摘要就够了，更早的删掉
-    （它们的内容早已被新摘要覆盖）。
+    多个 "[之前的对话已自动总结]" 占位同时存在时只留最近一个——
+    更早的内容已被新摘要覆盖。
 
     参数：
         msgs: 消息列表
@@ -2077,8 +2063,7 @@ def _cleanup_redundant_summaries(msgs: list) -> list:
 def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
     """/rewind：列出存档点（checkpoint 快照），选一个回滚（恢复文件和/或对话）。
 
-    背景：每条用户消息发出前，agent 改过的文件都会
-    自动拍快照。这个命令列出这些"存档点"，让用户时光倒流回某一时点。
+    存档点来自每条用户消息发出前对 agent 改过文件的自动快照。
 
     参数：
         rt: RuntimeContext（拿 checkpoint 管理器和 agent）
@@ -2495,10 +2480,10 @@ def _handle_goal_command(args: str, rt) -> bool:
 def _handle_output_style_command(args: str, rt) -> bool:
     """/output-style：列出/切换/关闭输出风格。
 
-    背景：输出风格 = 一段预设提示词，让 AI 按特定口吻/格式回答。
-    风格目录：`<项目>/.omnimate/output-styles/`（优先，覆盖同名）+
-    `~/.OmniMate/output-styles/`。切换时写 settings.json 顶层的
-    output_style 并作废缓存的 system prompt（下一条消息生效）。
+    输出风格 = 一段预设提示词。目录：`<项目>/.omnimate/output-styles/`
+    （优先，覆盖同名）+ `~/.OmniMate/output-styles/`。切换时写
+    settings.json 顶层的 output_style 并作废缓存的 system prompt
+    （下一条消息生效）。
 
     参数：
         args: 风格名 / off / 空（空=列表）
@@ -2584,8 +2569,6 @@ def _handle_poor_command(args: str, rt) -> bool:
         import copy as _copy_mod
         from agent.poor_mode import apply_poor_preset
         # 开启前先给配置拍快照，关闭时完整还原
-        #（此前 off 只清标志，被关掉的复盘/摘要等功能要等重启才回来
-        # ——on/off 行为不对称）
         if not getattr(rt, "_poor_config_snapshot", None):
             rt._poor_config_snapshot = _copy_mod.deepcopy(rt.config)
         rt.config = apply_poor_preset(rt.config, on=True)
@@ -2818,7 +2801,6 @@ def _handle_init_command(rt, args: str) -> bool:
 def _handle_inbox_command(args: str, rt) -> bool:
     """/inbox——显示收件箱里还没消费的消息（MCP 外部工具服务推送的内容）。
 
-    背景：ChannelInbox 是 MCP server 推送消息的落地收件箱。
     本命令只做只读展示；"标记已消费"由主循环组装轮次消息时完成。
 
     参数：
@@ -3544,8 +3526,7 @@ def _render_statusline(rt, agent) -> str:
 def _is_path_item(item: str) -> bool:
     """判断审批回调收到的是"路径"还是"命令"。
 
-    背景：判错代价不对称——把命令误判成路径，它会拿到"即将写入路径"的
-    文案和"总是允许并记住"的错误语义，所以判定要保守。
+    把命令误判成路径会拿到错误的"写入路径"审批语义，判定须保守。
 
     规则：带空格的多词组合一律按命令处理（del /s /q tmp、rm -rf build/）；
     只有 ~ 开头 / Windows 盘符（C:\\ 或 C:/）/ 单个词里含分隔符
@@ -3577,11 +3558,10 @@ def _should_exit_on_interrupt_sentinel(
 ) -> bool:
     """判断输入线程收到的 Ctrl+C 信号该不该退出程序。
 
-    背景：同一次 Ctrl+C 可能被两处同时收到——主线程（在跑模型时收到 →
-    中断本轮，记下时间戳）和输入线程（输入等待时收到 → 往队列塞一个
-    中断信号）。如果信号到达时，1 秒窗口内刚发生过"回合内中断"，就认定
-    是同一次按键被重复消费（本意是中断本轮，不是退出）→ 返回 False；
-    空闲等输入时的 Ctrl+C（附近没有回合内中断）保持原语义（退出）→ True。
+    同一次按键可能同时被主线程（跑模型时中断本轮，记下时间戳）和输入线程
+    （塞一个中断信号）收到：1 秒窗口内刚发生过"回合内中断"就视为重复
+    消费（本意是中断本轮，不是退出）→ False；空闲等输入时的 Ctrl+C
+    保持退出语义 → True。
 
     参数：
         last_interrupt_ts: 最近一次回合内中断的时间戳（monotonic 时钟）

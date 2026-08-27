@@ -1,8 +1,7 @@
 """HTTP hook（用 HTTP 请求触发的钩子）的 SSRF（服务器端请求伪造）防护。
 
-背景：http hook 会让程序主动向外发 HTTP 请求。如果配置里写了个内网地址，
-攻击者就可能借它去摸云服务器的"元数据接口"（能拿到云账号密钥）或公司内网。
-这个模块就是在请求发出去之前做一道安检（适配 Python 的 requests 库）：
+http hook 会主动向外发 HTTP 请求，这个模块在请求发出去之前做一道安检
+（适配 Python 的 requests 库），防止配置里的 URL 被用来摸云元数据接口或内网：
 
 - 地址段检查：把目标域名做 DNS 解析（域名变 IP），只要解析出来的 IP 落在
   "禁达名单"里就拒绝。禁达名单包括：0/8、10/8（家庭/公司内网）、
@@ -63,7 +62,6 @@ _URL_CTRL_RE = re.compile(r"[\r\n\x00]")
 def is_blocked_address(address: str) -> bool:
     """判断一个 IP 地址是否落在 http hook 的禁达段里。
 
-    背景：http hook 外呼前要做安检，这个函数负责"IP 落点"这一项。
     环回地址（127.0.0.0/8、::1，即本机）放行——本地开发的 policy server
     是主流用法。传进来的字符串不是合法 IP 时返回 False，交给后面真正的
     DNS 解析路径去处理。
@@ -102,9 +100,8 @@ def _is_blocked_ip(ip) -> bool:
 def _env_proxy_active(url: str) -> bool:
     """判断这个 URL 是否会走环境变量配置的代理（HTTP_PROXY/HTTPS_PROXY，尊重 NO_PROXY 的豁免）。
 
-    背景：如果流量走代理，目标域名是代理服务器去解析的，我们在本地做
-    DNS 检查反而会把"公司内网代理"这种正常场景误杀，所以这种情况下
-    整个 SSRF 检查跳过。
+    走代理时整个 SSRF 检查跳过——DNS 由代理侧解析，本地查会误杀
+    "公司内网代理"这种正常场景。
 
     参数：
         url：要请求的完整 URL
@@ -120,9 +117,7 @@ def _env_proxy_active(url: str) -> bool:
 
 
 def validate_url_for_ssrf(url: str) -> Optional[str]:
-    """校验 http hook 要访问的 URL 能不能放行外呼。允许返回 None，拒绝返回原因文字。
-
-    背景：这是 http hook 请求发出前的总安检入口，逐层把关。
+    """校验 http hook 要访问的 URL 能不能放行外呼（请求发出前的总安检入口）。允许返回 None，拒绝返回原因文字。
 
     步骤（按顺序）：
     1. URL 含回车/换行/NUL 控制字符 → 拒（防伪造请求行/HTTP 头）
@@ -186,10 +181,7 @@ def validate_url_for_ssrf(url: str) -> Optional[str]:
 
 
 def url_matches_pattern(url: str, pattern: str) -> bool:
-    """判断 URL 是否匹配一个 allowlist（允许清单）模式，* 是通配符。
-
-    背景：allowlist 里每条是一个模式串，模式要求整串匹配（相当于自动加
-    ^...$），* 可以匹配任意字符。
+    """判断 URL 是否匹配一个 allowlist（允许清单）模式：整串匹配（相当于自动加 ^...$），* 是通配符。
 
     参数：
         url：要检查的完整 URL
@@ -202,9 +194,7 @@ def url_matches_pattern(url: str, pattern: str) -> bool:
 
 
 def check_url_against_allowlist(url: str, allowed: Optional[List[str]]) -> Optional[str]:
-    """URL allowlist（允许清单）检查。
-
-    背景：除了禁达段，还可以配置"只许访问这些 URL"。语义：
+    """URL allowlist（允许清单）检查——在禁达段之外还可配置"只许访问这些 URL"。语义：
     - 传 None → 不限制（默认行为）
     - 传空列表 → 全部拒绝
     - 传非空列表 → 必须至少匹配其中一个模式，否则拒

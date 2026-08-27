@@ -46,11 +46,11 @@ logger = logging.getLogger(__name__)
 def _spawn_detached(coro, name: str):
     """把一个后台协程扔到独立 daemon 线程 + 独立事件循环里跑，真正「发出去就不管」。
 
-    背景（历史踩坑）：CLI 每处理一条用户消息就新建一个
-    事件循环、处理完就销毁。如果用 create_task 派后台任务，主循环一返回，
-    asyncio.run 会把还没跑完的任务全部取消——任务刚挂起就被杀，而且不报错，
-    导致「自动记忆提取 / 批间摘要」这类后台功能静默失效。解法：daemon 线程
-    （随进程退出的后台线程）自带独立事件循环，主循环销毁不影响它。
+    CLI 每处理一条用户消息就新建一个事件循环、处理完就销毁——如果用
+    create_task 派后台任务，主循环一返回 asyncio.run 会把还没跑完的任务
+    全部取消（任务刚挂起就被杀且不报错，「自动记忆提取 / 批间摘要」这类
+    后台功能会静默失效）。daemon 线程（随进程退出的后台线程）自带独立
+    事件循环，主循环销毁不影响它。
     contextvars（线程内共享的上下文变量，比如当前工作目录）从调用方复制
     一份带过去，线程里也能读到。
 
@@ -84,10 +84,7 @@ def _spawn_detached(coro, name: str):
 #   绝不影响主循环
 
 def _build_goal_continue_message(goal_state) -> Optional[dict]:
-    """造一条 `<continue_goal>` 临时 user 消息，催着模型跑下一轮。
-
-    背景：goal（目标驱动）模式下，模型每轮干完活得有人「踢」它一下才会继续，
-    这条消息就是那一下。
+    """造一条 `<continue_goal>` 临时 user 消息，催着模型跑下一轮——goal（目标驱动）模式下模型每轮干完活得有人「踢」它一下才会继续，这条消息就是那一下。
 
     参数：
         goal_state: GoalState 实例（目标状态机）；None 或目标不在 active
@@ -110,10 +107,7 @@ def _build_goal_continue_message(goal_state) -> Optional[dict]:
 
 
 def _build_channel_injection(inbox) -> Optional[dict]:
-    """造一条 `<channel_push>` 临时 user 消息，转发外部工具服务器的推送。
-
-    背景：MCP（接外部工具的服务）的服务器会主动推通知，通知先落在收件箱
-    （ChannelInbox）里，这里取出来打包成消息给模型看。
+    """造一条 `<channel_push>` 临时 user 消息，转发外部工具服务器的推送——MCP（接外部工具的服务）的服务器会主动推通知，通知先落在收件箱（ChannelInbox）里，这里取出来打包成消息给模型看。
 
     参数：
         inbox: ChannelInbox 实例（收件箱）；None 直接不注入
@@ -144,10 +138,7 @@ def _build_channel_injection(inbox) -> Optional[dict]:
 
 
 def _build_mail_injection(mailbox, agent_name: str) -> Optional[dict]:
-    """造一条 `<mail>` 临时 user 消息，转发队友（teammate agent）发来的邮件。
-
-    背景：多个 agent 协作时，别的 agent 可能异步留信给我们，这里取未读
-    邮件打包给模型看，看完标记已读（fail-open，出错只打日志）。
+    """造一条 `<mail>` 临时 user 消息，转发队友（teammate agent）发来的邮件——多个 agent 协作时别的 agent 可能异步留信，这里取未读邮件打包给模型看，看完标记已读（fail-open，出错只打日志）。
 
     参数：
         mailbox: Mailbox 实例（团队邮箱）；None 不注入
@@ -187,10 +178,9 @@ def _build_mail_injection(mailbox, agent_name: str) -> Optional[dict]:
 
 
 class LoopExitReason:
-    """主循环「为什么退出了」的原因清单（一组字符串常量，当枚举用）。
+    """主循环「为什么退出了」的原因清单（一组字符串常量，当枚举用）——测试断言退出原因、trace（运行轨迹记录）打点都用它。
 
-    背景：测试要断言退出原因、trace（运行轨迹记录）要打点，
-    没有统一枚举就只能猜。「继续跑」类的原因（重试/续写/stop hook/goal
+    「继续跑」类的原因（重试/续写/stop hook/goal
     continue/遗言轮）在代码里直接用 continue 语句表达，不单独列——
     真正需要断言的是「终点」。旧字符串值（interrupted_by_user /
     llm_failed / normal）原样保留，改动会破坏兼容。
@@ -212,12 +202,7 @@ class LoopExitReason:
 
 
 def _drop_leading_system(messages: list) -> list:
-    """剥掉消息列表开头那条 system 消息（如果真的在开头）。
-
-    背景（历史踩坑）：压缩/续写之后要拿 messages 重建对话历史，
-    得先把 system 消息去掉。不能无脑切 `messages[1:]`——赌「system
-    一定在第 0 位」，一旦不在，就会悄悄把第一条真实消息也切掉。所以
-    先确认 [0] 真是 system 才剥。
+    """剥掉消息列表开头那条 system 消息（如果真的在开头）——不能无脑切 `messages[1:]`（赌「system 一定在第 0 位」，一旦不在就会悄悄把第一条真实消息也切掉），先确认 [0] 真是 system 才剥。
 
     参数：
         messages: 消息 dict 列表
@@ -367,7 +352,7 @@ class AIAgent:
         self.memory_store = memory_store
         self.memory_manager = memory_manager
         self.session_store = session_store
-        # 历史踩坑：omnimate_home=None 时要解析成默认 ~/.OmniMate，
+        # omnimate_home=None 时要解析成默认 ~/.OmniMate，
         # 否则下游拿 None 拼路径会直接 TypeError
         if omnimate_home is not None:
             self.omnimate_home = omnimate_home
@@ -385,13 +370,13 @@ class AIAgent:
 
         # 预算耗尽后的「遗言轮」标志：再给模型一次机会消化工具结果
         self._budget_grace_call = False
-        # 历史踩坑：遗言轮只能触发一次——不然「跑工具→遗言→
+        # 遗言轮只能触发一次——不然「跑工具→遗言→
         # 又跑工具→又遗言」能无限循环
         self._grace_triggered = False
 
         # 系统提示词：会话开头构建一次，之后用缓存（中途改会打穿前缀缓存）
         self._system_prompt_built = system_prompt_override is not None
-        # 05 新增：分两层缓存（stable=整个会话不变 / context=本会话不变）
+        # 分两层缓存（stable=整个会话不变 / context=本会话不变）
         self._stable_prompt: Optional[str] = system_prompt_override
         self._context_prompt: Optional[str] = ""
         # 自定义子代理可跳过项目 OMNIMATE.md 注入
@@ -429,9 +414,9 @@ class AIAgent:
 
         # 上下文压缩的会话级状态（每实例一份，跨轮追踪冷却时间和触发次数）
         self._compress_session_state = CompressionSessionState()
-        # 历史踩坑：这是「本 agent 专属」的子代理完成队列——
-        # 以前是全局单例，同进程里多个 AIAgent（团队工人等）会把别人子代理
-        # 的结果捞走。这里延迟导入是防循环依赖（delegate_tool 依赖 agent 包）。
+        # 这是「本 agent 专属」的子代理完成队列——
+        # 不能做成全局单例，否则同进程里多个 AIAgent（团队工人等）会把别人
+        # 子代理的结果捞走。这里延迟导入是防循环依赖（delegate_tool 依赖 agent 包）。
         try:
             from tools.delegate_tool import DelegationCompletionQueue
             self._delegation_queue = DelegationCompletionQueue()
@@ -444,7 +429,7 @@ class AIAgent:
         self._surfaced_memory_ids: set = set()
         # 按模型分别记账的用量追踪器（CLI 注入；None = 不追踪）
         self._usage_tracker = None
-        # 历史踩坑：这里刻意不清空模块级的「工具结果落盘决策表」——
+        # 这里刻意不清空模块级的「工具结果落盘决策表」——
         # 那张表是同进程所有 agent 共享的，__init__ 里清空会把别的正在跑的
         # agent 的决策一起抹掉，下一轮工具结果会被原样还原、重新全量落盘，
         # 破坏逐字节重放（等于打穿 prompt cache）。不用担心的理由：
@@ -482,7 +467,7 @@ class AIAgent:
         # === 轨迹记录 sink 接到钩子上（fail-open）===
         # 挂 6 个钩子点（LLM 调用前后 + 工具成功/失败 + 子代理开始/结束）。
         # 钩子内部自带异常保护，写盘失败只记日志。
-        # 防「静默死代码」（历史踩坑）：必须在构造函数里真的调用
+        # 防「静默死代码」：必须在构造函数里真的调用
         # _register_trace_hooks——否则单元测试能过但生产路径一条轨迹都不出。
         self._trace_sink = trace_sink
         if trace_sink is not None and hooks_registry is not None:
@@ -492,7 +477,7 @@ class AIAgent:
             except Exception as e:
                 logger.warning("trace hook 注册失败（不影响主流程）: %s", e)
 
-        # === PlanMode 新增：计划模式状态 + 审批回调 ===
+        # === PlanMode：计划模式状态 + 审批回调 ===
         # plan_mode=True 时下一轮切到 ["plan"] 工具集（全只读，只能调研）
         # plan_approval_callback(plan: str) -> (approved: bool, feedback: str)
         # 传 None 表示自动批准（测试/当库用的场景）
@@ -639,7 +624,7 @@ class AIAgent:
     def cleanup(self):
         """释放这个 agent 占用的资源（由 CLI 的 RuntimeContext.shutdown 调用）。
 
-        背景：进程退出前要把临时文件、HTTP 连接池等收拾干净。
+        进程退出前要把临时文件、HTTP 连接池等收拾干净。
         幂等（调用多少次都安全）；每项清理各自 try/except，一项失败不拖累其他。
 
         参数：无。返回：无。
@@ -654,7 +639,7 @@ class AIAgent:
         except Exception as e:
             logger.warning("清理 session env 文件失败: %s", e)
 
-        # 历史踩坑：关闭 LLM 客户端（释放 HTTP 连接池），防进程退出前泄漏
+        # 关闭 LLM 客户端（释放 HTTP 连接池），防进程退出前泄漏
         for client_attr in ("llm_client", "fallback_llm_client", "_vision_client"):
             client = getattr(self, client_attr, None)
             if client is not None:
@@ -668,7 +653,7 @@ class AIAgent:
     def _setup_session_env_file(self):
         """会话启动时创建 .session/{session_id}.env 文件并设 OMNIMATE_ENV_FILE 环境变量。
 
-        背景：SessionStart 钩子跑的时候能从环境变量读到这个路径，往文件里
+        SessionStart 钩子跑的时候能从环境变量读到这个路径，往文件里
         写 `export K=V` 行；之后 terminal 工具执行命令会把这些变量合并进去。
         失败只打日志（fail-open）。
 
@@ -687,7 +672,7 @@ class AIAgent:
     def interrupt(self):
         """请求中断（CLI 的 Ctrl+C 处理器调用这个）。
 
-        背景：用的是「商量式」中断——不直接杀线程（硬杀可能把消息历史弄坏），
+        用的是「商量式」中断——不直接杀线程（硬杀可能把消息历史弄坏），
         只设个标志让主循环自己看到后退出。中断会像多米诺一样传给所有
         活跃的子代理（主对话派出去帮忙干活的分身）。
 
@@ -704,7 +689,7 @@ class AIAgent:
     def cleanup_runtime(self) -> None:
         """子代理退出时清理它遗留的运行状态。
 
-        背景：子代理跑完/被砍时，它自己派生的孙代理和后台任务可能还活着，
+        子代理跑完/被砍时，它自己派生的孙代理和后台任务可能还活着，
         得收尾。幂等 + fail-open（逐项清，单项失败不拖累其他）：
         - 中断级联到 children（异步孙代理线程会在自己的循环顶上协作式退出，
           不再往已死的父代理的结果队列里塞东西）
@@ -725,9 +710,8 @@ class AIAgent:
                 logger.debug("cleanup_runtime bg shutdown 失败: %s", e)
 
     def _record_llm_usage(self, response, sent_message_count: int = None) -> None:
-        """记一笔 LLM 调用的 token 用量账。
+        """记一笔 LLM 调用的 token 用量账（/usage 命令、缓存命中分析都要有账可查）。
 
-        背景：/usage 命令、缓存命中分析都要有账可查。
         sent_message_count 不为 None 时，顺手记一个「权威锚点」
         ``_last_usage_anchor = (消息条数, 输入 token 数)``——输入 token 取
         prompt + 缓存读 + 缓存创建之和（OpenAI 语义下 prompt 本来就含缓存
@@ -810,7 +794,7 @@ class AIAgent:
     def set_input_queue(self, q) -> None:
         """注入用户输入队列（CLI 的输入线程往里灌用户敲的字）。
 
-        背景：模型正在回复时用户敲的字先排队（不打断当前回复）；一批工具
+        模型正在回复时用户敲的字先排队（不打断当前回复）；一批工具
         跑完后取出，以临时消息 <queued_user_input> 的形式回流——模型下一轮
         看得到并回应。
 
@@ -821,7 +805,7 @@ class AIAgent:
     def _drain_queued_input(self) -> None:
         """把输入队列里攒的用户输入捞出来，包成临时消息回流给模型。
 
-        背景：非阻塞取，出错也只打日志。只有主代理（派生深度为 0）
+        非阻塞取，出错也只打日志。只有主代理（派生深度为 0）
         才做——子代理没有用户交互面。多条输入合并成一条临时消息（同一轮
         消化）；队列空就什么都不做。
 
@@ -845,8 +829,7 @@ class AIAgent:
                     continue
                 # 排队输入里的斜杠命令不喂模型——分流到
                 # _queued_cli_commands，让 CLI 主循环在本轮对话结束后执行
-                #（历史踩坑：以前模型运行中敲 /compact /quit 会被当普通
-                # 文本吞掉）
+                #（不分流的话 /compact /quit 会被当普通文本吞掉）
                 if item.startswith("/") and self._is_cli_command_like(item):
                     commands.append(item)
                     continue
@@ -875,7 +858,7 @@ class AIAgent:
     def _is_cli_command_like(line: str) -> bool:
         """判断一行字长得像不像斜杠命令（规则和 cli.py 的启发式一致）。
 
-        背景：排队输入要分流——`/compact`、`/skills_list` 这种「斜杠+单词」
+        排队输入要分流——`/compact`、`/skills_list` 这种「斜杠+单词」
         形态算命令交给 CLI；`/etc/passwd 是什么`（含路径分隔符等非命令
         字符）不算，还是当普通消息喂给模型。
 
@@ -894,7 +877,7 @@ class AIAgent:
     def _recent_active_tools(self, lookback: int = 8, limit: int = 3) -> list:
         """列出最近用过哪几个工具（给记忆检索当降噪信号）。
 
-        背景：记忆检索时知道「正在干哪种活」，能滤掉不相关的记忆。
+        记忆检索时知道「正在干哪种活」能滤掉不相关的记忆。
         从对话历史尾部倒着扫 assistant 消息里的工具调用，去重后收集，
         最多 limit 个；倒扫保住「最近」，最后插回头部恢复时间正序。
 
@@ -917,7 +900,7 @@ class AIAgent:
         return names[:limit]
 
     def set_mailbox(self, mailbox, agent_name: str = None) -> None:
-        """注入团队邮箱。agent_name 传空就保留原来的名字。
+        """注入团队邮箱。agent_name 传空就保留现有名字。
 
         参数：
             mailbox: Mailbox 实例（传 None = 清除）
@@ -947,7 +930,7 @@ class AIAgent:
     def _check_all_goal_tasks_done(self) -> bool:
         """goal 关联的任务是否全部完成了。
 
-        背景：真的查任务库：
+        真的查任务库：
         - 没有 goal_state → False
         - 否则调 agent.goal 的 check_all_tasks_done 查任务状态
 
@@ -965,7 +948,7 @@ class AIAgent:
     def _extract_turn_tokens(self, response) -> int:
         """从响应的 usage 字段里取本轮花了多少 token（输入 + 输出）。
 
-        背景：goal 的 token 预算要在每轮结束后累加，数据就从这取。
+        goal 的 token 预算要在每轮结束后累加，数据就从这取。
         响应没有 usage 字段就返回 0（不炸）。
 
         参数：
@@ -989,7 +972,7 @@ class AIAgent:
     def _extract_cache_read(usage) -> int:
         """从 usage 里取「前缀缓存命中读的 token 数」。
 
-        背景：各家服务商字段名不一样——DeepSeek 叫 prompt_cache_hit_tokens，
+        各家服务商字段名不一样——DeepSeek 叫 prompt_cache_hit_tokens，
         Anthropic 叫 cache_read_input_tokens。流式路径合成的 usage 对象两个
         字段都塞了值（见 _call_llm_streaming 末尾），所以这里用 or 短路，
         哪个非零用哪个。dict 和对象两种形态都兼容，出错返回 0。
@@ -1017,13 +1000,13 @@ class AIAgent:
             return 0
 
     # ------------------------------------------------------------------
-    # 04 新增：流式调 LLM（边生成边吐字）
+    # 流式调 LLM（边生成边吐字）
     # ------------------------------------------------------------------
 
     async def _call_llm_streaming(self, *, messages, tools):
         """流式调用 LLM：每收到一小段就调 stream_callback 报告一次。
 
-        背景：流式让用户边生成边看到字，不用干等。流式失败时自动退回
+        流式让用户边生成边看到字，不用干等。流式失败时自动退回
         非流式重试（带备用客户端）。返回值和非流式路径完全同构
         （用 SimpleNamespace 拼出 OpenAI 响应的形状），下游的用量记账 /
         hook / 工具调用处理代码一行都不用改。
@@ -1243,7 +1226,7 @@ class AIAgent:
                 retried_choice = retried.choices[0]
                 retried_msg = retried_choice.message
                 # 用重试结果整体覆盖（重试拿到的是完整响应）。
-                # 历史踩坑：不能只在「重试有 tool_calls」时才覆盖，
+                # 不能只在「重试有 tool_calls」时才覆盖，
                 # 重试结果没有工具调用时会把截断那次的半截 tool_calls 残留进
                 # 最终响应——必须无条件清空。
                 finish_reason = (
@@ -1264,7 +1247,7 @@ class AIAgent:
                     except Exception:
                         pass
                 # 更新 usage：截断那次 + 升级重试这次都真实花过钱，两边加总
-                # （旧版直接覆盖会漏记截断那次的花费）
+                # （直接覆盖会漏记截断那次的花费）
                 if getattr(retried, "usage", None) is not None:
                     u = retried.usage
                     retry_usage = {
@@ -1335,10 +1318,10 @@ class AIAgent:
     def _get_system_prompt(self) -> str:
         """拿系统提示词。第一次调用时现场构建，之后一直返回缓存的那份。
 
-        背景：为什么缓存？因为 LLM 服务商有「前缀缓存」——请求开头不变，
+        为什么缓存？LLM 服务商有「前缀缓存」——请求开头不变，
         后面就能按折扣价算。中途改系统提示词等于每次都换开头，费用翻倍。
 
-        05 升级：分两层缓存 + 一层不缓存：
+        分两层缓存 + 一层不缓存：
         - stable（稳定层）：跨会话都不变（身份、指导），几乎 100% 命中前缀缓存
         - context（会话层）：本会话内不变（记忆/技能索引/OMNIMATE.md）
         - volatile（易变层）：每轮都可能变（提醒类），不进缓存
@@ -1431,13 +1414,13 @@ class AIAgent:
         # 同一个 agent 实例在自主生命周期的多个工作周期里会复用，
         # 上一次的停下请求不能漏到下一次。
         self._idle_requested = False
-        # 历史踩坑：清掉上一回合残留的中断标志——上次
+        # 清掉上一回合残留的中断标志——上次
         # Ctrl+C 异常退出时旗子已插但循环没消费，不清的话用户下一条消息
         # 第一轮就被吞（直接回「[已被用户中断]」）。
         self._interrupt_requested = False
         # 每条用户消息重置迭代预算：预算只管「这一条消息」的循环轮数。
         # 不重置的话，长会话里多条消息累计消耗，中途突然耗尽就静默断线
-        # （历史踩坑：工具调完预算没了 → 直接 break → 没有任何提示）。
+        # （工具调完预算没了直接 break，没有任何提示）。
         self.iteration_budget.reset()
         # 每条用户消息独立的「遗言轮」机会（_grace_triggered 防同一条消息内反复触发）
         self._grace_triggered = False
@@ -1458,7 +1441,7 @@ class AIAgent:
         user_message = await asyncio.to_thread(
             self._run_prompt_submit_hook, user_message,
         )
-        # 历史踩坑：这里故意不收消息——改成每轮 while 里都收，
+        # 这里故意不收消息——每轮 while 里都收，
         # 不然多轮工具调用中途新到的消息挤不进模型上下文
 
         # 开场不做记忆注入——记忆统一走按需检索的临时注入
@@ -1551,12 +1534,12 @@ class AIAgent:
                     break
                 consumed_this_iter = True
             else:
-                # 历史踩坑：遗言轮进入时立刻清标志，保证只跑一次。
+                # 遗言轮进入时立刻清标志，保证只跑一次。
                 # 不清的话会「跑工具→遗言→又跑工具」无限循环
                 self._budget_grace_call = False
 
             # 组装 messages + 注入 bg/cron/team/plan_mode 等临时消息
-            # 历史踩坑：每轮都重新收一遍外部消息——不能只在循环前
+            # 每轮都重新收一遍外部消息——不能只在循环前
             # 收一次，多轮工具调用中途新到的后台/定时/团队消息挤不进模型上下文
             injected = self._drain_injected_messages()
             messages = self._assemble_turn_messages(system_prompt, injected)
@@ -1567,9 +1550,8 @@ class AIAgent:
             )
 
             # 剥掉内部字段（_timestamp 之类的记账标记）——必须放在压缩之后、
-            # 发给 LLM 之前。历史踩坑：剥早了（在组装末尾、压缩之前），
-            # 压缩层读不到 _timestamp，「按时间清理旧工具
-            # 结果」整个功能在生产里是死代码。现在挪到这里：压缩层能读到时间
+            # 发给 LLM 之前。剥早了压缩层读不到 _timestamp，「按时间清理旧
+            # 工具结果」功能会失效；放这里压缩层能读到时间
             # 标记（按时清理真正生效），发给 LLM 的消息又不带这些内部字段
             # （保护前缀缓存）。重复剥也无害（每次都建新 dict）。
             messages = strip_internal_fields(messages)
@@ -1631,7 +1613,7 @@ class AIAgent:
             # === POST_LLM_CALL 钩子（LLM 返回后、处理工具调用前）===
             response = self._run_post_llm_call_hook(response)
 
-            # 历史踩坑：同步累加压缩会话状态的轮次——L4 层的冷却
+            # 同步累加压缩会话状态的轮次——L4 层的冷却
             # 计时就靠这个值，漏加会导致冷却判断错乱
             self._compress_session_state.increment_turn()
 
@@ -1646,7 +1628,7 @@ class AIAgent:
                 if not should_continue:
                     turn_exit_reason = LoopExitReason.IDLE_REQUESTED
                     break  # 工具要求停下
-                # 历史踩坑：工具跑完发现预算没了，就开一轮遗言——
+                # 工具跑完发现预算没了，就开一轮遗言——
                 # 让下轮 LLM 至少能看到工具结果再收尾。
                 # 模型刚调完工具还没消化
                 # 结果就因预算耗尽退出，体验很差。
@@ -1796,7 +1778,7 @@ class AIAgent:
     def _drain_injected_messages(self) -> dict:
         """把各路外部异步消息一次收齐（后台任务/定时任务/团队信箱/异步子代理）。
 
-        背景：这些消息到了不会自己长腿走进模型上下文，得每轮主动来取；
+        这些消息到了不会自己长腿走进模型上下文，得每轮主动来取；
         取完即清空（本轮注入后下轮不重复）。
 
         参数：无。
@@ -1883,7 +1865,7 @@ class AIAgent:
     def has_pending_wake_payload(self) -> bool:
         """预检：有没有"后台完成"类消息待取（给 CLI 的唤醒哨兵用）。
 
-        背景（idle wake）：CLI 收到唤醒哨兵后先问这里——通知已经被
+        （idle wake）CLI 收到唤醒哨兵后先问这里——通知已经被
         正在跑的回合消费掉了就别再空跑一轮 LLM（防哨兵风暴/空唤醒）。
 
         参数：无。
@@ -1906,7 +1888,7 @@ class AIAgent:
     def _build_bg_running_note(self):
         """把"仍在跑的后台任务/异步子代理"整理成一段状态说明（没有返回 None）。
 
-        背景（idle wake 配套）：让模型每轮都看得见"还有哪些活儿在后台跑、
+        （idle wake 配套）让模型每轮都看得见"还有哪些活儿在后台跑、
         跑完会自动通知/唤醒"，从而不瞎轮询、收工时会主动向用户交代。
         只读状态不消费（区别于通知类的一次性注入），每轮现算。
 
@@ -1954,7 +1936,7 @@ class AIAgent:
     async def _consume_memory_prefetch(self, messages: list) -> list:
         """等记忆检索预取的结果，把它作为临时消息追加到本轮 messages。
 
-        背景：预取任务在 run_conversation 开场就发起了（把记忆
+        预取任务在 run_conversation 开场就发起了（把记忆
         检索并行化）；这里等到结果为止。等待点特意放在压缩/剥字段之后，
         并行窗口最大——检索的辅助模型调用延迟大半被主循环的准备工作
         吸收掉了。结果只追加到本轮局部 messages（不进正式历史，和待注入
@@ -1981,7 +1963,7 @@ class AIAgent:
     def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
         """组装本轮要发给 LLM 的消息：系统提示词 + 历史 + 各种临时消息。
 
-        背景：模型每轮看到的完整上下文在这里拼装。injected 里的后台/定时/
+        模型每轮看到的完整上下文在这里拼装。injected 里的后台/定时/
         团队消息注入后会被原地清空（防止下轮重复注入）；计划模式提醒每轮
         现算（不消费）。channel/mailbox 走临时注入（失败放行），不进正式
         历史（保护前缀缓存 + 持久化）。
@@ -2026,7 +2008,7 @@ class AIAgent:
             messages.append({
                 "role": "user",
                 "content": f"<task_notification>\n{notif_text}\n</task_notification>",
-                # 历史踩坑：消费型消息一律标 ephemeral——压缩过滤器
+                # 消费型消息一律标 ephemeral——压缩过滤器
                 # 只保留非 ephemeral 的；不标的话它会被焊进内存里的历史、但
                 # 又从没落过会话库 → 恢复会话时两边对不上
                 "_ephemeral": True,
@@ -2175,7 +2157,7 @@ class AIAgent:
     def _maybe_inject_context_tip(self, messages: list) -> None:
         """上下文快到上限时给模型塞一条「管理建议」提示。
 
-        背景：context rot（上下文太长模型变笨）——
+        context rot（上下文太长模型变笨）——
         自动压缩总发生在模型「最不聪明」的时刻，不如主动 /compact
         并说明保留重点；换新任务用 /new；读大文件委托子代理只带摘要回来。
         每会话只提示一次，免得每轮刷屏。
@@ -2216,7 +2198,7 @@ class AIAgent:
     async def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
         """快到 token 上限时压缩上下文（整体已异步化）。
 
-        背景：上下文太大不但贵还会超限报错，得分层瘦身。
+        上下文太大不但贵还会超限报错，得分层瘦身。
         返回 (messages, system_prompt, compressed: bool)：
         - 无损变化（大结果落盘 / 按时间清旧工具结果 / 折叠）：只同步历史，
           返回 compressed=False（不做重建提示词、注入简报这些「仪式」，
@@ -2253,18 +2235,17 @@ class AIAgent:
         # 任何一层动了 messages → 同步回正式历史（不同步的话，按时间清理
         # 下一轮会把原始内容原样塞回来；折叠/落盘同理）。
         # 顺手滤掉临时消息（它们不该进正式历史，保护持久化）。
-        # 历史踩坑：不能无脑切 messages[1:]——system 缺失时会
+        # 不能无脑切 messages[1:]——system 缺失时会
         # 悄悄丢掉第一条真实消息；只在 [0] 确实是 system 时才剥。
         self.conversation_history = [
             m for m in _drop_leading_system(messages) if not m.get("_ephemeral")
         ]
 
         if not compacted:
-            # 历史踩坑：无损变化（落盘/按时间清理/折叠）
+            # 无损变化（落盘/按时间清理/折叠）
             # 到此为止——作废缓存 / 打压缩边界标记 / 注入「历史已被总结」
-            # 简报这些仪式，只有真做了 LLM 摘要压缩才有意义。以前 changed 的
-            # 语义太宽，一次大工具结果落盘就把全套仪式跑一遍（误导模型 +
-            # 白白打穿缓存）。
+            # 简报这些仪式，只有真做了 LLM 摘要压缩才有意义（一次大工具结果
+            # 落盘就跑全套仪式会误导模型 + 白白打穿缓存）。
             return messages, system_prompt, False
 
         # 压缩前调记忆管理器提取事实（趁旧消息还在）
@@ -2705,11 +2686,11 @@ class AIAgent:
     ):
         """续写恢复的最后一步：把截断响应和续写响应合并成一个。
 
-        背景：拼上内容、取最后一轮的用量，形状对齐截断前的响应结构。
-        历史踩坑：最后一轮续写如果带工具调用，必须保留并把
-        结束原因标成 "tool_calls"（主循环按它分发工具）——以前硬编码成
-        「无工具调用 + stop」，模型明确要调工具的意图被吞了还伪装成正常
-        完成。还没写完（仍截断）就维持 "length"。
+        拼上内容、取最后一轮的用量，形状对齐截断前的响应结构。
+        最后一轮续写如果带工具调用，必须保留并把
+        结束原因标成 "tool_calls"（主循环按它分发工具；硬编码成
+        「无工具调用 + stop」会把模型明确要调工具的意图吞掉还伪装成正常
+        完成）。还没写完（仍截断）就维持 "length"。
 
         参数：
             truncated_response: 最初被截断的响应
@@ -2781,10 +2762,10 @@ class AIAgent:
     def _queue_skill_activation(self, path: str) -> None:
         """工具触发的条件技能激活，走「先收集、后批量执行」。
 
-        背景：回调里同步扫技能目录（磁盘 glob）太浪费——一轮跑多个工具
+        回调里同步扫技能目录（磁盘 glob）太浪费——一轮跑多个工具
         就扫多次。所以回调里只收集路径（去重），
         等组装消息时统一处理——时机正好赶在临时消息队列消费之前，激活
-        结果当轮可见，时序和原来的内联实现完全一致。
+        结果当轮可见。
 
         参数：path: 工具触碰到的文件路径。返回：无。
         """
@@ -2796,7 +2777,7 @@ class AIAgent:
     def _flush_skill_activations(self) -> None:
         """把收集到的条件技能激活批量处理掉（出错放行）。
 
-        背景：这里保持同步是因为调用方（组装消息）本身是同步方法，主循环
+        这里保持同步是因为调用方（组装消息）本身是同步方法，主循环
         每轮 LLM 调用前来一次；扫描有「修改时间+文件大小」双因子缓存兜底，
         又已从「每工具一次」去重到「每轮一次」——不值得为此改成 async。
 
@@ -2812,7 +2793,7 @@ class AIAgent:
     def _activate_conditional_skills(self, path) -> None:
         """碰到匹配的文件 → 动态激活「条件技能」。
 
-        背景：技能的 frontmatter（文件头元数据）里写了 paths 的，默认不进
+        技能的 frontmatter（文件头元数据）里写了 paths 的，默认不进
         静态索引（省索引空间）；等读/写/替换工具真的碰到匹配文件时才激活
         ——发一条临时消息告诉模型这个技能可用了（用 load_skill 取正文），
         会话内只激活一次。出错放行。
@@ -2853,14 +2834,14 @@ class AIAgent:
     def _maybe_auto_extract(self) -> None:
         """对话级轻量记忆提取的启动器（主循环末尾调）。
 
-        背景：让 agent 顺手从对话里捞事实存记忆。门控条件：config 里
+        让 agent 顺手从对话里捞事实存记忆。门控条件：config 里
         memory.auto_extract.enabled 开着（默认关）+ 每 N 回合才一次 +
         只有主代理做（子代理有独立记忆目录，不走这条链）。
         互斥：本轮模型自己调过记忆写入工具 → 跳过并推进游标
         （已经写过了，别抢着重复写）。
         发出去就不管：用 _spawn_detached 跑提取（辅助模型单轮；daemon 线程
         + 自有事件循环——躲开「每轮销毁事件循环会杀掉 create_task」的
-        历史踩坑）；任务引用保活；出错放行。
+        坑）；任务引用保活；出错放行。
 
         参数：无。返回：无。
         """
@@ -2894,7 +2875,7 @@ class AIAgent:
     def _record_recent(self, kind: str, key: str) -> None:
         """记下最近读过的文件 / 加载过的技能（去重、保序，只留最近 10 个）。
 
-        背景：上下文压缩后把这些重新注入，让 agent 不「失忆」。
+        上下文压缩后把这些重新注入，让 agent 不「失忆」。
 
         参数：
             kind: "read"（读过的文件）或 "skill"（加载的技能）
@@ -2933,7 +2914,7 @@ class AIAgent:
                                  tool_call_id=None, name=None) -> None:
         """把一条消息写进会话库（工具轮次也完整入库）。
 
-        背景：内存里的对话历史本来就含工具轮次；这里把 assistant（带工具
+        内存里的对话历史本来就含工具轮次；这里把 assistant（带工具
         调用）和工具结果同步写进会话库，重开会话恢复时才能完整重放。
         用户输入和最终回答由 cli.py 负责持久化，这里只补工具轮次，避免
         重复写。失败不阻塞主流程。
@@ -2962,7 +2943,7 @@ class AIAgent:
     async def _dispatch_tool_calls(self, assistant_msg, handle_function_call) -> bool:
         """执行模型要求的这批工具调用，并处理计划审批 + 失败统计 + 停下检查。
 
-        背景：模型的 assistant 消息（含工具调用和思考字段）会先入历史。
+        模型的 assistant 消息（含工具调用和思考字段）会先入历史。
         返回 True 表示主循环继续；False 表示工具要求停下了，得退出。
 
         并发策略：把工具分成两组——
@@ -3041,7 +3022,7 @@ class AIAgent:
         for tc in tool_calls:
             entry = registry.get(tc.function.name)
             is_safe = bool(entry.isConcurrencySafe) if entry else False
-            # T7（核心机制对齐第 7 项）：terminal 工具整体按不安全处理（保守
+            # terminal 工具整体按不安全处理（保守
             # 串行），但单条调用看命令内容——只读命令（git status/ls/cat 等）
             # 放进并发组。工具级的并发安全标记不动，只在这里分组时放宽。
             if not is_safe and tc.function.name == "terminal":
@@ -3068,8 +3049,8 @@ class AIAgent:
         for idx, tc in enumerate(unsafe_calls):
             # 批内商量式中断——每跑一个工具前查一次中断标志。
             # 中断后剩下的工具不跑了，补上「error_type=interrupted」的假结果
-            # 保住调用与结果的配对完整（历史踩坑：一批不安全工具全跑完
-            # 才退出，异常路径还会在库里留下没有结果的孤儿调用）。
+            # 保住调用与结果的配对完整（全跑完才退出
+            # 会在库里留下没有结果的孤儿调用）。
             # getattr 防御：测试用 __new__ 造的轻量 agent 没这些属性
             if getattr(self, "_interrupt_requested", False):
                 logger.info(
@@ -3134,7 +3115,7 @@ class AIAgent:
     def _maybe_start_tool_batch_summary(self, tool_calls, safe_processed, unsafe_processed) -> None:
         """启动「批间摘要」后台任务。
 
-        背景：每批工具跑完后，后台让辅助小模型写一句话总结，下一轮以临时
+        每批工具跑完后，后台让辅助小模型写一句话总结，下一轮以临时
         消息注入（生成延迟藏在模型流式输出期间，感觉不到）。
         门控：config 的 context.tool_batch_summary_enabled 开着（默认关）+
         有辅助模型 + 只有主代理做（防止子代理也来一套白花钱）。
@@ -3164,7 +3145,7 @@ class AIAgent:
                 return
             # 上一批的任务还没跑完 → 直接覆盖（新摘要取代旧的，符合「看最新」语义）
             # 用 _spawn_detached 跑：普通任务会在每轮事件循环销毁时被杀
-            # （历史踩坑）——daemon 线程把生命周期解耦出来
+            # ——daemon 线程把生命周期解耦出来
             self._tool_summary_task = _spawn_detached(
                 self._generate_tool_batch_summary(items), "tool-batch-summary",
             )
@@ -3204,7 +3185,7 @@ class AIAgent:
     def _run_tool_pre_callbacks(self, tc) -> None:
         """工具执行前的记录/通知类小事（safe 组顺序版和流式预执行共用）。
 
-        背景：真正执行工具前要记账——记最近读的文件、条件技能激活入队、
+        真正执行工具前要记账——记最近读的文件、条件技能激活入队、
         记忆互斥标记、通知回调。各回调自带异常保护（fail-open）。
 
         参数：tc: 工具调用对象。返回：无。
@@ -3335,7 +3316,7 @@ class AIAgent:
         return tool_content
 
     def _apply_post_plan_clear(self, plan_text: str) -> None:
-        """T9（核心机制对齐第 9 项）：计划批准后「清空上下文再执行」。
+        """计划批准后「清空上下文再执行」。
 
         大白话：调研阶段的一大堆对话执行时用不上，白白占 token——批准后：
         - 把对话历史截成一条 <post_plan_brief> user 消息（含计划全文 +
@@ -3388,8 +3369,8 @@ class AIAgent:
         try:
             if self.plan_approval_callback is not None:
                 cb_result = self.plan_approval_callback(plan_text)
-                # T9：新版回调返回三元组 (批准?, 反馈, 是否清上下文)；
-                # 老版二元组也兼容（清上下文默认 False）
+                # 回调返回三元组 (批准?, 反馈, 是否清上下文)；
+                # 二元组也兼容（清上下文默认 False）
                 if isinstance(cb_result, tuple) and len(cb_result) >= 3:
                     approved, feedback, clear_context = (
                         cb_result[0], cb_result[1], cb_result[2],
@@ -3405,9 +3386,9 @@ class AIAgent:
 
         if approved:
             self.plan_mode = False
-            # T2：记下批准的计划全文（压缩后恢复注入用）
+            # 记下批准的计划全文（压缩后恢复注入用）
             self._last_approved_plan = plan_text
-            # T9：清空上下文执行——历史截断成计划指令，调研消息全部让位
+            # 清空上下文执行——历史截断成计划指令，调研消息全部让位
             if clear_context and plan_text.strip():
                 self._apply_post_plan_clear(plan_text)
                 return json.dumps({
@@ -3459,7 +3440,7 @@ class AIAgent:
     def _merge_results_in_order(self, all_calls, safe_processed, unsafe_processed):
         """按模型原始调用顺序合并 safe/unsafe 两路结果，回填历史并落盘。
 
-        背景：safe 组和 unsafe 组是分开跑的，但模型那边的调用顺序不能乱；
+        safe 组和 unsafe 组是分开跑的，但模型那边的调用顺序不能乱；
         这里按原顺序对号入座，保证调用 id 和结果严格配对（不破坏
         「调用和结果必须交替」的消息规矩）。
 
@@ -3498,7 +3479,7 @@ class AIAgent:
     async def _finalize_response(self, assistant_msg, user_message: str) -> str:
         """处理「模型不再调工具」的最终回答：入历史 + 跑 STOP 钩子 + 触发反思。
 
-        背景：已改 async——STOP 钩子链挪到线程里跑，
+        本方法是 async——STOP 钩子链挪到线程里跑，
         免得慢钩子冻住事件循环。如果 STOP 钩子注入了强制消息，会置
         self._stop_hook_forced = True，主循环看到这个标志要继续跑而不是返回。
 
@@ -3529,7 +3510,7 @@ class AIAgent:
                 )
             else:
                 # 完全空响应（正文和思考都没字）：友好兜底。
-                # 历史踩坑：以前这里静默返回空串，用户看到「突然断开」
+                # 绝不静默返回空串——用户会看到「突然断开」
                 # 以为 agent 崩了
                 final_content = (
                     "[LLM 返回了空响应（content 和 reasoning_content 都为空）。"
@@ -3622,7 +3603,7 @@ class AIAgent:
     def _update_prevent_sleep(self) -> None:
         """看一眼忙不忙，忙就按住电脑不让它休眠。
 
-        背景：每轮 while 开头调。goal 进行中或有后台任务在跑就算「忙」；
+        每轮 while 开头调。goal 进行中或有后台任务在跑就算「忙」；
         忙且 config 开了防休眠就 acquire，闲了就 release。用实例标志保证
         只在忙闲切换时真正调——每轮都调的话引用计数会无限涨。
         任何异常由调用处兜底（防休眠失败不影响主对话）。
@@ -3720,7 +3701,7 @@ class AIAgent:
     def _collect_turn_tool_trace(self, start_idx: int):
         """从本轮历史片段里抽出观察器要的工具调用/结果对。
 
-        背景：历史里存的参数和结果都是 JSON 字符串，观察器要的是解析后的
+        历史里存的参数和结果都是 JSON 字符串，观察器要的是解析后的
         形状（[{"name","arguments"}] / [{"name","error","content"}]）。
         结果是按原调用顺序回填的，两个列表下标天然对齐；解析失败的条目
         跳过，不让观察器吃坏数据。
@@ -3817,7 +3798,7 @@ class AIAgent:
                 "[LLM 调用失败，本轮已中断] 重试或检查模型连接。"
                 "详见日志（LLM API 调用失败）。"
             )
-            # P3.3：触发 STOP_FAILURE 钩子（和正常收尾的 STOP 区分开，给审计/告警用）
+            # 触发 STOP_FAILURE 钩子（和正常收尾的 STOP 区分开，给审计/告警用）
             self._trigger_stop_failure_hook(
                 error="LLM 调用失败", error_type="LLMError",
             )
@@ -3854,7 +3835,7 @@ class AIAgent:
         return fallback
 
     def _trigger_stop_failure_hook(self, *, error: str, error_type: str) -> None:
-        """P3.3：触发 STOP_FAILURE 钩子（失败放行，异常不影响主流程）。
+        """触发 STOP_FAILURE 钩子（失败放行，异常不影响主流程）。
 
         参数：
             error: 错误描述
@@ -3891,7 +3872,7 @@ class AIAgent:
     def _sync_memory(self, user_message: str, assistant_message: str) -> None:
         """把这一轮对话同步到外部记忆服务（如果配了）。
 
-        背景：内置的文件记忆（Memory.md 那套）由记忆工具主动写；这里只管
+        内置的文件记忆（Memory.md 那套）由记忆工具主动写；这里只管
         外部服务的逐轮同步。出错只打 debug 日志。
 
         参数：
@@ -3970,10 +3951,10 @@ class AIAgent:
                 with self._reflection_lock:
                     self._active_reflections -= 1
 
-        # 历史踩坑：daemon 线程不会自动继承主线程的
-        # contextvars（线程内共享的上下文变量）。会话内切过工作目录后，
-        # 反思写项目记忆会落错项目区（退回 os.getcwd() 兜底）。修法：主线程
-        # 先 copy_context()，线程入口用 ctx.run 包一层。
+        # daemon 线程不会自动继承主线程的
+        # contextvars（线程内共享的上下文变量）——不复制的话，会话内切过
+        # 工作目录后，反思写项目记忆会落错项目区（退回 os.getcwd() 兜底）。
+        # 所以主线程先 copy_context()，线程入口用 ctx.run 包一层。
         _reflection_ctx = contextvars.copy_context()
         t = threading.Thread(
             target=lambda: _reflection_ctx.run(_bg),

@@ -23,8 +23,7 @@ TAVILY_URL = "https://api.tavily.com/search"
 def _check_tavily_configured() -> bool:
     """开关函数（check_fn）：配置了 TAVILY_API_KEY 才把这个工具亮给模型看。
 
-    背景：注册表支持"登记了但不一定可见"——每次暴露工具列表前会调这个函数
-    决定显隐。没配 API key 时搜索必然失败，不如直接藏起来。
+    注册表每次暴露工具列表前调此函数决定显隐；没配 key 时搜索必然失败，直接隐藏。
 
     返回：True 表示已配置（显示工具），False 表示没配置（隐藏）。
     """

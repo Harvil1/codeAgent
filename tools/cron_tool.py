@@ -1,9 +1,9 @@
 """定时任务（cron）工具：让 AI 能自己创建/查看/删除定时任务。
 
 打个比方：这是给 AI 一个「闹钟遥控器」。闹钟本体（CronScheduler，在
-agent/cron.py 里，靠后台线程每秒看一眼到没到点，到点就把提醒塞进主对话）
-早就有了；本文件补上缺失的操作入口，
-让 LLM（AI 模型）用工具调用的方式管理闹钟，不必手工编辑 jobs.json。
+agent/cron.py 里，靠后台线程每秒看一眼到没到点，到点就把提醒塞进主对话）；
+本文件给 LLM（AI 模型）提供工具调用方式的管理入口，
+不必手工编辑 jobs.json。
 
 怎么拿到闹钟本体：工具被调用时，框架会把 agent 实例放在
 dispatch_kwargs["agent_ref"] 里，从它的 cron_scheduler 字段取调度器
@@ -100,7 +100,7 @@ CRON_DELETE_SCHEMA = {
 def _get_scheduler(dispatch_kwargs: dict):
     """从工具调用的上下文里把 cron 调度器（闹钟本体）取出来。
 
-    背景：handler 被调用时框架传来的 dispatch_kwargs 里带着 agent 实例，
+    handler 被调用时框架传来的 dispatch_kwargs 里带着 agent 实例，
     调度器就挂在它的 cron_scheduler 字段上。
 
     参数：

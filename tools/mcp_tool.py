@@ -1,6 +1,6 @@
 """把 MCP server（外挂工具服务）的工具登记进 OmniMate 的工具注册表。
 
-背景：MCP 是接外部工具的标准协议。程序启动时会调 register_mcp_tools()，
+MCP 是接外部工具的标准协议。程序启动时会调 register_mcp_tools()，
 把所有已连接的 MCP server 提供的工具按 mcp__<server>__<tool> 的命名
 登记到 registry（中央工具注册表），LLM 就能像调内置工具一样调用它们。
 
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 def _make_server_check(mgr: MCPManager, sname: str):
     """造一个"这个 server 还连着吗"的检查函数（闭包记住 manager 和 server 名）。
 
-    背景：registry 的 check_fn 机制用它在运行时决定工具显不显——
-    对应 server 的 client 存在且已连接才返回 True（server 断开时工具自动隐藏）。
+    registry 的 check_fn 机制用它决定工具显不显——对应 server 的 client
+    存在且已连接才返回 True（server 断开时工具自动隐藏）。
     """
     def check():
         with mgr._lock:
@@ -35,8 +35,8 @@ def _make_server_check(mgr: MCPManager, sname: str):
 def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
     """把 MCP server 的工具批量登记进 registry。
 
-    背景：启动时全量登记；但内联临时 server 只需要暴露
-    agent 声明的那几个，所以加了 servers 过滤参数。
+    启动时全量登记；内联临时 server 只需暴露 agent 声明的那几个，
+    所以有 servers 过滤参数。
 
     参数：
         manager: MCP 管理器（None 时自动取全局单例）
@@ -108,10 +108,10 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
 def _register_resource_tools(manager: MCPManager) -> int:
     """给每个连着的 MCP server 配上"列资源/读资源"两个工具。
 
-    背景：MCP server 除了工具还能提供 resources（静态资源，比如一份文档）。
+    MCP server 除了工具还能提供 resources（静态资源，比如一份文档）。
     注册名是 mcp__<server>__list_resources / mcp__<server>__read_resource，
     走 registry 现成的 mcp__ 动态命名空间——model_tools 自动发现、
-    catalog 精简条目、mcp_server_filter 过滤全都天然生效，不用发明新机制。
+    catalog 精简条目、mcp_server_filter 过滤全都天然生效。
 
     注意：server 不支持 resources 协议时工具照样注册（调用时会返回
     友好错误），而不是启动时探测一次就永久藏起来——能力探测留作 follow-up。
@@ -200,10 +200,9 @@ def _register_resource_tools(manager: MCPManager) -> int:
 def initialize_mcp(approval_callback=None) -> int:
     """启动时的总入口：加载配置 → 连接 server → 登记工具。
 
-    背景：审批只针对"项目级"配置——用户级 ~/.OmniMate/.mcp.json 是用户
-    自己手写的，天然可信；但项目里的 .mcp.json 可能是 clone 陌生仓库
-    带进来的，所以每个 server 第一次连接前必须先过审批。
-    没批准、或者压根没有
+    审批只针对"项目级"配置——用户级 ~/.OmniMate/.mcp.json 是用户自己手写的，
+    天然可信；但项目里的 .mcp.json 可能是 clone 陌生仓库带进来的，所以每个
+    server 第一次连接前必须先过审批。没批准、或者压根没有
     approval_callback（非交互场景）→ fail-closed 直接跳过不连。
 
     参数：

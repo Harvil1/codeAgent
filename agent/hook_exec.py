@@ -35,8 +35,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # 辅助小模型 router 的注入
 #
-# 背景：agent/aux_llm.py 的 AuxLLMRouter 要在 cli.py / RuntimeContext 构造时
-# 拿到 main_client 和 endpoints，它没有全局单例的 getter。所以这里留一个
+# agent/aux_llm.py 的 AuxLLMRouter 没有全局单例的 getter，这里留一个
 # 模块级的"提供者"注入点：cli.py 启动时调
 # set_aux_router_provider(lambda: aux_llm_router)，run_prompt_hook 再通过
 # provider 拿 router。没注入就返回 None → fail-open 跳过。
@@ -134,9 +133,8 @@ def _is_handler_allowed(handler_type: str) -> bool:
 
 
 def _wrap_with_sandbox(hook) -> list:
-    """把 hook 要跑的命令用 sandbox_runner（OS 沙箱）包一层。
+    """把 hook 要跑的命令用 sandbox_runner（OS 沙箱）包一层，限制它能碰的文件范围。
 
-    背景：声明式 hook 跑的是外部命令，套沙箱限制它能碰的文件范围。
     平台不支持或沙箱程序没装时降级——返回原始 command 并记条警告
     （fail-open，不能因为沙箱缺失让 hook 跑不了）。
 
@@ -183,7 +181,7 @@ def _wrap_with_sandbox(hook) -> list:
 class HookExecutionError(RuntimeError):
     """声明式 hook 执行失败（启动失败/超时/非零退出/输出解析失败）。
 
-    历史踩坑：fail_closed=True 的 hook 要在失败路径把这个异常
+    fail_closed=True 的 hook 要在失败路径把这个异常
     抛出去。只有 pre_tool_use 路径（dispatch_hook 传 propagate_error=True）
     会放行异常，让 registry 把它转成 deny（拒绝执行工具）；其他事件仍按
     fail-open 处理（吞掉异常返回 None）。
@@ -291,7 +289,7 @@ def dispatch_hook(
     默认所有执行器的异常都吞掉返回 None（fail-open，和老的 run_script_hook
     行为一致）。
 
-    历史踩坑：propagate_error=True 且 hook 配了 fail_closed 时，
+    propagate_error=True 且 hook 配了 fail_closed 时，
     异常必须向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远走不到
     （等于声明式 hook 配了 fail_closed: true，出错时却照样 fail-open 放行）。
 
@@ -341,7 +339,7 @@ def dispatch_hook(
 
 
 # ============================================================================
-# command 类型：起子进程跑命令（就是最早的 run_script_hook，逻辑保持不动）
+# command 类型：起子进程跑命令
 # ============================================================================
 
 
@@ -363,7 +361,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
     Windows + use_sandbox=True 走 Job Object（进程管控）模式——
           命令不做包装，正常 Popen 启动后把进程挂进 job（与 terminal_tool
           同一套流程）；挂 job 失败也降级继续跑（记警告）。
-    历史踩坑：各失败分支（启动失败/超时/非零退出/输出解析失败）
+    各失败分支（启动失败/超时/非零退出/输出解析失败）
           在 hook.fail_closed 时要抛 HookExecutionError——经 pre_tool_use
           路径转成 deny；注意 exit 2 是 hook 主动"拦截"的决策、不算失败，
           维持原协议不走异常。
@@ -377,8 +375,8 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         return _fail_closed_or_none(hook, f"hook {hook.name} command 为空")
 
     payload_json = json.dumps(payload, ensure_ascii=False)
-    # 历史踩坑：hook 子进程的环境变量不再原样继承宿主的全量
-    # （里面含 API key 等敏感信息），改用 terminal 同款 build_safe_env
+    # hook 子进程的环境变量不原样继承宿主的全量
+    # （里面含 API key 等敏感信息），用 terminal 同款 build_safe_env
     # （把密钥类洗掉）+ hook 配置里自己声明的 env 覆盖
     from agent.sandbox_env import build_safe_env
     env = {**build_safe_env(), **(hook.script.env or {})}
@@ -435,7 +433,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         stderr = result.stderr
         returncode = result.returncode
     else:
-        # 老路径：直接 subprocess.run（没开沙箱，或 Unix 下被 wrapper 包装过）
+        # 非 Job 模式路径：直接 subprocess.run（没开沙箱，或 Unix 下被 wrapper 包装过）
         try:
             proc = subprocess.run(
                 argv,
@@ -498,12 +496,10 @@ _ENV_INTERP_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def interpolate_env_vars(value: str, allowed: list) -> str:
-    """把字符串里的 ${VAR} 换成环境变量的值——但只换白名单点过名的变量。
+    """把字符串里的 ${VAR} 换成环境变量的值——但只换白名单点过名的变量（不加限制可能把 API key 等敏感变量悄悄发到外部网址）。
 
-    背景：不加限制的话，hook 配置
-    可能把 API key 这类敏感环境变量悄悄发到外部网址。所以不在白名单的
-    引用一律原样保留 ${VAR} 字样并记警告——既防泄漏，也防"用户以为会
-    插值、实际没插"的静默错配。
+    不在白名单的引用一律原样保留 ${VAR} 字样并记警告——既防泄漏，也防
+    "用户以为会插值、实际没插"的静默错配。
 
     参数：
     - value：待处理的字符串（通常是 url）
@@ -663,10 +659,9 @@ class _SafeFormatDict(dict):
 
 
 def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
-    """让辅助小模型（aux_llm_router）单轮评估这个事件，返回 JSON 判决。
+    """让辅助小模型（aux_llm_router）单轮评估这个事件，返回 JSON 判决——有些判决逻辑写不成死规则，让小模型看一眼更灵活。
 
-    背景：有些 hook 的判决逻辑写不成死规则，让小模型看一眼更灵活。
-    hook 配置里的 prompt 是模板字符串，会用 payload 的字段填空。
+    hook 配置里的 prompt 是模板字符串，用 payload 的字段填空。
 
     参数：
     - hook：要执行的 prompt 类型 hook
@@ -684,9 +679,9 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         )
         return None
 
-    # 历史踩坑：必须用 format_map + _SafeFormatDict 这种"安全填充"——
-    # payload 缺字段时保留 {field} 原样继续渲染（此前裸 .format(**payload)
-    # 缺 key 直接 KeyError 抛穿，整个 hook 挂掉）
+    # 必须用 format_map + _SafeFormatDict 这种"安全填充"——
+    # payload 缺字段时保留 {field} 原样继续渲染（裸 .format(**payload)
+    # 缺 key 会直接 KeyError 抛穿，整个 hook 挂掉）
     prompt_text = (
         (hook.script.prompt or "").format_map(_SafeFormatDict(payload))
         if hook.script.prompt else ""
@@ -736,10 +731,7 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
 
 
 def run_agent_hook(hook, payload: dict) -> Optional[dict]:
-    """派一个子代理去多轮评估这个事件，解析它回答里的 JSON 当判决。
-
-    背景：单轮小模型不够用的复杂判断，交给能多轮思考（还能查资料）的
-    子代理——直接复用 delegate_tool 的 _run_child，不另起炉灶。
+    """派一个子代理去多轮评估这个事件，解析它回答里的 JSON 当判决——单轮小模型不够用的复杂判断，交给能多轮思考（还能查资料）的子代理（复用 delegate_tool 的 _run_child）。
 
     参数：
     - hook：要执行的 agent 类型 hook

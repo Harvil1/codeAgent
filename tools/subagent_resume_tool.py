@@ -1,8 +1,7 @@
 """subagent_resume 工具：让中断的子代理（主对话派出去帮忙干活的分身）从断点继续干活。
 
-背景：子代理的对话记录会写到磁盘
-（~/.OmniMate/.agent-sessions/<agent_id>.jsonl）；本工具是"取"的入口，
-整体流程是：
+子代理的对话记录写到磁盘（~/.OmniMate/.agent-sessions/<agent_id>.jsonl）；
+本工具是"取"的入口，整体流程是：
 - load_transcript 把历史消息读回来
 - 用 initial_messages 重新启动一个 AIAgent 子代理
   （深度 = 父深度+1、只给 minimal 最小工具集、关掉摘要压缩）
@@ -12,7 +11,7 @@
 注意：恢复的只是"对话历史"（一条条 role/content 消息），不是内存里的
 运行时状态——重建内存代价太高，对话记录已经够用了。
 
-设计要点（历史踩坑，别丢）：
+设计要点：
 - **handler 签名必须是 (args, **dispatch_kwargs)**——注意：
   签名不符时 dispatch 静默不调用，代码成了摆设（silent-dead-code）
 - **fail-open**：读文件/追加/标记完成任何一步失败都不崩，返回错误 JSON
@@ -48,7 +47,7 @@ def _spawn_resumed_agent(
 ) -> str:
     """构造一个子代理，把续命任务跑完，返回最终回答。专门留的测试接缝。
 
-    背景：生产实现参考 tools/delegate_tool.py:_run_child 的子代理构造套路——
+    子代理构造对齐 tools/delegate_tool.py:_run_child 的套路——
     - spawn_depth+1（从 agent_ref 拿父深度再 +1，防止子代理套子代理无限递归）
     - 只给 minimal 最小工具集（跟 leaf 叶子子代理对齐，免得它乱派活）
     - 关掉 summary_only（resume 要的是完整结果，不是 300 字摘要）
@@ -139,8 +138,7 @@ def _spawn_resumed_agent(
 def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
     """恢复一个中断的子代理：读历史 → 起子代理续跑 → 续写记录 → 标记完成。
 
-    背景：这是工具 handler 和 CLI 共用的入口，逻辑集中在一处免得
-    两边跑偏。流程：
+    工具 handler 和 CLI 共用的入口，逻辑集中在一处。流程：
     1. load_transcript(agent_id) 读出历史消息
     2. 组装续跑用的 messages = 历史 + 末尾的 user 指令
     3. _spawn_resumed_agent 起子代理跑完
@@ -267,7 +265,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
 def _handle_subagent_resume(args: dict, **dispatch_kwargs) -> str:
     """工具 handler：LLM 调 subagent_resume 时进这里，校验参数后转 _run_resume。
 
-    背景：handler 签名必须严格是 (args: dict, **dispatch_kwargs) → JSON 字符串
+    handler 签名必须严格是 (args: dict, **dispatch_kwargs) → JSON 字符串
     （签名不符时 dispatch 静默不调用，代码等于白写）。
     LLM 传的字段从 args 取，命名上下文（agent_ref / config 等）从
     dispatch_kwargs 取。

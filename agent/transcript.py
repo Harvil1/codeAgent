@@ -1,7 +1,7 @@
 """压缩前快照存档：在对话被压缩（摘要替换原文）之前，把完整消息原样备份到 .transcripts/，方便事后翻旧账。
 
-背景：上下文压缩是有损的——原始对话一旦被摘要替代就找不回来了，
-所以每次压缩前先偷偷留一份全量底稿。什么时候备份由调用方决定
+上下文压缩是有损的——原始对话一旦被摘要替代就找不回来了，
+所以每次压缩前先留一份全量底稿。什么时候备份由调用方决定
 （默认只在 L4 LLM 摘要那一步 force=True）。
 文件格式：JSONL，一行一条消息，最后一行是 _meta 元数据。
 """
@@ -53,7 +53,7 @@ def snapshot_if_needed(
     target = transcripts_dir / f"transcript_{ts}_{short_uuid}.jsonl"
 
     try:
-        # I3 修复遗留：写文件前先过 safe_path 路径安全检查——不能绕过全局路径闸门
+        # 写文件前先过 safe_path 路径安全检查——不能绕过全局路径闸门
         from agent.permission import safe_path
         perm = safe_path(target, write=True, allowed_roots=[transcripts_dir.resolve()])
         if not perm.allowed:

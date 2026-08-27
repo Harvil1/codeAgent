@@ -46,7 +46,7 @@ def get_log_path() -> Path:
 def main():
     """入口：从 stdin 读事件 JSON，拼一行日志追加写进日志文件。
 
-    背景：stdin 读不进有效 JSON 就安静退出（hook 不能因为自己挂了连累主程序）。
+    stdin 读不进有效 JSON 就安静退出（hook 不能因为自己挂了连累主程序）。
     """
     try:
         payload = json.load(sys.stdin)

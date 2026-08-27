@@ -123,7 +123,7 @@ _BG_UNAVAILABLE_ERR = json.dumps({
 def _require_bg_manager(kwargs):
     """从 kwargs 里取后台任务管理器 bg_manager。
 
-    背景：所有 bg_* 工具都依赖它，缺了就干不了活，所以统一在这里检查。
+    所有 bg_* 工具都依赖它，缺了就干不了活，统一在这里检查。
 
     参数：
         kwargs: dispatch 透传的命名上下文
@@ -168,8 +168,8 @@ def _task_not_found_err(task_id):
 def _handle_bg_start(args: dict, **kwargs) -> str:
     """bg_start 的处理函数：先过权限审查，再把命令交给后台管理器去跑。
 
-    背景：后台任务容易被人当成"绕过安检的后门"——历史上它确实漏检过，
-    所以现在启动前必须完整走权限闸门（见下方 S1 fix 注释）。
+    启动前必须完整走权限闸门（含 fatal 硬底线），防止 bg_start 被当成
+    绕过安检的后门。
 
     参数：
         args: LLM 传来的参数——command（命令及参数的列表）、cwd（工作目录，

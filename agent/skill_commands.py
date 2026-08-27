@@ -6,7 +6,7 @@
 
 给谁用：cli.py（启动建命令表）和主循环（触发技能时拼消息）用。
 
-关键设计（历史共识，别破坏）：技能正文走 user 消息注入，绝不进 system prompt！
+关键设计（铁律）：技能正文走 user 消息注入，绝不进 system prompt！
 system prompt 在会话开始时构建一次，之后改一个字都会让前缀缓存失效、token 成本翻倍；
 而技能内容经常变，所以放在 user 消息里，改技能不碰缓存。
 """
@@ -25,10 +25,7 @@ _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 
 
 def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
-    """把技能目录扫一遍，生成 {"/命令名": 技能信息} 字典。
-
-    背景：CLI 的斜杠命令不是手写死的，而是从技能目录里现场扫出来的——
-    每个带 SKILL.md 的子目录就是一条 /<技能名> 命令。
+    """把技能目录扫一遍，生成 {"/命令名": 技能信息} 字典——每个带 SKILL.md 的子目录就是一条 /<技能名> 命令。
 
     参数：
         skills_dirs：技能目录。可以传一个目录（Path 或字符串），
@@ -87,10 +84,7 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
 
 
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
-    """把 SKILL.md 开头的 YAML 头拆出来。
-
-    背景：技能文件分两段——开头的「---」围起来的元信息（YAML，叫 frontmatter，
-    存技能名/描述/触发条件等）和后面的正文（给 AI 看的操作指引）。
+    """把 SKILL.md 开头的 YAML 头（frontmatter，存技能名/描述/触发条件等元信息）拆出来，正文（给 AI 看的操作指引）另行返回。
 
     参数：
         content：SKILL.md 的完整文本。
@@ -127,7 +121,7 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
 
 # frontmatter 摘要缓存：{SKILL.md 路径: ((修改时间纳秒, 文件大小), 摘要字典)}
 # 为什么缓存：每次文件读写都会触发一轮匹配扫描，不缓存就得反复解析全部 SKILL.md。
-# 为什么用 mtime+size 两个因子：历史踩坑——Windows 的 mtime 精度只有 ~15 毫秒，
+# 为什么用 mtime+size 两个因子：Windows 的 mtime 精度只有 ~15 毫秒，
 # 同一窗口内改文件单看时间会误判「没变过」导致丢更新，加 size 才稳。
 _fm_summary_cache: dict = {}
 
@@ -181,11 +175,7 @@ def _iter_skill_fm_summaries(skills_dirs=None):
 
 
 def path_matches_skill_paths(paths, file_path: str, cwd: str = None) -> bool:
-    """判断某个文件路径是否命中技能声明的 paths 模式。
-
-    背景：这是条件技能的核心判定——文件读写一发生，就拿被碰的文件路径
-    对照各技能的 paths 列表，命中就注入该技能的提示（只按文件路径匹配，
-    不看别的东西）。
+    """判断某个文件路径是否命中技能声明的 paths 模式（条件技能的核心判定，只按文件路径匹配）。
 
     参数：
         paths：技能 frontmatter 里的模式列表（如 ["*.py", "src/**"]）。
@@ -276,10 +266,7 @@ _SKIP_DIR_NAMES = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
 
 
 def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
-    """从文件所在目录一路向上走到 cwd，把沿途的嵌套技能目录找出来。
-
-    背景：技能不一定只放在全局目录——项目里任何子目录下的
-    .omnimate/skills 或 .claude/skills 都算「本项目这块区域专属技能」。
+    """从文件所在目录一路向上走到 cwd，把沿途的嵌套技能目录（.omnimate/skills 或 .claude/skills，算「本区域专属技能」）找出来。
 
     参数：
         file_path：出发的文件路径（相对路径会按 cwd 补成绝对路径）。
@@ -440,11 +427,7 @@ def execute_skill(
 
 
 def scan_bundle_commands(skills_dir: Path) -> Dict[str, dict]:
-    """把配置文件里的技能束也注册成斜杠命令。
-
-    背景：技能束（一次打包加载多个技能的配置，见 skill_bundle.py）也是
-    一种可触发的东西，所以也要有命令。命令格式是 /bundle:<名字>，
-    与普通技能命令 /<名字> 区分开。
+    """把配置文件里的技能束（一次打包加载多个技能的配置，见 skill_bundle.py）也注册成斜杠命令，格式 /bundle:<名字>（与普通技能命令 /<名字> 区分）。
 
     参数：
         skills_dir：技能根目录（本函数保留此参数是为了接口一致，实际用不到）。

@@ -1,9 +1,8 @@
 """复刻检查清单的验证脚本：跑 22 项小检查，确认 agent 的核心功能还活着。
 
-背景：本项目是按复刻指南（11-scaffold.md）实现的，指南里有一份「这些
-功能必须存在且能用」的清单。这个脚本就是清单的自动化验收——每项做一件
-小事（建个文件、发个工具调用），看结果对不对。适合改完代码后快速回归，
-比跑全量测试快得多。
+本项目按复刻指南（11-scaffold.md）实现，这个脚本验收指南里「这些功能
+必须存在且能用」的清单——每项做一件小事（建个文件、发个工具调用），
+看结果对不对。适合改完代码后快速回归，比跑全量测试快得多。
 
 用法：
     uv run python scripts/verify.py
@@ -113,9 +112,8 @@ def check_read_file_tool(tmp):
 
 
 def check_interrupt():
-    """验证中断机制：调用 interrupt() 后，中断标志确实被设置。
-
-    背景：这是用户按 Ctrl+C 优雅打断 agent 的底层开关。
+    """验证中断机制：调用 interrupt() 后，中断标志确实被设置
+    （用户按 Ctrl+C 优雅打断 agent 的底层开关）。
 
     返回：PASS/FAIL 结果。
     """
@@ -312,10 +310,8 @@ def check_usage_stats(tmp):
 # ---------------------------------------------------------------------------
 
 def check_sessions_db(tmp):
-    """验证会话存储初始化时会创建 .sessions/ 目录（新版是 JSONL 文件目录）。
-
-    背景：老版本用单个 sessions.db 数据库，新版改成了 .sessions/ 目录下
-    的 JSONL 文本文件（append-only，方便恢复）。
+    """验证会话存储初始化时会创建 .sessions/ 目录（JSONL 文件目录，
+    append-only 方便恢复；传 sessions.db 路径会自动转成该目录）。
 
     参数：
         tmp  临时目录 Path
@@ -371,7 +367,7 @@ def check_curator_status(tmp):
     """
     from agent.curator import load_state
     state = load_state(tmp / "skills")
-    # 从没跑过 curator 时状态文件不存在，返回空 dict 也算通过
+    # 从未跑过 curator 时状态文件不存在，返回空 dict 也算通过
     return _ok(f"state keys: {list(state.keys()) or '(空)'}")
 
 
@@ -393,9 +389,8 @@ def check_curator_dry_run(tmp):
 
 
 def check_curator_archive(tmp):
-    """验证技能归档：archive 后技能目录从原地消失、出现在 .archive/ 下。
-
-    背景：「完全可逆」铁律——归档不删除，只是挪到 .archive/ 藏起来。
+    """验证技能归档：archive 后技能目录从原地消失、出现在 .archive/ 下
+    （「完全可逆」铁律——归档不删除，只是挪到 .archive/ 藏起来）。
 
     参数：
         tmp  临时目录 Path
@@ -493,8 +488,7 @@ def check_delegate_batch(tmp):
 def check_context_compress():
     """验证上下文压缩：消息条数超阈值时新管线会把历史压短（LLM 用假实现）。
 
-    背景：长对话不压缩会撑爆上下文窗口；这里把触发阈值调得很低，
-    确保压缩一定会发生。
+    这里把触发阈值调得很低，确保压缩一定会发生。
 
     返回：PASS/FAIL 结果。
     """
@@ -570,7 +564,7 @@ def main():
             ("使用统计", lambda: check_usage_stats(tmp)),
         ]),
         ("会话存储", [
-            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # 名字沿用旧清单，实际查的是 .sessions/ 目录
+            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # 名字来自清单原文，实际查的是 .sessions/ 目录
             ("session_search", lambda: check_session_search(tmp)),
         ]),
         ("Curator", [

@@ -139,10 +139,10 @@ def _no_goal(tool_name: str) -> str:
 def _handle_goal_start(args: dict, **dispatch_kwargs) -> str:
     """立一个新的目标（启动 goal）。
 
-    背景：内部调用共享的 start_goal_agent 函数，与 CLI 的 /goal 命令
+    内部调用共享的 start_goal_agent 函数，与 CLI 的 /goal 命令
     同一份代码，保证两条入口行为一致。
 
-    注意（历史踩坑）：这里故意不往对话历史里追加 [goal_start] 的 user
+    注意：这里故意不往对话历史里追加 [goal_start] 的 user
     消息——工具路径在工具结果还没回填时插 user 消息，会破坏消息历史
     「user/assistant 严格交替」的规矩（API 会报错）。目标激活后主循环
     的 goal-continue 分支自然会接手推进，不需要靠这条消息。

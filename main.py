@@ -45,9 +45,9 @@ ensure_default_settings()
 def _mcp_server_approval(name: str, desc: str) -> bool:
     """项目级 .mcp.json 的首次连接审批。
 
-    背景：项目目录里的 .mcp.json 可能指定任意外部 server，直接连有安全风险，
-    所以第一次连接前要问用户一句"允许吗"。拿不到用户输入（非交互环境，
-    比如管道喂数）就一律拒绝——宁可不用，不可乱连（fail-closed）。
+    项目目录里的 .mcp.json 可能指定任意外部 server，第一次连接前要问
+    用户一句"允许吗"。拿不到用户输入（非交互环境，比如管道喂数）就一律
+    拒绝——宁可不用，不可乱连（fail-closed）。
 
     参数：
         name：MCP server 的名字（配置里写的键名）
@@ -68,11 +68,9 @@ def _mcp_server_approval(name: str, desc: str) -> bool:
 
 
 def _init_mcp_safely():
-    """带兜底的 MCP 初始化包装函数：失败了也要让用户在终端看得见。
+    """带兜底的 MCP 初始化包装函数：失败了在终端直接警告（不只写 debug 日志）。
 
-    背景：MCP 连接失败如果只写一条 debug 日志，用户
-    根本不知道为什么 mcp__ 开头的工具全消失了，所以改成终端上直接警告。
-    注意失败不阻断启动——MCP 只是可选扩展，主功能不依赖它。
+    失败不阻断启动——MCP 只是可选扩展，主功能不依赖它。
     """
     try:
         from tools.mcp_tool import initialize_mcp
@@ -91,18 +89,18 @@ _init_mcp_safely()
 def main():
     """主入口函数：把启动流程收尾，实际分发交给 cli 模块。
 
-    背景与分工：参数解析和"该进交互模式还是一次性问答"
-    的判断在 cli.main，这里只剩"转手调用"。main.py 本身只负责
-    三件事：输出编码设置、MCP 初始化、调用 cli.main。
+    分工：参数解析和"该进交互模式还是一次性问答"的判断在 cli.main，
+    这里只转手调用。main.py 本身只负责三件事：输出编码设置、MCP 初始化、
+    调用 cli.main。
 
-    支持的调用形式（向后兼容）：
+    支持的调用形式：
         python main.py                         # 交互模式
         python main.py -c / --continue         # 自动恢复最近会话
         python main.py chat <msg>              # 非交互一次性问答
         python main.py --agents '{json}'       # 从命令行注入子代理定义
         python main.py --agents '{json}' chat <msg>
 
-    一个设计细节：asyncio.run（启动异步事件循环的开关）不在本层调用，而是
+    设计细节：asyncio.run（启动异步事件循环的开关）不在本层调用，而是
     放在 cli 里的 run_interactive / run_one_shot 内部、紧贴真正要用异步的
     run_conversation 调用点。这样 cli.main 保持纯同步，避免出现"事件循环
     里再套事件循环"的嵌套问题。

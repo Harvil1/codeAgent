@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 class AgentDefinition:
     """一份子代理定义（从 .md 文件或 CLI 注入解析出来）。
 
-    背景：delegate_tool 派活时按这份定义起一个独立的 AIAgent 分身——
-    用什么模型、能看到哪些工具、什么权限，全由这里的字段决定。
+    delegate_tool 按它起独立的 AIAgent 分身：用什么模型、能看到哪些
+    工具、什么权限，全由这里的字段决定。
     """
 
     name: str
@@ -68,9 +68,8 @@ def _user_agents_dir() -> Path:
 
 
 def _project_agents_dir() -> Path:
-    # 历史踩坑：Path.cwd() 是整个进程共享的（就是 os.getcwd），
-    # 多个子代理并发跑时会互相踩目录。所以改用 get_workspace_cwd()——
-    # 它基于线程局部的 ContextVar，每个并发上下文拿到自己的工作目录。
+    # Path.cwd() 是进程共享的，并发子代理会互踩；get_workspace_cwd()
+    # 基于 ContextVar，每个并发上下文拿到自己的工作目录。
     from agent.workspace_context import get_workspace_cwd
     return Path(get_workspace_cwd()) / ".omnimate" / "agents"
 
@@ -173,8 +172,8 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
 def project_inline_mcp_servers() -> Dict[str, dict]:
     """把所有项目级 agent .md 里声明的内联 MCP server 合并成一张表。
 
-    背景：这些 server 来自项目目录（可能是 clone 来的陌生仓库），要交给
-    首连审批统一把关，所以需要先把它们收拢出来。
+    这些 server 来自项目目录（可能是 clone 来的陌生仓库），收拢出来
+    交给首连审批统一把关。
 
     返回：
         {server名: 配置dict}；扫描出任何异常都返回空 dict（fail-open，不阻塞启动）。
@@ -198,9 +197,7 @@ _cli_injected: Dict[str, AgentDefinition] = {}
 
 
 def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
-    """把 CLI `--agents '{json}'` 参数传进来的子代理定义登记进来。
-
-    背景：不落盘、启动时动态塞一批子代理定义。
+    """把 CLI `--agents '{json}'` 参数传进来的子代理定义登记进来（不落盘）。
 
     参数：
         cli_agents：{名字: {description, prompt, tools, model, ...}} 形式的 dict

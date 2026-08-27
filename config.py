@@ -7,10 +7,10 @@
 配置怎么算出来的（默认路径下）：
   最终值 = DEFAULT_CONFIG（出厂默认）← 深合并 ← settings.json（~/.OmniMate/settings.json）
   - settings.json 由 agent/settings.py 负责读写；第一次启动时会自动把
-    旧的三样东西（config.yaml + .env + .mcp.json）搬进 settings.json
-  - 如果调用时显式传了 config_file 指向某个 yaml 文件，就走旧的 yaml
+    config.yaml / .env / .mcp.json 迁进 settings.json
+  - 如果调用时显式传了 config_file 指向某个 yaml 文件，就走 yaml
     加载逻辑（现在基本只有测试在用）
-  - settings.json 读取失败时，也会退回旧的 yaml 逻辑兜底
+  - settings.json 读取失败时，也会退回 yaml 逻辑兜底
 
 什么是"深合并"（deep-merge），为什么不用整体替换：
   比如默认配置里有 context 整段几十个键，用户只想改其中一个阈值。
@@ -132,7 +132,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "reactive_keep_recent": 10,
         "reactive_compact_cooldown_seconds": 60,   # 60 秒内最多救一次
         "reactive_compact_max_per_session": 5,     # 单会话最多救 5 次（防死循环）
-        "reactive_once_per_session": False,        # 旧版"每会话只救一次"开关（已废弃，别开）
+        "reactive_once_per_session": False,        # 已废弃的"每会话只救一次"开关（别开）
         # 工具批间摘要：让辅助模型一句话总结这批工具结果，下一轮再悄悄
         # 注入，把"出结果"和"看结果"的时间差藏起来。默认关
         "tool_batch_summary_enabled": False,
@@ -507,15 +507,12 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
 # 路径辅助
 # ---------------------------------------------------------------------------
 
-# 说明：路径函数（get_omnimate_home / config_path / env_file）已经统一
-# 收敛到 constants.py。这里留个 config_path 别名纯粹是本模块自己用着
+# 说明：路径函数（get_omnimate_home / config_path / env_file）统一在
+# constants.py。这里留个 config_path 别名纯粹是本模块自己用着
 # 方便——外部代码请直接 import constants。
 
 def config_path() -> Path:
-    """拿到配置文件 config.yaml 的完整路径。
-
-    背景：真正的实现在 constants.py 里，这里只是转手调用一下，
-    方便本模块内部使用。
+    """拿到配置文件 config.yaml 的完整路径（实现在 constants.py，这里是本模块内部用的别名）。
 
     返回：
         Path 对象，指向 ~/.OmniMate/config.yaml（或 OMNIMATE_HOME 覆盖后的位置）。
@@ -535,18 +532,18 @@ def load_config(
 ) -> Dict[str, Any]:
     """加载配置，返回程序实际使用的那份配置字典。
 
-    干什么：把出厂默认值、用户配置、命令行临时覆盖三层捏成一份。
-    不传 config_file 时优先走 settings.json 这条新路；传了就按
-    yaml 老路走（主要是测试在用）；settings.json 读挂了也会退回老路兜底。
+    把出厂默认值、用户配置、命令行临时覆盖三层捏成一份。
+    不传 config_file 时优先读 settings.json；传了就按 yaml 逻辑走
+    （主要是测试在用）；settings.json 读挂了也会退回 yaml 兜底。
 
     参数：
         config_file：可选，显式指定一个 yaml 配置文件路径。
-            不传（默认）就走 settings.json 新逻辑；传了就强制走旧 yaml 逻辑。
+            不传（默认）就走 settings.json 逻辑；传了就强制走 yaml 逻辑。
         cli_overrides：可选，命令行临时覆盖项（字典）。
             优先级最高，最后合并进来。
 
     返回：
-        合并好的配置字典（dict）。旧代码习惯读的 config["model"]["name"]
+        合并好的配置字典（dict）。兼容形态的 config["model"]["name"]
         等字段会被构造好放进去。
     """
     # 默认路径：优先读 settings.json（新配置体系）
@@ -559,9 +556,8 @@ def load_config(
             model_cfg = get_current_model_config(settings)
 
             config = dict(settings)
-            # 拼一个兼容的 model 段：settings.json 的模型结构和老配置
-            # 不一样，但一堆旧代码还在读 config["model"]["xxx"]，
-            # 所以这里翻译成老形状喂给它们
+            # 拼一个兼容的 model 段：settings.json 的模型结构不同，
+            # 读 config["model"]["xxx"] 的地方靠这里翻译成兼容形状
             config["model"] = {
                 "provider": model_cfg.get("name", "opus"),
                 "name": model_cfg.get("model", ""),
@@ -594,7 +590,7 @@ def load_config(
         except Exception as e:
             logger.warning("读 settings.json 失败，fallback 到 yaml: %s", e)
 
-    # 旧 yaml 逻辑：传了 config_file 参数，或上面 settings.json 读失败了
+    # yaml 逻辑：传了 config_file 参数，或上面 settings.json 读失败了
     config = copy.deepcopy(DEFAULT_CONFIG)
 
     # 2. 加载用户 config.yaml（存在的话）
@@ -624,8 +620,7 @@ def load_config(
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并两个字典（深合并），返回一份新字典。
 
-    背景：整体替换字典会让用户没写的字段丢失默认值，所以合并时
-    要一层层下钻。规则：
+    规则（逐层下钻，避免用户没写的字段丢默认值）：
     - 两边都是字典 → 递归继续合
     - 其他情况 → 用 override（用户配置）的值直接覆盖
     - override 里的 None 不覆盖（让默认值有机会生效）
@@ -655,7 +650,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def _maybe_migrate(config: dict) -> dict:
     """配置结构迁移：版本号对不上时把旧结构改成新结构。
 
-    背景：只有"重命名键、改 schema"这种结构性变更才需要迁移；
+    只有"重命名键、改 schema"这种结构性变更才需要迁移；
     单纯新增字段不需要（深合并会自动补默认值）。
 
     参数：
@@ -678,8 +673,7 @@ def _maybe_migrate(config: dict) -> dict:
 def save_config(config: dict, config_file: Optional[Path] = None) -> None:
     """把配置字典写回 config.yaml 文件（遗留路径，运行时别用）。
 
-    背景：这是旧的持久化通道；运行时改配置应走
-    agent/settings.py 的 save_settings（写 settings.json），
+    运行时改配置应走 agent/settings.py 的 save_settings（写 settings.json），
     写 yaml 下次启动读不回来。
 
     参数：
@@ -721,10 +715,7 @@ def _remove_none(obj):
 
 
 def ensure_default_config() -> None:
-    """配置文件不存在时，把出厂默认配置写一份到磁盘。
-
-    背景：首次安装/首次运行时给用户生成一个可编辑的配置文件模板。
-    """
+    """配置文件不存在时，把出厂默认配置写一份到磁盘（首启生成可编辑模板）。"""
     cf = config_path()
     if not cf.exists():
         cf.parent.mkdir(parents=True, exist_ok=True)

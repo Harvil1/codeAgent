@@ -1,6 +1,6 @@
 """记忆管理员（MemoryCurator）：后台自动维护记忆库的系统。
 
-背景：记忆会越攒越多、越放越旧，需要有个"图书管理员"定期整理。分两个阶段：
+记忆会越攒越多、越放越旧，需要有个"图书管理员"定期整理，分两个阶段：
 
 第 1 阶段（本模块的 apply_automatic_transitions）：
   纯时间规则，不调 LLM——按 expected_valid_days（预期有效天数）
@@ -67,8 +67,8 @@ def apply_automatic_transitions(
 
     # 拿 memory_dir 的上一级当 omnimate_home
     omnimate_home = memory_dir.parent
-    # 历史踩坑（X1 修复）：优先用传进来的 store（和主 agent 共用一个实例，
-    # 锁才能跨线程互斥）。以前每次现建 MemoryStore，和主实例不是同一把锁，
+    # 优先用传进来的 store（和主 agent 共用一个实例，锁才能跨线程互斥）；
+    # 现建 MemoryStore 的话和主实例不是同一把锁，
     # 并发写同一个 topic.jsonl 会丢数据
     if store is None:
         store = MemoryStore(omnimate_home=omnimate_home)
@@ -189,7 +189,7 @@ def should_run_now_memory(
     - config：配置字典（可选）。读 config["memory"]["curator"]：
       - enabled = False → 整个 memory curator 关掉
       - interval_hours → 覆盖默认 168
-      老配置没有这一段时按默认跑（向后兼容）。
+      配置缺这一节时按默认跑。
     返回：该跑 True / 不该跑 False。
     """
     # 配置门控：enabled=False 直接不跑
@@ -476,7 +476,7 @@ def run_memory_review(
     - config：配置字典（可选），读 config["memory"]["curator"]：
       - llm_review_enabled = False → 跳过整个第 2 阶段（不造 agent，省成本）
       - max_batch_size → 覆盖默认 30
-      老配置没有这一段时按默认跑（向后兼容）。
+      配置缺这一节时按默认跑。
     返回：报告 dict（dry_run / buckets_reviewed（实际跑过 LLM 的批数）/
       candidates_found（候选总数）/ executed_actions / errors）。
     """

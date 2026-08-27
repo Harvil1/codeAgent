@@ -45,8 +45,7 @@ _PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z]{1,4}")
 def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
     """机械查证：条目里提到的文件路径必须真实存在。
 
-    背景：LLM 提取最常见的幻觉是编造文件路径——编出来的路径一旦入库，
-    之后的会话会把它当真。所以宁缺毋滥：提到不存在路径的条目直接丢弃。
+    宁缺毋滥：提到不存在路径的条目直接丢弃（防编造路径入库）。
     只验"长得像路径"的 token（file.py / a/b.py 形态），纯单词不验。
 
     参数：
@@ -77,7 +76,7 @@ def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
 async def run_auto_extract(agent, start_idx: int) -> int:
     """后台任务：从上次游标处到当前对话末尾，增量提取记忆。
 
-    背景：这是节流器到点后真正跑的函数，主循环把它丢到后台执行。
+    节流器到点后由主循环丢到后台执行。
 
     参数：
     - agent：主 agent 实例（提供对话历史、aux 路由、记忆库、会话 ID）
@@ -156,8 +155,8 @@ async def run_auto_extract(agent, start_idx: int) -> int:
 def _parse_items(content: str) -> List[dict]:
     """把 LLM 回复解析成条目列表，容忍 JSON 外的多余文字。
 
-    背景：模型经常在 JSON 前后加解释性文字。先试整段解析，不行再用
-    正则从文本里抠出 [...] 片段解析（与 reflection 同款策略）。
+    模型经常在 JSON 前后加解释性文字：先试整段解析，不行再用正则
+    从文本里抠出 [...] 片段（与 reflection 同款策略）。
 
     参数：
     - content：LLM 的原始回复文本
