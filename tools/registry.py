@@ -274,7 +274,7 @@ class ToolRegistry:
     def unregister(self, name: str) -> bool:
         """把一个工具从户口本上划掉（注销）。
 
-        背景：R20 轮加了这个接口，主要是给测试用的——测试临时登记的工具
+        背景：这个接口主要是给测试用的——测试临时登记的工具
         跑完要清掉，免得污染其他测试。生产代码不该用它（工具登记是启动期
         一次性的事，运行中撤工具不是设计内的玩法）。
 
@@ -293,10 +293,10 @@ class ToolRegistry:
     async def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """把 LLM 发起的工具调用转交给对应的干活函数，返回 JSON 字符串结果。
 
-        背景（Task C1 改造）：主程序是异步的（async），但工具函数有同步有异步，
+        背景：主程序是异步的（async），但工具函数有同步有异步，
         两种要都能跑而且不能卡住整个事件循环。
 
-        怎么跑（Task C1）：
+        怎么跑：
         - async handler（如 MCP / delegate 这些）：直接 await
         - 同步 handler（内置的同步工具）：丢到线程池里跑，不阻塞事件循环，
           handler 内部代码一行都不用改
@@ -320,12 +320,12 @@ class ToolRegistry:
                 "error_type": "unknown_tool",
             }, ensure_ascii=False)
 
-        # T6（核心机制对齐第 6 项）：permissions.deny 的第二道防线——
+        # permissions.deny 的第二道防线——
         # 第一道"眼不见为净"（get_tool_definitions 不把被拒工具发给 LLM）还不够：
         # 手动构造的 tool_call、schema 缓存没来得及刷新的情况，都会绕过第一道，
         # 所以真正执行前（dispatch 这里）还要再拒一次。
-        # R30c-B7：保留了 fail-open（配置坏了就全拒会把整个 agent 搞成砖），
-        # 但必须大声报 ERROR——以前是静默吞掉，规则加载失败时这道防线就无声消失了。
+        # 保留 fail-open（配置坏了就全拒会把整个 agent 搞成砖），
+        # 但必须大声报 ERROR——静默吞掉的话，规则加载失败时这道防线就无声消失了。
         try:
             from agent.tool_permissions import is_tool_denied
             if is_tool_denied(name):
@@ -386,7 +386,7 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[ToolEntry]:
         """按工具名查档案；查不到返回 None。
 
-        背景：Task C1 测试和 Task F1/F2（并发分组）需要直接拿到工具档案，
+        背景：测试和并发分组逻辑需要直接拿到工具档案，
         比如读"能不能并发跑"这个字段。
 
         参数：

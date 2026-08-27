@@ -237,7 +237,7 @@ def test_parse_consolidation_no_yaml():
 
 
 # ---------------------------------------------------------------------------
-# R26 #14：跨会话 transcript 整理（should_consolidate + consolidate_transcripts）
+# 跨会话 transcript 整理（should_consolidate + consolidate_transcripts）
 # ---------------------------------------------------------------------------
 
 import json as _json

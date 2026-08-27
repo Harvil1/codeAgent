@@ -32,7 +32,7 @@ async def test_subclass_must_implement_chat_completions():
 
 
 # ---------------------------------------------------------------------------
-# OpenAICompatClient async 契约测试（Task B2）
+# OpenAICompatClient async 契约测试
 # ---------------------------------------------------------------------------
 
 async def test_openai_compat_uses_async_client():
@@ -68,7 +68,7 @@ async def test_openai_compat_stream_is_async_gen():
 
 
 # ---------------------------------------------------------------------------
-# AnthropicClient async 契约测试（Task B3）
+# AnthropicClient async 契约测试
 # ---------------------------------------------------------------------------
 
 def test_anthropic_chat_completions_is_coroutine():

@@ -314,10 +314,9 @@ def test_stall_watchdog_no_trigger_on_steady_output(tmp_path):
 
 
 def test_stall_watchdog_enabled_by_default():
-    """X12 fix: stall_timeout 默认 45.0（看门狗默认开，对齐 Claude Code bg task 监控）。
+    """stall_timeout 默认 45.0（看门狗默认开）。
 
-    之前默认 0（=禁用），用户不显式配 stall_timeout=45 时 45s 看门狗永不触发。
-    现在默认开。用户仍可显式传 stall_timeout=0 禁用。
+    用户仍可显式传 stall_timeout=0 禁用。
     """
     mgr = BackgroundManager()
     assert mgr._stall_timeout == 45.0, (

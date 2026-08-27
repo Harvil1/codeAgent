@@ -1,4 +1,4 @@
-"""CCAR4 Task B: post-compact 主动恢复 测试。
+"""post-compact 主动恢复测试。
 
 覆盖：
 1. 单元测试：build_post_compact_brief 各场景
@@ -311,7 +311,7 @@ async def test_e2e_recovery_injected_via_run_context_compression(tmp_path):
 
     # mock compress_if_needed 返回 changed=True
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     # 构造 messages（含 system + user）
     messages = [
@@ -354,7 +354,7 @@ async def test_e2e_recovery_not_injected_when_disabled(tmp_path):
     agent.config = {"context": {"post_compact_recovery_enabled": False}}
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -386,7 +386,7 @@ async def test_e2e_recovery_not_injected_when_empty_state(tmp_path):
     agent._recent_skills = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -426,7 +426,7 @@ async def test_e2e_full_run_conversation_with_recovery(tmp_path):
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -542,7 +542,7 @@ async def test_recovery_content_visible_in_first_round_after_compact(tmp_path):
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -581,7 +581,7 @@ async def test_recovery_content_lost_in_second_round_due_to_ephemeral_design(tmp
 
     **为什么不修**：如果把 brief 写入 history，下次 compact 会把 brief 也压缩掉，
     导致摘要不要的内容污染；而且 brief 本质是"刚醒来的提醒"，不该长期驻留。
-    Claude Code 用 file attachments（结构化字段），OmniMate 用临时消息，都是 ephemeral。
+    （file attachments 式的结构化字段方案同理，都是 ephemeral。）
 
     本测试锁定这个设计行为：如果未来有人改成把 brief 写入 history，此测试会 FAIL
     提醒他重新评估设计权衡（而不是无意中改变行为）。
@@ -597,7 +597,7 @@ async def test_recovery_content_lost_in_second_round_due_to_ephemeral_design(tmp
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         call_count[0] += 1

@@ -2,8 +2,8 @@
 
 打个比方：这是给 AI 一个「闹钟遥控器」。闹钟本体（CronScheduler，在
 agent/cron.py 里，靠后台线程每秒看一眼到没到点，到点就把提醒塞进主对话）
-早就有了，但以前想设闹钟只能手工编辑 jobs.json 文件——本文件补上了这
-个缺失的操作入口，让 LLM（AI 模型）用工具调用的方式管理闹钟。
+早就有了；本文件补上缺失的操作入口，
+让 LLM（AI 模型）用工具调用的方式管理闹钟，不必手工编辑 jobs.json。
 
 怎么拿到闹钟本体：工具被调用时，框架会把 agent 实例放在
 dispatch_kwargs["agent_ref"] 里，从它的 cron_scheduler 字段取调度器
@@ -164,8 +164,8 @@ def _handle_cron_create(args: dict, **dispatch_kwargs) -> str:
         cron = str(args.get("cron") or "").strip() or tpl["cron"]
         message = str(args.get("message") or "").strip() or tpl["message"]
         catch_up = bool(args.get("catch_up", tpl["catch_up"]))
-        # 历史踩坑（R26 #18 复审发现）：以前模板的 recurring 没透传，
-        # 一次性任务会被当循环任务。现在模板值生效，显式参数可覆盖。
+        # recurring 要吃模板默认值（显式参数可覆盖）——漏了模板值的
+        # 话，一次性任务会被当成循环任务。
         recurring = bool(args.get("recurring", tpl["recurring"]))
     else:
         cron = (args.get("cron") or "").strip()

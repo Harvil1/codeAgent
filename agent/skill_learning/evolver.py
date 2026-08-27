@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """技能演化器：习惯攒够了就自动升级成正式技能。
 
-（历史轮次 CCAR15 Task 3 引入，对标 CCB 的 skillEvolver。）
-
 打比方：平时记的习惯是散落的便签，攒了一沓（同一个情境下 3 条不同做法、
 且都被反复验证过）就装订成一本正经的说明书（技能 MD 文件）。
 
@@ -141,8 +139,8 @@ def maybe_evolve(store, scope: str, skills_dir, *,
         scope：作用域——"global" 或 "project:<key>"，只处理这个 scope 的簇。
         skills_dir：技能根目录（生成的文件落在
             <skills_dir>/learned-<slug>/SKILL.md）。
-        min_members：簇最小成员数门槛（keyword-only；历史轮次 CCAR15
-            Task 4 起可从 config["skill_learning"]["evolve_min_cluster"]
+        min_members：簇最小成员数门槛（keyword-only；可从
+            config["skill_learning"]["evolve_min_cluster"]
             传入，默认 3）。
         min_avg_confidence：簇平均置信度门槛（keyword-only；config 键
             evolve_threshold，默认 0.75）。

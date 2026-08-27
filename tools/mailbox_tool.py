@@ -10,10 +10,10 @@
 - mailbox_clear：把自己信箱里的信全扔掉
 
 怎么拿到信箱：从 kwargs["agent_ref"] 取 AIAgent 实例，再读它的
-_mailbox / _agent_name 字段（Task 12 在 RuntimeContext 里创建信箱，
+_mailbox / _agent_name 字段（RuntimeContext 里创建信箱，
 并用 set_mailbox 挂到 agent 身上）。
 
-并发分类（能不能同时跑，Task F1 定的规则）：
+并发分类（能不能同时跑）：
 - mailbox_send：isConcurrencySafe=False（要写信箱，不能并发）
 - mailbox_check：isConcurrencySafe=True（只读，可并发）
 - mailbox_clear：isConcurrencySafe=False（要删信，不能并发）
@@ -66,7 +66,7 @@ def _resolve_mailbox_ctx(kwargs: dict):
     """从工具调用的上下文里提取「信箱 + 自己的名字」这两样东西。
 
     背景：中央注册表分发工具时会把 agent_ref（AIAgent 实例）放在
-    kwargs 里透传（Task 12 接的线）。信箱挂在 agent 的 _mailbox 字段、
+    kwargs 里透传。信箱挂在 agent 的 _mailbox 字段、
     名字挂在 _agent_name 字段。所有「拿不到怎么办」的兜底逻辑集中在
     这一个函数里，三个 handler 不用各写一遍。
 

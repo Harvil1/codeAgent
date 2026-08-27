@@ -289,7 +289,7 @@ def test_per_message_does_not_cross_user_boundary(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 端到端测试：_assemble_turn_messages → compress_if_needed → strip_internal_fields
-# 防止"测试绿但生产死代码"再次发生（Task 1 的 silent-dead-code bug 教训）
+# 防止"测试绿但生产死代码"（silent-dead-code 回归）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -420,11 +420,11 @@ async def test_e2e_offload_refined_full_chain(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# E2E: AIAgent.__init__ 与 _offload_decisions（R30b-A1 语义翻转）
+# E2E: AIAgent.__init__ 与 _offload_decisions（保留语义）
 # ---------------------------------------------------------------------------
 
 def test_aiagent_init_preserves_offload_decisions_r30b(tmp_path):
-    """R30b-A1：新建 AIAgent **不再**清空 _offload_decisions。
+    """新建 AIAgent 不清空 _offload_decisions。
 
     模块级决策表是同进程内所有 agent（主代理 + 并发子代理）共享的，
     __init__ 里清空会把正在运行的其他 agent 的冻结决策一起清掉，

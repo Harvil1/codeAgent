@@ -77,8 +77,8 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
                     "description": frontmatter.get("description", ""),
                     "skill_md_path": str(skill_md),
                     "skill_dir": str(skill_md.parent),
-                    "context": frontmatter.get("context"),  # 历史轮次（round3）加的字段：None=主对话内跑，"fork"=开子代理隔离跑
-                    "files": frontmatter.get("files") or [],  # 历史轮次（T3）加的字段：触发时要一并注入的参考文件清单
+                    "context": frontmatter.get("context"),  # None=主对话内跑，"fork"=开子代理隔离跑
+                    "files": frontmatter.get("files") or [],  # 触发时要一并注入的参考文件清单
                 }
             except Exception as e:
                 logger.warning("解析技能失败 %s: %s", skill_md, e)
@@ -121,7 +121,7 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
-# 条件技能动态激活（R19 第 25 项）：frontmatter 写了 paths: 的技能，
+# 条件技能动态激活：frontmatter 写了 paths: 的技能，
 # 在被触碰的文件匹配 paths 模式时自动注入提示——不用用户敲命令。
 # ---------------------------------------------------------------------------
 
@@ -184,8 +184,8 @@ def path_matches_skill_paths(paths, file_path: str, cwd: str = None) -> bool:
     """判断某个文件路径是否命中技能声明的 paths 模式。
 
     背景：这是条件技能的核心判定——文件读写一发生，就拿被碰的文件路径
-    对照各技能的 paths 列表，命中就注入该技能的提示。语义对齐 Claude Code
-    的 parseSkillPaths（只按文件路径匹配，不看别的东西）。
+    对照各技能的 paths 列表，命中就注入该技能的提示（只按文件路径匹配，
+    不看别的东西）。
 
     参数：
         paths：技能 frontmatter 里的模式列表（如 ["*.py", "src/**"]）。
@@ -235,7 +235,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
     返回：[{name, description, paths}]，只含有 paths 的技能——
     没有 paths 的技能已经在常规索引里，这里只管动态激活专用池。
 
-    历史轮次（R24 第 26 项）：skills_dirs 不传时，除常规目录外还会自动
+    skills_dirs 不传时，除常规目录外还会自动
     并入**动态发现的嵌套技能目录**（从文件所在位置一路向上到 cwd，沿途的
     .omnimate/skills 和 .claude/skills 都算）。
 
@@ -249,7 +249,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
         except Exception:
             pass
         if skills_dirs is None:
-            # 历史轮次（R24 #26）：常规目录 + 嵌套发现目录，后者放后面让同名覆盖生效
+            # 常规目录 + 嵌套发现目录，后者放后面让同名覆盖生效
             try:
                 from constants import all_skills_dirs
                 base_dirs = list(all_skills_dirs())
@@ -266,10 +266,10 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
 
 
 # ---------------------------------------------------------------------------
-# 动态技能目录发现（R24 第 26 项，对齐 Claude Code 的 discoverSkillDirsForPaths）
+# 动态技能目录发现
 # ---------------------------------------------------------------------------
 
-# 认可的嵌套技能目录名（自家 .omnimate/skills 为主；.claude/skills 是为了兼容 CC 的项目结构）
+# 认可的嵌套技能目录名（自家 .omnimate/skills 为主；.claude/skills 是兼容既有项目结构用的）
 _NESTED_SKILL_DIR_NAMES = (".omnimate/skills", ".claude/skills")
 # 向上找时跳过这些目录——node_modules 里被人塞一个技能也不该被信任（防投毒）
 _SKIP_DIR_NAMES = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
@@ -286,7 +286,7 @@ def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
         cwd：向上走的终点。不传时自动取当前工作区目录。
 
     返回：目录 Path 列表，可能为空。顺序是深路径优先——离文件越近的排
-    越前，这样同名技能「近的覆盖远的」（对齐 CC 的覆盖语义）。
+    越前，这样同名技能「近的覆盖远的」。
     路径里穿过 node_modules 等跳过目录的不收（防投放）。
     文件不在 cwd 内时返回空（如 ~/.OmniMate 的落盘文件不适用本机制）。
     fail-open：任何异常返回空列表。
@@ -331,7 +331,7 @@ def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
 
 
 # ---------------------------------------------------------------------------
-# 技能附件（历史轮次 T3，核心机制对齐第 3 项）：
+# 技能附件：
 # frontmatter 写 files: 即可声明参考文件，技能触发时一并注入。
 # ---------------------------------------------------------------------------
 

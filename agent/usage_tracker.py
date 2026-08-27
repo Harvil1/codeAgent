@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按模型分别记账的 token 用量追踪器（R30f 第 H8 项，对标 CCB cost-tracker 的核心子集）。
+"""按模型分别记账的 token 用量追踪器。
 
 干什么：像流水账一样记下每次 LLM 调用花了多少 token——按模型分开累计
 五个数：prompt（输入）/ completion（输出）/ cache_read（缓存命中）/

@@ -1,6 +1,6 @@
 """TraceSink 本地 trace sink 测试。
 
-CCAR8 Task 4。验证：
+验证：
 - 每天 jsonl 文件
 - fail-open 写盘
 - query / summary 聚合
@@ -94,7 +94,7 @@ def test_query_limit(tmp_path: Path):
 
 
 # =============================================================================
-# CCAR8 Task 5: trace hook 接入测试（防 silent-dead-code）
+# trace hook 接入测试（防 silent-dead-code）
 # =============================================================================
 
 

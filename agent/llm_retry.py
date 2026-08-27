@@ -13,8 +13,7 @@
   - 回答被输出上限拦腰截断：先把上限调大重试，还不行就让模型「接着说」
 
 处于 agent/__init__.py（主循环）之下、llm_client.py（真正的接线层）
-之上——每次 LLM 请求都先经过这里的「防摔」包装。借鉴了 Claude Code
-的韧性机制。
+之上——每次 LLM 请求都先经过这里的「防摔」包装。
 """
 
 import asyncio
@@ -37,7 +36,7 @@ DEFAULT_UNATTENDED_MAX_HOURS = 24
 
 # 输出上限（max_tokens）「升级」的默认值：
 # - 初始 None = 不主动传这个参数，让 SDK 用模型自己的默认值
-# - 升级到 64000（对齐业界 64k；早年是 32768）
+# - 升级到 64000（业界常用 64k）
 # 设计取舍：输出上限较小的服务商（如 DeepSeek 只有 8K）收到 64k 会报
 # 400 溢出——由下面的「400 溢出自适应」（parse_context_overflow）动态
 # 下调兜底；万一升级调用本身失败，也沿用截断的回答（fail-open 不硬抛）。
@@ -127,7 +126,7 @@ def is_retryable(error: Exception) -> bool:
     except ImportError:
         pass
 
-    # 历史踩坑（R26 #10 修复）：httpx 的传输层错误（连接被重置/管道断裂/
+    # 历史踩坑：httpx 的传输层错误（连接被重置/管道断裂/
     # 各种网络毛病的总类）一律可重试。openai SDK 通常会把它包装成
     # APIConnectionError（上面已经命中），但其它路径可能裸着抛出来——
     # 这种异常的类名里不含 "connection"/"timeout" 字样，光靠名字兜底
@@ -174,7 +173,7 @@ def get_retry_after(error: Exception) -> Optional[float]:
     return None
 
 
-# 连接被掐断类错误的名字特征（R26 #10）：遇到它们，重试前要先重建
+# 连接被掐断类错误的名字特征：遇到它们，重试前要先重建
 # client 扔掉坏掉的连接池——在坏池子上重试大概率还是同样的错
 _RESET_NAMES = ("connectionreset", "brokenpipe", "remoteprotocol", "readerror", "writeerror")
 
@@ -203,7 +202,7 @@ def _is_connection_reset(error: Exception) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 400 溢出自适应（R17 #13）：请求的「输入 + 输出上限」超过了模型的
+# 400 溢出自适应：请求的「输入 + 输出上限」超过了模型的
 # 上下文总容量时，服务器会报 400 并在报错文字里写出具体数字。这里用
 # 两个正则把数字抠出来，好算出一个塞得下的输出上限再重试
 # ---------------------------------------------------------------------------
@@ -273,8 +272,8 @@ async def call_with_retry(
     max_tokens: Optional[int] = None,
     consecutive_529_threshold: int = DEFAULT_CONSECUTIVE_529_THRESHOLD,
     config: Optional[Dict[str, Any]] = None,
-    background: bool = False,  # R25 #4：后台调用（子代理摘要等）遇 529 立即放弃
-    heartbeat_cb=None,  # R25 #5：长退避分片心跳（fn(elapsed, total)）
+    background: bool = False,  # 后台调用（子代理摘要等）遇 529 立即放弃
+    heartbeat_cb=None,  # 长退避分片心跳（fn(elapsed, total)）
 ):
     """带着全套「防摔预案」调一次 LLM：自动重试、自动换备胎、自动调参。
 
@@ -285,10 +284,7 @@ async def call_with_retry(
       3. 主号码彻底打不通，而配了备胎（fallback_llm_client），就再试一次
       4. 备胎也不行，只好把最后一个错误抛出去
 
-    历史改造（Plan 2A Task D1，保留背景）：本函数原来是同步 def，
-    后来整个项目改异步——LLM client 的 chat_completions 都加了 await，
-    sleep 也换成 asyncio 版（不让等待卡住整个事件循环）。
-    退避/抖动/529 早切/max_tokens 升级的逻辑自始至终没变。
+    本函数是 async：所有等待都用 asyncio 版 sleep（不让等待卡住整个事件循环）。
 
     无人值守持久重试模式：当配置里的 `bash_unattended_retry` 开关打开——
       - 重试次数视为无限（不会数满退出，只受时间限制）
@@ -324,7 +320,7 @@ async def call_with_retry(
     抛错：所有尝试都失败时，抛最后一次遇到的那个异常。
     """
     last_error: Optional[Exception] = None
-    # 历史踩坑（X6 修复）：max_retries<=0 时下面的循环一次都不进，
+    # 历史踩坑：max_retries<=0 时下面的循环一次都不进，
     # 最后会变成「raise None」，报出让人摸不着头脑的 TypeError——
     # 所以提前拦下给个说得清的错误。
     # 注意：无人值守模式下重试次数视为无限，不走这个校验（原值被忽略）。
@@ -390,7 +386,7 @@ async def call_with_retry(
             return await llm_client.chat_completions(messages, **call_kwargs)
         except Exception as e:
             last_error = e
-            # === 400 溢出自适应（R17 #13）===
+            # === 400 溢出自适应 ===
             # 报错文字里带了具体数字 → 现场把输出上限调小、立刻重试
             # （最多调 2 次，不占正常重试的名额）。解析不出数字 / 输入
             # 本身太大 / 已调到底 → 当普通 400 抛出去，交给上层的
@@ -418,13 +414,13 @@ async def call_with_retry(
             if not is_retryable(e):
                 raise
 
-            # 后台调用遇 529（过载）直接放弃（R25 #4，防「火上浇油」）——
+            # 后台调用遇 529（过载）直接放弃（防「火上浇油」）——
             # 后台任务下个周期自然会重跑，没必要在过载端点上排队硬挤
             if background and _error_status_code(e) == 529:
                 logger.warning("后台 LLM 调用遇 529（过载），放弃重试（防放大）")
                 raise
 
-            # 连接被掐断 → 先重建 client（换新连接池）再重试，不额外耗重试名额（R26 #10）
+            # 连接被掐断 → 先重建 client（换新连接池）再重试，不额外耗重试名额
             if _is_connection_reset(e):
                 reset = getattr(llm_client, "reset_client", None)
                 if reset is not None:
@@ -600,7 +596,7 @@ def _compute_backoff(
 
     历史踩坑：早期没有上限——Retry-After 很大或重试次数多时会一等
     几小时，用户以为程序挂了（X7 修复加了帽）；后来又按模式分了档：
-    普通模式 60 秒、无人值守长跑模式 5 分钟（R17 #44）。
+    普通模式 60 秒、无人值守长跑模式 5 分钟。
 
     返回：实际该睡的秒数。
     """

@@ -345,7 +345,7 @@ def test_fork_session_empty_source_creates_empty_fork(store):
 
 
 # ---------------------------------------------------------------------------
-# 对齐 Claude Code：tool 消息持久化往返
+# tool 消息持久化往返
 # ---------------------------------------------------------------------------
 
 def test_tool_message_roundtrip(store):

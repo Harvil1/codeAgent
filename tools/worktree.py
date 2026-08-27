@@ -9,7 +9,7 @@
     多个目录共享同一份历史，但各自有独立分支和文件）
     非 git 目录：只能建一个普通临时目录凑合用
 
-历史沿革（P3.4 轮新增）：create_isolated_workspace 多了一个可选参数
+create_isolated_workspace 还有一个可选参数
 hook_registry（钩子登记本，用户配置的附加动作），在 worktree 创建/清理时
 触发 WORKTREE_CREATE / WORKTREE_REMOVE 钩子。这两个钩子是通知型的，
 给审计/清理脚本用的；钩子出异常也不影响 worktree 本身（fail-open：
@@ -69,7 +69,7 @@ def _run_git(argv: List[str], cwd, timeout: float = 10) -> subprocess.CompletedP
 
 
 # ---------------------------------------------------------------------------
-# 变更检测（历史出处：Task G）
+# 变更检测
 # ---------------------------------------------------------------------------
 
 def has_worktree_changes(worktree_path: Path) -> bool:
@@ -263,7 +263,7 @@ def create_isolated_workspace(
     参数：
         base_path：以哪个目录为基准建（不传用当前目录）。
         name：工作区名字（会用在分支名和目录名里）。
-        hook_registry：可选，钩子登记本（历史沿革 P3.4 轮加的参数）。
+        hook_registry：可选，钩子登记本。
         传了它，创建/清理时会触发 WORKTREE_CREATE / WORKTREE_REMOVE
         两个通知钩子（fail-open，钩子挂了不影响主流程）。
         session_id：可选，触发钩子时捎带给钩子的会话 ID。
@@ -293,7 +293,7 @@ def _create_git_worktree(base: Path, name: str, *,
     目录（放在仓库旁边的 .omnimate-worktrees/ 下，不混进项目目录），并
     返回一个配套的清理闭包。
 
-    历史沿革 P3.4：hook_registry 不为 None 时，建好/删完会触发
+    hook_registry 不为 None 时，建好/删完会触发
     WORKTREE_CREATE / WORKTREE_REMOVE 通知钩子（fail-open）。
 
     参数：
@@ -340,7 +340,7 @@ def _create_git_worktree(base: Path, name: str, *,
         "name": name,
     })
 
-    # 历史出处 P3.4：触发 WORKTREE_CREATE 钩子（fail-open）
+    # 触发 WORKTREE_CREATE 钩子（fail-open）
     _fire_worktree_hook(hook_registry, "create", {
         "session_id": session_id,
         "path": str(worktree_dir),
@@ -397,7 +397,7 @@ def _create_git_worktree(base: Path, name: str, *,
             "branch": branch,
             "worktree_dir": str(worktree_dir),
         })
-        # 历史出处 P3.4：触发 WORKTREE_REMOVE 钩子（fail-open）
+        # 触发 WORKTREE_REMOVE 钩子（fail-open）
         _fire_worktree_hook(hook_registry, "remove", {
             "session_id": session_id,
             "path": str(worktree_dir),
@@ -414,7 +414,7 @@ def _create_temp_workspace(name: str, *,
 
     参数：
         name：工作区名（用在临时目录名前缀里）。
-        hook_registry：可选的钩子登记本（历史沿革 P3.4 加的）。
+        hook_registry：可选的钩子登记本。
         session_id：可选，捎带给钩子的会话 ID。
 
     返回：(临时目录路径, cleanup 清理闭包)。
@@ -429,7 +429,7 @@ def _create_temp_workspace(name: str, *,
         "type": "temp",
     })
 
-    # 历史出处 P3.4：触发 WORKTREE_CREATE 钩子（fail-open）
+    # 触发 WORKTREE_CREATE 钩子（fail-open）
     _fire_worktree_hook(hook_registry, "create", {
         "session_id": session_id,
         "path": str(tmp),
@@ -458,7 +458,7 @@ def _create_temp_workspace(name: str, *,
             logger.info("temp workspace %s 有改动，保留（智能清理）", tmp)
             return False
         shutil.rmtree(tmp, ignore_errors=True)
-        # 历史出处 P3.4：触发 WORKTREE_REMOVE 钩子（fail-open）
+        # 触发 WORKTREE_REMOVE 钩子（fail-open）
         _fire_worktree_hook(hook_registry, "remove", {
             "session_id": session_id,
             "path": str(tmp),
@@ -469,7 +469,7 @@ def _create_temp_workspace(name: str, *,
 
 
 def _fire_worktree_hook(hook_registry, action: str, payload: dict) -> None:
-    """触发 worktree 的创建/删除通知钩子（历史出处 P3.4）。
+    """触发 worktree 的创建/删除通知钩子。
 
     定位：纯通知性质的附加动作，worktree 的正事不能被它拖累——钩子抛出
     的任何异常都在这里吞掉，只留一条 warning 日志。

@@ -1,7 +1,7 @@
-"""两件事：跨会话的输入历史 + 大段粘贴的"引用协议"（R21 #42/#39 引入）。
+"""两件事：跨会话的输入历史 + 大段粘贴的"引用协议"。
 
-分别对齐 Claude Code 的 history.ts（跨会话 ↑↓ 键召回旧输入）和
-pasteStore.ts（大段粘贴先存盘、消息里只留占位符，要用时再展开）。
+两个能力分别是：跨会话召回旧输入（↑↓ 键语义），以及
+大段粘贴先存盘、消息里只留占位符（要用时再展开）。
 适配说明：OmniMate 用的是纯 rich console，没有 readline 那种按键级行编辑，
 所以做了相应变形：
 
@@ -25,12 +25,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# 大段粘贴判定阈值（对齐 CC pasteStore 的 1024 字符），超过就走外存
+# 大段粘贴判定阈值（1024 字符），超过就走外存
 PASTE_THRESHOLD = 1024
-# 输入历史最多留多少条（对齐 CC 的 100 条上限）
+# 输入历史最多留多少条（100 条上限）
 HISTORY_LIMIT = 100
 
-# R30d-C10：占位符里的 id 既认 hex（新的内容寻址 id），也认旧的纯数字编号
+# 占位符里的 id 既认 hex（内容寻址 id），也认旧的纯数字编号
 _PASTE_REF_RE = re.compile(r"\[Pasted text #([A-Za-z0-9]+)(?: \+\d+ lines)?\]")
 
 
@@ -100,8 +100,8 @@ class GlobalHistory:
     def append(self, text: str) -> None:
         """记一条输入（和最近一条一模一样就不记；条数超了裁旧的）。全程 fail-open。
 
-        历史踩坑（R30d-C9 修复）：追加和"软裁剪"（超上限时整文件重写）必须都
-        放进文件锁里——以前重写没加锁，会把别的进程刚追加进去的数据覆盖丢掉。
+        历史踩坑：追加和"软裁剪"（超上限时整文件重写）必须都
+        放进文件锁里——重写不加锁会把别的进程刚追加进去的数据覆盖丢掉。
         折中策略：等锁等到超时时，追加照做（追加风险低），裁剪放弃
         （重写必须持锁，宁可不裁也不能丢数据）。
 
@@ -178,7 +178,7 @@ class GlobalHistory:
 
 
 # ---------------------------------------------------------------------------
-# R21 #39：粘贴引用协议——大段文本存外面，消息里只留占位符
+# 粘贴引用协议——大段文本存外面，消息里只留占位符
 # ---------------------------------------------------------------------------
 
 def _paste_dir(home) -> Path:
@@ -189,7 +189,7 @@ def _paste_dir(home) -> Path:
 def _paste_id_for(text: str) -> str:
     """给一段粘贴内容算 id：取内容 sha256 的前 8 位 hex。
 
-    背景（R30d-C10）：这叫"内容寻址"——内容相同算出的 id 就相同，
+    背景：这叫"内容寻址"——内容相同算出的 id 就相同，
     同一段东西粘十次也只占一个文件。
     """
     return hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()[:8]
@@ -198,8 +198,8 @@ def _paste_id_for(text: str) -> str:
 def store_paste_if_large(text: str, home) -> Tuple[str, Optional[str]]:
     """输入太长就转存到外部文件，消息里换成占位符。
 
-    超过 PASTE_THRESHOLD 字符时：原文存 .paste/text_<hash8>.txt（内容寻址，
-    R30d-C10——同样内容重复粘贴复用同一个文件，不再每次新写 text_<n>.txt），
+    超过 PASTE_THRESHOLD 字符时：原文存 .paste/text_<hash8>.txt（内容寻址——
+    同样内容重复粘贴复用同一个文件），
     消息替换成 `[Pasted text #<hash8> +M lines]`；没超长就原样返回 (text, None)。
     早期数字编号的占位符（text_5.txt）在展开那边仍然认识（正则做了兼容）。
 
@@ -243,7 +243,7 @@ def expand_paste_references(text: str, home) -> str:
 
     def _expand(m: "re.Match") -> str:
         try:
-            # R30d-C10：id 是字母数字串，hex（内容寻址）和旧数字编号都能对上
+            # id 是字母数字串，hex（内容寻址）和旧数字编号都能对上
             pid = m.group(1)
             path = _paste_dir(home) / f"text_{pid}.txt"
             if path.exists():

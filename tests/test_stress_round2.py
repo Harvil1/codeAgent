@@ -1,8 +1,8 @@
-"""压力测试 Round 2：补 Round 1 的覆盖缺口。
+"""压力测试：补函数级用例的覆盖缺口。
 
-Round 1（test_stress_long_context.py）测的是函数级；本文件压三个盲区：
+test_stress_long_context.py 测的是函数级；本文件压三个盲区：
 1. 主循环端到端长跑（run_conversation 数百轮 + goal 驱动）——粘合处验证
-2. MCP notification 风暴（Task 9 reader 线程高频消息）
+2. MCP notification 风暴（reader 线程高频消息）
 3. 韧性时间线（熔断器连开 / 429 重试风暴 / 529 早切）
 
 纯本地 mock（不调真 LLM）。
@@ -114,7 +114,7 @@ async def test_stress_main_loop_300_tool_rounds(tmp_path):
     """主循环 300 轮 brief 工具调用 + 最终响应。
 
     压的是 run_conversation + dispatch + 压缩编排的**粘合处**
-    （Round 1 只测了管线函数级）。brief 纯 echo 无副作用。
+    （常规用例只测管线函数级）。brief 纯 echo 无副作用。
     验证：跑完不崩、history 协议合法、无 ephemeral 泄漏、耗时可接受。
     """
     responses = []
@@ -148,7 +148,7 @@ async def test_stress_goal_driven_50_rounds(tmp_path):
     """goal 驱动长跑：mock 一直返回文本，goal evaluate continue 逐轮推进，
     budget 超限（每轮 2050 token × 50 轮 > 100K limit）自动 pause。
 
-    验证 CCAR8 核心新路径：goal continue 注入 ephemeral → 下一轮消费 →
+    验证 goal continue 核心路径：注入 ephemeral → 下一轮消费 →
     不进 history → budget pause 收尾。
     """
     # 60 个文本响应（足够 goal 跑到 budget 超限）
@@ -205,7 +205,7 @@ async def test_stress_goal_network_pause_in_main_loop(tmp_path):
 def test_stress_mcp_notification_storm_1000():
     """reader 线程 1000 条 notification 风暴 + 慢 handler（1ms/条）。
 
-    Task 9 全新线程代码只测过单条 dispatch——这里压高频：
+    线程代码常规用例只测单条 dispatch——这里压高频：
     验证不丢消息、不崩、耗时可接受。
     """
     transport = StdioTransport("echo")  # 不会真连

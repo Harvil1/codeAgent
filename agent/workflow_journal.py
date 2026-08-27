@@ -1,4 +1,4 @@
-"""工作流执行日志（journal）——为断点恢复记的账本（R28 W2，蓝图 §4）。
+"""工作流执行日志（journal）——为断点恢复记的账本（蓝图 §4）。
 
 在项目里的位置：由 workflow_engine 在调子代理前后写入，resume（断点恢复）
 时读取；对上服务 workflow_engine，对下只碰文件系统。
@@ -168,8 +168,8 @@ class WorkflowJournal:
     def save_meta(self, data: dict) -> None:
         """把若干字段合并进 meta.json（已有的字段保留，不整文件覆盖）。
 
-        历史踩坑（R30c-C7 修复）：以前直接 write_text，进程中断会留下
-        半截 JSON，resume 读 meta 直接失败。现在改成"先写临时文件再改名"
+        历史踩坑：不能直接 write_text——进程中断会留下
+        半截 JSON，resume 读 meta 直接失败。必须用"先写临时文件再改名"
         的原子写，中断最多丢这次更新，不会写坏整个文件。
 
         参数：

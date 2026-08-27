@@ -35,7 +35,7 @@ import sys
 import traceback
 from pathlib import Path
 
-# stdout 强制 utf-8（历史踩坑：Windows 控制台默认 GBK，打印中文/emoji 会崩；
+# stdout 强制 utf-8（Windows 控制台默认 GBK，打印中文/emoji 会崩；
 # 与 main.py 用同一套防护）
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

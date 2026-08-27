@@ -1,4 +1,4 @@
-"""workflow 工具：确定性工作流引擎暴露给 LLM 的入口（R28 W4，蓝图 §2）。
+"""workflow 工具：确定性工作流引擎暴露给 LLM 的入口。
 
 背景：workflow 引擎（agent/workflow_engine.py）能用受约束的 Python 脚本
 并发驱动一批子代理，本文件把它包装成一个工具给 LLM 调。共五个 action：
@@ -6,7 +6,7 @@ run（name=脚本名 或 script=内联代码）/ resume（只信 run 目录里�
 list / status / kill。DSL 具体写法见 skills/workflow-dsl/SKILL.md
 （窄腰原则：工具 description 只写一句话，详细文档让 LLM 按需 load_skill）。
 
-C3（借鉴 CCB 的 detached launch）：run/resume 支持 wait=false——
+run/resume 支持 wait=false——
 放到后台线程 + 独立事件循环里跑，立刻返回 run_id 不堵住对话主循环；
 跑完后经 delegation 队列以后台通知送达；同会话内可以 kill
 （取消通道用 threading.Event，因为要跨线程触发）。run 目录超过
@@ -25,12 +25,12 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 # run_id -> threading.Event（正在跑的 run 的取消开关；只存在进程内存里）。
-# C3 历史取舍：用 threading.Event 而不是 asyncio.Event——detached run
+# 取舍：用 threading.Event 而不是 asyncio.Event——detached run
 # 跑在后台线程的事件循环里，主循环线程要能跨线程 set 它
 # （asyncio.Event 不能跨线程/跨事件循环用）
 _ACTIVE_RUNS: dict = {}
 
-# C3（借鉴 CCB 的 KEEP_MAX_RUNS）：run 目录数量上限（按修改时间从旧到新删，跳过还在跑的）
+# run 目录数量上限（按修改时间从旧到新删，跳过还在跑的）
 _KEEP_MAX_RUNS = 50
 
 

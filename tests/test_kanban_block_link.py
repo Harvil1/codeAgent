@@ -12,7 +12,7 @@ def store(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 1: TaskStore has_path + add_dependency
+# TaskStore has_path + add_dependency
 # ---------------------------------------------------------------------------
 
 def test_valid_statuses_includes_blocked():
@@ -92,7 +92,7 @@ def test_add_dependency_no_validate_bypasses_cycle(store):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: task_block + task_unblock handler
+# task_block + task_unblock handler
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import _handle_task_block, _handle_task_unblock
@@ -197,7 +197,7 @@ def test_unblock_non_blocked_rejected(store, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 3: task_link handler
+# task_link handler
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import _handle_task_link

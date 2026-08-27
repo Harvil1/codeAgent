@@ -177,7 +177,7 @@ async def test_mock_conversation_with_tool_call(tmp_path):
 
 
 async def test_mock_conversation_with_memory_injection(tmp_path):
-    """CCAR10 Task 2: 记忆 snapshot 从 system prompt 退役——改走 ephemeral 注入。
+    """记忆 snapshot 从 system prompt 退役——改走 ephemeral 注入。
 
     无 aux_llm_router 时走降级链：snapshot 作为 ephemeral user 消息注入
     （_pending_ephemeral_messages → _assemble_turn_messages 消费）。
@@ -205,7 +205,7 @@ async def test_mock_conversation_with_memory_injection(tmp_path):
 
     await agent.chat("test")
 
-    # CCAR10: 记忆改走 ephemeral 注入，出现在 LLM 收到的 messages 里
+    # 记忆走 ephemeral 注入，出现在 LLM 收到的 messages 里
     assert len(captured_messages) > 0
     flat_text = "\n".join(
         str(m.get("content", "")) for m in captured_messages[0]
@@ -221,7 +221,7 @@ async def test_mock_conversation_with_memory_injection(tmp_path):
 async def test_interrupt_stops_conversation(tmp_path):
     """运行中置位的中断标志能停止对话循环（下一轮 loop-top 消费并清除）。
 
-    R30 审计 High-3 契约更新：run_conversation 入口会清残留中断标志
+    契约：run_conversation 入口会清残留中断标志
     （防上一回合的 Ctrl+C 吞掉下一条用户消息），所以"停止循环"的语义
     是模型运行中置位 → 下一轮迭代开头退出。
     """
@@ -253,11 +253,11 @@ async def test_interrupt_stops_conversation(tmp_path):
 
 
 async def test_stale_interrupt_flag_cleared_on_new_message(tmp_path):
-    """R30 审计 High-3 回归：上一回合残留的中断标志不得吞掉新消息。
+    """回归：上一回合残留的中断标志不得吞掉新消息。
 
     场景：Ctrl+C 异常退出 run（flag 已置位但 loop-top 未消费）→ 用户发
-    下一条消息 → 旧行为第一轮 loop-top 立即 break 回"[已被用户中断]"，
-    消息被吞；新行为在 run_conversation 入口清标志，正常处理。
+    下一条消息 → 若入口不清标志，第一轮 loop-top 立即 break 回
+    "[已被用户中断]"，消息被吞；run_conversation 入口清标志后正常处理。
     """
     async def fake_chat_completions(messages, *, tools=None, **kwargs):
         msg = SimpleNamespace(content="正常响应", tool_calls=None)
@@ -380,8 +380,7 @@ def test_session_persistence_round_trip(tmp_path):
 async def test_compress_if_needed_signature_matches_integration():
     """compress_if_needed 签名匹配 AIAgent 集成层的调用约定。
 
-    端到端验证在 Task 11 完成；此处只验证开关 True 时新管线能独立跑通。
-    Task D4 fix: compress_if_needed 改 async。
+    此处只验证新管线能独立跑通；compress_if_needed 是 async。
     """
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
 
@@ -416,9 +415,9 @@ async def test_compress_if_needed_signature_matches_integration():
 
 
 async def test_aiagent_new_pipeline_flag_true(tmp_path):
-    """新管线是唯一路径（Commit 7 后双轨期结束）。
+    """新管线是唯一路径。
 
-    端到端验证在 Task 11；此处只确认短对话不抛。
+    此处只确认短对话不抛。
     """
     agent = AIAgent(
         api_key="fake",
@@ -433,7 +432,7 @@ async def test_aiagent_new_pipeline_flag_true(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 工具层 offload 集成（Task 10）
+# 工具层 offload 集成
 # ---------------------------------------------------------------------------
 
 def test_prompt_builder_includes_offload_guidance():
@@ -523,7 +522,7 @@ def _handle_terminal_direct(args, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# 端到端：200 轮对话 + 新管线（Task 11）
+# 端到端：200 轮对话 + 新管线
 # ---------------------------------------------------------------------------
 
 async def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
@@ -536,7 +535,7 @@ async def test_e2e_200_turn_conversation_with_pipeline(tmp_path):
     - 最终 messages 长度应远小于起始（压缩生效）
     - reactive_compact 也能无异常调用（紧急通道不崩溃）
 
-    Task D4 fix: compress_if_needed + chat_completions 改 async。
+    compress_if_needed + chat_completions 均为 async。
     """
     from agent.context_pipeline import (
         compress_if_needed, CompressionSessionState, reactive_compact,
@@ -695,7 +694,7 @@ async def test_aiagent_chat_long_conversation_triggers_pipeline(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# P2-T6: AIAgent hooks 集成测试
+# AIAgent hooks 集成测试
 # ---------------------------------------------------------------------------
 
 from agent.hooks import HookRegistry  # noqa: E402
@@ -784,7 +783,7 @@ def _mock_llm_simple_response(text: str):
     return m
 
 
-# === P2-T7: handle_function_call + PRE/POST_TOOL_USE 集成测试 ===
+# === handle_function_call + PRE/POST_TOOL_USE 集成测试 ===
 
 async def test_handle_function_call_pre_tool_use_deny():
     """PreToolUse hook 返回 deny 时，handler 不调，返回 hook_deny error。"""
@@ -869,7 +868,7 @@ async def test_handle_function_call_hooks_disabled_skips():
 
 
 # ---------------------------------------------------------------------------
-# P2-T8: RuntimeContext hooks 注入 + 端到端集成测试
+# RuntimeContext hooks 注入 + 端到端集成测试
 # ---------------------------------------------------------------------------
 
 def test_runtime_context_has_hooks_registry():
@@ -978,7 +977,7 @@ async def test_e2e_no_hooks_enabled_full_backward_compat(tmp_path):
     assert agent.conversation_history[0]["content"] == "original"
 
 
-# === P2b-T5: AIAgent 集成 bg_manager ===
+# === AIAgent 集成 bg_manager ===
 
 def test_aiagent_accepts_bg_manager_kwarg():
     agent = _make_test_agent()
@@ -1054,7 +1053,7 @@ def test_runtime_context_has_bg_manager(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# P2b-T7: handle_function_call 透传 bg_manager + e2e 生命周期
+# handle_function_call 透传 bg_manager + e2e 生命周期
 # ---------------------------------------------------------------------------
 
 async def test_handle_function_call_threads_bg_manager(tmp_path):
@@ -1272,15 +1271,15 @@ async def test_e2e_cron_full_lifecycle(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Mem-T5: AIAgent memory retriever 注入
-# （CCAR10 后旧注入路径已删；memory_retriever 构造参数已随 dead path 移除）
+# AIAgent memory retriever 注入
+# （记忆注入走 ephemeral 路径；memory_retriever 构造参数已随 dead path 移除）
 # ---------------------------------------------------------------------------
 
 async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
-    """Task 2.5: 旧 _initial_memory_recall 已删除——记忆注入走 CCAR10 ephemeral。
+    """记忆注入走 ephemeral 路径。
 
-    验证新行为：
-    - conversation_history[0] 不含 <relevant_memories>（旧包裹路径已删）
+    验证：
+    - conversation_history[0] 不含 <relevant_memories>
     - user 消息原样入 history
     """
     from agent import AIAgent
@@ -1302,12 +1301,12 @@ async def test_aiagent_injects_relevant_memories_into_user_msg(tmp_path):
     agent.llm_client = _mock_llm_simple_response("ok")
     await agent.run_conversation("怎么跑测试")
 
-    # Task 2.5: 旧路径删除后——conversation_history[0] 应原样为 user_message
+    # conversation_history[0] 应原样为 user_message
     first_user = agent.conversation_history[0]["content"]
     assert first_user == "怎么跑测试", (
         f"开场 user 消息应原样入 history（无记忆前缀），实际: {first_user!r}"
     )
-    # 旧路径的 <relevant_memories> 包裹不应出现在 history 中
+    # <relevant_memories> 包裹不应出现在 history 中
     assert "<relevant_memories>" not in first_user
 
 
@@ -1320,8 +1319,8 @@ async def test_aiagent_no_memory_retriever_backward_compat(tmp_path):
 
 
 async def test_retrieval_failure_does_not_break_main_loop(tmp_path):
-    """带 memory_store 的主循环正常跑（旧 retriever 注入路径已删，
-    检索失败容错由 CCAR10 memory_injection 自己的 fail-open 兜底）。
+    """带 memory_store 的主循环正常跑（检索失败容错由 memory_injection
+    自己的 fail-open 兜底）。
     """
     from agent import AIAgent
     from agent.memory_store import MemoryStore
@@ -1340,19 +1339,18 @@ async def test_retrieval_failure_does_not_break_main_loop(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Mem-T8: 端到端 memory save → retrieve → 注入（跨会话）
+# 端到端 memory save → retrieve → 注入（跨会话）
 # ---------------------------------------------------------------------------
 
 async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     """端到端：会话 1 save → 会话 2 检索 + 注入。
 
-    Task 2.5 更新：旧 _initial_memory_recall 已删除——记忆注入走 CCAR10 ephemeral。
-    新断言：
+    断言：
     - conversation_history[0] 不含 <relevant_memories>（记忆不进 history）
     - user 消息原样入 history
-    - 记忆上下文来源只是 CCAR10 ephemeral（不污染持久化）
+    - 记忆上下文来源只是 ephemeral 注入（不污染持久化）
 
-    Plan 2B: retrieve_relevant 已 async，主 LLM chat_completions 已 async。
+    retrieve_relevant 与主 LLM chat_completions 均为 async。
     """
     from unittest.mock import MagicMock, AsyncMock
 
@@ -1368,7 +1366,7 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     # === 会话 2：索引应能看到（retriever 仍可独立调用，但 AIAgent 不再调）===
     store2 = MemoryStore(omnimate_home=tmp_path)  # 重建索引
 
-    # mock LLM：主 LLM 调用返回 stop（Task 2.5 后不再有 retriever 调用分支）
+    # mock LLM：主 LLM 调用返回 stop（无 retriever 调用分支）
     async def side_effect(msgs, **kw):
         resp = MagicMock()
         resp.choices = [MagicMock(
@@ -1380,7 +1378,7 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     main_llm = MagicMock()
     main_llm.chat_completions = AsyncMock(side_effect=side_effect)
 
-    # retriever 注入路径已删（CCAR10 起走 memory_injection ephemeral）
+    # 记忆注入走 memory_injection ephemeral
     agent = AIAgent(
         base_url="http://fake", api_key="fake", model="fake",
         enabled_toolsets=[], omnimate_home=str(tmp_path),
@@ -1389,17 +1387,17 @@ async def test_e2e_memory_save_then_retrieve_next_session(tmp_path):
     agent.llm_client = main_llm
     await agent.run_conversation("怎么跑测试")
 
-    # Task 2.5: 旧路径删除后——第一次入 history 的 user 消息应原样为 user_message
+    # 第一次入 history 的 user 消息应原样为 user_message
     first_user = agent.conversation_history[0]["content"]
     assert first_user == "怎么跑测试", (
         f"开场 user 消息应原样入 history（无记忆前缀），实际: {first_user!r}"
     )
-    # 旧路径的 <relevant_memories> 包裹不应出现在 history 中
+    # <relevant_memories> 包裹不应出现在 history 中
     assert "<relevant_memories>" not in first_user
 
 
 # ---------------------------------------------------------------------------
-# P4a-T6: AIAgent team_bus 集成
+# AIAgent team_bus 集成
 # ---------------------------------------------------------------------------
 
 def test_aiagent_accepts_team_kwargs():
@@ -1439,7 +1437,7 @@ async def test_aiagent_team_messages_injected_into_temporary_user_msg(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# P4a-T8: e2e 团队集成测试（FINAL P4a）
+# e2e 团队集成测试
 # ---------------------------------------------------------------------------
 
 def test_e2e_team_spawn_real_subprocess(tmp_path):
@@ -1504,7 +1502,7 @@ def test_e2e_team_send_and_inbox_through_bus(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# P4b-T2: idle 工具 + spawn depth 检查
+# idle 工具 + spawn depth 检查
 # ---------------------------------------------------------------------------
 
 async def test_idle_tool_sets_flag():
@@ -1630,7 +1628,7 @@ async def test_idle_requested_reset_between_run_conversation_calls(tmp_path):
 
     # 第一轮：调 idle → 设置 _idle_requested → 循环 break → fallback
     r1 = await agent2.run_conversation("turn 1")
-    # idle 后 break 走 idle_requested 分支（R17 #14 起消息为"已按请求停止本轮"）
+    # idle 后 break 走 idle_requested 分支（消息为"已按请求停止本轮"）
     assert "停止本轮" in r1
     # _idle_requested 此时为 True（idle 工具设置的）
     assert agent2._idle_requested is True
@@ -1670,7 +1668,7 @@ async def test_team_spawn_max_depth_blocks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4b Task 5: autonomous lifecycle e2e（mock）
+# autonomous lifecycle e2e（mock）
 # ---------------------------------------------------------------------------
 
 
@@ -1770,7 +1768,7 @@ def test_autonomous_worker_crash_sends_failure_message(tmp_path):
 
 
 async def test_tool_call_persisted_to_session(tmp_path):
-    """对齐 Claude Code：工具调用轮次（assistant tool_calls + tool 结果）持久化到会话库。"""
+    """工具调用轮次（assistant tool_calls + tool 结果）持久化到会话库。"""
     from agent.session_store import SessionStore
     session_store = SessionStore(tmp_path / "sessions.db")
     session_id = session_store.create_session(model="test", provider="test")
@@ -1823,7 +1821,7 @@ async def test_tool_call_persisted_to_session(tmp_path):
 
 
 async def test_checkpoint_tracked_on_write_file(tmp_path):
-    """write_file 成功后 checkpoint 追踪该文件（对齐 Claude Code）。"""
+    """write_file 成功后 checkpoint 追踪该文件。"""
     from agent.checkpoint import CheckpointManager
     from agent.permission import add_extra_allowed_root, clear_extra_allowed_roots
     ckpt_mgr = CheckpointManager(tmp_path / ".checkpoints", "sess", max_snapshots=10)
@@ -1857,7 +1855,7 @@ async def test_checkpoint_tracked_on_write_file(tmp_path):
     )
     agent.llm_client = SimpleNamespace(chat_completions=fake_chat_completions)
 
-    # CCAR13 Task 4: check_path 闸门 3 恢复白名单语义——AIAgent 的 omnimate_home
+    # check_path 闸门 3 恢复白名单语义——AIAgent 的 omnimate_home
     # 参数不改 constants.get_omnimate_home()，tmp_path 需注册 extra root 才放行
     # （finally clear 防注册表泄漏污染其他测试）。
     add_extra_allowed_root(str(tmp_path))
@@ -1900,8 +1898,7 @@ async def test_recent_read_file_and_skill_recorded(tmp_path):
 def test_build_reinject_context(tmp_path):
     """压缩后重注入包含技能正文 + 最近读过的文件内容。
 
-    Task B Round 1 fix：原内联 _build_reinject_context 已删除（dead code），
-    改用 agent.post_compact_recovery.build_post_compact_brief（行为等价）。
+    走 agent.post_compact_recovery.build_post_compact_brief。
     """
     from agent.post_compact_recovery import build_post_compact_brief
     src = tmp_path / "data.txt"
@@ -1922,8 +1919,7 @@ def test_build_reinject_context(tmp_path):
 def test_reinject_context_budget(tmp_path):
     """重注入受每文件 preview 上限限制（RECENT_FILE_PREVIEW_CHARS=1000）。
 
-    Task B Round 1 fix：原内联 _build_reinject_context 已删除（dead code），
-    改用 build_post_compact_brief（per-file 1K preview，不是旧 4K）。
+    走 build_post_compact_brief（per-file 1K preview）。
     """
     from agent.post_compact_recovery import build_post_compact_brief, RECENT_FILE_PREVIEW_CHARS
     big = tmp_path / "big.txt"
@@ -2017,17 +2013,17 @@ def test_cleanup_redundant_summaries():
 
 
 # ---------------------------------------------------------------------------
-# R26 #15：流式中途失败不得把半截 assistant 消息留进 history
+# 流式中途失败不得把半截 assistant 消息留进 history
 # ---------------------------------------------------------------------------
 
 class TestStreamFailureNoOrphan:
-    """R26 #15：流式中途失败不得把半截 assistant 消息留进 history。
+    """流式中途失败不得把半截 assistant 消息留进 history。
 
-    audit-first 审计结论（R26）：_call_llm_streaming 的流异常 except 分支
-    只把半截增量喂给 stream_callback（UI 层），随后 fallback 到非流式
-    call_with_retry 并返回完整 response；半截累积变量（full_content /
-    tool_call_buffers）是函数局部变量，随作用域自然丢弃，任何路径都不会
-    append 进 conversation_history。本组测试把该契约固化，防未来回归。
+    契约：_call_llm_streaming 的流异常 except 分支只把半截增量喂给
+    stream_callback（UI 层），随后 fallback 到非流式 call_with_retry
+    并返回完整 response；半截累积变量（full_content / tool_call_buffers）
+    是函数局部变量，随作用域自然丢弃，任何路径都不会 append 进
+    conversation_history。本组测试把该契约固化，防未来回归。
     """
 
     async def test_history_tail_complete_after_stream_failure(self, tmp_path):
@@ -2159,7 +2155,7 @@ class TestStreamFailureNoOrphan:
         assert agent._streaming_preset_results == {}
 
     async def test_discard_partial_stream_state_helper(self):
-        """R26 #15 防御 helper 契约：显式清空半截累积暂存（tombstone）。"""
+        """防御 helper 契约：显式清空半截累积暂存（tombstone）。"""
         agent = AIAgent(
             api_key="fake",
             model="test",
@@ -2173,10 +2169,10 @@ class TestStreamFailureNoOrphan:
 
 
 async def test_reactive_retry_refunds_iteration_budget(tmp_path):
-    """R30 审计 L10：reactive_compact 重试轮不白扣迭代预算。
+    """reactive_compact 重试轮不白扣迭代预算。
 
     场景：预算 1，第一轮 LLM 调用遇 prompt_too_long → reactive_compact
-    扣留转压缩 → _REACTIVE_RETRY 重试。旧代码重试轮再扣 1 → 预算耗尽
+    扣留转压缩 → _REACTIVE_RETRY 重试。若重试轮再扣 1 → 预算耗尽
     BUDGET_EXHAUSTED，模型一次成功调用都没有就断线；重试是韧性恢复，
     不是新的一轮——应退还预算。（防失控由 reactive 自身的冷却+次上限保证）
     """
@@ -2207,12 +2203,12 @@ async def test_reactive_retry_refunds_iteration_budget(tmp_path):
 
 
 async def test_dispatch_interrupts_mid_unsafe_batch(tmp_path):
-    """R30 审计 L11/L12：unsafe 批内逐工具检查中断，剩余合成 interrupted 结果。
+    """unsafe 批内逐工具检查中断，剩余合成 interrupted 结果。
 
-    旧代码中断粒度是"批"——Ctrl+C 后一批 unsafe 工具仍全部跑完；且异常
-    路径 DB 里 assistant(tool_calls) 无 result（孤儿，靠兜底修复）。新行为：
-    工具边界检测中断 → 剩余工具不再执行、合成 error_type=interrupted 的
-    result 保配对完整（对齐 CCB yieldMissingToolResultBlocks）。
+    中断粒度必须是"工具边界"而非"批"——Ctrl+C 后剩余 unsafe 工具不再执行；
+    异常路径 DB 里 assistant(tool_calls) 也必须有配对 result（无 result 的
+    孤儿消息会破坏 API 契约）。工具边界检测中断 → 剩余工具合成
+    error_type=interrupted 的 result 保配对完整。
     """
     import json as _json
     agent = AIAgent(
@@ -2248,7 +2244,7 @@ async def test_dispatch_interrupts_mid_unsafe_batch(tmp_path):
 
 
 async def test_cleanup_runtime_cascades_and_stops_bg(tmp_path):
-    """C2（CCB runAgent 清理清单）：子代理退出时清杀遗留运行态。
+    """子代理退出时清杀遗留运行态。
 
     - interrupt 级联到 _children（async 孙代理线程经 loop-top 协作式退出）
     - bg_manager.shutdown()（若子代理持有）

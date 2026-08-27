@@ -1,12 +1,12 @@
 """多文件记忆存储：记忆（AI 对用户和项目沉淀下来的事实条目，跨会话保留）按主题分文件存放。
 
-存储结构（对齐 Claude Code 的 topic 文件做法）：
+存储结构：
 - ~/.OmniMate/.memory/{topic}.jsonl：一个主题一个文件，文件里每行一条记忆（JSON）
 - ~/.OmniMate/MEMORY.md：总目录/索引（自动生成，按主题分组，超 200 行或 25KB 截断）
 
 几条核心规则：
 - 写入即维护：往同一主题写同名（name 相同）的记忆是更新旧条目，不是无限堆积
-- 会话内注入走 CCAR10 的检索式临时注入（memory_injection + memory_retriever，
+- 会话内注入走检索式临时注入（memory_injection + memory_retriever，
   每轮挑最相关的 5 条放进一次性的 user 消息，不进 system prompt）；
   snapshot_for_prompt() 的截断索引只是没有 aux_llm（辅助小模型）时的兜底，
   检索器用的是 full_index_text() 的完整版
@@ -28,7 +28,7 @@ import yaml
 
 from agent.atomic_io import atomic_write_text
 
-# 索引快照的截断上限（抄 Claude Code 的做法：最多 200 行或 25KB，哪个先超按哪个截）
+# 索引快照的截断上限（最多 200 行或 25KB，哪个先超按哪个截）
 _INDEX_MAX_LINES = 200
 _INDEX_MAX_BYTES = 25000
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 VALID_TYPES = {"user", "feedback", "project", "reference", "other"}
 
-# 历史设计（CCAR9 Task 2）：project/reference 两类按项目分家存放，
+# 分区设计：project/reference 两类按项目分家存放，
 # user/feedback 等其余类型全局共享——项目经验不串门，用户偏好处处生效
 _PROJECT_TYPES = ("project", "reference")
 
@@ -61,9 +61,9 @@ class MemoryEntry:
     body: str
     created_at: datetime
     updated_at: datetime
-    # 主题（对齐 Claude Code）：这条记忆归哪个话题，对应 .memory/{topic}.jsonl 文件
+    # 主题：这条记忆归哪个话题，对应 .memory/{topic}.jsonl 文件
     topic: str = "general"
-    # 历史功能（CCALS-P0-1）：L1 摘要层——给记忆配的一句摘要
+    # L1 摘要层——给记忆配的一句摘要
     summary: str = ""
     confidence: float = 1.0
     expected_valid_days: int = 365
@@ -83,7 +83,7 @@ def _generate_id() -> str:
 
 
 def _now_iso() -> str:
-    # 历史踩坑（S6 修复）：必须用 UTC——本地时间和 curator 那边的 UTC 比较会差 8 小时
+    # 必须用 UTC——本地时间和 curator 那边的 UTC 比较会差 8 小时
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -130,7 +130,7 @@ def _format_frontmatter(meta: dict) -> str:
 
 
 def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
-    """memory 目录的安全校验（历史安全项 R21 #23，对齐 Claude Code 的 memdir/paths.validateMemoryPath）。
+    """memory 目录的安全校验。
 
     背景：memory 目录的位置来自配置/环境变量，如果被指到敏感位置（比如 ~/.ssh），
     记忆系统就等于拿到了敏感目录的写权限，所以要先把关。
@@ -142,9 +142,8 @@ def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
     2. **软链逃逸检测**：memory_dir 解析成真实路径后必须仍在 omnimate_home
        的真实路径之下——挡住"home/.memory 是个指向 ~/.ssh 的软链"这类把戏
 
-    和 Claude Code 的差异：CC 的设置文件有多个来源（policy/user/project），
-    只信前三种、排除恶意仓库里的 projectSettings；OmniMate 的配置只从用户级
-    settings.json 读（项目配置没有注入面），来源校验天然满足，只补路径内容校验。
+    说明：OmniMate 的配置只从用户级 settings.json 读（项目配置没有注入面），
+    来源校验天然满足，这里只补路径内容校验。
 
     参数：
     - memory_dir：待校验的 memory 目录
@@ -193,7 +192,7 @@ class MemoryStore:
         """
         self._home = Path(omnimate_home)
         self._memory_dir = Path(memory_dir) if memory_dir else self._home / ".memory"
-        # 历史安全项（R21 #23）：先做目录安全校验（受保护路径 + 软链逃逸）。
+        # 先做目录安全校验（受保护路径 + 软链逃逸）。
         # 宁可启动失败也绝不悄悄写到敏感位置（fail-closed）。
         violation = validate_memory_dir(self._memory_dir, self._home)
         if violation:
@@ -212,7 +211,7 @@ class MemoryStore:
         # 这样做不改变语义：记忆本来就要等下次会话才注入（保护 prompt cache 的设计），
         # 下次会话构造时会调 build_index_text 强制刷新索引。
         self._index_dirty = False
-        # 历史设计（CCAR9 Task 3）：记住上次重建索引用的项目键，
+        # 记住上次重建索引用的项目键，
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引。
         # 初始为 None，第一次 _rebuild_index() 会填上实际值。
         self._index_built_key: Optional[str] = None
@@ -221,7 +220,7 @@ class MemoryStore:
         self._rebuild_index()
 
     # ------------------------------------------------------------------
-    # 主题文件读写（CCAR9 Task 2 引入的分区机制：全局区/项目区）
+    # 主题文件读写（分区机制：全局区/项目区）
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -373,7 +372,7 @@ class MemoryStore:
         return None
 
     # ------------------------------------------------------------------
-    # CCAR9 Task 2 的另一半：按类型路由到分区 + 跨分区查找条目
+    # 按类型路由到分区 + 跨分区查找条目
     # ------------------------------------------------------------------
 
     def _resolve_zone(self, mtype: str) -> Optional[Path]:
@@ -447,7 +446,7 @@ class MemoryStore:
         """把文件里的一行（dict）转成 MemoryEntry 对象。
 
         zone_dir 记下这条记忆住在哪个分区（None=全局区），用来生成正确的索引链接。
-        历史踩坑（CCAR9 Task 3）：链接路径必须区分全局区（.memory/）和项目区
+        注意：链接路径必须区分全局区（.memory/）和项目区
         （.memory/projects/<项目键>/），否则项目条目的链接会指错地方。
 
         参数：
@@ -497,8 +496,8 @@ class MemoryStore:
         """扫全局区 + 当前项目区的所有主题文件，解析出全部记忆。
 
         list_all 和 _rebuild_index 用——把两个区合在一起。每条记忆带上 _zone_dir
-        标记来自哪个区，_rebuild_index 靠它分区出章节、生成正确链接（修 Task 2
-        留下的路径错位问题）。当前项目区由工作目录决定（子代理场景也算得对）。
+        标记来自哪个区，_rebuild_index 靠它分区出章节、生成正确链接。
+        当前项目区由工作目录决定（子代理场景也算得对）。
         """
         entries = []
         # 1. 先扫全局区
@@ -528,7 +527,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _rebuild_index(self) -> None:
-        """重建 MEMORY.md 索引：全局记忆 + 当前项目记忆，两个分区各成一节（CCAR9 Task 3）。
+        """重建 MEMORY.md 索引：全局记忆 + 当前项目记忆，两个分区各成一节。
 
         排序规则没变（类型优先级 → 置信度 → 更新时间倒序），但各分区内自己排，
         再各自按主题分组。最终长这样：
@@ -614,15 +613,15 @@ class MemoryStore:
                 break
         self._cached_snapshot = "\n".join(lines[head_end:]) if head_end > 0 else ""
         self._index_dirty = False
-        # 历史设计（CCAR9 Task 3）：记下本次重建索引用的项目键，
+        # 记下本次重建索引用的项目键，
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引
         self._index_built_key = self._current_project_key_safe()
 
     def snapshot_for_prompt(self) -> str:
         """返回截断版索引（最多 200 行 / 25KB，哪个先超按哪个截）。
 
-        只在没有辅助模型（aux_llm）时当兜底做一次性注入用；主路径是 CCAR10
-        的检索式临时注入（见 memory_injection.py）。
+        只在没有辅助模型（aux_llm）时当兜底做一次性注入用；主路径是
+        检索式临时注入（见 memory_injection.py）。
         """
         self._ensure_index_fresh()
         snap = self._cached_snapshot
@@ -641,7 +640,7 @@ class MemoryStore:
         return self._cached_snapshot
 
     def full_index_text_with_age(self) -> str:
-        """带"年龄"标注的检索索引（T4：防止召回太久没更新的旧记忆）。
+        """带"年龄"标注的检索索引（防止召回太久没更新的旧记忆）。
 
         在 full_index_text 的基础上给每行附上 `[age: N天]`（最后更新距今天数），
         喂给辅助模型检索时，配合提示词里"新记忆优先"的规则做年龄打折扣。
@@ -733,10 +732,10 @@ class MemoryStore:
     ) -> Optional[MemoryEntry]:
         """同一主题里按 name 查重（"写入即维护"的查重入口）。
 
-        历史修复（R30d-D9）：给了 type 时只查 save(type=...) 实际会写进去的
+        注意：给了 type 时只查 save(type=...) 实际会写进去的
         那个分区——和 save 的单区查重口径一致（上层靠它判断"这次是更新还是
-        新建"，以前跨区查会让标签谎报）。type 不给时保持老行为跨区查
-        （先全局后当前项目区）。跨区同名允许共存（CCAR9 的物理隔离是特性：
+        新建"，跨区查会让标签谎报）。type 不给时跨区查
+        （先全局后当前项目区）。跨区同名允许共存（物理隔离是特性：
         项目区的条目别的项目看不见）。
 
         参数：
@@ -785,7 +784,7 @@ class MemoryStore:
     ) -> str:
         """创建或更新一条记忆（写入即维护：同主题同名 → 更新旧条目）。返回记忆 id。
 
-        按类型路由分区（CCAR9 Task 2）：
+        按类型路由分区：
         - user/feedback/other → 全局区（~/.OmniMate/.memory/）
         - project/reference → 项目区（~/.OmniMate/.memory/projects/<项目键>/）
 
@@ -807,7 +806,7 @@ class MemoryStore:
             raise ValueError("name 和 description 必需")
         if type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一，实际: {type}")
-        # 历史安全项（R19 #24）：写入前先扫秘密——疑似密钥直接拒写（秘密不该进记忆库；只报规则 ID 不回显内容）
+        # 写入前先扫秘密——疑似密钥直接拒写（秘密不该进记忆库；只报规则 ID 不回显内容）
         from agent.secret_scanner import find_secrets_in
         secret_hits = find_secrets_in(name, description, summary, body)
         if secret_hits:
@@ -816,7 +815,7 @@ class MemoryStore:
             )
         # 注意：save 里自己内联做查重/更新，避免嵌套拿锁（threading.Lock 不可重入，重复拿会自己锁死自己）
         with self._lock:
-            # 按类型路由到对应分区（CCAR9 Task 2）
+            # 按类型路由到对应分区
             zone_dir = self._resolve_zone(type)
             rows = self._read_topic_rows(topic, zone_dir=zone_dir)
             existing = next(
@@ -837,8 +836,8 @@ class MemoryStore:
                 self._mark_index_dirty()
                 return f"{topic}#{existing['id']}"
 
-            # 历史踩坑（R30b-A3）：新建也必须用 _now_iso()（UTC）——以前新建用
-            # 本地时间、更新用 UTC 混着来，东八区新记忆的年龄永远虚大 8 小时
+            # 历史踩坑：新建也必须用 _now_iso()（UTC）——新建用
+            # 本地时间、更新用 UTC 混着来，东八区新记忆的年龄会虚大 8 小时
             # （curator 的年龄判定跟着一起错）
             now = _now_iso()
             uid = _generate_id()
@@ -875,7 +874,7 @@ class MemoryStore:
         跨分区查找条目（先全局后项目区），但条目留在原分区——即使改了 type
         字段也写回原分区，不重新路由（想跨区搬家要 delete + save）。
 
-        历史功能（R30b-A4）：新增 state 字段（"active"/"stale"，归档走 delete）。
+        state 字段（"active"/"stale"，归档走 delete）：
         **只改 state 不刷新 updated_at**——curator 的年龄判定按内容年龄算，
         如果标 stale 时把 updated_at 刷新了，年龄归零会把这条 stale 记忆
         误判成新内容，在 stale 和 active 之间反复翻转（死循环）。
@@ -890,7 +889,7 @@ class MemoryStore:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
         if state is not None and state not in ("active", "stale"):
             raise ValueError("state 只接受 active/stale（archived 走 delete）")
-        # 历史安全项（R19 #24）：秘密扫描只查新传入的值，命中拒绝更新
+        # 秘密扫描只查新传入的值，命中拒绝更新
         from agent.secret_scanner import find_secrets_in
         secret_hits = find_secrets_in(name, description, summary, body)
         if secret_hits:
@@ -968,7 +967,7 @@ class MemoryStore:
     def clear_all(self) -> int:
         """软删除全部记忆（主题文件整个挪进 .archive，可恢复）。返回删掉的条数。
 
-        同时清全局区和当前项目区（CCAR9 Task 2）。
+        同时清全局区和当前项目区。
         """
         with self._lock:
             total = 0

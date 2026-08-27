@@ -190,8 +190,8 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
             "error_type": "invalid_args",
         }, ensure_ascii=False)
 
-    # 历史踩坑（S1 修复）：bg_start 必须过权限闸门，包括 fatal 硬底线。
-    # 早期版本完全跳过 PermissionChecker，等于开了个后门——
+    # bg_start 必须过权限闸门，包括 fatal 硬底线。
+    # 完全跳过 PermissionChecker 等于开了个后门——
     # 借 bg_start 就能跑 rm -rf / 这种任何模式都该拦的命令。
     import shlex
     from agent.permission import (
@@ -233,7 +233,7 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
     cwd = Path(cwd_raw) if cwd_raw else None
     detach = bool(args.get("detach", False))
     timeout = args.get("timeout")
-    monitor = bool(args.get("monitor", False))  # 流式监视模式（R22 轮 #32 引入）：给 tail -f 这类持续输出命令用的
+    monitor = bool(args.get("monitor", False))  # 流式监视模式：给 tail -f 这类持续输出命令用的
     try:
         task_id = bg_manager.start(
             command, cwd=cwd, detach=detach,

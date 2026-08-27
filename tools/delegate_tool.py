@@ -1,4 +1,4 @@
-"""subagent 工具：主对话派出「分身」去独立干活的入口（对齐 Claude Code 的 Agent 工具）。
+"""subagent 工具：主对话派出「分身」去独立干活的入口。
 
 子代理（subagent）= 主对话临时派出去帮忙的独立 AI 实例，有自己的上下文和工具，
 干完活只把结果带回来，不共享主对话的聊天记录。
@@ -91,14 +91,14 @@ class DelegationCompletionQueue:
             return len(self._queue) > 0
 
 
-# 全局兜底信箱（历史踩坑 R30c-C1 修复：只在没有 agent_ref 时才用它——
+# 全局兜底信箱（只在没有 agent_ref 时才用它——
 # 即直接调函数或跑测试的场景。生产环境的 dispatch 一定带 agent_ref，
 # 结果会定向送进发起者自己的实例信箱，避免「agent A 的后台子代理结果
 # 被 agent B 取走」这种串箱事故）
 _delegation_queue = DelegationCompletionQueue()
 
 
-# === async 子代理花名册（Task K 引入，让 subagent_kill 工具能找到正在跑的任务）===
+# === async 子代理花名册（让 subagent_kill 工具能找到正在跑的任务）===
 # key = delegation_id（_delegate_async 生成的 del_xxx），
 # value = {"thread": 线程, "cancel_event": 取消信号}
 # 注意：只在单个进程内有效，不跨进程；多个 AIAgent 实例共用这一份花名册
@@ -112,7 +112,7 @@ def get_delegation_queue() -> DelegationCompletionQueue:
 
 
 def _resolve_delegation_queue(kwargs) -> DelegationCompletionQueue:
-    """决定结果送进哪个信箱（R30c-C1 定向修复）。
+    """决定结果送进哪个信箱。
 
     有 agent_ref（生产 dispatch 必有）→ 用该 agent 自己的实例信箱；
     没有 → 退回全局兜底信箱（只有直接调函数/测试会走这条路）。
@@ -159,7 +159,7 @@ def inline_mcp_spawn_allowed(agent_def, server_name: str, server_cfg: dict) -> b
 DELEGATE_TASK_SCHEMA = {
     "name": "subagent",
     "description": (
-        "派生子代理（subagent）执行独立任务（对齐 Claude Code Agent 工具）。"
+        "派生子代理（subagent）执行独立任务。"
         "子代理有独立的上下文和工具，只把结果带回主代理。\n\n"
         "主入口用 prompt 描述任务；subagent_type 选子代理类型。\n\n"
         "两种模式：\n"
@@ -177,7 +177,7 @@ DELEGATE_TASK_SCHEMA = {
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "子代理任务（Claude Code Agent 主入口，必填之一）",
+                "description": "子代理任务描述（必填之一）",
             },
             "subagent_type": {
                 "type": "string",
@@ -266,7 +266,7 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
 
     返回：JSON 字符串（各模式的结果或错误信息）。
     """
-    # prompt 是主入口字段（对齐 Claude Code Agent），goal 是旧名字，两者兼容
+    # prompt 是主入口字段，goal 是旧名字，两者兼容
     goal = args.get("goal") or args.get("prompt", "")
     tasks = args.get("tasks")
     background = args.get("background", False)
@@ -298,9 +298,9 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
     # 把 subagent_type 塞进 kwargs 传给子代理创建逻辑（用于选工具集）
     kwargs["subagent_type"] = subagent_type
     # 把 isolated_workspace 也搬进 kwargs（LLM 传在 args 里，_run_child 只认 kwargs）
-    # 历史踩坑：之前漏搬这一行，导致 isolated_workspace=True 永远进不了 worktree 创建逻辑
+    # 这行不能漏——漏了 isolated_workspace=True 永远进不了 worktree 创建逻辑
     kwargs["isolated_workspace"] = args.get("isolated_workspace", False)
-    # 历史踩坑（T10 修复）：fork 之前 schema 里有字段但从没接线——LLM 传 fork:true 是无效空参数
+    # fork 同理必须搬进 kwargs——不搬的话 LLM 传 fork:true 是无效空参数
     kwargs["fork"] = args.get("fork", False)
 
     if background:
@@ -318,11 +318,10 @@ def _delegate_sync(
     """同步委托：主对话原地等子代理干完活，带超时（防止永远卡死）。
 
     背景：同步模式下子代理在后台线程跑，主线程 join 等待。如果子代理卡住，
-    主线程不能无限陪等，所以有两级退出机制（Task K 引入，用「取消信号」
-    协作式中断替代了原来的「直接扔下不管」）：
+    主线程不能无限陪等，所以有两级退出机制（用「取消信号」协作式中断，
+    而不是「直接扔下不管」）：
     1. 超时后主线程按下取消信号（cancel_event），子代理在每轮调 LLM 前会检查
-       这个信号 → 优雅退出，并返回 _extract_partial_result() 保留已完成的部分
-       （借鉴 Claude Code 的 extractPartialResult 思路）；
+       这个信号 → 优雅退出，并返回 _extract_partial_result() 保留已完成的部分；
     2. 如果子代理在 sync_cancel_timeout_seconds 秒内还没响应取消信号，
        主线程强制扔下它（abandon）——线程是 daemon，进程退出时自然消亡，
        宁可冒资源泄漏风险也不让主线程无限阻塞。
@@ -347,7 +346,7 @@ def _delegate_sync(
     cancel_event = threading.Event()
     kwargs["cancel_event"] = cancel_event
 
-    # 预先生成持久化 ID 传给 _run_child（R30d-D8 修复）：超时强制扔下子代理时，
+    # 预先生成持久化 ID 传给 _run_child：超时强制扔下子代理时，
     # 能立刻把它的元数据标成 interrupted，而不是等下次启动时的 cleanup_stale_subagents
     # 来兜底。不这样做的话，残留的 running 状态会骗过 subagent_resume，
     # 让它以为这是个还能恢复的活任务
@@ -391,7 +390,7 @@ def _delegate_sync(
                 "Task K: 子代理在 %ss 内未响应 cancel，强制 abandon",
                 sync_cancel_timeout,
             )
-            # 立刻标 interrupted（R30d-D8）：僵尸线程如果之后真跑完了，
+            # 立刻标 interrupted：僵尸线程如果之后真跑完了，
             # 会把状态覆盖成 completed/failed——那是对的；这里只是别让状态一直悬在 running
             if _pid:
                 try:
@@ -456,14 +455,13 @@ def _delegate_async(
 
     背景：后台子代理跑在后台线程里，用户不在旁边盯着，所以有两道安全限制：
 
-    1. 工具白名单（Task F，对齐 claude-code-main 的 ASYNC_AGENT_ALLOWED_TOOLS）：
+    1. 工具白名单（ASYNC_AGENT_ALLOWED_TOOLS）：
        后台子代理没法让用户实时审批危险操作，所以只给它安全工具——
        用户传的工具集跟白名单取交集，再注入一份禁用工具黑名单兜底。
        config.delegation.async_tool_whitelist_enabled=False 可关（不推荐）。
 
-    2. 默认拒审批（Task J，permission_mode='autoDeny'，宁可拒绝不可放行）：
-       借鉴 Claude Code 的 `shouldAvoidPermissionPrompts: true`。后台子代理
-       弹不了审批界面（用户不在场），所有需要用户批准的破坏性命令一律直接
+    2. 默认拒审批（permission_mode='autoDeny'，宁可拒绝不可放行）：
+       后台子代理弹不了审批界面（用户不在场），所有需要用户批准的破坏性命令一律直接
        返回 permission_denied。config.delegation.async_auto_deny_permission=False
        可关（不推荐）。自定义 .md 定义里的 permission_mode 优先级更高
        （经 kwargs.permission_mode 透传，_run_child 的 custom_def 分支会覆盖
@@ -480,7 +478,7 @@ def _delegate_async(
     """
     delegation_id = f"del_{datetime.now(timezone.utc).strftime('%H%M%S%f')}"
 
-    # 结果定向送回发起者（R30c-C1 修复）：有 agent_ref 就送它自己的实例信箱，
+    # 结果定向送回发起者：有 agent_ref 就送它自己的实例信箱，
     # 取件方（AIAgent._drain_injected_messages）只读自家信箱；
     # 没有 agent_ref（直接调函数/测试）才落回全局兜底信箱
     _queue = _resolve_delegation_queue(kwargs)
@@ -490,7 +488,7 @@ def _delegate_async(
     cancel_event = threading.Event()
     kwargs["cancel_event"] = cancel_event
 
-    # === 工具白名单（Task F）===
+    # === 工具白名单 ===
     # fail-open：白名单逻辑出错也不崩，退回原来的行为
     try:
         from toolsets import (
@@ -525,9 +523,8 @@ def _delegate_async(
     except Exception:
         logger.warning("async 工具白名单应用失败（fail-open）", exc_info=True)
 
-    # === 后台子代理默认拒审批（Task J，permission_mode=autoDeny）===
-    # 借鉴 Claude Code 的 `shouldAvoidPermissionPrompts: true`：后台子代理
-    # 弹不了审批界面（用户不在场），所有需要用户批准的命令一律直接拒绝
+    # === 后台子代理默认拒审批（permission_mode=autoDeny）===
+    # 后台子代理弹不了审批界面（用户不在场），所有需要用户批准的命令一律直接拒绝
     # （fail-closed，宁可拒绝不可放行）。
     # 优先级：自定义 .md 的 permission_mode > config 显式覆盖 > 默认 autoDeny
     # （custom_def 分支在 _run_child 内部处理，这里只注入默认/配置值；
@@ -612,7 +609,7 @@ def _start_progress_ticker(
     session_id: str,
     interval: float = 30.0,
 ) -> "threading.Thread":
-    """多个子代理并行跑的时候，每隔 interval 秒写一条进度播报（R26 #12）。
+    """多个子代理并行跑的时候，每隔 interval 秒写一条进度播报。
 
     背景：2 个以上子代理并行时用户只能干等没反馈——这个小闹钟线程让进度可见：
     有辅助小模型（aux）就让它把状态归纳成 1-2 句人话；没有就直接机械拼一行状态。
@@ -677,7 +674,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     """批量并行委托：一次派出多个子代理同时干活，等全干完一起收结果。
 
     背景：LLM 传 tasks=[...] 时走这里，用线程池真并行（比一个个串行调
-    subagent 快得多）。每个任务各配一个取消信号（Task K），Ctrl+C 时全部
+    subagent 快得多）。每个任务各配一个取消信号，Ctrl+C 时全部
     按下，让所有子代理在下次调 LLM 前退出。
 
     参数：
@@ -687,8 +684,8 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
 
     返回：JSON 字符串，results 列表里每个任务一条成功/失败记录。
     """
-    # 并发上限从 config.delegation.max_concurrent_children 读，
-    # 历史踩坑：之前只看 kwargs，导致配置永远不生效、一直 fallback 到 3
+    # 并发上限从 config.delegation.max_concurrent_children 读
+    # （不能只看 kwargs——只看 kwargs 的话配置永远不生效，一直 fallback 到 3）
     _cfg = (kwargs.get("config") or {}) if isinstance(kwargs.get("config"), dict) else {}
     max_concurrent = int((_cfg.get("delegation") or {}).get("max_concurrent_children", 5))
     child_timeout = float(kwargs.get("child_timeout", 600))
@@ -701,7 +698,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     futures = {}
     # 每个任务一个取消信号（submit 时创建，传给 _run_child）
     batch_cancel_events = []
-    # 进度 ticker 的共享状态（R26 #12；tasks 没有名字字段，按序号起名；
+    # 进度 ticker 的共享状态（tasks 没有名字字段，按序号起名；
     # 约定只改 value 不增删 key——ticker 线程遍历时就不会撞上字典变更）
     children_state = {}
     _progress_stop = threading.Event()
@@ -766,7 +763,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     except KeyboardInterrupt:
         # Ctrl+C：先把中断传给子代理（让它们下轮迭代退出）、取消还没启动的
         # 任务、shutdown(wait=False) 不阻塞，然后向上抛。
-        # 另外（Task K 新增）：按下所有批量子代理的取消信号，让正在跑的
+        # 另外：按下所有批量子代理的取消信号，让正在跑的
         # 在下次调 LLM 前优雅退出（不能只指望 parent.interrupt() 一条路）
         parent = kwargs.get("agent_ref")
         if parent is not None and hasattr(parent, "interrupt"):
@@ -815,7 +812,7 @@ def _run_child(
 
     其它职责：
     - 把子代理登记到父代理的 _children 名单，支持中断往下传（batch1-T4）；
-    - 把子代理的执行轨迹（transcript）落盘，供事后查证/恢复（Task I，出错不挡主流程）。
+    - 把子代理的执行轨迹（transcript）落盘，供事后查证/恢复（出错不挡主流程）。
 
     参数：
       - goal：任务描述
@@ -829,7 +826,7 @@ def _run_child(
     # 延迟导入，避免和 agent 包互相 import 死锁
     from agent import AIAgent
 
-    # === 子代理轨迹落盘初始化（Task I；出错只 debug 记录，不影响主流程）===
+    # === 子代理轨迹落盘初始化（出错只 debug 记录，不影响主流程）===
     _persistence_enabled = (kwargs.get("config") or {}).get(
         "delegation", {},
     ).get("subagent_persistence_enabled", True)
@@ -839,7 +836,7 @@ def _run_child(
             from agent.subagent_persistence import (
                 generate_agent_id, write_metadata as _sp_write_meta,
             )
-            # 调用方预先生成的 id 优先用（R30d-D8：_delegate_sync 强制扔下子代理时要靠它标状态）
+            # 调用方预先生成的 id 优先用（_delegate_sync 强制扔下子代理时要靠它标状态）
             _child_agent_id = kwargs.pop("subagent_agent_id", None) \
                 or generate_agent_id(
                     parent_session_id=kwargs.get("session_id", ""),
@@ -851,7 +848,7 @@ def _run_child(
                 "status": "running",
                 "created_at": time.time(),
             })
-            # === 用户指令先进轨迹文件（作为轨迹开头，CCAR13 Task 3）===
+            # === 用户指令先进轨迹文件（作为轨迹开头）===
             # 真被中断的子代理之后 resume 时，原始指令就是对话的起点。
             from agent.subagent_persistence import append_message as _sp_append
             _sp_append(_child_agent_id, {
@@ -927,10 +924,10 @@ def _run_child(
         parent_depth = int(kwargs.get("spawn_depth", 0))
     child_spawn_depth = parent_depth + 1
 
-    # 工具集选择（对齐 Claude Code Agent 的 subagent_type 参数）
+    # 工具集选择
     # 提前解析类型 + 自定义定义：为了让 isolation=worktree 能赶在创建 worktree
-    # 的分支之前生效（历史踩坑：isolated 在自定义定义写入 kwargs 之前就读了，
-    # 导致 worktree 永远创建不出来）
+    # 的分支之前生效（isolated 要在自定义定义写入 kwargs 之后再读，
+    # 读早了 worktree 永远创建不出来）
     stype = kwargs.get("subagent_type", "general-purpose")
     custom_def = None
     if stype not in ("general-purpose", "custom"):
@@ -944,8 +941,8 @@ def _run_child(
             )
 
     # 可选：隔离工作区（自定义 .md 定义 isolation=worktree 也会开启）
-    # 历史踩坑：以前用 os.chdir 切目录——那是进程级全局操作，线程池里
-    # 并发跑的多个子代理会互相踩对方的工作目录。现在改用
+    # 千万别用 os.chdir 切目录——那是进程级全局操作，线程池里
+    # 并发跑的多个子代理会互相踩对方的工作目录。所以用
     # workspace_cwd_context（contextvars.ContextVar，线程各一份互不干扰），
     # 子代理内的工具调 get_workspace_cwd() 拿到的就是自己的 worktree。
     isolated = kwargs.get("isolated_workspace", False) or (
@@ -989,11 +986,11 @@ def _run_child(
         except Exception:
             pass  # fail-open：钩子失败不影响子代理
     try:
-        # 工具集选择（对齐 Claude Code Agent 的 subagent_type）：
+        # 工具集选择：
         # - 自定义名：custom_def 已提前加载，按定义配置工具集/模型/权限/轮数上限
         # - custom：用显式传的 enabled_toolsets
         # - general-purpose：按角色给默认
-        # permission_mode（权限模式）优先级（Task J）：
+        # permission_mode（权限模式）优先级：
         #   ① 自定义 .md 里显式写的 permission_mode（最高）
         #   ② kwargs 里的（_delegate_async 注入的 autoDeny，或调用方显式传的）
         #   ③ "default"（兜底）
@@ -1086,11 +1083,10 @@ def _run_child(
         # disabled_tools 传递方式：AIAgent.__init__ 没有这个参数，只能走 config 转交
         # （get_tool_definitions 运行时会从 self.config 读 disabled_tools）
         #
-        # 历史踩坑（CCAR5 重要修复 1）：两个来源的禁用清单要合并
-        # （取并集、保序、去重）：
+        # 两个来源的禁用清单要合并（取并集、保序、去重）：
         #   ① 自定义 .md 的 disallowed_tools（custom_def 路径，上面赋给了 `disabled`）
         #   ② _delegate_async 注入到 kwargs["config"]["disabled_tools"] 的后台黑名单兜底
-        #      —— 非 custom_def 路径以前会把它弄丢，在这里补上
+        #      —— 非 custom_def 路径会把它弄丢，靠这里补上
         _injected_disabled = (
             (kwargs.get("config") or {}).get("disabled_tools")
             if isinstance(kwargs.get("config"), dict)
@@ -1215,15 +1211,15 @@ def _run_child(
                     if custom_def and custom_def.system_prompt:
                         system_prompt = _build_child_system_prompt(
                             goal, context, role, override=custom_def.system_prompt)
-                    # 兜底路径同样要补关键提醒（重要修复：别在 fallback 里丢了安全提醒）
+                    # 兜底路径同样要补关键提醒（别在 fallback 里丢了安全提醒）
                     if custom_def and custom_def.critical_reminder:
                         system_prompt += (
                             f"\n\n## CRITICAL REMINDER\n{custom_def.critical_reminder}"
                         )
 
-        # === 每轮把轨迹落盘（CCAR13 Task 3，靠 POST_LLM_CALL 程序式钩子实现）===
-        # 为什么自己建一套：子代理的钩子注册表不跟主代理共享（以前 _run_child
-        # 没传，子代理拿到的是 None）→ 新建一个空的独立 HookRegistry 注册
+        # === 每轮把轨迹落盘（靠 POST_LLM_CALL 程序式钩子实现）===
+        # 为什么自己建一套：子代理的钩子注册表不跟主代理共享（_run_child
+        # 不传，子代理拿到的是 None）→ 新建一个空的独立 HookRegistry 注册
         # 程序式钩子，完全不碰主代理的注册表。
         # 落什么：轨迹 = 用户指令 + 每轮 assistant 正文；tool_calls 和工具结果
         # 不落盘（POST_LLM_CALL 只拿得到 LLM 响应；存了带 tool_calls 但没有
@@ -1300,7 +1296,7 @@ def _run_child(
             config=child_config,
             memory_store=child_memory_store,
             initial_messages=child_initial_messages,
-            # 轮级轨迹持久化（CCAR13 Task 3）：独立空 registry + POST_LLM_CALL
+            # 轮级轨迹持久化：独立空 registry + POST_LLM_CALL
             # 程序式钩子每轮追加；最终响应的 append 已删掉，避免同一内容写两遍
             hooks_registry=_child_hooks,
             omit_project_memory=bool(custom_def.omit_claude_md) if custom_def else False,
@@ -1342,7 +1338,7 @@ def _run_child(
                     pass  # fail-open
 
             # 正式跑子代理
-            # AIAgent.chat 已经改成 async（Task D4 修复时跟进）。_run_child 在
+            # AIAgent.chat 是 async。_run_child 在
             # 独立线程里跑（同步/异步两条路都起的 threading.Thread），线程里
             # 没有事件循环 → 用 asyncio.run 驱动它。
             # cancel_event 也传给子代理的对话主循环：它每轮开头检查信号，
@@ -1350,7 +1346,7 @@ def _run_child(
             import asyncio
             _cancel_event = kwargs.get("cancel_event")
             # === initial_prompt 前置到第一条 user 消息 ===
-            # 类似斜杠命令的预处理（对齐 Claude Code Agent 的 initialPrompt 字段）
+            # 类似斜杠命令的预处理
             _child_first_msg = f"请执行任务: {goal}"
             if custom_def and custom_def.initial_prompt:
                 _child_first_msg = (
@@ -1368,7 +1364,7 @@ def _run_child(
                 result = asyncio.run(child.chat(_child_first_msg))
 
         # 幻觉检测（赶在摘要压缩之前做，这样警告能保留进摘要）
-        # 历史踩坑（第 1 轮修复）：Path.cwd() 是进程级的（就是 os.getcwd），
+        # 注意：Path.cwd() 是进程级的（就是 os.getcwd），
         # 并发子代理会互相踩。优先用 kwargs 里的 cwd，没有就读线程局部的
         # get_workspace_cwd()。
         try:
@@ -1383,7 +1379,7 @@ def _run_child(
         except Exception as e:
             logger.warning("幻觉检测失败（fail-open）: %s", e)
 
-        # === 放权模式下的交接复审（R21 #37，对齐 CC 的 classifyHandoffIfNeeded）===
+        # === 放权模式下的交接复审 ===
         # bypass/auto 权限模式下，子代理产出会直接进父代理上下文——危险产出
         # （破坏命令证据/数据外发/凭证修改痕迹）由辅助 LLM 复审一遍，命中就在
         # 结果前面附警告（注意不拦截——怎么处理由父代理和用户自己决断）。
@@ -1413,7 +1409,7 @@ def _run_child(
 
         return result
     finally:
-        # === 清杀子代理留下的运行状态（对齐 CCB 的 runAgent 清理清单）===
+        # === 清杀子代理留下的运行状态 ===
         # 级联中断孙代理（免得后台线程往已死的父代理推结果）+ 停后台任务；
         # 可重复执行且出错不挡路，放在清理链最前（后面步骤不再依赖子代理活着）
         try:
@@ -1454,7 +1450,7 @@ def _run_child(
             except Exception:
                 pass
         if workspace_cleanup:
-            # 智能清理 worktree（Task G）：子代理有改动就保留现场，没改动才删
+            # 智能清理 worktree：子代理有改动就保留现场，没改动才删
             # config.delegation.worktree_always_cleanup=True → 恢复旧行为（无脑总清理）
             _cfg = kwargs.get("config") or {}
             _delegation_cfg = _cfg.get("delegation") if isinstance(_cfg, dict) else {}
@@ -1544,7 +1540,7 @@ def _summarize_child_result(result: str, client, model: str) -> str:
 
     返回：`[摘要] ...` 格式的压缩文本；失败时返回原文。
 
-    接口说明（T_D1 修复时定型）：call_with_retry 改成 async 后，本函数仍保持
+    接口说明：call_with_retry 是 async，本函数仍保持
     同步接口（调用方 _run_child 在独立线程里跑、没有事件循环），内部用
     asyncio.run() 驱动那个 async 函数。
     """
@@ -1562,7 +1558,7 @@ def _summarize_child_result(result: str, client, model: str) -> str:
         response = asyncio.run(call_with_retry(
             client,  # child.llm_client（LLM 客户端实例）
             [{"role": "user", "content": prompt}],
-            background=True,  # 摘要属于后台活（R25 #4 修复）：遇 529 过载直接放弃不重试
+            background=True,  # 摘要属于后台活：遇 529 过载直接放弃不重试
         ))
         summary = response.choices[0].message.content
         return f"[摘要] {summary}\n\n[完整结果 {len(result)} 字符已省略]"
@@ -1656,7 +1652,7 @@ def _delegate_schema_overrides(schema: dict, runtime_ctx: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# subagent_kill 工具（Task K）：中断后台跑的子代理
+# subagent_kill 工具：中断后台跑的子代理
 # ---------------------------------------------------------------------------
 
 SUBAGENT_KILL_SCHEMA = {
@@ -1688,7 +1684,7 @@ SUBAGENT_KILL_SCHEMA = {
 
 
 def _handle_subagent_kill(args: dict, **kwargs) -> str:
-    """中断后台子代理（Task K）。
+    """中断后台子代理。
 
     做法：查 _async_tasks 花名册找到目标，按下它的取消信号——子代理的
     对话主循环每轮开头都查这个信号，一发现被按下就退出，并返回

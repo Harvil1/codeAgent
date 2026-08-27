@@ -1,7 +1,7 @@
 # tests/test_goal.py
-"""GoalState 状态机 + 持久化的单元测试（CCAR8 Task 10）。
+"""GoalState 状态机 + 持久化的单元测试。
 
-仅覆盖状态机本身，主循环集成在 Task 11。
+仅覆盖状态机本身，主循环集成见下方。
 """
 import json
 import logging
@@ -126,7 +126,7 @@ def test_goal_notes_appended():
 
 
 # ============================================================================
-# CCAR8 Task 11：主循环集成测试
+# 主循环集成测试
 # ============================================================================
 # 策略：抽纯函数（_build_goal_continue_message / _build_channel_injection /
 # _build_mail_injection）测，再用一个集成测试验证 AIAgent 字段接线。
@@ -434,11 +434,11 @@ async def test_goal_not_paused_on_non_network_error(tmp_path):
 
 
 # ============================================================================
-# CCAR13 Task 2 B5：pause() 集中通知
+# pause() 集中通知
 # ============================================================================
 
 def test_pause_notifies_for_all_reasons():
-    """pause() 集中通知（CCAR13 B5：network/budget/manual 三原因一处接）。
+    """pause() 集中通知（network/budget/manual 三原因一处接）。
 
     lazy import 下 patch agent.notifier.notify（函数内 import 每次调用时
     从 agent.notifier 模块取名字，patch 模块属性即可命中）。
@@ -466,11 +466,11 @@ def test_pause_notify_failure_does_not_break_state_machine():
 
 
 # ============================================================================
-# R26 #9：预算未用完"踢一脚"（nudge）
+# 预算未用完"踢一脚"（nudge）
 # ============================================================================
 
 class TestShouldNudge:
-    """R26 #9：预算未用完 + 最近有进展 → 该踢一脚让它继续。"""
+    """预算未用完 + 最近有进展 → 该踢一脚让它继续。"""
 
     def _state(self, limit=100_000):
         from agent.goal import GoalState
@@ -504,7 +504,7 @@ class TestShouldNudge:
 
 
 # ============================================================================
-# R26 #9：nudge 主循环接线（防 silent-dead-code：单元测试过 ≠ 生产路径生效）
+# nudge 主循环接线（防 silent-dead-code：单元测试过 ≠ 生产路径生效）
 # ============================================================================
 
 async def test_goal_nudge_wiring_in_run_conversation(tmp_path):

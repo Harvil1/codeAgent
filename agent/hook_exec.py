@@ -2,7 +2,7 @@
 
 本文件在项目里的位置：agent/hooks.py 的 HookRegistry 只管"什么时候触发"，
 具体"怎么执行"全在这里。被 agent/hook_loader.py（配置解析）和
-cli.py（启动时注入依赖）使用。执行方式共 5 种（F1 扩展定的）：
+cli.py（启动时注入依赖）使用。执行方式共 5 种：
 - command:  起本地子进程跑命令。把 payload JSON 喂给它的标准输入（stdin），
             期望它往标准输出（stdout）吐一段合法 JSON 作为判决。
 - http:     往 url POST 一份 JSON，把响应 JSON 当判决。
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 辅助小模型 router 的注入（F1）
+# 辅助小模型 router 的注入
 #
 # 背景：agent/aux_llm.py 的 AuxLLMRouter 要在 cli.py / RuntimeContext 构造时
 # 拿到 main_client 和 endpoints，它没有全局单例的 getter。所以这里留一个
@@ -70,7 +70,7 @@ def _get_aux_router():
 
 
 # ============================================================================
-# config 的注入（P3.2 批次）：dispatch_hook 需要读配置里的 feature flag
+# config 的注入：dispatch_hook 需要读配置里的 feature flag
 # （功能开关），决定 http / mcp_tool / agent 三种执行器允不允许用。
 # 和上面 aux_router 同一套模式：cli.py 启动时注入 lambda: self.config，
 # dispatch_hook 通过它拿 config dict。没注入就当作"全允许"
@@ -104,7 +104,7 @@ def _get_config():
         return None
 
 
-# P3.2 批次：执行器类型 → 对应 feature flag 名字的对照表
+# 执行器类型 → 对应 feature flag 名字的对照表
 _HANDLER_FLAG_MAP = {
     "http": "hook_http_handler",
     "mcp_tool": "hook_mcp_tool_handler",
@@ -134,7 +134,7 @@ def _is_handler_allowed(handler_type: str) -> bool:
 
 
 def _wrap_with_sandbox(hook) -> list:
-    """P3.8 批次：把 hook 要跑的命令用 sandbox_runner（OS 沙箱）包一层。
+    """把 hook 要跑的命令用 sandbox_runner（OS 沙箱）包一层。
 
     背景：声明式 hook 跑的是外部命令，套沙箱限制它能碰的文件范围。
     平台不支持或沙箱程序没装时降级——返回原始 command 并记条警告
@@ -183,7 +183,7 @@ def _wrap_with_sandbox(hook) -> list:
 class HookExecutionError(RuntimeError):
     """声明式 hook 执行失败（启动失败/超时/非零退出/输出解析失败）。
 
-    历史踩坑（R30b-A6）：fail_closed=True 的 hook 要在失败路径把这个异常
+    历史踩坑：fail_closed=True 的 hook 要在失败路径把这个异常
     抛出去。只有 pre_tool_use 路径（dispatch_hook 传 propagate_error=True）
     会放行异常，让 registry 把它转成 deny（拒绝执行工具）；其他事件仍按
     fail-open 处理（吞掉异常返回 None）。
@@ -201,7 +201,7 @@ def _fail_closed_or_none(hook, reason: str) -> None:
 
 
 # ============================================================================
-# C4（借鉴 CCB）：异步 hook 的 rewake（重新叫醒）通知队列
+# 异步 hook 的 rewake（重新叫醒）通知队列
 # ============================================================================
 # 异步 hook 在后台跑完后如果退出码是 2（block）且配了 async_rewake=True，
 # 就往这个队列推一条通知；agent 主循环每轮用 _drain_injected_messages
@@ -240,7 +240,7 @@ def drain_rewake_notifications() -> list:
 
 
 def _run_async_hook(hook, payload: dict, timeout_cap: float = None) -> None:
-    """C4 批次：异步 command hook——丢到后台线程跑，dispatch 立刻返回不等它。
+    """异步 command hook——丢到后台线程跑，dispatch 立刻返回不等它。
 
     后台跑完退出码是 2（block）且配了 async_rewake 时，推一条 rewake 通知
     （模型下一轮能看到并跟进）。其他结果直接扔掉——异步的语义本来就是
@@ -291,27 +291,27 @@ def dispatch_hook(
     默认所有执行器的异常都吞掉返回 None（fail-open，和老的 run_script_hook
     行为一致）。
 
-    历史踩坑（R30b-A6）：propagate_error=True 且 hook 配了 fail_closed 时，
+    历史踩坑：propagate_error=True 且 hook 配了 fail_closed 时，
     异常必须向上抛而不是吞掉——否则 registry 的 fail_closed 分支永远走不到
     （等于声明式 hook 配了 fail_closed: true，出错时却照样 fail-open 放行）。
 
-    R30g-M8 批次：timeout_cap 非空时钳住执行器超时（取较小值；会话结束时
+    timeout_cap 非空时钳住执行器超时（取较小值；会话结束时
     传 1.5 秒，防止收尾被慢 hook 卡死）。只对 command/http 这两种有超时
     概念的执行器生效。
 
-    P3.2 批次：http / mcp_tool / agent 三种执行器受 feature flag 门控，
+    http / mcp_tool / agent 三种执行器受 feature flag 门控，
     flag 没开就直接返回 None（当作跳过），不碰对应执行器；
     command / prompt 永远允许（基线能力）。
     """
     if hook.script is None:
         return None
     ht = getattr(hook.script, "handler_type", "command") or "command"
-    # C4 批次：异步 command hook——后台跑不阻塞，立刻返回 None
+    # 异步 command hook——后台跑不阻塞，立刻返回 None
     if (ht == "command"
             and getattr(hook.script, "async_run", False)):
         _run_async_hook(hook, payload, timeout_cap)
         return None
-    # P3.2 批次：feature flag 门控
+    # feature flag 门控
     if not _is_handler_allowed(ht):
         logger.info(
             "hook %s handler_type '%s' 被门控关闭（feature flag 未开启），跳过",
@@ -319,7 +319,7 @@ def dispatch_hook(
         )
         return None
     try:
-        # R30g-M8 批次：只在 cap 存在时才传参（保持旧的两参调用/测试 mock 兼容）
+        # 只在 cap 存在时才传参（保持旧的两参调用/测试 mock 兼容）
         _tkw = {"timeout_cap": timeout_cap} if timeout_cap is not None else {}
         if ht == "command":
             return run_script_hook(hook, payload, **_tkw)
@@ -351,19 +351,19 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
     参数：
         hook: Hook 实例（kind="declarative"，script 非 None）
         payload: 要传给子进程的 dict（含 event/session_id/timestamp/事件字段）
-        timeout_cap: 可选的超时上限（R30g-M8 批次加的，取较小值；
+        timeout_cap: 可选的超时上限（取较小值；
                      会话结束时传 1.5s 防收尾被卡）
 
     返回：
         解析后的 dict（空 dict 表示"放行"），或 None（出了任何故障）
 
     沙箱相关：
-    P3.8 批次：hook 配了 use_sandbox=True 时，命令会被 sandbox_runner 包装
+    hook 配了 use_sandbox=True 时，命令会被 sandbox_runner 包装
           （只有 Unix 可用）；Windows/平台不支持时降级成无沙箱跑（记警告）。
-    CCAR14 Task 2：Windows + use_sandbox=True 走 Job Object（进程管控）模式——
-          命令不做包装，正常 Popen 启动后把进程挂进 job（对齐 terminal_tool
-          的 CCAR12 分支）；挂 job 失败也降级继续跑（记警告）。
-    历史踩坑（R30b-A6）：各失败分支（启动失败/超时/非零退出/输出解析失败）
+    Windows + use_sandbox=True 走 Job Object（进程管控）模式——
+          命令不做包装，正常 Popen 启动后把进程挂进 job（与 terminal_tool
+          同一套流程）；挂 job 失败也降级继续跑（记警告）。
+    历史踩坑：各失败分支（启动失败/超时/非零退出/输出解析失败）
           在 hook.fail_closed 时要抛 HookExecutionError——经 pre_tool_use
           路径转成 deny；注意 exit 2 是 hook 主动"拦截"的决策、不算失败，
           维持原协议不走异常。
@@ -377,20 +377,20 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         return _fail_closed_or_none(hook, f"hook {hook.name} command 为空")
 
     payload_json = json.dumps(payload, ensure_ascii=False)
-    # 历史踩坑（R30d-B6a）：hook 子进程的环境变量不再原样继承宿主的全量
+    # 历史踩坑：hook 子进程的环境变量不再原样继承宿主的全量
     # （里面含 API key 等敏感信息），改用 terminal 同款 build_safe_env
     # （把密钥类洗掉）+ hook 配置里自己声明的 env 覆盖
     from agent.sandbox_env import build_safe_env
     env = {**build_safe_env(), **(hook.script.env or {})}
-    # R30g-M8 批次：超时钳制（cap 更小就听 cap 的）
+    # 超时钳制（cap 更小就听 cap 的）
     effective_timeout = hook.script.timeout
     if timeout_cap is not None:
         effective_timeout = min(effective_timeout, float(timeout_cap))
 
-    # P3.8 批次：可选的沙箱包装
+    # 可选的沙箱包装
     argv = hook.script.command
     use_sandbox = getattr(hook, "use_sandbox", False)
-    # CCAR14 Task 2：Windows Job Object 模式（命令不包装，启动后再挂进 job）
+    # Windows Job Object 模式（命令不包装，启动后再挂进 job）
     win_job_mode = False
     if use_sandbox:
         from agent import sandbox_runner
@@ -409,7 +409,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
 
     if win_job_mode:
         # ============================================================
-        # CCAR14 Task 2：Windows Job Object 分支
+        # Windows Job Object 分支
         # 公共流程提取到了 sandbox_runner.run_with_job_object（照抄
         # terminal_tool 的模式：命令不包装、正常启动 → 挂进 job →
         # try 里 communicate / finally 里关 job。job 句柄必须保活到进程
@@ -457,7 +457,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
         returncode = proc.returncode
 
     if returncode != 0:
-        # P3.7 批次：exit code 2 = "拦截"协议（对齐 claude-code-main）——
+        # exit code 2 = "拦截"协议——
         # stderr 里写的是拦截原因，返回特殊 dict 让调用方识别成 block。
         # 要和 fail-open（None）区分开：None = 出故障静默跳过，
         # block = hook 主动说"不行"。
@@ -493,14 +493,14 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
 # ============================================================================
 
 
-# R25 #5 → #8：http hook 的 ${VAR} 环境变量插值（只允许白名单里的变量）
+# http hook 的 ${VAR} 环境变量插值（只允许白名单里的变量）
 _ENV_INTERP_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def interpolate_env_vars(value: str, allowed: list) -> str:
     """把字符串里的 ${VAR} 换成环境变量的值——但只换白名单点过名的变量。
 
-    背景（对齐 CCB 的 httpHookAllowedEnvVars）：不加限制的话，hook 配置
+    背景：不加限制的话，hook 配置
     可能把 API key 这类敏感环境变量悄悄发到外部网址。所以不在白名单的
     引用一律原样保留 ${VAR} 字样并记警告——既防泄漏，也防"用户以为会
     插值、实际没插"的静默错配。
@@ -540,7 +540,7 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
 
     返回：响应里的 JSON dict，或 None（没跑/失败）。
 
-    R16 #4 的 SSRF 防护（防"让服务器替攻击者访问内网"，实现在
+    SSRF 防护（防"让服务器替攻击者访问内网"，实现在
     agent/ssrf_guard.py），发请求之前过四道检查：
     - URL 白名单（配置 security.http_hook_allowed_urls：None = 不限 /
       空列表 = 全拒 / 非空必须匹配上，支持 * 通配）
@@ -559,7 +559,7 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
     url = hook.script.url.strip()
 
     config = _get_config()
-    # R25 #8：${VAR} 插值（只认白名单；默认空列表 = 完全不插值，原样发送）
+    # ${VAR} 插值（只认白名单；默认空列表 = 完全不插值，原样发送）
     allowed_env = []
     if config is not None:
         allowed_env = [
@@ -592,10 +592,10 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
         timeout=(
             min(hook.script.timeout, float(timeout_cap))
             if timeout_cap is not None else hook.script.timeout
-        ),  # R30g-M8 批次：会话结束等场景的超时钳制
-        allow_redirects=False,  # R16 #4：跟着重定向走能绕过预检，所以直接禁掉
+        ),  # 会话结束等场景的超时钳制
+        allow_redirects=False,  # 跟着重定向走能绕过预检，所以直接禁掉
     )
-    # R30d-H1 批次：响应体大小上限（防恶意/异常服务器用超大 body 打爆内存；
+    # 响应体大小上限（防恶意/异常服务器用超大 body 打爆内存；
     # requests 拿到手时已经下载完了，这里至少挡住超大 JSON 的解析放大效应）。
     # getattr 容错：非 requests 传输/测试替身没有 content 属性时按小 body 处理。
     _body = getattr(resp, "content", None) or b""
@@ -650,7 +650,7 @@ def run_mcp_tool_hook(hook, payload: dict) -> Optional[dict]:
 # ============================================================================
 
 
-# R30d-H1 批次：http hook 响应体上限（1MB——hook 协议只需要很小的 JSON 决策）
+# http hook 响应体上限（1MB——hook 协议只需要很小的 JSON 决策）
 _MAX_HTTP_HOOK_BODY_BYTES = 1_000_000
 
 
@@ -684,7 +684,7 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         )
         return None
 
-    # 历史踩坑（R30d-H2）：必须用 format_map + _SafeFormatDict 这种"安全填充"——
+    # 历史踩坑：必须用 format_map + _SafeFormatDict 这种"安全填充"——
     # payload 缺字段时保留 {field} 原样继续渲染（此前裸 .format(**payload)
     # 缺 key 直接 KeyError 抛穿，整个 hook 挂掉）
     prompt_text = (

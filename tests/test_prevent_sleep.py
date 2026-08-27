@@ -1,10 +1,10 @@
-"""CCAR15 Task 5：preventSleep（Windows ctypes 防休眠）单元 + 接线测试。
+"""preventSleep（Windows ctypes 防休眠）单元 + 接线测试。
 
 覆盖：
 1. 非 Windows no-op（_IS_WIN=False 时 acquire/release 返回 False）
 2. Windows mock kernel32 调用序列（acquire → 唤醒态 → release → 恢复）
 3. 引用计数两个 reason 独立
-4. atexit 注册 + restype 显式声明（CCAR12 教训）
+4. atexit 注册 + restype 显式声明
 5. 主循环接线（goal active → acquire("busy")；闲 → release）
 6. 重复 release 不下穿到负数
 """
@@ -157,7 +157,7 @@ def test_two_reasons_independent():
 
 
 # ---------------------------------------------------------------------------
-# 4. atexit 注册 + restype 显式声明（CCAR12 教训）
+# 4. atexit 注册 + restype 显式声明
 # ---------------------------------------------------------------------------
 
 def test_atexit_registered_on_module_load():
@@ -170,7 +170,7 @@ def test_atexit_registered_on_module_load():
 
 
 def test_restype_explicitly_set():
-    """CCAR12 教训：SetThreadExecutionState.restype 必须显式 c_uint32。"""
+    """SetThreadExecutionState.restype 必须显式 c_uint32（不设会被当 int 截断指针）。"""
     with patch("ctypes.WinDLL") as m_win:
         m_kernel = MagicMock()
         m_win.return_value = m_kernel

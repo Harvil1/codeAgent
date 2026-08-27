@@ -1,4 +1,4 @@
-"""CCAR10 Task 1：检索式记忆注入消息构造的单元测试。"""
+"""检索式记忆注入消息构造的单元测试。"""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -99,7 +99,7 @@ def test_retrieval_failure_failopen():
 def test_same_query_cached_within_round():
     """同 query 第二次调用不再触发检索（一轮缓存）。
 
-    R30c-C1：缓存改 ContextVar 后，两次调用须在同一 task/context 内
+    缓存存 ContextVar，两次调用须在同一 task/context 内
     （对齐生产形态——同一轮内）；asyncio.run 各自拷 context 测不到缓存。
     """
     store = _make_store({"general#a": ("n", "user", "b")})
@@ -117,7 +117,7 @@ def test_same_query_cached_within_round():
 
 
 # ============================================================================
-# CCAR10 Task 2: snapshot 退役 + 降级链
+# snapshot 退役 + 降级链
 # ============================================================================
 
 

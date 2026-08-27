@@ -80,7 +80,7 @@ class MCPTransport(ABC):
       - close(): 断开
       - is_connected 属性：现在连着吗
 
-    可选实现（Task 9 加）：
+    可选实现：
       - set_notification_handler(handler)：注册"服务器 → 客户端"通知的
         处理器。默认什么都不做（老子类不用改），子类按需重载
         （StdioTransport 重载了，在 reader 线程里真分发通知）
@@ -127,7 +127,7 @@ class MCPTransport(ABC):
         """查当前注册的通知处理器；返回 None 表示没注册过。"""
         return getattr(self, "_notification_handler", None)
 
-    # CCAR12 Task 5：MCP Resources 协议（服务器除工具外还能提供"资源"——
+    # MCP Resources 协议（服务器除工具外还能提供"资源"——
     # 可读的文件/数据）。这里给默认实现，子类不用重载：
     # send_request 在所有具体 transport 里都是通用的，基类直接复用；
     # 服务器不支持 resources（返回 JSON-RPC error）或出任何异常 →
@@ -181,7 +181,7 @@ class StdioTransport(MCPTransport):
     """stdio 传输：在本机启动一个子进程当 MCP 服务器，跟它的标准输入/输出
     管道里互发 JSON-RPC 消息（好比两个人各拿一根管子喊话）。
 
-    Task 9 升级：起一个后台守护线程专门读子进程的 stdout——读到的
+    起一个后台守护线程专门读子进程的 stdout——读到的
     "响应"放进队列（send_request 从队列里取），读到的"通知"转交给
     set_notification_handler 注册的处理器。对调用方完全透明（看起来还是
     同步阻塞等响应的老用法）。
@@ -209,7 +209,7 @@ class StdioTransport(MCPTransport):
         self._request_id = 0
         self._lock = threading.Lock()
         self._connected = False
-        # Task 9：reader 线程相关
+        # reader 线程相关
         self._response_queue: "queue.Queue" = queue.Queue()
         self._reader_thread: Optional[threading.Thread] = None
         self._notification_handler = None  # 默认 None（向后兼容）
@@ -233,7 +233,7 @@ class StdioTransport(MCPTransport):
             env=full_env,
             text=True,
             encoding="utf-8",
-            # 历史踩坑（2026-08-17 真实 server 对话测试逮到）：server 输出
+            # 历史踩坑：server 输出
             # 里可能混坏字节（GBK 日志/二进制），不能让 reader 线程炸——
             # replace 成 U+FFFD 替换符后当"非 JSON 行"跳过（fail-open），
             # 否则一条 UnicodeDecodeError 就让整条连接永久失效
@@ -282,7 +282,7 @@ class StdioTransport(MCPTransport):
         - handler 抛异常 → 记日志，不影响继续读
         - readline 返回空（EOF，管道关闭）→ 退出循环
 
-        ⚠️ 历史踩坑（2026-08-17 真实 server 对话测试逮到，stdio MCP 全断）：
+        ⚠️ 历史踩坑：
         循环条件绝不能带 self._connected——握手期间（本线程被懒启动时）
         _connected 还是 False（connect() 要等握手成功才置 True），带上它
         reader 会立刻退出 → 响应永远读不到 → 握手 60s 超时。线程的退出
@@ -352,7 +352,7 @@ class StdioTransport(MCPTransport):
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("MCP stdio server 未运行")
 
-        # Task 9：懒启动 reader 线程（第一次调用时起，之后复用）
+        # 懒启动 reader 线程（第一次调用时起，之后复用）
         self._ensure_reader_started()
 
         with self._lock:
@@ -575,7 +575,7 @@ class HTTPTransport(MCPTransport):
         """（内部）用 refresh_token 换一张新的 access_token（OAuth 刷新流程）。
 
         背景：access_token 是短期门票，refresh_token 是长期身份证。
-        做法（参考 claude-code-main 的 HTTPTransport）：向 token_url 发
+        做法：向 token_url 发
         POST（grant_type=refresh_token），拿回新 access_token 和有效期
         expires_in；记下过期时间，提前 60 秒主动刷新，不等它真过期。
 
@@ -1347,7 +1347,7 @@ class MCPClient:
             "arguments": arguments or {},
         }) or {}
 
-    # CCAR12 Task 5：resources 透传（fail-open：返回 None = 对方不支持或失败）
+    # resources 透传（fail-open：返回 None = 对方不支持或失败）
     def list_resources(self) -> Optional[list]:
         """列出 server 的资源清单（转手调 transport.list_resources）。"""
         return self._transport.list_resources()
@@ -1404,7 +1404,7 @@ def load_mcp_config(config_path=None) -> Dict[str, dict]:
 
 
 def load_project_mcp_config() -> Tuple[Optional[Path], Dict[str, dict]]:
-    """读项目级 MCP 配置（R25 安全专项第 3 项）：当前工作目录下的 .mcp.json。
+    """读项目级 MCP 配置：当前工作目录下的 .mcp.json。
 
     参数：无。
 
@@ -1478,7 +1478,7 @@ class MCPManager:
         *,
         app_config: Optional[dict] = None,
     ) -> "MCPClient":
-        """连接单个 server（R24 裁决第 38 项：给 agent 定义里内联的 mcpServers 用）。
+        """连接单个 server（给 agent 定义里内联的 mcpServers 用）。
 
         参数：
             name：server 名字
@@ -1512,7 +1512,7 @@ class MCPManager:
         return client
 
     def disconnect_one(self, name: str) -> bool:
-        """断开并移除单个 server 连接（R24 裁决第 38 项：临时连接用完就断，
+        """断开并移除单个 server 连接（临时连接用完就断，
         不留残留——比如 agent 定义里的内联 server）。
 
         参数：
@@ -1602,7 +1602,7 @@ class MCPManager:
         except Exception as e:
             return {"error": f"MCP 调用失败: {e}"}
 
-    # CCAR12 Task 5：resources 协议的对外入口（给 mcp_resource 工具调）。
+    # resources 协议的对外入口（给 mcp_resource 工具调）。
     # 错误风格与 call() 对齐：统一返回 dict，成功失败都能直接 JSON 序列化。
     def list_resources(self, server_name: str) -> dict:
         """列某个 server 的资源清单。
@@ -1711,7 +1711,7 @@ def is_mcp_tool(name: str) -> bool:
 def collect_routing_hints(config_path=None) -> str:
     """从 .mcp.json 收集 keywords,生成给 system prompt 用的 routing hints 块。
 
-    借鉴 DeerFlow:用户在 .mcp.json 配 server 时可加 keywords 字段:
+    用户在 .mcp.json 配 server 时可加 keywords 字段:
         "postgres": {
             "command": "...",
             "keywords": ["订单", "数据库", "SQL", "查询"],

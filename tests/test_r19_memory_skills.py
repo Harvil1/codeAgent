@@ -1,11 +1,11 @@
-"""R19 记忆技能专项测试。
+"""记忆技能专项测试。
 
-#22 curator 整理增强（delete_falsified / normalize_dates）
-#24 秘密扫描扩展（公共 scanner + memory/curator/trace/handoff 链路）
-#25 条件技能 paths
-#28 skillify 内置技能
-#21 每轮自动记忆提取
-R26 #16 条件技能激活收集-批量执行
+curator 整理增强（delete_falsified / normalize_dates）
+秘密扫描扩展（公共 scanner + memory/curator/trace/handoff 链路）
+条件技能 paths
+skillify 内置技能
+每轮自动记忆提取
+条件技能激活收集-批量执行
 """
 
 import json
@@ -24,7 +24,7 @@ from agent.secret_scanner import (
 
 
 # ---------------------------------------------------------------------------
-# R19 #22：curator 整理增强
+# curator 整理增强
 # ---------------------------------------------------------------------------
 
 class _FakeStore:
@@ -92,7 +92,7 @@ def test_execute_unknown_action_still_skipped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R19 #24：秘密扫描
+# 秘密扫描
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("text,rule", [
@@ -188,7 +188,7 @@ def test_redact_fields():
 
 
 # ---------------------------------------------------------------------------
-# R19 #25：条件技能 paths 动态激活
+# 条件技能 paths 动态激活
 # ---------------------------------------------------------------------------
 
 from agent.skill_commands import (
@@ -280,7 +280,7 @@ def test_agent_activate_conditional_skills(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R26 #16：条件技能激活收集-批量执行（一轮多工具只扫一次技能目录）
+# 条件技能激活收集-批量执行（一轮多工具只扫一次技能目录）
 # ---------------------------------------------------------------------------
 
 def _fake_tc(name, args):
@@ -372,7 +372,7 @@ class TestSkillActivationDeferred:
 
 
 # ---------------------------------------------------------------------------
-# R19 #28：skillify 内置技能
+# skillify 内置技能
 # ---------------------------------------------------------------------------
 
 def test_skillify_builtin_skill_discoverable():
@@ -394,7 +394,7 @@ def test_skillify_builtin_skill_discoverable():
 
 
 # ---------------------------------------------------------------------------
-# R19 #21：对话级轻量记忆提取
+# 对话级轻量记忆提取
 # ---------------------------------------------------------------------------
 
 from agent.auto_extract import _parse_items, run_auto_extract
@@ -503,12 +503,12 @@ def test_maybe_auto_extract_gates():
 
 
 def test_auto_extract_survives_per_turn_loop_teardown(monkeypatch):
-    """R30 审计 High-2 回归：per-turn asyncio.run 销毁循环后提取仍要跑完。
+    """per-turn asyncio.run 销毁循环后提取仍要跑完。
 
     CLI 每条用户消息 asyncio.run 新建/销毁一个事件循环（cli.py per-turn 模型）；
-    旧实现 create_task 在 run_conversation return 前一刻启动，asyncio.run 退出时
-    _cancel_all_tasks 把还没开跑的任务直接取消——auto_extract 静默死亡（无报错）。
-    新实现必须与主循环生命周期解耦（daemon 线程 + 自有事件循环）。
+    若 create_task 在 run_conversation return 前一刻启动，asyncio.run 退出时
+    _cancel_all_tasks 会把还没开跑的任务直接取消——auto_extract 静默死亡
+    （无报错）。提取必须与主循环生命周期解耦（daemon 线程 + 自有事件循环）。
     """
     import threading
     import agent.auto_extract as ax

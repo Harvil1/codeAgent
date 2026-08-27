@@ -17,64 +17,64 @@ _CORE_TOOLS = [
     "terminal",        # 跑 shell 命令
     "read_file",       # 读文件
     "write_file",      # 写文件
-    "notebook_edit",   # 编辑 Jupyter 笔记本单元格（R20 #35，对齐 Claude Code）
+    "notebook_edit",   # 编辑 Jupyter 笔记本单元格
     "search_files",    # 按内容搜文件（类似 grep）
-    "glob",            # 按文件名模式找文件（CCAR11；和按内容搜的 search_files 互补）
-    "lsp",             # 跳转定义/查引用（R26 #17；依赖外部 pylsp，装不上会自动隐身）
+    "glob",            # 按文件名模式找文件（和按内容搜的 search_files 互补）
+    "lsp",             # 跳转定义/查引用（依赖外部 pylsp，装不上会自动隐身）
     "str_replace",     # 对文件做定点替换编辑
-    # —— 技能（05 实现）——
+    # —— 技能 ——
     "skills_list",
     "skill_view",
     "skill_manage",
-    "load_skill",  # P1：LLM 主动把技能正文读进上下文
-    # —— 记忆（04 实现）——
+    "load_skill",  # LLM 主动把技能正文读进上下文
+    # —— 记忆 ——
     "memory",
-    # LLM 主动深挖历史记忆（CCAR8；和会话开场自动注入的那份互补，这是按需查）
+    # LLM 主动深挖历史记忆（和会话开场自动注入的那份互补，这是按需查）
     "memory_recall",
-    # —— 会话搜索（07 实现）——
+    # —— 会话搜索 ——
     "session_search",
-    # —— 委托（09 实现）——
+    # —— 委托 ——
     "subagent",  # 子代理（主对话派出去帮忙干活的分身；老名字 delegate_task 也能用）
-    # —— 确定性工作流编排（R28：批量派分身 + 执行日志断点续跑 + 花费封顶）——
+    # —— 确定性工作流编排（批量派分身 + 执行日志断点续跑 + 花费封顶）——
     "workflow",
-    "subagent_kill",  # 中断正在后台跑的子代理（Task K）
-    "subagent_resume",  # 让中断的子代理从存档接着跑（CCAR10 Task 4）
-    # —— 向用户提问（复刻 AskUserQuestion）——
+    "subagent_kill",  # 中断正在后台跑的子代理
+    "subagent_resume",  # 让中断的子代理从存档接着跑
+    # —— 向用户提问 ——
     "ask_user",
-    # —— 结构化简报（CCAR8：重要操作前先给用户过目一遍）——
+    # —— 结构化简报（重要操作前先给用户过目一遍）——
     "brief",
-    # —— 持久化任务清单（P3 Task System，任务之间能有先后依赖）——
+    # —— 持久化任务清单（Task System，任务之间能有先后依赖）——
     "task_create", "task_update", "task_complete", "task_list",
     # —— 任务系统的看板扩展 ——
     "task_block", "task_unblock", "task_link", "task_comment",
     "task_heartbeat", "task_artifacts",
-    # —— 图片分析（B1：本地图片理解 + 文字识别 OCR）——
+    # —— 图片分析（本地图片理解 + 文字识别 OCR）——
     "image_analyze", "image_ocr",
-    # —— 主动压缩上下文（借鉴 learn-claude-code s08：让 LLM 自己管窗口大小）——
+    # —— 主动压缩上下文（让 LLM 自己管窗口大小）——
     "compact",
-    # —— LLM 主动剪掉早期历史（snip）+ 查看上下文现状（ctx_inspect）（Task L）——
+    # —— LLM 主动剪掉早期历史（snip）+ 查看上下文现状（ctx_inspect）——
     "snip",
     "ctx_inspect",
-    # —— 抓网页（对齐 Claude Code WebFetch）——
+    # —— 抓网页 ——
     "web_fetch",
-    # —— 搜网络（对齐 Claude Code WebSearch；Tavily 后端，没配 key 自动隐身）——
+    # —— 搜网络（Tavily 后端，没配 key 自动隐身）——
     "web_search",
-    # —— MCP 工具说明书按需加载（对齐 Claude Code ToolSearch）——
+    # —— MCP 工具说明书按需加载 ——
     "tool_search",
-    # —— 后台任务（Phase 2b；后台组件没起时自动隐身）——
+    # —— 后台任务（后台组件没起时自动隐身）——
     "bg_start", "bg_status", "bg_result", "bg_list", "bg_stop",
-    # —— 多 agent 团队协作（Phase 4a）——
+    # —— 多 agent 团队协作 ——
     "team_send", "team_inbox", "team_members",
     "team_spawn", "team_shutdown", "idle",
-    # —— 队友间的异步邮箱（CCAR8：寄完就走的通信；和 team 总线的"一问一答"分工）——
+    # —— 队友间的异步邮箱（寄完就走的通信；和 team 总线的"一问一答"分工）——
     "mailbox_send", "mailbox_check", "mailbox_clear",
-    # —— 定时任务（CCAR12 Task 3：LLM 自己创建/查看/删除 cron）——
+    # —— 定时任务（LLM 自己创建/查看/删除 cron）——
     "cron_create", "cron_list", "cron_delete",
-    # —— 目标驱动模式（CCAR12 Task 4：LLM 自己启动/管理 goal，和 CLI 的 /goal 同一套）——
+    # —— 目标驱动模式（LLM 自己启动/管理 goal，和 CLI 的 /goal 同一套）——
     "goal_start", "goal_status", "goal_pause", "goal_resume", "goal_clear",
-    # —— 进出独立工作副本（CCAR12 Task 6，对齐 CCB 的 EnterWorktree/ExitWorktree）——
+    # —— 进出独立工作副本 ——
     "worktree_enter", "worktree_exit",
-    # —— 配置读写（CCAR12 Task 7：只允许白名单里的 7 个键；set 既落盘又当场生效）——
+    # —— 配置读写（只允许白名单里的 7 个键；set 既落盘又当场生效）——
     "config_get", "config_set",
 ]
 
@@ -109,12 +109,12 @@ TOOLSETS: Dict[str, dict] = {
         "includes": [],
     },
     "bg": {
-        "description": "后台任务管理（Phase 2b）",
+        "description": "后台任务管理",
         "tools": ["bg_start", "bg_status", "bg_result", "bg_list", "bg_stop"],
         "includes": [],
     },
     "team": {
-        "description": "Team 多 agent 协作（Phase 4a）",
+        "description": "Team 多 agent 协作",
         "tools": ["team_send", "team_inbox", "team_members",
                   "team_spawn", "team_shutdown", "idle"],
         "includes": [],
@@ -130,7 +130,7 @@ TOOLSETS: Dict[str, dict] = {
             "load_skill",
             "session_search",
             "exit_plan_mode",
-            "plan_mode_v2_dispatch",  # P6：多 Agent 并行做计划（开关 plan_mode_v2_parallel 控制）
+            "plan_mode_v2_dispatch",  # 多 Agent 并行做计划（开关 plan_mode_v2_parallel 控制）
         ],
         "includes": [],
     },
@@ -152,9 +152,8 @@ TOOLSETS: Dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------------
-# Task F：后台（async）子代理的工具门禁
+# 后台（async）子代理的工具门禁
 # ---------------------------------------------------------------------------
-# 借鉴 claude-code-main 的 ASYNC_AGENT_ALLOWED_TOOLS。
 # 为什么要拦：后台子代理跑在无人盯守的线程里，闯了祸用户根本看不见，
 # 所以要"套餐级白名单放行 + 单个工具黑名单兜底"两道闸。
 
@@ -183,11 +182,11 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     "cron_create", "cron_delete",
     # 挂起等待（后台子代理不该进入 IDLE 状态干扰团队协调）
     "idle",
-    # 启动/恢复 goal 循环（CCAR12 Task 4 复审定案：goal 循环没有
+    # 启动/恢复 goal 循环（goal 循环没有
     # "套娃层数"守卫，后台线程里激活会不可中断地烧 token；
     # 暂停/清除是刹车工具，保留给子代理自救）
     "goal_start", "goal_resume",
-    # 进入会话级工作副本（CCAR12 Task 6 修复：后台子代理一进入就会
+    # 进入会话级工作副本（后台子代理一进入就会
     # 占住模块级的 _session_worktree 标记——主对话随后再进会被
     # "已在副本中"卡死；退出工具留给子代理自救，处置思路同上）
     "worktree_enter",

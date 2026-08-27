@@ -17,7 +17,7 @@
 - 用"引用计数"管理：谁需要醒着就 acquire 加一票，忙完 release 减一票，
   按原因（reason）记账，调试时能看清是"谁"还占着唤醒态
 - atexit 兜底：程序退出前无论如何把电源状态还回去（防泄漏）
-- 历史踩坑（CCAR12 教训）：ctypes 调系统函数必须显式声明返回值类型
+- 历史踩坑：ctypes 调系统函数必须显式声明返回值类型
   （restype），默认会当 32 位整数处理、把 64 位返回值截断；
   SetThreadExecutionState 返回 DWORD，返回 0 才表示失败——不显式声明
   就分不清"成功"和"被截断的失败"
@@ -55,7 +55,7 @@ if _IS_WIN:
         import ctypes
 
         _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        # 历史踩坑（CCAR12 教训）：返回值类型必须显式声明成 32 位无符号整数
+        # 历史踩坑：返回值类型必须显式声明成 32 位无符号整数
         # （DWORD）；不声明的话 ctypes 默认按带符号 int 处理，返回值会变味，
         # 而"返回 0 = 失败"的判断就不可靠了
         _kernel32.SetThreadExecutionState.restype = ctypes.c_uint32

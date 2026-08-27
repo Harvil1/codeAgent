@@ -100,13 +100,13 @@ from cli_diag_cmds import (  # noqa: F401（回导入：测试/内部引用兼�
 
 
 # ---------------------------------------------------------------------------
-# 启动期校验/容错（历史踩坑：Bug #2/#3 修复产物）
+# 启动期校验/容错
 # ---------------------------------------------------------------------------
 
 def _validate_model_config(config: dict) -> None:
     """启动最早检查模型配置齐不齐，缺了就用红字告诉用户怎么补，然后退出。
 
-    背景（历史踩坑 Bug #2 修复）：旧代码直接取 config["model"]["name"]，
+    背景：直接取 config["model"]["name"]，
     配置缺字段时会抛 KeyError（Python 报的"键不存在"错误），用户看到一串
     英文 traceback 完全不知道该改哪里——而 api_key 缺失反而有友好提示，
     两边不一致。这里补齐：缺 name/provider 或值为空 → SystemExit(2)
@@ -143,11 +143,11 @@ def _validate_model_config(config: dict) -> None:
 def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
     """记忆维护工人（memory curator）跑一轮，无论成败都把"上次运行时间"写盘。
 
-    背景（历史踩坑 Bug #3 修复）：旧代码里这活儿在后台线程函数中，中途
-    一崩"上次运行时间"就没存下来，下次启动会重复跑一遍——白白烧 LLM
+    背景：这活儿若放在后台线程函数里，
+    中途一崩"上次运行时间"就没存下来，下次启动会重复跑一遍——白白烧 LLM
     tokens。所以提取成独立函数并用 try/finally 兜底：跑完、跑挂都先写盘。
 
-    历史踩坑（X1 修复）：加 store 参数，直接用主 agent 的记忆实例——
+    store 参数要直接用主 agent 的记忆实例——
     两个实例各拿各的锁，锁就不生效了（跨实例 race）。
 
     参数：
@@ -174,7 +174,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
         try:
             # factory 由调用方在 RuntimeContext 注入；这里若没注入就跳过
             # 通过参数透传：本函数只负责"主体逻辑 + state 保存"
-            # （历史踩坑 S2 修复：漏传会导致第 2 阶段静默失效）
+            # （漏传会导致第 2 阶段静默失效）
             factory = config.pop("_curator_factory", None) if isinstance(config, dict) else None
             if factory is not None:
                 review_report = run_memory_review(
@@ -196,7 +196,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
         review_summary = f"第 1 阶段失败: {e}"
 
     finally:
-        # Bug #3 核心修复：无论中途是否崩，state 都写盘（防重复跑）
+        # 无论中途是否崩，state 都写盘（防重复跑）
         state["last_run_at"] = datetime.datetime.now(
             datetime.timezone.utc
         ).isoformat()
@@ -216,7 +216,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
 def _thread_llm_client(config: dict):
     """给"后台线程"专用的 LLM 连接对象：每次调用独立建连，跨事件循环安全。
 
-    背景（R26 终审 follow-up）：主 LLM client 绑定在主线程的事件循环上，
+    背景：主 LLM client 绑定在主线程的事件循环上，
     后台线程（如 curator）借用它会在别的循环里调异步代码而出错。所以
     用 ThreadedLLMClient——每次请求单独建连接，跟哪个循环都不绑定。
 
@@ -252,7 +252,7 @@ class RuntimeContext:
         """只做"轻量启动"：读配置 + 建不依赖别人的组件。重的活留给 initialize()。"""
         self.config = load_config()
         self.home = get_omnimate_home()
-        # === CCAR11 Task 4 新增: /add-dir 持久化白名单启动加载 ===
+        # === /add-dir 持久化白名单启动加载 ===
         # 把 settings.json 里 security.extra_allowed_roots 记过的额外可写目录
         # 灌进运行时白名单。宽松失败策略（fail-open）：某一条坏了就跳过，
         # 不让程序起不来。
@@ -268,14 +268,14 @@ class RuntimeContext:
         self.agent = None
         self.session_id = None
         self.skill_commands = {}
-        self.bundle_commands = {}  # 技能束斜杠命令（batch1-T3 新增）：一个命令连发多个技能
+        self.bundle_commands = {}  # 技能束斜杠命令：一个命令连发多个技能
         self.quit_requested = False  # 用户敲了 /quit 的标志（走正常关机流程，不是硬杀）
-        self.checkpoint_mgr = None  # Checkpoint 管理器：文件快照/回滚（对标 Claude Code）
-        # === P2-T8 新增: Hooks 系统（事件钩子——特定事件发生时自动执行用户配置的动作）===
+        self.checkpoint_mgr = None  # Checkpoint 管理器：文件快照/回滚
+        # === Hooks 系统（事件钩子——特定事件发生时自动执行用户配置的动作）===
         from agent.hooks import HookRegistry
         self.hooks_registry = HookRegistry()
 
-        # === P2b-T6 新增: 后台任务管理器 ===
+        # === 后台任务管理器 ===
         from agent.background import BackgroundManager
         bg_cfg = self.config.get("bg_task", {})
         self.bg_manager = BackgroundManager(
@@ -283,10 +283,10 @@ class RuntimeContext:
             notification_stdout_cap=bg_cfg.get("notification_stdout_cap", 500),
             result_stdout_cap=bg_cfg.get("result_stdout_cap", 5000),
             default_timeout=bg_cfg.get("default_timeout", 600),
-            stall_timeout=bg_cfg.get("stall_timeout", 45.0),  # P1-3: 停滞看门狗——45 秒没有新输出就通知用户（防"卡死没动静"）
+            stall_timeout=bg_cfg.get("stall_timeout", 45.0),  # 停滞看门狗——45 秒没有新输出就通知用户（防"卡死没动静"）
         )
 
-        # === P2c-T5 新增: Cron 调度器（定时任务，像闹钟一样到点触发）===
+        # === Cron 调度器（定时任务，像闹钟一样到点触发）===
         from agent.cron import CronScheduler
         cron_cfg = self.config.get("cron", {})
         if cron_cfg.get("enabled", True):
@@ -298,7 +298,7 @@ class RuntimeContext:
                     jobs_path=Path(cron_path),
                     poll_interval_seconds=cron_cfg.get("poll_interval_seconds", 30.0),
                     enabled=True,
-                    max_age_days=cron_cfg.get("max_age_days", 7),  # === CronRecurringExpiry 新增：循环任务过期天数 ===
+                    max_age_days=cron_cfg.get("max_age_days", 7),  # 循环任务过期天数
                 )
                 self.cron_scheduler.start()
             except Exception as e:
@@ -307,7 +307,7 @@ class RuntimeContext:
         else:
             self.cron_scheduler = None
 
-        # === P4a-T7 新增: Agent Teams（多代理协作：一个"队长"带多个队友分工）===
+        # === Agent Teams（多代理协作：一个"队长"带多个队友分工）===
         self.team_bus = None
         self.team_coordinator = None
         team_cfg = self.config.get("team", {})
@@ -338,24 +338,24 @@ class RuntimeContext:
                 self.team_bus = None
                 self.team_coordinator = None
 
-        # === ⑮ 新增: Handoff bundle 存储（会话移交包裹：把当前对话打包存档/带走）===
+        # === Handoff bundle 存储（会话移交包裹：把当前对话打包存档/带走）===
         self.handoff_store = None  # 在 initialize() 中真正初始化
 
-        # === CCAR8 Task 12 新增: mailbox + agent_name + trace_sink ===
-        # mailbox：队友间的异步邮箱（补 Task 8 遗留的接线）
+        # === mailbox + agent_name + trace_sink ===
+        # mailbox：队友间的异步邮箱
         # agent_name：当前 agent 的名字（邮箱收件人，默认 "main"）
-        # trace_sink：本地运行轨迹记录器（补 Task 5 遗留接线，/trace 命令读这个）
+        # trace_sink：本地运行轨迹记录器（/trace 命令读这个）
         # 这些字段先置 None，在 initialize() 中真正填充
-        # 注意：aux_llm_client / aux_model 已删（CCAR8 终审修复）——
-        # 是没人读的死字段；辅助模型调用统一走 agent_ref.aux_llm_router
+        # 注意：不要在这加 aux_llm_client / aux_model 之类的字段——
+        # 没人读的死字段；辅助模型调用统一走 agent_ref.aux_llm_router
         self.mailbox = None
         self.agent_name = "main"
         self.trace_sink = None
         self._poor_mode_on = False  # /poor 省钱模式的开关状态
-        # CCAR10 Task 3: 状态行用的项目分区键（initialize 里赋值一次，取不到就空着不报错）
+        # 状态行用的项目分区键（initialize 里赋值一次，取不到就空着不报错）
         self._statusline_project_key = None
 
-        # X2 修复：用 atexit 兜底关机——即使主循环崩了或 SystemExit，也会清理锁文件等资源
+        # 用 atexit 兜底关机——即使主循环崩了或 SystemExit，也会清理锁文件等资源
         import atexit
         atexit.register(self.shutdown)
 
@@ -402,27 +402,27 @@ class RuntimeContext:
 
         参数：无。返回：无（结果都挂在 self 的字段上）。
         """
-        # Bug #2 修复：启动最早校验 model.name/provider（缺字段时友好提示）
+        # 启动最早校验 model.name/provider（缺字段时友好提示）
         _validate_model_config(self.config)
 
         # 0. 设置权限检查器（注入"破坏性命令要问用户"的回调 + 持久化白名单）
-        # B2：perm_mode 放 try 外面定义，因为后面构造 AIAgent 时还要用
+        # perm_mode 放 try 外面定义，因为后面构造 AIAgent 时还要用
         perm_mode = self.config.get("security", {}).get("permission_mode", "default")
         try:
             from agent.permission import set_default_checker, PermissionChecker
             from agent.settings import approved_commands_path, approved_paths_path
             set_default_checker(PermissionChecker(
                 approval_callback=_make_approval_callback(
-                    # R21 #45：审批时按 e 可以让辅助模型解释命令。
+                    # 审批时按 e 可以让辅助模型解释命令。
                     # 延迟获取——aux_llm_router 要到更晚才构造好
                     aux_provider=lambda: getattr(self, "aux_llm_router", None),
                 ),
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
                 mode=perm_mode,
-                hooks_registry=self.hooks_registry,  # round3 D2 新增: 权限审计 hook（每次权限判定都留痕）
+                hooks_registry=self.hooks_registry,  # 权限审计 hook（每次权限判定都留痕）
             ))
-            # Task 7: 把 config["security"]["sandbox_mode"] 灌进检查器
+            # 把 config["security"]["sandbox_mode"] 灌进检查器
             from agent.permission import get_default_checker
             _checker = get_default_checker()
             if _checker is not None:
@@ -459,7 +459,7 @@ class RuntimeContext:
             self.memory_store = MemoryStore(
                 omnimate_home=self.home,
             )
-            # batch2-T3：memory_manager 的 LLM 连接等 agent 建好后再注入
+            # memory_manager 的 LLM 连接等 agent 建好后再注入
             # （要跟 aux_llm_router 共用同一个）
             self.memory_manager = MemoryManager(self.memory_store)
 
@@ -477,7 +477,7 @@ class RuntimeContext:
                 provider=self.config["model"]["provider"],
             )
 
-        # Checkpoint：文件快照/回滚（对标 Claude Code，按会话隔离）
+        # Checkpoint：文件快照/回滚（按会话隔离）
         try:
             from agent.checkpoint import CheckpointManager
             ckpt_root = Path(self.home) / ".checkpoints"
@@ -492,7 +492,7 @@ class RuntimeContext:
 
         # 4. 创建 agent（AI 本体）
         self.agent = self._create_agent()
-        # R30f-H8：按模型分别记账的用量追踪（注入 agent；/usage 按模型展示）
+        # 按模型分别记账的用量追踪（注入 agent；/usage 按模型展示）
         try:
             from agent.usage_tracker import UsageTracker
             self.usage_tracker = UsageTracker(
@@ -505,7 +505,7 @@ class RuntimeContext:
 
         # 5. 扫描技能命令（内置 + 用户两个目录都扫，同名时用户目录优先）
         self.skill_commands = scan_skill_commands(all_skills_dirs())
-        # batch1-T3：扫描技能束命令（只在用户目录扫，不扫内置）
+        # 扫描技能束命令（只在用户目录扫，不扫内置）
         self.bundle_commands = scan_bundle_commands(skills_dir())
 
         # 7. Handoff 存储
@@ -516,8 +516,8 @@ class RuntimeContext:
             logger.warning("HandoffStore 初始化失败: %s", e)
             self.handoff_store = None
 
-        # === CCAR8 Task 12 新增: 初始化 mailbox + trace_sink，注入 agent ===
-        # mailbox 接线（补 Task 8 遗留）：用 team 目录，跟 team_bus 共享同一个邮箱根目录
+        # === 初始化 mailbox + trace_sink，注入 agent ===
+        # mailbox 接线：用 team 目录，跟 team_bus 共享同一个邮箱根目录
         try:
             from agent.team.mailbox import Mailbox
             mb_dir = Path(self.home) / ".team"
@@ -531,7 +531,7 @@ class RuntimeContext:
             logger.warning("mailbox 初始化失败（fail-open）: %s", e)
             self.mailbox = None
 
-        # trace_sink 接线（补 Task 5 遗留）：从 config.trace.enabled 读开关
+        # trace_sink 接线：从 config.trace.enabled 读开关
         trace_cfg = self.config.get("trace", {})
         if trace_cfg.get("enabled", True):
             try:
@@ -559,9 +559,9 @@ class RuntimeContext:
                 import threading
 
                 def _run_memory_curator():
-                    # Bug #3 修复：调提取出的 _run_memory_curator_once，
+                    # 调 _run_memory_curator_once，
                     # 内部 try/finally 保证 state 写盘（即使中途崩溃）。
-                    # X1 修复：传主 store 实例避免跨实例竞争
+                    # 传主 store 实例避免跨实例竞争
                     #（threading.Lock 只对同一个实例生效，两个实例等于没锁）。
                     # factory 通过 config 字典临时捎带（避免改函数签名）。
                     cfg_copy = dict(self.config) if isinstance(self.config, dict) else {}
@@ -576,7 +576,7 @@ class RuntimeContext:
                     except Exception as e:
                         logger.warning("Memory Curator 后台运行失败: %s", e)
 
-                # CCAR9 终审 Important：daemon 线程不会自动继承主线程的
+                # 重要：daemon 线程不会自动继承主线程的
                 # contextvars（上下文变量——Python 3.12 以下的 threading.Thread
                 # 不拷贝 context）。项目分区键依赖 workspace_cwd 这个 ContextVar，
                 # 不带过去就会退化用 os.getcwd()——多项目场景下，别的项目的
@@ -591,7 +591,7 @@ class RuntimeContext:
         except Exception as e:
             logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
 
-        # === Task I: 清理僵尸子代理记录 + 过期记录清理 ===
+        # === 清理僵尸子代理记录 + 过期记录清理 ===
         # 启动时把"标着 running 但进程早就没了"的残留（上次崩溃留下的）改成
         # interrupted，并清掉超过保留天数的老记录。
         _delegation_cfg = self.config.get("delegation", {})
@@ -612,7 +612,7 @@ class RuntimeContext:
             except Exception as e:
                 logger.debug("子代理持久化清理失败（不阻塞）: %s", e)
 
-        # === CCAR10 Task 3 新增: statusline 项目分区键（赋值一次，取不到就空着）===
+        # === statusline 项目分区键（赋值一次，取不到就空着）===
         # 放在 initialize 末尾（所有依赖就绪后），失败不影响主流程
         try:
             from agent.project_scope import get_project_memory_key
@@ -701,18 +701,18 @@ class RuntimeContext:
             )
             raise SystemExit(1)
 
-        # === batch2-T3 + 07: 创建辅助模型路由器（AuxLLMRouter）===
+        # === 创建辅助模型路由器（AuxLLMRouter）===
         # 辅助模型 = 干杂活的便宜小模型（起标题、解释命令等），跟主模型分开
         aux_llm_router = None
         aux_cfg = self.config.get("aux_model")
-        # 07 新增：优先读 aux_llm.endpoints 端点列表
+        # 优先读 aux_llm.endpoints 端点列表
         aux_llm_cfg = self.config.get("aux_llm", {})
         endpoints_cfg = aux_llm_cfg.get("endpoints", []) if aux_llm_cfg else []
 
         if endpoints_cfg or (aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model")):
             try:
                 from agent.aux_llm import AuxLLMRouter, LLMEndpoint
-                # R26 终审 follow-up：router 的降级兜底也可能从线程里调
+                # router 的降级兜底也可能从线程里调
                 # （分类器/curator）——用每次独立连接的 client，
                 # 别建绑定主循环的临时连接池
                 from agent.llm_client import ThreadedLLMClient
@@ -722,7 +722,7 @@ class RuntimeContext:
                     "api_key": api_key,
                     "model": model_cfg["name"],
                 })
-                # 07 新增：配置了 endpoints 列表就优先用它
+                # 配置了 endpoints 列表就优先用它
                 endpoints = None
                 if endpoints_cfg:
                     endpoints = [
@@ -747,17 +747,17 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
                 aux_llm_router = None
-                # R26 终审 follow-up：ThreadedLLMClient 没有常驻连接池可泄漏，不用 close
+                # ThreadedLLMClient 没有常驻连接池可泄漏，不用 close
                 main_client = None
 
-        # === 04 新增: 流式输出回调 ===
+        # === 流式输出回调 ===
         # config["streaming"]["enabled"] 默认 True（打字机效果：边生成边打印）
         streaming_cfg = self.config.get("streaming", {})
         stream_callback = None
         if streaming_cfg.get("enabled", True):
             stream_callback = _make_cli_stream_callback()
 
-        # batch2-T3：给 memory_manager 注入 LLM 连接（有辅助模型就用辅助的）
+        # 给 memory_manager 注入 LLM 连接（有辅助模型就用辅助的）
         if self.memory_manager:
             if aux_llm_router:
                 self.memory_manager._llm_client = aux_llm_router
@@ -768,20 +768,20 @@ class RuntimeContext:
                 # 没配置辅助模型时用主连接（等 agent 创建后再补注入）
                 pass
 
-        # === F2 新增: 把辅助模型路由器注入给 hook 执行器 ===
+        # === 把辅助模型路由器注入给 hook 执行器 ===
         # 声明式 hook 的 prompt/agent 两类 handler 要靠辅助模型做评估。
         # hook_exec 是模块级的注入点，没配置辅助模型时 lambda 返回 None
         #（宽松失败：hook 相关评估静默跳过，不报错）。
         from agent.hook_exec import set_aux_router_provider, set_config_provider
         set_aux_router_provider(lambda: aux_llm_router)
-        # P3.2：注入 config 提供者，让 hook 分发器能读功能开关——
+        # 注入 config 提供者，让 hook 分发器能读功能开关——
         # http / mcp_tool / agent 三种 handler 类型都受开关门控
         set_config_provider(lambda: self.config)
 
-        # 注：aux_llm_client / aux_model 回填已删（CCAR8 终审修复）——
+        # 注：不要往 RuntimeContext 回填 aux_llm_client / aux_model——
         # 是没人读的死字段；辅助模型的唯一来源是 agent_ref.aux_llm_router。
 
-        # === P4.1 新增: 给权限检查器注入辅助模型 + config 提供者 ===
+        # === 给权限检查器注入辅助模型 + config 提供者 ===
         # 权限闸门第 4 道（用辅助模型给命令分类）需要这两个提供者。
         # 权限检查器比辅助路由器先构造（前面行 294 那里），所以这里回头补上
         # （跟上面 hook_exec 的做法同款）。没配置辅助模型时 lambda 返回
@@ -811,28 +811,28 @@ class RuntimeContext:
             omnimate_home=self.home,
             on_tool_call=_make_tool_call_callback(self.config),
             config=self.config,
-            hooks_registry=self.hooks_registry,  # === P2-T8 新增: hook 注册表 ===
-            bg_manager=self.bg_manager,  # === P2b-T6 新增: 后台任务管理器 ===
-            cron_scheduler=self.cron_scheduler,  # === P2c-T5 新增: 定时调度器 ===
-            team_bus=self.team_bus,  # === P4a-T7 新增: 团队消息总线 ===
-            team_coordinator=self.team_coordinator,  # === P4a-T7 新增: 团队协调器 ===
-            team_name="main",  # === P4a-T7 新增: 本 agent 的团队名 ===
-            aux_llm_router=aux_llm_router,  # === batch2-T3 新增: 辅助模型路由 ===
-            plan_approval_callback=cli_plan_approval_callback,  # === PlanMode 新增: 计划审批回调 ===
-            stream_callback=stream_callback,  # === 04 新增: 流式输出 ===
+            hooks_registry=self.hooks_registry,  # hook 注册表
+            bg_manager=self.bg_manager,  # 后台任务管理器
+            cron_scheduler=self.cron_scheduler,  # 定时调度器
+            team_bus=self.team_bus,  # 团队消息总线
+            team_coordinator=self.team_coordinator,  # 团队协调器
+            team_name="main",  # 本 agent 的团队名
+            aux_llm_router=aux_llm_router,  # 辅助模型路由
+            plan_approval_callback=cli_plan_approval_callback,  # 计划审批回调（Plan Mode）
+            stream_callback=stream_callback,  # 流式输出
             ask_user_bridge=_make_ask_user_bridge(),  # ask_user 工具的 CLI 桥接（在黑窗口里向用户提问）
-            checkpoint_manager=self.checkpoint_mgr,  # === Checkpoint 新增: 快照管理器 ===
-            permission_mode=self.config.get("security", {}).get("permission_mode", "default"),  # === B2 新增: 权限模式透传给 AIAgent ===
-            # R17 #12：流空闲看门狗（llm.stream_idle_timeout_seconds，默认 90 秒没新内容就掐掉重试，<=0 禁用）
+            checkpoint_manager=self.checkpoint_mgr,  # 快照管理器
+            permission_mode=self.config.get("security", {}).get("permission_mode", "default"),  # 权限模式透传给 AIAgent
+            # 流空闲看门狗（llm.stream_idle_timeout_seconds，默认 90 秒没新内容就掐掉重试，<=0 禁用）
             stream_idle_timeout=(self.config.get("llm") or {}).get("stream_idle_timeout_seconds"),
         )
 
-        # batch2-T3：如果 memory_manager 还没分到 LLM 连接，就用 agent 的主连接
+        # 如果 memory_manager 还没分到 LLM 连接，就用 agent 的主连接
         if self.memory_manager and self.memory_manager._llm_client is None:
             self.memory_manager._llm_client = agent.llm_client
             self.memory_manager._llm_model = agent.model
 
-        # === B1 新增: 初始化视觉模型连接（image_analyze / image_ocr 两个工具共用）===
+        # === 初始化视觉模型连接（image_analyze / image_ocr 两个工具共用）===
         vision_cfg = self.config.get("vision", {}) or {}
         if vision_cfg.get("enabled", True):
             try:
@@ -853,10 +853,10 @@ class RuntimeContext:
                 logger.warning("vision_client 初始化失败（用主 client 回退）: %s", e)
                 agent._vision_client = None
 
-        # === CCAR8 终审修复新增: 接线 MCP 推送 → 收件箱 ===
-        # 背景（历史踩坑）：传输层的 set_notification_handler 和读循环都写好了，
-        # 但没人把"收件箱推送函数"注册成 handler——MCP server 推消息时
-        # handler 是 None，消息直接被扔掉，/inbox 永远是空的。这里补上接线。
+        # === 接线 MCP 推送 → 收件箱 ===
+        # 背景：光有传输层的 set_notification_handler 和读循环还不够，
+        # 得把"收件箱推送函数"注册成 handler——否则 MCP server 推消息时
+        # handler 是 None，消息直接被扔掉，/inbox 永远是空的。这里做接线。
         # 宽松失败：任何异常只记 warning，不影响 agent/MCP 本身。
         try:
             from agent.channel_inbox import ChannelInbox
@@ -952,7 +952,7 @@ class RuntimeContext:
             try:
                 if should_run_now(skills_dir()):
                     console.print("[dim]后台 curator 触发：整理技能库...[/dim]")
-                    # R26 #14：要用的组件现场取——session/memory store 用
+                    # 要用的组件现场取——session/memory store 用
                     # initialize 前段建好的那两个实例（同实例才防得了跨实例竞争）；
                     # LLM 优先用辅助模型（便宜），没有就退回主连接
                     #（跟 reflection 复盘的取法同一模式）。
@@ -962,7 +962,7 @@ class RuntimeContext:
                     if _aux is not None and _aux.is_aux_configured:
                         _llm = _aux
                     else:
-                        # R26 终审 follow-up：线程里绝不借用绑定主循环的主连接
+                        # 线程里绝不借用绑定主循环的主连接
                         #——用 ThreadedLLMClient 每次独立建连
                         _llm = _thread_llm_client(self.config)
                     run_curator_review(
@@ -981,9 +981,9 @@ class RuntimeContext:
     def new_session(self):
         """开始新会话：新建会话档案 + 把 agent 的会话级状态全部清回初始。
 
-        背景（R30 审计 Medium-7 修复）：旧代码漏了不少清理——
-        - checkpoint 管理器没重建绑定新会话，还指向旧会话，之后的快照
-          全写进旧目录、/rewind 会回滚错对象（对照 resume_session 有重建，这是漏项）
+        背景：会话级状态要清理到位，漏一项就出错——
+        - checkpoint 管理器必须重建绑定新会话，否则还指向旧会话，之后的快照
+          全写进旧目录、/rewind 会回滚错对象（做法跟 resume_session 一致）
         - 压缩状态 / 自动提取游标 / 记忆注入去重 / 上下文提示 /
           中断残留 / 临时消息队列等也都要归零
         裁决（故意不清的）：审批缓存不清——虽然名义上是"会话内缓存"，
@@ -1054,14 +1054,14 @@ class RuntimeContext:
         msgs = self.session_store.get_messages(session_id)
         # 对话历史不含 system 消息（system 由 prompt_builder 现场生成）
         conv = [m for m in msgs if m.get("role") != "system"]
-        # R22 #40：按最后一次压缩的边界裁掉更早的旧消息
+        # 按最后一次压缩的边界裁掉更早的旧消息
         #（会话库只追加不删改，不裁的话会载入全部旧历史；
         # 旧会话没有边界标记就保守全量载入）
         conv = _truncate_at_last_compact_boundary(conv)
         # 清理多余的摘要占位（只留最近一个）——压缩频率修复前的长会话可能
         # 存了几十个"[之前的对话已自动总结]"占位，全塞进上下文会撑爆且混乱
         conv = _cleanup_redundant_summaries(conv)
-        # R21 #41：孤儿工具结果修复（对标 CC 的孤儿恢复）
+        # 孤儿工具结果修复
         # 保存时中断可能留下"缺了一半"的悬空工具结果（assistant 发了
         # tool_calls 但对应的 result 缺失，或反过来的孤儿 result）。
         # 主循环里的 _fix_tool_call_pairs 只在发送前临时修（不写回盘）；
@@ -1109,7 +1109,7 @@ class RuntimeContext:
     def shutdown(self):
         """关机清理：触发会话结束钩子 + 停后台任务、定时器、团队，关连接。
 
-        背景（P2b-T6 + P2c-T5）：后台任务和定时器不关会变"僵尸进程"，
+        背景：后台任务和定时器不关会变"僵尸进程"，
         Windows 上会话库连接不关会锁住文件。
 
         参数：无。返回：无（每一步都容错，单步失败不影响其余清理）。
@@ -1176,11 +1176,11 @@ def _make_approval_callback(aux_provider=None):
     批准的效果范围（如实说明，别夸大）：
     - 命令 → 同意后记入 ~/.OmniMate/approved_commands.json，
       跨会话不再重复询问同一条命令
-    - 路径 → 三档（T5）：y=本次允许（父目录进会话缓存，同目录后续写入不再问）；
+    - 路径 → 三档：y=本次允许（父目录进会话缓存，同目录后续写入不再问）；
       a=总是允许（父目录持久化到 settings.json 的 security.extra_allowed_roots，
       跨会话生效，与 /add-dir 同一通道）；N=拒绝
 
-    R21 #45：命令审批多一个 e 选项——让辅助模型解释这条命令干什么用 +
+    命令审批多一个 e 选项——让辅助模型解释这条命令干什么用 +
     LOW/MEDIUM/HIGH 风险等级（aux_provider 注入；没配辅助模型就隐藏该选项）。
     宽松失败：解释挂了不阻塞审批。
 
@@ -1189,7 +1189,7 @@ def _make_approval_callback(aux_provider=None):
     返回：审批回调函数 callback(item)。
     """
     def _explain(command: str):
-        """R21 #45：用辅助模型解释命令（干什么用 + 风险等级）。宽松失败。
+        """用辅助模型解释命令（干什么用 + 风险等级）。宽松失败。
 
         参数：
             command: 要解释的命令字符串
@@ -1213,7 +1213,7 @@ def _make_approval_callback(aux_provider=None):
             console.print(f"[dim]（解释失败: {e}）[/dim]")
 
     def callback(item: str):
-        # 审批入口：R30 审计 Medium-8 修复——命令/路径的判定提取成 _is_path_item
+        # 审批入口：命令/路径的判定提取成 _is_path_item
         #（旧启发式会把 del /s /q tmp 误判成"路径审批"；而 check_path 发来的
         # 内容恒带"文件写入审批: "前缀，优先按这个约定识别，不再瞎猜）
         if _is_path_item(item):
@@ -1648,7 +1648,7 @@ def cli_plan_approval_callback(plan: str) -> tuple:
     背景：计划模式下 AI 只做调研、不动手，调研完把计划交给用户审。
     返回 (是否批准, 修订意见, 是否清空上下文) 三元组：
     - y/yes → (True, "", False) 批准，保留上下文继续执行
-    - c/clear → (True, "", True) 批准并清空上下文再执行（T9 设计：调研
+    - c/clear → (True, "", True) 批准并清空上下文再执行（设计考量：调研
       过程的对话全部丢弃、只留计划指令，执行阶段不用再烧调研的 token；
       完整历史仍存在轨迹/会话库里随时可查）
     - edit → 收集一行修订意见 → (False, 意见, False)
@@ -1762,7 +1762,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/permission":
-        # B2 新增：/permission [default|bypass|acceptEdits]
+        # /permission [default|bypass|acceptEdits]：切换权限模式
         # 不带参数 → 显示当前模式；带参数 → 切换（要同步改两处：检查器的
         # mode + rt.agent.permission_mode，改一处会不同步）
         arg = args.strip().lower() if args else ""
@@ -1794,7 +1794,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/sandbox":
-        # OS 沙箱开关（对标 Claude Code 的 /sandbox）
+        # OS 沙箱开关
         # 用法：/sandbox on | off | status（无参数 = status）
         arg = args.strip().lower() if args else ""
         from agent.sandbox_runner import (
@@ -1809,7 +1809,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                     f"[yellow]⚠️  沙箱不可用：{availability_reason()}\n"
                     "仍会切换到 on 模式（fail-open 降级，命令照常执行）[/yellow]"
                 )
-            # I4 修复：有些简化版检查器没有 set_sandbox_mode 方法，先探测防崩
+            # 有些简化版检查器没有 set_sandbox_mode 方法，先探测防崩
             if hasattr(checker, "set_sandbox_mode"):
                 checker.set_sandbox_mode("on")
                 console.print(
@@ -1844,7 +1844,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/hooks":
-        # 阶段 4 新增：展示会话启动那一刻锁定的 hook 快照 + 对比磁盘上的改动
+        # 展示会话启动那一刻锁定的 hook 快照 + 对比磁盘上的改动
         from agent.hook_loader import get_snapshot, get_disk_version
         snap = get_snapshot()
         if not snap:
@@ -1919,7 +1919,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                     f"（降 {lb['drop']} tokens）"
                 )
                 console.print(f"[cyan]根因：[/cyan]{lb['root_cause']}")
-                # CCAR4 Task A：顺便告诉用户 diff 文件存哪了
+                # 顺便告诉用户 diff 文件存哪了
                 if lb.get('diff_path'):
                     console.print(
                         f"[cyan]diff 文件：[/cyan]{lb['diff_path']}"
@@ -1933,7 +1933,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
             console.print(f"[red]读取 cache 统计失败：[/red]{e}")
         return True
 
-    # === CCAR8 Task 12 新增: 6 个新命令 ===
+    # === goal / poor / output-style / trace / history / mailbox / inbox / resume_bundle ===
     if name == "/goal":
         return _handle_goal_command(args, rt)
     if name == "/poor":
@@ -1943,7 +1943,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/trace":
         return _handle_trace_command(args, rt)
     if name == "/history":
-        # R21 #42：全局输入历史（/history 列最近 20 条；/history N 打印第 N 条完整原文）
+        # 全局输入历史（/history 列最近 20 条；/history N 打印第 N 条完整原文）
         try:
             from agent.input_history import GlobalHistory
             h = GlobalHistory(rt.home)
@@ -1976,21 +1976,21 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         # 另起 /resume_bundle 加以区分
         return _handle_resume_command(args, rt)
 
-    # === CCAR9 Task 4: /init 生成 OMNIMATE.md（对标 Claude Code 的 /init）===
+    # === /init 生成 OMNIMATE.md ===
     if name == "/init":
         return _handle_init_command(rt, args)
 
-    # === CCAR10 Task 5: /resumable 列出/恢复可续跑的子代理 ===
+    # === /resumable 列出/恢复可续跑的子代理 ===
     if name == "/resumable":
         return _handle_resumable_command(args, rt)
 
-    # === CCAR11 Task 2: /compact 手动压缩上下文 + /context 看 token 分布 ===
+    # === /compact 手动压缩上下文 + /context 看 token 分布 ===
     if name == "/compact":
         return _handle_compact_cli(args, rt)
     if name == "/context":
         return _handle_context_cli(args, rt)
 
-    # === CCAR11 Task 3: /status 状态一览 + /doctor 自诊断 + /diff 本会话文件改动 ===
+    # === /status 状态一览 + /doctor 自诊断 + /diff 本会话文件改动 ===
     if name == "/status":
         return _handle_status_cli(args, rt)
     if name == "/doctor":
@@ -1998,15 +1998,15 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     if name == "/diff":
         return _handle_diff_cli(args, rt)
 
-    # === CCAR11 Task 4: /add-dir 追加可写路径白名单（运行时生效 + 持久化）===
+    # === /add-dir 追加可写路径白名单（运行时生效 + 持久化）===
     if name == "/add-dir":
         return _handle_add_dir_cli(args, rt)
 
-    # === CCAR11 Task 5: /paste 读剪贴板图片存 .paste/ 目录 ===
+    # === /paste 读剪贴板图片存 .paste/ 目录 ===
     if name == "/paste":
         return _handle_paste_command(args, rt)
 
-    # === CCAR15 Task 4: /skill-learning 行为直觉学习链路管理 ===
+    # === /skill-learning 行为直觉学习链路管理 ===
     if name == "/skill-learning":
         return _handle_skill_learning_command(args, rt)
 
@@ -2016,7 +2016,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
 def _truncate_at_last_compact_boundary(msgs: list) -> list:
     """恢复会话时，从最后一条"[COMPACT_BOUNDARY]"（压缩边界标记）起截断。
 
-    背景（R22 #40，对标 CC 的边界重连）：压缩发生时，摘要占位消息会带着
+    背景：压缩发生时，摘要占位消息会带着
     边界标记存进会话库。恢复载入时，标记之前的旧消息全部裁掉——
     它们已经被总结进摘要了，再载入一遍既撑上下文又跟摘要重复。
     标记行本身剥掉，摘要正文保留。找不到标记就原样返回
@@ -2077,7 +2077,7 @@ def _cleanup_redundant_summaries(msgs: list) -> list:
 def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
     """/rewind：列出存档点（checkpoint 快照），选一个回滚（恢复文件和/或对话）。
 
-    背景（对标 Claude Code）：每条用户消息发出前，agent 改过的文件都会
+    背景：每条用户消息发出前，agent 改过的文件都会
     自动拍快照。这个命令列出这些"存档点"，让用户时光倒流回某一时点。
 
     参数：
@@ -2136,7 +2136,7 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
         return
     sid = snaps[idx]["id"]
 
-    # 4 种恢复模式菜单（对标 Claude Code 的 /rewind）
+    # 4 种恢复模式菜单
     console.print(
         f"[bold]快照 {sid[:19]} 含 {len(snaps[idx]['files'])} 文件 / "
         f"{snaps[idx]['msg_count']} 条对话。恢复模式：[/bold]\n"
@@ -2177,7 +2177,7 @@ def _handle_rewind_command(rt: RuntimeContext, args: str) -> None:
 
 
 def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
-    """把选中存档点之后的对话压成一段摘要（对标 Claude Code 的 Summarize from here）。
+    """把选中存档点之后的对话压成一段摘要。
 
     做法：保留存档点当时的对话，其后新追加的消息交给 LLM 总结；
     最终对话历史 = 存档点对话 + 一条带摘要的 user 消息。
@@ -2205,8 +2205,8 @@ def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
 
     try:
         from agent.context_compressor import _summarize_conversation
-        # _summarize_conversation 在 Plan 2A 改成了 async（因为底层 LLM 调用
-        # 已 async）。本函数是同步的（被同步的命令处理函数调用），用
+        # _summarize_conversation 是 async（因为底层 LLM 调用是 async）。
+        # 本函数是同步的（被同步的命令处理函数调用），用
         # asyncio.run 桥接（跟 reflection.py:150 的处理方式相同）。
         summary = asyncio.run(_summarize_conversation(after, rt.agent.llm_client))
     except Exception as e:
@@ -2269,7 +2269,7 @@ def _show_help():
 
 
 # ---------------------------------------------------------------------------
-# CCAR8 Task 12 新增: 6 个新命令的处理函数
+# goal / poor / output-style / trace / history / mailbox 等命令的处理函数
 # ---------------------------------------------------------------------------
 
 def _goal_state_path(rt) -> Path:
@@ -2311,7 +2311,7 @@ def _start_new_goal(rt, objective: str) -> None:
     """启动新 goal（目标驱动：给 AI 一个目标，它多轮自主推进直到完成）。
 
     核心三步（暂停旧 goal / 建新 GoalState / 持久化 + 挂到 agent）走
-    agent/goal.start_goal_agent 共享函数（CCAR12 Task 4，跟 LLM 的
+    agent/goal.start_goal_agent 共享函数（跟 LLM 的
     goal_start 工具同一来源）；CLI 这层只负责屏幕输出 / 辅助模型拆解 /
     往对话历史注入目标。
 
@@ -2337,7 +2337,7 @@ def _start_new_goal(rt, objective: str) -> None:
         console.print(f"[dim]已自动 pause 旧 goal: {old_gs.objective}[/dim]")
 
     # 3. 尝试用辅助模型把目标拆解成子任务（宽松失败：没配辅助模型就跳过）
-    # CCAR8 终审修复：直接走 agent.aux_llm_router（不再走 RuntimeContext 上
+    # 直接走 agent.aux_llm_router（不要走 RuntimeContext 上
     # 的死字段；工具分发路径早已统一到 agent_ref.aux_llm_router）
     aux_client = getattr(rt.agent, "aux_llm_router", None)
     if aux_client is not None:
@@ -2493,7 +2493,7 @@ def _handle_goal_command(args: str, rt) -> bool:
 
 
 def _handle_output_style_command(args: str, rt) -> bool:
-    """/output-style：列出/切换/关闭输出风格（C6，借鉴 CCB 的 outputStyles）。
+    """/output-style：列出/切换/关闭输出风格。
 
     背景：输出风格 = 一段预设提示词，让 AI 按特定口吻/格式回答。
     风格目录：`<项目>/.omnimate/output-styles/`（优先，覆盖同名）+
@@ -2583,7 +2583,7 @@ def _handle_poor_command(args: str, rt) -> bool:
     if arg == "on":
         import copy as _copy_mod
         from agent.poor_mode import apply_poor_preset
-        # R30d-C11：开启前先给配置拍快照，关闭时完整还原
+        # 开启前先给配置拍快照，关闭时完整还原
         #（此前 off 只清标志，被关掉的复盘/摘要等功能要等重启才回来
         # ——on/off 行为不对称）
         if not getattr(rt, "_poor_config_snapshot", None):
@@ -2675,7 +2675,7 @@ def _handle_trace_command(args: str, rt) -> bool:
 
 
 def _handle_init_command(rt, args: str) -> bool:
-    """/init——给当前项目生成一份"项目说明书"OMNIMATE.md（CCAR9 Task 4，对标 Claude Code /init）。
+    """/init——给当前项目生成一份"项目说明书"OMNIMATE.md。
 
     流程：收集项目信息（目录树/关键文件/类型统计，缺哪跳哪）→
     主 LLM 按四段式生成（项目本质/常用命令/架构/约定）→
@@ -2826,7 +2826,7 @@ def _handle_inbox_command(args: str, rt) -> bool:
         rt: RuntimeContext
     返回：True（已处理）。
     """
-    # 收件箱挂在 AIAgent._channel_inbox（Task 11 的 setter 注入）
+    # 收件箱挂在 AIAgent._channel_inbox（由 setter 注入）
     inbox = getattr(rt.agent, "_channel_inbox", None)
     if inbox is None:
         console.print("[yellow]ChannelInbox 未初始化（无 MCP server 推送）[/yellow]")
@@ -2891,17 +2891,16 @@ def _handle_mailbox_command(args: str, rt) -> bool:
         return True
 
     if sub in ("check", "ls", "list"):
-        # CCAR8 终审修复：默认读全部（含已读）。
-        # 历史踩坑：之前默认只看未读，但主循环每轮查完未读就立刻标记已读
-        # ——等用户敲 /mailbox check 时邮件早被清空，永远显示空邮箱。
-        # 修法：默认显示全部，加 --unread / -u 才过滤未读；"all" 关键字向后兼容。
+        # 默认读全部（含已读）。不能默认只看未读：主循环每轮查完未读
+        # 就立刻标记已读——等用户敲 /mailbox check 时邮件早被清空，
+        # 永远显示空邮箱。加 --unread / -u 才过滤未读；"all" 关键字向后兼容。
         rest_lower = rest.lower()
         if "--unread" in rest_lower or "-u" in rest_lower.split():
             unread_only = True
         elif "all" in rest_lower:
             unread_only = False
         else:
-            unread_only = False  # 默认显示全部（这就是上面说的关键修复）
+            unread_only = False  # 默认显示全部（理由见上）
         if unread_only:
             msgs = mailbox.check_unread(agent_name)
             label = "未读"
@@ -2934,7 +2933,7 @@ def _handle_mailbox_command(args: str, rt) -> bool:
 
 
 def _handle_resumable_command(args: str, rt) -> bool:
-    """/resumable [agent_id]——列出/恢复可续跑的子代理（CCAR10 Task 5）。
+    """/resumable [agent_id]——列出/恢复可续跑的子代理。
 
     - 无参：列出还标着 running 的子代理（agent_id/状态/消息数/时间），
       并提示语义边界——只有存了运行轨迹（transcript）的子代理才能真正恢复
@@ -3058,7 +3057,7 @@ def _handle_resumable_command(args: str, rt) -> bool:
 
 
 def _handle_diff_cli(args: str, rt) -> bool:
-    """/diff——列出本会话改过哪些文件（CCAR11 Task 3）。
+    """/diff——列出本会话改过哪些文件。
 
     基于快照管理器已有的数据：列出被编辑工具改过的文件清单 + 快照数。
     没有快照管理器或没有改动记录时给出提示。
@@ -3099,14 +3098,14 @@ def _handle_diff_cli(args: str, rt) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 4 新增: /add-dir 运行时白名单 + 持久化
+# /add-dir 运行时白名单 + 持久化
 # ---------------------------------------------------------------------------
 
 def _persist_extra_root(root: str) -> bool:
     """把一个额外可写目录持久化到 settings.json 的 security.extra_allowed_roots。
 
     写法是"读-改-写"：先读现有内容 → 追加（去重）→ 原子写回。
-    历史踩坑（断轨问题）：必须走 settings.json 这条真实配置轨——
+    必须走 settings.json 这条真实配置轨——
     load_config 只读 settings.json，config.yaml 首次启动就被改名 .bak，
     往 yaml 写等于写进黑洞，灌不回来。
 
@@ -3117,7 +3116,7 @@ def _persist_extra_root(root: str) -> bool:
     """
     from agent.settings import persist_extra_allowed_root
 
-    # T5：逻辑下沉到 agent/settings.py（跟写路径审批"总是允许"档共用同一通道）
+    # 逻辑下沉到 agent/settings.py（跟写路径审批"总是允许"档共用同一通道）
     return persist_extra_allowed_root(root)
 
 
@@ -3147,7 +3146,7 @@ def _load_persisted_extra_roots(config: dict) -> int:
 
 
 def _handle_add_dir_cli(args: str, rt) -> bool:
-    """/add-dir <目录>——把一个目录加进"AI 可写范围"白名单（CCAR11 Task 4）。
+    """/add-dir <目录>——把一个目录加进"AI 可写范围"白名单。
 
     - 无参数：列出当前白名单（默认的 cwd + ~/.OmniMate，加上追加过的）
     - 带目录：校验目录真实存在 → 运行时立即生效（去重幂等）→
@@ -3202,11 +3201,11 @@ def _handle_add_dir_cli(args: str, rt) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 5 新增: /paste 剪贴板图片保存
+# /paste 剪贴板图片保存
 # ---------------------------------------------------------------------------
 
 def _handle_paste_command(args: str, rt) -> bool:
-    """/paste——把剪贴板里的图片存到工作区 .paste/ 目录（CCAR11 Task 5）。
+    """/paste——把剪贴板里的图片存到工作区 .paste/ 目录。
 
     小而美的 Windows 快捷路径：用 PowerShell 的剪贴板 API 读图 →
     存成 PNG → 打印路径。只保存、不自动分析（用户可能想配段文字再发给 AI）。
@@ -3288,9 +3287,9 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
     用法：
     /approved                    列出已批准命令 + 前缀规则 + 持久化写入根目录
     /approved remove <序号|命令>   按序号/命令移除已批准命令
-    /approved remove-root <序号|路径>  移除持久化写入根目录（T5：同时删
+    /approved remove-root <序号|路径>  移除持久化写入根目录（同时删
                                        settings.json 记录和运行时白名单）
-    /approved remove-prefix <p序号|前缀>  移除前缀规则（R25 #2：前缀规则
+    /approved remove-prefix <p序号|前缀>  移除前缀规则（前缀规则
                                           只从安全的精选表派生，见 agent/command_prefix.py）
 
     参数：
@@ -3310,13 +3309,13 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
                 # 长命令截断显示，免得撑爆屏幕
                 display = cmd if len(cmd) <= 80 else cmd[:77] + "..."
                 console.print(f"  [{i}] {display}")
-        # R25 #2：前缀规则展示
+        # 前缀规则展示
         prefixes = sorted(getattr(checker, "_persistent_prefixes", set()) or set())
         if prefixes:
             console.print("\n[bold]前缀规则（同前缀命令免审批）：[/bold]")
             for i, p in enumerate(prefixes, 1):
                 console.print(f"  p{i}. {p}")
-        # T5：持久化写入根目录（审批时选"总是允许"落盘的条目）
+        # 持久化写入根目录（审批时选"总是允许"落盘的条目）
         extra_roots = list_extra_allowed_roots()
         console.print(f"\n[bold]写入根目录白名单（{len(extra_roots)} 条，来自 /add-dir 与审批「总是允许」）：[/bold]")
         if not extra_roots:
@@ -3356,7 +3355,7 @@ def _manage_whitelist(rt: RuntimeContext, args: str):
             console.print(f"[red]写入根目录白名单中未找到: {target[:80]}[/red]")
         return
 
-    # R25 #2：前缀规则移除（支持 p序号 或完整前缀字符串）
+    # 前缀规则移除（支持 p序号 或完整前缀字符串）
     if action == "remove-prefix":
         if not target:
             console.print("[yellow]用法：/approved remove-prefix <p序号或前缀>[/yellow]")
@@ -3478,7 +3477,7 @@ def _switch_model(rt: RuntimeContext, args: str):
 
 
 def _render_statusline(rt, agent) -> str:
-    """拼一行状态摘要（CCAR10 Task 3），每轮回答后打在屏幕上。
+    """拼一行状态摘要，每轮回答后打在屏幕上。
 
     段的顺序：模型 │ 本会话 token 用量 │ goal 状态 │ 项目名
     返回值约定：非空字符串 → 主循环打印它；空串 → 什么都不打。
@@ -3543,15 +3542,14 @@ def _render_statusline(rt, agent) -> str:
 
 
 def _is_path_item(item: str) -> bool:
-    """判断审批回调收到的是"路径"还是"命令"（R30 审计 Medium-8 修复）。
+    """判断审批回调收到的是"路径"还是"命令"。
 
     背景：判错代价不对称——把命令误判成路径，它会拿到"即将写入路径"的
     文案和"总是允许并记住"的错误语义，所以判定要保守。
 
     规则：带空格的多词组合一律按命令处理（del /s /q tmp、rm -rf build/）；
     只有 ~ 开头 / Windows 盘符（C:\\ 或 C:/）/ 单个词里含分隔符
-    （src/lib、/tmp）才算路径。旧的启发式（`"/" in item` 加上三元表达式
-    优先级 bug——长度小于 3 整体判否）已废弃。
+    （src/lib、/tmp）才算路径。
 
     参数：
         item: 审批回调收到的字符串
@@ -3577,7 +3575,7 @@ def _is_path_item(item: str) -> bool:
 def _should_exit_on_interrupt_sentinel(
     last_interrupt_ts: float, now: float, window: float = 1.0,
 ) -> bool:
-    """判断输入线程收到的 Ctrl+C 信号该不该退出程序（R30 审计 High-3 修复）。
+    """判断输入线程收到的 Ctrl+C 信号该不该退出程序。
 
     背景：同一次 Ctrl+C 可能被两处同时收到——主线程（在跑模型时收到 →
     中断本轮，记下时间戳）和输入线程（输入等待时收到 → 往队列塞一个
@@ -3600,10 +3598,10 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     参数：
         resume_last: True 时自动恢复最近一次会话（命令行 -c/--continue 触发）；
                      False 时提示用户自己选
-        cli_agents: 阶段 6 新增——`--agents '{json}'` 传入的子代理定义，
-                    优先级介于用户级和项目级之间（对标 Claude Code 的 --agents）
+        cli_agents: `--agents '{json}'` 传入的子代理定义，
+                    优先级介于用户级和项目级之间
     """
-    # 阶段 6 新增：把 CLI 传入的子代理定义注入发现链
+    # 把 CLI 传入的子代理定义注入发现链
     if cli_agents:
         from agent.agent_defs import inject_cli_agents
         n = inject_cli_agents(cli_agents)
@@ -3631,17 +3629,17 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     else:
         _maybe_prompt_resume(rt)
 
-    # R22 #11：输入线程 + 队列——模型干活时用户敲的字先排队，不打断当前
+    # 输入线程 + 队列——模型干活时用户敲的字先排队，不打断当前
     # 回答；等工具批结束后由 agent 的排队输入回流机制以"临时消息"消化
     import queue as _queue_mod
     import threading as _threading_mod
     _input_q = _queue_mod.Queue()
     _input_stop = _threading_mod.Event()
-    # R30c-C6：用"对象"当信号而不是字符串——防止用户真的输入 "__EOF__"
+    # 用"对象"当信号而不是字符串——防止用户真的输入 "__EOF__"
     # 这几个字导致误退出（对象地址唯一，用户敲不出来）
     _EOF_SENTINEL = object()
     _INTERRUPT_SENTINEL = object()
-    # R30 审计 High-3：最近一次"回合内中断"的时间戳——主线程的 Ctrl+C
+    # 最近一次"回合内中断"的时间戳——主线程的 Ctrl+C
     # 处理器记录；输入线程消费中断信号时用它去重同一次按键
     _last_ctrl_c = 0.0
 
@@ -3706,7 +3704,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
     # 主循环：读输入 → 处理 → 调 agent → 显示，循环往复
     while True:
-        # R30d-C8：优先消费模型运行期间排队的 slash 命令（agent 的排队
+        # 优先消费模型运行期间排队的 slash 命令（agent 的排队
         # 机制会把它们分流到 _queued_cli_commands；对话一结束就在这里
         # 按正常命令执行掉）
         _deferred = getattr(rt.agent, "_queued_cli_commands", None)
@@ -3718,7 +3716,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             console.print("\n再见！")
             break
         if user_input is _INTERRUPT_SENTINEL:
-            # R30 审计 High-3：同一次 Ctrl+C 可能同时被输入线程（本信号）和
+            # 同一次 Ctrl+C 可能同时被输入线程（本信号）和
             # 主线程（回合内中断，已记 _last_ctrl_c）两边消费——窗口内到达的
             # 信号是重复消费，吞掉不退出；空闲等输入时的 Ctrl+C 保持退出语义
             if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
@@ -3762,7 +3760,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
             except KeyboardInterrupt:
                 rt.agent.interrupt()
-                _last_ctrl_c = time.monotonic()  # 同 High-3：给中断信号去重当锚点
+                _last_ctrl_c = time.monotonic()  # 给中断信号去重当锚点
                 console.print("[yellow]\n[已中断][/yellow]")
             except Exception as e:
                 console.print(f"[red]错误: {e}[/red]")
@@ -3772,21 +3770,21 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         if not user_input:
             continue
 
-        # R21 #39：大段粘贴内容转存外部文件 + 留占位符（会话库里只存
+        # 大段粘贴内容转存外部文件 + 留占位符（会话库里只存
         # 占位符省空间，发送时再展开）
         from agent.input_history import store_paste_if_large
         user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
 
-        # R21 #42：记入全局输入历史（跨会话可召回，宽松失败）
-        # R30d-C10：必须先转外存再记历史——历史里存的是占位符而不是大原文
-        #（历史踩坑：此前顺序反了，history.jsonl 存了未替换的大原文，越滚越大）
+        # 记入全局输入历史（跨会话可召回，宽松失败）。
+        # 必须先转外存再记历史——历史里存的是占位符而不是大原文
+        #（顺序反了的话 history.jsonl 会存进未替换的大原文，越滚越大）
         try:
             from agent.input_history import GlobalHistory
             GlobalHistory(rt.home).append(user_input)
         except Exception:
             pass
 
-        # 0. `#` 开头 = 快捷写记忆（对标 Claude Code 的体验）
+        # 0. `#` 开头 = 快捷写记忆
         if user_input.startswith("#"):
             text = user_input[1:].strip()
             if text:
@@ -3797,7 +3795,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
         # 1. 处理 slash 命令（/ 开头的指令）
         if user_input.startswith("/"):
-            # 先看是不是技能束/技能命令（R30c-C6：命令名统一按 split()[0]
+            # 先看是不是技能束/技能命令（命令名统一按 split()[0]
             # 解析，与下面技能束/技能触发用同一套规则）
             cmd_name = user_input.split()[0]
             if cmd_name in rt.bundle_commands:
@@ -3809,8 +3807,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     break  # /quit 请求：跳出循环走正常关机（rt.shutdown()）
                 continue
             else:
-                # R30c-C6：不认识的 slash 命令——形如命令名（/word）时报错
-                # 不发给模型（历史踩坑：/sesion 这类敲错的命令会整条静默
+                # 不认识的 slash 命令——形如命令名（/word）时报错
+                # 不发给模型（否则 /sesion 这类敲错的命令会整条静默
                 # 发给 LLM）。路径形态（如 "/etc/passwd 是什么"）不拦，
                 # 正常当消息发送。
                 _name = cmd_name[1:]
@@ -3826,7 +3824,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     )
                     continue
 
-        # 2. 检查是否触发技能束（命令名解析规则与步骤 1 相同——R30c-C6 统一）
+        # 2. 检查是否触发技能束（命令名解析规则与步骤 1 相同）
         cmd_name = user_input.split()[0]
         if cmd_name in rt.bundle_commands:
             bundle_info = rt.bundle_commands[cmd_name]
@@ -3841,7 +3839,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         elif cmd_name in rt.skill_commands:
             skill_info = rt.skill_commands[cmd_name]
             rest_msg = user_input[len(cmd_name):].strip()
-            # round3：声明了 context:fork 的技能放到隔离子代理里跑
+            # 声明了 context:fork 的技能放到隔离子代理里跑
             if skill_info.get("context") == "fork" and getattr(rt, "agent", None) is not None:
                 from pathlib import Path as _P
                 from agent.skill_commands import parse_frontmatter as _pf
@@ -3881,10 +3879,10 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
         # 4. 调用 agent（把消息交给 AI，拿回答）
         try:
-            # R21 #39：发给 agent 前展开粘贴引用（会话库里存的是占位符）
+            # 发给 agent 前展开粘贴引用（会话库里存的是占位符）
             from agent.input_history import expand_paste_references
             agent_input = expand_paste_references(user_input, rt.home)
-            # Checkpoint：每条用户消息发出前拍快照（对标 Claude Code，/rewind 可回滚）
+            # Checkpoint：每条用户消息发出前拍快照（/rewind 可回滚）
             if rt.checkpoint_mgr:
                 try:
                     rt.checkpoint_mgr.create_snapshot(
@@ -3894,17 +3892,14 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     logger.warning("checkpoint 快照失败: %s", e)
             # 先打 "AI:" 前缀，流式输出会接在这个前缀后面显示
             console.print("[bold green]AI:[/bold green]")
-            # Task E1：run_conversation 已改成 async（T_D4）。
-            # 但 run_interactive 保持同步签名（run_skill_in_fork 等下游依赖
-            # 同步上下文），所以每轮用 asyncio.run 驱动一次完整的异步对话。
-            # 全量 async 改造留给 Plan 2B（届时 skill_fork 也改 async，
-            # 就能消掉嵌套 asyncio.run）。
+            # run_conversation 是 async，但 run_interactive 保持同步签名
+            # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
+            # asyncio.run 驱动一次完整的异步对话。
             response = asyncio.run(rt.agent.run_conversation(agent_input))
             # 流式模式（设了流式回调）下内容在对话过程中已经实时显示过，
             # 不重复打印。非流式模式才打印 response。
             # 但 LLM 失败/预算耗尽这类兜底文案不走流式（没有内容增量），
-            # 必须主动打印——否则用户会看到"没反应就断了"
-            #（这就是之前莫名断开的根因）。
+            # 必须主动打印——否则用户会看到"没反应就断了"。
             if not getattr(rt.agent, "_stream_callback", None):
                 console.print(response)
             elif response and response.startswith(
@@ -3921,7 +3916,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     rt.session_id, "assistant", response,
                 )
 
-            # CCAR10 Task 3 新增：每轮回答完打印状态行（模型/token/goal/项目）
+            # 每轮回答完打印状态行（模型/token/goal/项目）
             # 放在回答完整输出之后、不接 Live 动态刷新（Windows 上跟 input()
             # 有冲突）；中断/异常路径都不打（用户主动断开就别再追加信息了）。
             try:
@@ -3932,13 +3927,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
         except KeyboardInterrupt:
             rt.agent.interrupt()
-            _last_ctrl_c = time.monotonic()  # High-3：记下时间戳，给信号去重当锚点
+            _last_ctrl_c = time.monotonic()  # 记下时间戳，给信号去重当锚点
             console.print("[yellow]\n[已中断][/yellow]")
         except Exception as e:
             console.print(f"[red]错误: {e}[/red]")
             logger.exception("agent 运行错误")
 
-    # === P2b-T6 新增：退出前清理后台任务 ===
+    # === 退出前清理后台任务 ===
     rt.shutdown()
 
 
@@ -3960,11 +3955,11 @@ def run_one_shot(message: str):
     try:
         # user 消息必须在跑对话之前先入库，保证会话历史顺序：
         # user → assistant(tool_calls) → tool → ...
-        #（历史踩坑：先跑后存的话工具轮次会排在 user 前，恢复会话时
+        #（先跑后存的话工具轮次会排在 user 前，恢复会话时
         #  assistant 的 tool_calls 前面没有 user 消息，违反 API 消息协议）
         if rt.session_store and rt.session_id:
             rt.session_store.append_message(rt.session_id, "user", message)
-        # Task E1：run_conversation 已改 async（T_D4），同步入口用 asyncio.run 驱动。
+        # run_conversation 是 async，同步入口用 asyncio.run 驱动。
         response = asyncio.run(rt.agent.run_conversation(message))
         # 流式输出（默认开启）过程中已实时打印过内容；
         # 这里只补个换行收尾，避免重复打印完整回答。非流式模式才打印。
@@ -3979,15 +3974,15 @@ def run_one_shot(message: str):
         print(f"错误: {e}", file=sys.stderr)
         logger.exception("one-shot 运行错误")
     finally:
-        # === P2b-T6 新增：退出前清理后台任务 ===
+        # === 退出前清理后台任务 ===
         rt.shutdown()
 
 
 # ---------------------------------------------------------------------------
-# Task E1: 主入口函数
+# 主入口函数
 # ---------------------------------------------------------------------------
-# 设计决策：把原来内联在 main.py 里的参数解析 + 分发逻辑抽到 cli.main，
-# 这样 main.py 只负责 stdout 编码 + MCP 初始化 + 调 cli.main，职责干净。
+# 设计决策：参数解析 + 分发逻辑放在 cli.main，
+# main.py 只负责 stdout 编码 + MCP 初始化 + 调 cli.main，职责干净。
 #
 # 为什么不在 cli.main 外面再套一层 asyncio.run：
 #   run_interactive / run_one_shot 保持同步签名，内部各自用 asyncio.run
@@ -3997,12 +3992,9 @@ def run_one_shot(message: str):
 #   （事件循环已在跑时不能再开新的）。所以 asyncio.run 只出现在
 #   run_one_shot / run_interactive 内部（紧贴异步调用点），
 #   cli.main 本身只是个同步分发器。
-#
-# Plan 2B 会把 run_interactive / run_one_shot / run_skill_in_fork 全改 async，
-# 到那时 cli.main 才真正需要 asyncio.run 包装（且不再嵌套）。
 
 def main(argv: list = None) -> None:
-    """CLI 主入口（Task E1 从 main.py 抽出，main.py 只负责调用它）。
+    """CLI 主入口（main.py 只负责调用它）。
 
     参数：
         argv: 命令行参数列表（None 时用 sys.argv，便于测试时传假参数）
@@ -4011,7 +4003,7 @@ def main(argv: list = None) -> None:
         python main.py                         # 交互模式
         python main.py -c / --continue         # 自动恢复最近会话
         python main.py chat <msg>              # 非交互一次性问答
-        python main.py --agents '{json}'       # CLI 注入子代理（阶段 6 新增）
+        python main.py --agents '{json}'       # CLI 注入子代理
         python main.py --agents '{json}' chat <msg>
     """
     if argv is None:

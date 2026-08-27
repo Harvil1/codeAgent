@@ -73,8 +73,8 @@ def apply_automatic_transitions(
     if store is None:
         store = MemoryStore(omnimate_home=omnimate_home)
 
-    # 历史踩坑（S5 修复）：用标准接口 list_all() 拿条目，不再扫老 .md 文件。
-    # 以前直接读 markdown，但 MemoryStore 实际写的是 .jsonl，根本扫不到东西（死代码）
+    # 必须用标准接口 list_all() 拿条目，不要直接扫文件——
+    # MemoryStore 实际写的是 .jsonl，直接读 markdown 根本扫不到东西（死代码）
     try:
         all_entries = store.list_all()
     except Exception as e:
@@ -116,8 +116,7 @@ def apply_automatic_transitions(
                 except Exception as e:
                     logger.warning("归档记忆 %s 失败: %s", mem_id, e)
             elif age_days > threshold_stale:
-                # 历史修复（R30b-A4）：update() 支持了 state 字段，标 stale
-                # 才真正落盘（以前只打日志不生效——第 1 阶段形同虚设）。
+                # 标 stale 走 update() 的 state 字段，真正落盘。
                 # 只改 state 不刷新 updated_at（memory_store.update 的语义），
                 # 年龄按内容年龄算，不会 stale↔active 反复翻转。
                 try:
@@ -236,7 +235,7 @@ def should_run_now_memory(
 # ---------------------------------------------------------------------------
 
 MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同一个分类(type={type_name})下的 {n} 条记忆。
-请逐条/逐对检查,识别以下五种情况之一(R19 #22 对齐 CC autoDream 三动作,矛盾解决已有):
+请逐条/逐对检查,识别以下五种情况之一:
 
 1. **重复**: 多条记忆描述实质相同的事实
    操作: 选一条最完整/最新的作为主条目,其余归档
@@ -346,7 +345,7 @@ def safe_rewrite_body(store, entry_id: str, new_body: str, archive_root: Path) -
     """改写记忆正文前，先把原文备份到 .archive/memory-rewrites-{时间戳}/。
 
     返回备份文件路径；条目不存在抛 KeyError。
-    历史安全项（R19 #24）：新正文是 LLM 重写的产物——疑似含密钥就拒绝改写、
+    安全项：新正文是 LLM 重写的产物——疑似含密钥就拒绝改写、
     保留原文（返回 None 表示拒绝，调用方不用区分这种情况）。
 
     参数：
@@ -387,8 +386,8 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
     支持：
       merge_duplicate {keep, archive: [ids]}        合并重复：留一条，归档其余
       resolve_contradiction {update_id, new_body, archive}  矛盾解决：改旧条目并归档新条目
-      delete_falsified {archive, evidence}          删除被证伪事实（R19 #22）
-      normalize_dates {update_id, new_body}         相对日期转绝对日期（R19 #22）
+      delete_falsified {archive, evidence}          删除被证伪事实
+      normalize_dates {update_id, new_body}         相对日期转绝对日期
     不认识的 action 跳过。
 
     参数：
@@ -425,7 +424,7 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
         return f"resolve_contradiction: updated={update_id}, archived={archive_id}"
 
     if act_type == "delete_falsified":
-        # 被证伪的事实（R19 #22）——软删除到归档，完全可逆，对齐设计原则 3
+        # 被证伪的事实——软删除到归档，完全可逆
         archive_id = action.get("archive")
         evidence = action.get("evidence", "")
         if archive_id:
@@ -436,7 +435,7 @@ def execute_action(action: Dict, store, archive_root: Path) -> str:
         return f"delete_falsified: archived={archive_id} ({evidence[:60]})"
 
     if act_type == "normalize_dates":
-        # 相对日期转绝对日期（R19 #22）——只改正文，原文经 safe_rewrite_body 备份过
+        # 相对日期转绝对日期——只改正文，原文经 safe_rewrite_body 备份过
         update_id = action.get("update_id")
         new_body = action.get("new_body", "")
         if update_id and new_body:
@@ -549,7 +548,7 @@ def run_memory_review(
 
             # 每批单独 try/except——一批失败不连累其他批
             try:
-                # 历史适配（Task D4 修复）：AIAgent.chat 已改成 async，本函数是 sync 的，用 asyncio.run 驱动
+                # 本函数是 sync 的，AIAgent.chat 是 async 的，用 asyncio.run 驱动
                 import asyncio
                 raw_output = asyncio.run(review_agent.chat(prompt))
             except Exception as e:

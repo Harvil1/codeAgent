@@ -9,8 +9,8 @@
 干活分三步：
   第 1 步：确定性状态转换（纯时间规则，不调 LLM）
   第 2 步：LLM 合并审查（可选，默认关闭）
-  第 3 步（R26 #14，可选）：跨会话记录整理 consolidate_transcripts——
-      从最近 5 个会话的原始轨迹里提炼跨会话的共性经验（对齐 CC /dream）。
+  第 3 步（可选）：跨会话记录整理 consolidate_transcripts——
+      从最近 5 个会话的原始轨迹里提炼跨会话的共性经验。
       和前两步互补：前两步整理"已有"的技能/记忆，这一步从原始会话里挖"新"知识。
 
 手动触发：omnimate curator run [--dry-run]
@@ -319,7 +319,7 @@ def run_curator_review(
 
     第 1 步：确定性状态转换（总是跑）
     第 2 步：LLM 合并审查（可选，agent_factory 传入且非 dry_run 才跑）
-    第 3 步：跨会话记录整理（可选，R26 #14）——session_store/memory_store/llm
+    第 3 步：跨会话记录整理（可选）——session_store/memory_store/llm
         都传入才启用；门控是"距上次 ≥24 小时 + 新增 ≥5 个会话"（should_consolidate），
         门控状态（last_consolidate_at / sessions_seen）随本次运行一起落盘
 
@@ -363,8 +363,8 @@ def run_curator_review(
                     enabled_toolsets=["core"],  # core 工具集里有技能管理工具
                     is_background_review=True,
                 )
-                # 历史适配（Task D4 修复）：AIAgent.chat 已改成 async，本函数是 sync 的
-                # （可能在后台线程或 CLI 里被同步调用）→ 用 asyncio.run 驱动
+                # 本函数是 sync 的（可能在后台线程或 CLI 里被同步调用），
+                # AIAgent.chat 是 async 的 → 用 asyncio.run 驱动
                 import asyncio
                 raw_output = asyncio.run(review_agent.chat(prompt))
 
@@ -383,7 +383,7 @@ def run_curator_review(
     state = load_state(skills_dir)
     state["last_run_at"] = now.isoformat()
 
-    # 历史功能（R26 #14）：跨会话记录整理（可选第 3 步）。门控状态直接写进 state，
+    # 跨会话记录整理（可选第 3 步）。门控状态直接写进 state，
     # 和 last_run_at 一起随下面的 save_state 落盘
     consolidated = _maybe_consolidate_transcripts(
         state,
@@ -456,7 +456,7 @@ def _parse_consolidation_output(output: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 历史功能（R26 #14）：跨会话记录整理（第 3 步，可选）
+# 跨会话记录整理（第 3 步，可选）
 # ---------------------------------------------------------------------------
 
 CONSOLIDATE_MIN_HOURS = 24
@@ -477,10 +477,9 @@ CONSOLIDATE_PROMPT = """以下是最近 {n} 个会话的轨迹摘要。请提炼
 
 
 def should_consolidate(state: dict, *, now: float, new_sessions_since: int) -> bool:
-    """第 3 步的门控（R26 #14）：距上次 ≥24 小时 且 新增 ≥5 个会话才跑。
+    """第 3 步的门控：距上次 ≥24 小时 且 新增 ≥5 个会话才跑。
 
-    对齐 CC autoDream 的门控（去掉了跨进程锁——OmniMate 的 curator
-    本来就是单进程触发的，用不上）。
+    （curator 是单进程触发的，不需要跨进程锁。）
 
     参数：
     - state：curator 状态 dict（读 last_consolidate_at）
@@ -494,9 +493,9 @@ def should_consolidate(state: dict, *, now: float, new_sessions_since: int) -> b
 
 
 def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
-    """跨会话记录整理（R26 #14）：从最近几个会话的轨迹里提炼值得长期记的经验。
+    """跨会话记录整理：从最近几个会话的轨迹里提炼值得长期记的经验。
 
-    对齐 CC 的 /dream：把散落在多个会话里的碎片经验沉淀成完整记忆条目。
+    把散落在多个会话里的碎片经验沉淀成完整记忆条目。
     和 curator 其他动作的区别：那些整理"已有记忆"，这里从"原始会话"挖新知识。
     整体 fail-open（出任何错吞掉返回 0）；save 自带秘密扫描（命中拒收单条）。
 
@@ -522,7 +521,7 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
             n=len(parts), max_items=5,
             trajectories="\n\n".join(parts)[:60000],
         )
-        # 现场适配（R26 #14）：chat_completions 是 async 的（Task D4 改的），
+        # chat_completions 是 async 的，
         # 而 curator 在后台线程 / CLI 的同步上下文里跑 → 用 asyncio.run 驱动
         import asyncio
         resp = asyncio.run(llm.chat_completions([{"role": "user", "content": prompt}]))
@@ -566,7 +565,7 @@ def _maybe_consolidate_transcripts(
     llm,
     dry_run: bool,
 ) -> int:
-    """第 3 步的接线（R26 #14）：过了门控（≥24h + ≥5 新会话）才真正跑。
+    """第 3 步的接线：过了门控（≥24h + ≥5 新会话）才真正跑。
 
     门控状态（last_consolidate_at / sessions_seen）直接写进 state dict，
     由调用方（run_curator_review）统一落盘。组件缺失 / 门控没过 / dry_run

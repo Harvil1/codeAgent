@@ -20,9 +20,8 @@
 1. 后台任务完成：agent/__init__.py 的 _drain_injected_messages 在收完
    后台消息后过滤出状态类消息弹通知
 2. 权限审批：agent/permission.py 在弹出审批询问前通知用户
-3. goal 暂停：agent/goal.py 的 GoalState.pause() 集中接（历史重构
-   CCAR13 B5：不管因为断网/预算耗尽/手动暂停，统一在这一处弹，
-   agent/__init__.py 里原来东一处西一处的调用已经删掉）
+3. goal 暂停：agent/goal.py 的 GoalState.pause() 集中接——不管因为
+   断网/预算耗尽/手动暂停，统一在这一处弹
 """
 import logging
 import subprocess

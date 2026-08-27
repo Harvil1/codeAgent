@@ -1,4 +1,4 @@
-"""网页抓取工具：把一个网址（URL）的内容下载下来，去掉 HTML 标签只留文字（做法对齐 Claude Code 的 WebFetch）。
+"""网页抓取工具：把一个网址（URL）的内容下载下来，去掉 HTML 标签只留文字。
 
 网络请求用 httpx 库（项目已装），HTML 转纯文本用 Python 自带的 html.parser。
 几条保命规则：
@@ -137,7 +137,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
         content = content[:_MAX_TEXT_CHARS]
         truncated = True
 
-    # === 历史借鉴（R20 #31）：小模型提炼（对齐 Claude Code WebFetch——按关注点
+    # === 小模型提炼（按关注点
     # 先提炼再交回主模型，省主模型的上下文额度）。带了 prompt 且主对话身上有
     # 小模型路由器（aux_llm_router）时走提炼；小模型失败或没配置就降级返回
     # 全文（fail-open：宁可多花点上下文也不报错卡住）。===
@@ -201,7 +201,7 @@ async def _refine_with_aux(aux_router, url: str, prompt: str, content: str) -> s
 WEB_FETCH_SCHEMA = {
     "name": "web_fetch",
     "description": (
-        "抓取网页/URL 内容并转为纯文本（对齐 Claude Code WebFetch）。"
+        "抓取网页/URL 内容并转为纯文本。"
         "适合查文档、读页面、看 API 说明。传 prompt 时由小模型按关注点提炼"
         "（省上下文，返回 refined=true）；不传返回全文（最多 2 万字符）。"
     ),

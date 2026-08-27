@@ -1,6 +1,6 @@
-"""CCAR9 Task 4: /init 命令生成 OMNIMATE.md 的测试。
+"""/init 命令生成 OMNIMATE.md 的测试。
 
-对标 Claude Code 的 /init 命令：收集项目信息 → 主 LLM 生成四段式
+流程：收集项目信息 → 主 LLM 生成四段式
 （项目本质/常用命令/架构/约定）→ 写 <cwd>/OMNIMATE.md。
 """
 

@@ -1,6 +1,6 @@
-"""压力测试 Round 3：剩余全部缺口（并发 / 规模 / 边界形态）。
+"""压力测试：剩余全部缺口（并发 / 规模 / 边界形态）。
 
-Round 1 函数级 + Round 2 粘合处之后，本文件压：
+在函数级与粘合处用例之后，本文件压：
 1. 并发文件锁争用（mailbox / trace 多线程同写）
 2. 索引与存储规模（500 记忆 / 300 技能 / 500 cron / 万条 session）
 3. 消息形态边界（1MB user 消息 / 一条 assistant 50 个 tool_calls）
@@ -185,7 +185,7 @@ def test_stress_skill_index_300_skills(tmp_path):
     assert "skill_299" in index or "技能 299" in index
     assert elapsed < 5.0, f"300 技能索引耗时 {elapsed:.2f}s 超 5s"
     # 二次构建也应在时限内（不比第一次快——OS 缓存/调度抖动不保证单调，
-    # 旧断言 "< elapsed" 是 flaky 源，曾致 CCAR10-11 多轮偶发失败）
+    # 断言 "< elapsed" 会 flaky，故只测绝对时限）
     t1 = time.perf_counter()
     _build_skill_index(skills)
     assert time.perf_counter() - t1 < 5.0

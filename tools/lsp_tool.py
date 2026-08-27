@@ -1,4 +1,4 @@
-"""「代码导航」工具：跳转到定义 / 查所有引用（R26 #17）。
+"""「代码导航」工具：跳转到定义 / 查所有引用。
 
 背景：查"这个函数在哪定义、谁在用它"，用文本搜索（grep）会被重名坑
 （两个不同类都有 run 方法）。LSP（Language Server Protocol，代码编辑器
@@ -302,7 +302,7 @@ def _handle_lsp(args: dict, **kwargs) -> str:
             ][:50],
         }, ensure_ascii=False)
     except Exception as e:
-        _reset_server()  # 出过错就不信任这个进程的状态，直接扔掉重建（对齐 Claude Code 的 discard 做法）
+        _reset_server()  # 出过错就不信任这个进程的状态，直接扔掉重建
         return json.dumps({"error": f"LSP 调用失败: {e}", "error_type": "lsp_error"}, ensure_ascii=False)
 
 

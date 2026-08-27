@@ -1,4 +1,4 @@
-"""第 6 轮 bug 修复测试：剩余复杂 bug（X1/X10/X11/X12）。"""
+"""bug 修复测试：剩余复杂 bug。"""
 import inspect
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -7,13 +7,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# X1: _run_memory_curator_once 应支持共享主 store 实例（避免跨实例 race）
+# _run_memory_curator_once 应支持共享主 store 实例（避免跨实例 race）
 # ---------------------------------------------------------------------------
 
 def test_run_memory_curator_once_accepts_store_param():
-    """X1 fix: _run_memory_curator_once 签名应支持 store 参数。
+    """_run_memory_curator_once 签名应支持 store 参数。
 
-    bug：之前每次 new MemoryStore，与主 agent 实例不同，threading.Lock
+    若每次 new MemoryStore，与主 agent 实例不同，threading.Lock
     不跨实例，并发写同一 topic.jsonl 会丢数据。
     """
     from cli import _run_memory_curator_once
@@ -26,7 +26,7 @@ def test_run_memory_curator_once_accepts_store_param():
 
 
 def test_run_memory_curator_once_uses_passed_store(tmp_path, monkeypatch):
-    """X1 fix: 传入 store 时，curator 应直接用，不再新建。"""
+    """传入 store 时，curator 应直接用，不再新建。"""
     from cli import _run_memory_curator_once
 
     memory_dir = tmp_path / ".memory"
@@ -56,11 +56,11 @@ def test_run_memory_curator_once_uses_passed_store(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# X10: Cron 时间戳应用 UTC（避免 DST/跨时区 age 计算偏差）
+# Cron 时间戳应用 UTC（避免 DST/跨时区 age 计算偏差）
 # ---------------------------------------------------------------------------
 
 def test_cron_created_at_uses_utc():
-    """X10 fix: _parse_job 写 created_at 应优先 UTC（datetime.now(timezone.utc)）。"""
+    """_parse_job 写 created_at 应优先 UTC（datetime.now(timezone.utc)）。"""
     from agent.cron import CronScheduler
     src = inspect.getsource(CronScheduler)
     # 应含 datetime.now(timezone.utc)
@@ -70,11 +70,11 @@ def test_cron_created_at_uses_utc():
 
 
 # ---------------------------------------------------------------------------
-# X11: Cron 一次性 job 触发后应立刻 disable + persist（不等循环末尾）
+# Cron 一次性 job 触发后应立刻 disable + persist（不等循环末尾）
 # ---------------------------------------------------------------------------
 
 def test_cron_oneshot_disables_immediately():
-    """X11 fix: _tick 内 one-shot 触发时应立刻 disable + persist。
+    """_tick 内 one-shot 触发时应立刻 disable + persist。
 
     静态验证：源码内 not job.recurring 附近含 _persist_jobs_unlocked 调用（在循环内）。
     """
@@ -103,11 +103,11 @@ def test_cron_oneshot_disables_immediately():
 
 
 # ---------------------------------------------------------------------------
-# X12: BackgroundManager stall_timeout 默认值应 > 0（45s 看门狗默认开）
+# BackgroundManager stall_timeout 默认值应 > 0（45s 看门狗默认开）
 # ---------------------------------------------------------------------------
 
 def test_background_manager_default_stall_timeout_positive():
-    """X12 fix: BackgroundManager 默认 stall_timeout 应 > 0（默认 45s 看门狗开）。"""
+    """BackgroundManager 默认 stall_timeout 应 > 0（默认 45s 看门狗开）。"""
     from agent.background import BackgroundManager
     sig = inspect.signature(BackgroundManager.__init__)
     stall_default = sig.parameters["stall_timeout"].default

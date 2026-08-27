@@ -35,8 +35,8 @@ def test_maybe_heartbeat_writes_with_env(monkeypatch, tmp_path):
     store = TaskStore(omnimate_home=tmp_path)
     task = store.create(subject="X")
     monkeypatch.setenv("OMNIMATE_KANBAN_TASK", task["id"])
-    # maybe_heartbeat 走 get_task_store()（无参 = 键控缓存的 "" 槽位）
-    # R30b-A5：单例改为按 home 键控缓存，测试 patch "" 槽位
+    # maybe_heartbeat 走 get_task_store()（无参 = 键控缓存的 "" 槽位），
+    # 缓存按 home 键控，测试 patch "" 槽位
     import agent.task_store as ts_module
     monkeypatch.setitem(ts_module._task_stores, "", store)
     result = maybe_heartbeat()

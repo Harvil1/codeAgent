@@ -1,4 +1,4 @@
-"""任务级反思引擎（CCALS-P0-2 引入）。
+"""任务级反思引擎。
 
 每次 run_conversation（一轮完整对话任务）结束后调一次，用辅助模型
 （aux_llm，便宜模型）把对话轨迹复盘一遍，提炼出 4 类长期经验，
@@ -126,7 +126,7 @@ def extract_trajectory(messages: List[dict], max_chars: int = 4000) -> str:
 def build_memory_manifest(memory_store) -> str:
     """已有记忆的清单文本（给 LLM 看，防止它重复存储）。
 
-    背景（CCAR9 Task 5 / R19 #21 抽出的公共函数，auto_extract 也用）：
+    背景（auto_extract 也用这个公共函数）：
     LLM 在生成新记忆前先看到"已经有什么"，才知道别写重复的。
 
     参数：
@@ -176,7 +176,7 @@ def run_reflection(
     if not trajectory.strip():
         return []
 
-    # CCAR9 Task 5：预注入已有记忆清单（R19 #21 时抽成公共 build_memory_manifest）
+    # 预注入已有记忆清单（公共 build_memory_manifest，auto_extract 同款）
     manifest = build_memory_manifest(memory_store)
 
     prompt = REFLECTION_PROMPT_TEMPLATE.format(
@@ -187,7 +187,7 @@ def run_reflection(
         kwargs = {}
         if model:
             kwargs["model"] = model
-        # 历史踩坑（Task D4 follow-up）：llm_client.chat_completions 已改 async，
+        # 历史踩坑：llm_client.chat_completions 是 async 的，
         # 而本函数经 apply_reflection 在 _bg() 守护线程里跑（那里没有事件循环），
         # 所以要用 asyncio.run 驱动；和 agent/user_profile.py 的做法同款。
         import asyncio
@@ -297,7 +297,7 @@ def apply_reflection(
         except Exception as e:
             logger.warning("反思写入 memory 失败（跳过）: %s", e)
 
-    # 阶段 2：处理 supersedes（X5 修复：加 type 一致性校验；X14 修复：也要在批内新写入里找）
+    # 阶段 2：处理 supersedes（注意：type 必须一致才允许替代；批内新写入里也要找）
     for ins, _ in written_records:
         supersedes = ins.get("supersedes")
         if not supersedes or supersedes == ins["name"]:

@@ -18,8 +18,8 @@ settings.json 里的写生长这样：
 - 单个 hook 缺 name / command → 跳过 + log warning（一条坏了不连累其他）
 - 文件不存在 → 静默返回 0（没配置 hook 是正常状态，不强制）
 
-阶段 4 新增 SnapshotCache（配置快照缓存）：启动加载完就把原始配置锁进内存，
-运行期不再重读磁盘。设计取舍（历史决策）：对齐 Claude Code 的安全语义——
+SnapshotCache（配置快照缓存）：启动加载完就把原始配置锁进内存，
+运行期不再重读磁盘。设计取舍（安全语义）：
 "hook 配置在会话启动时锁定，运行期改文件不会立即生效"，防止会话中途被人
 篡改配置文件偷偷加钩子。
 """
@@ -92,7 +92,7 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
                 registry.register_declarative(hook)
                 count += 1
 
-    # 阶段 4：深拷贝一份存内存——之后磁盘文件怎么改都不影响本会话（防篡改语义）
+    # 深拷贝一份存内存——之后磁盘文件怎么改都不影响本会话（防篡改语义）
     _snapshot_cache = copy.deepcopy(raw)
     _snapshot_settings_path = settings_path
     return count
@@ -155,7 +155,7 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
 
     ht = h_cfg.get("type", "command")
     timeout = h_cfg.get("timeout", 10.0)
-    # P3.5 新增：if 条件过滤——只在 4 个工具相关事件上生效，挂到别的事件上会被忽略并提醒
+    # if 条件过滤——只在 4 个工具相关事件上生效，挂到别的事件上会被忽略并提醒
     if_cond = h_cfg.get("if")
     if if_cond and event.value not in (
         "pre_tool_use", "post_tool_use", "post_tool_use_failure", "permission_request"
@@ -173,7 +173,7 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
             return None
         script = HookScriptConfig(handler_type="command", command=command, timeout=timeout,
                                   env=h_cfg.get("env"), if_condition=if_cond,
-                                  # C4：异步 hook——放后台跑，退出码 2 时把 agent 重新唤醒
+                                  # 异步 hook——放后台跑，退出码 2 时把 agent 重新唤醒
                                   async_run=bool(h_cfg.get("async", False)),
                                   async_rewake=bool(h_cfg.get("async_rewake", False)),
                                   status_message=h_cfg.get("status_message"))
@@ -218,7 +218,7 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
         kind="declarative",
         script=script,
         fail_closed=h_cfg.get("fail_closed", False),
-        # P3.5 新增：if 条件过滤（借用 permission rule 的写法，详见 agent/hook_filter.py）
-        once=h_cfg.get("once", False),  # P3.6 新增：一次性 hook——触发一次后自动失效
-        use_sandbox=h_cfg.get("use_sandbox", False),  # P3.8 新增：给 hook 进程套 OS 沙箱再跑
+        # if 条件过滤（借用 permission rule 的写法，详见 agent/hook_filter.py）
+        once=h_cfg.get("once", False),  # 一次性 hook——触发一次后自动失效
+        use_sandbox=h_cfg.get("use_sandbox", False),  # 给 hook 进程套 OS 沙箱再跑
     )

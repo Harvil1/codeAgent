@@ -1,4 +1,4 @@
-"""CCAR8 Task 7：跨项目会话恢复测试。"""
+"""跨项目会话恢复测试。"""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock

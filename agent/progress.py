@@ -1,4 +1,4 @@
-"""工具执行进度摘要（P1-10）——长时间任务跑着的时候，定时告诉用户"我还在干活、在干什么"。
+"""工具执行进度摘要——长时间任务跑着的时候，定时告诉用户"我还在干活、在干什么"。
 
 场景：subagent（子代理）或后台任务一跑就是几分钟，界面上毫无动静用户
 会以为卡死了。这个模块在背后开一个小线程，每隔一阵推一条进度消息给
@@ -31,7 +31,7 @@ DEFAULT_HEARTBEAT_MESSAGE = "任务仍在执行..."
 
 
 class ProgressReporter:
-    """周期性发进度通知的小助手（P1-10）。
+    """周期性发进度通知的小助手。
 
     用法：像文件一样 with 打开（详见本模块开头的 docstring，那里有完整示例）：
     进 with 时自动 start 起后台线程，出 with 时自动 stop。
@@ -141,8 +141,8 @@ class ProgressReporter:
                 f"已经过了约 {self._tick_count * self.interval:.0f} 秒。"
                 f"用 10 个字以内简短描述一个等待中的进度提示（不要复述任务）："
             )
-            # 历史踩坑（Task D4 修复）：aux_llm_router.chat_completions 已经改成
-            # 异步函数了；而本函数跑在守护线程里（线程里没有事件循环），漏了
+            # 历史踩坑：aux_llm_router.chat_completions 是异步函数，
+            # 而本函数跑在守护线程里（线程里没有事件循环），漏了
             # 用 asyncio.run 驱动会直接失效。
             import asyncio
             resp = asyncio.run(self.aux_llm_router.chat_completions(

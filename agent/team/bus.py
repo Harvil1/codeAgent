@@ -95,11 +95,11 @@ def _with_lock(lock_path: Path, fn):
         lock_path：锁文件路径
         fn：要在锁内执行的操作（无参函数），返回值原样透传
 
-    历史踩坑（R30c-C2 修复）：锁超时以前是 fail-open（照干不误），
-    结果 read_inbox 的「读全量 + 清空」在无锁并发下会丢信——
+    历史踩坑：锁超时必须 fail-closed——fail-open（超时照干不误）会让
+    read_inbox 的「读全量 + 清空」在无锁并发下丢信：
     A 和 B 同时读到同一批信，A 先清空，B 再清空时会把 C 刚写进来的
     新信一起清掉。对邮箱来说，丢信比「这次操作失败」伤害大得多，
-    所以改成 fail-closed：超时抛 MessageBusLockTimeout。
+    所以超时抛 MessageBusLockTimeout。
     死锁兜底交给调用方：捕获这个异常重试或降级
     （各个调用点外面都已包了 try/except）。
     """
@@ -161,14 +161,14 @@ class MessageBus:
 
         返回：新生成的 message_id。
 
-        历史踩坑（P1-8 修复）：response 不带 request_id 会变成「孤儿回音」
+        历史踩坑：response 不带 request_id 会变成「孤儿回音」
         ——没人知道它在回复谁，所以强制校验。
         """
         if type_ not in VALID_TYPES:
             raise ValueError(
                 f"type_ 必须是 {VALID_TYPES} 之一，实际: {type_}"
             )
-        # 历史踩坑（P1-8）：response 必须能对上号的 request_id，否则就是孤儿回音
+        # response 必须带能对上号的 request_id，否则就是孤儿回音
         if type_ == "response" and not request_id:
             raise ValueError(
                 "type='response' 的消息必须传 request_id（防孤儿 response）"
@@ -192,7 +192,7 @@ class MessageBus:
         _with_lock(self._lock_path(to), _append)
         return msg_id
 
-    # ---- 一问一答的便捷方法（P1-8 引入）----
+    # ---- 一问一答的便捷方法 ----
     def send_request(
         self, *, from_: str, to: str, content: str,
     ) -> str:

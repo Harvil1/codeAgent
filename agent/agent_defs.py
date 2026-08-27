@@ -42,21 +42,21 @@ class AgentDefinition:
     isolation: Optional[str] = None                          # 隔离方式："worktree"（独立 git 工作树）| None
     max_turns: Optional[int] = None
     system_prompt: str = ""
-    # Task C1 加的三个字段：memory / skills / mcpServers
+    # 三个扩展字段：memory / skills / mcpServers
     memory: bool = False                                  # frontmatter 写 "memory: true" → 子代理有独立记忆目录
     skills: List[str] = field(default_factory=list)       # frontmatter "skills: [...]"
     mcp_servers: List[str] = field(default_factory=list)  # frontmatter "mcpServers: [...]"
-    # R24 #38：内联 mcpServers——直接在定义里写 server 配置（{名字: {command/args/url/...}}）。
+    # 内联 mcpServers——直接在定义里写 server 配置（{名字: {command/args/url/...}}）。
     # 起子代理时临时连上、跑完就断（不写进全局配置）。与上面 mcp_servers 是互补关系：
     # mcp_servers 是"挑哪些已配置的全局 server 给它用"；inline_mcp_servers 是"现场定义新 server"
     inline_mcp_servers: dict = field(default_factory=dict)
     effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
-    # === Task N 加的 4 个字段（借鉴 Claude Code）===
+    # === 4 个扩展字段 ===
     omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理不加载项目 OMNIMATE.md（省 token）
     initial_prompt: str = ""                # frontmatter "initialPrompt" → 垫在第一条 user 消息前面（类似 slash 命令的预处理）
     required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺这些 server 时整个 agent 不出现
     critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼进 system_prompt 末尾（放尾部是为了不动前缀、保 cache）
-    # R29 #2：定义从哪来（builtin/user/cli/project）。为什么要记来源：项目级（project）
+    # 定义从哪来（builtin/user/cli/project）。为什么要记来源：项目级（project）
     # 的内联 MCP 要过首次连接审批——clone 陌生 repo 带进来的 agent .md 和 .mcp.json 是同一种威胁
     source: str = "user"
 
@@ -68,7 +68,7 @@ def _user_agents_dir() -> Path:
 
 
 def _project_agents_dir() -> Path:
-    # 历史踩坑（Round 1 修复）：Path.cwd() 是整个进程共享的（就是 os.getcwd），
+    # 历史踩坑：Path.cwd() 是整个进程共享的（就是 os.getcwd），
     # 多个子代理并发跑时会互相踩目录。所以改用 get_workspace_cwd()——
     # 它基于线程局部的 ContextVar，每个并发上下文拿到自己的工作目录。
     from agent.workspace_context import get_workspace_cwd
@@ -81,7 +81,7 @@ def _builtin_agents_dir() -> Path:
 
 
 def _parse_inline_mcp(raw) -> dict:
-    """解析 frontmatter 里的内联 mcpServers 配置（R24 #38 引入）。
+    """解析 frontmatter 里的内联 mcpServers 配置。
 
     参数：
         raw：frontmatter 解析出来的原始值
@@ -124,7 +124,7 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
             mcp_servers=fm.get("mcpServers") or [],
             inline_mcp_servers=_parse_inline_mcp(fm.get("mcpServersInline") or fm.get("inlineMcpServers")),
             effort=fm.get("effort"),
-            # === Task N：4 个新字段，frontmatter 里是 camelCase，这里转成 python 的 snake_case ===
+            # === 4 个扩展字段，frontmatter 里是 camelCase，这里转成 python 的 snake_case ===
             omit_claude_md=bool(fm.get("omitClaudeMd", False)),
             initial_prompt=str(fm.get("initialPrompt") or ""),
             required_mcp_servers=fm.get("requiredMcpServers") or [],
@@ -141,7 +141,7 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
     同名冲突时后扫的覆盖先扫的。优先级（低 → 高）：
       1. 内置（agent/builtin_agents/，随代码分发）
       2. 用户级（~/.OmniMate/agents/，跨项目个人配置）
-      3. CLI 注入（启动命令 --agents '{json}'，对齐 Claude Code 的 --agents 参数）
+      3. CLI 注入（启动命令 --agents '{json}'）
       4. 项目级（<cwd>/.omnimate/agents/，跟仓库走，团队共享）
 
     返回：
@@ -156,7 +156,7 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
             if ad and ad.name:
                 ad.source = _src
                 defs[ad.name] = ad  # 同名时后扫到的赢
-    # 阶段 6 新增：CLI 注入的子代理（优先级排在 user 和 project 之间）
+    # CLI 注入的子代理（优先级排在 user 和 project 之间）
     for name, ad in _cli_injected.items():
         defs[name] = ad
     # 项目级优先级最高，最后扫、最终生效
@@ -171,7 +171,7 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
 
 
 def project_inline_mcp_servers() -> Dict[str, dict]:
-    """把所有项目级 agent .md 里声明的内联 MCP server 合并成一张表（R29 #2 引入）。
+    """把所有项目级 agent .md 里声明的内联 MCP server 合并成一张表。
 
     背景：这些 server 来自项目目录（可能是 clone 来的陌生仓库），要交给
     首连审批统一把关，所以需要先把它们收拢出来。
@@ -191,7 +191,7 @@ def project_inline_mcp_servers() -> Dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# 阶段 6 新增：CLI 动态注入——启动命令 --agents '{json}' 传进来的定义放这里
+# CLI 动态注入——启动命令 --agents '{json}' 传进来的定义放这里
 # ---------------------------------------------------------------------------
 
 _cli_injected: Dict[str, AgentDefinition] = {}
@@ -200,8 +200,7 @@ _cli_injected: Dict[str, AgentDefinition] = {}
 def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
     """把 CLI `--agents '{json}'` 参数传进来的子代理定义登记进来。
 
-    背景：对齐 Claude Code `claude --agents '{json}'` 的玩法——不落盘、
-    启动时动态塞一批子代理定义。
+    背景：不落盘、启动时动态塞一批子代理定义。
 
     参数：
         cli_agents：{名字: {description, prompt, tools, model, ...}} 形式的 dict
@@ -231,7 +230,7 @@ def inject_cli_agents(cli_agents: Dict[str, dict]) -> int:
                 skills=cfg.get("skills") or [],
                 mcp_servers=cfg.get("mcpServers") or [],
                 effort=cfg.get("effort"),
-                # === Task N：CLI 注入同样接受那 4 个新字段 ===
+                # === CLI 注入同样接受那 4 个新字段 ===
                 omit_claude_md=bool(cfg.get("omitClaudeMd", False)),
                 initial_prompt=str(cfg.get("initialPrompt") or ""),
                 required_mcp_servers=cfg.get("requiredMcpServers") or [],

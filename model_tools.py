@@ -74,7 +74,7 @@ def get_tool_definitions(
     # mcp 工具集特殊：它的工具是运行时连上外部服务器才动态登记的，
     # 名字都以 mcp__ 开头，这里现场扫一遍登记处把它们捞出来
     if "mcp" in enabled_toolsets:
-        # 历史功能（Task C1）：子代理可以通过 config["mcp_server_filter"]
+        # 子代理可以通过 config["mcp_server_filter"]
         # 圈定"只看得见哪几个 MCP 服务器"，防止它乱碰别的服务器
         mcp_filter = (agent.config.get("mcp_server_filter")
                       if agent and isinstance(getattr(agent, "config", None), dict)
@@ -108,12 +108,12 @@ def get_tool_definitions(
             dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
             tool_names = [n for n in tool_names if n not in dis_scope]
 
-    # 核心机制对齐第 6 项（T6）：settings.json 里 permissions.deny 配的禁用规则，
+    # settings.json 里 permissions.deny 配的禁用规则，
     # 要在 LLM 看到之前就把工具整类拿掉（支持精确名 / mcp__server__* 通配 /
     # mcp__server 整个服务器）。
-    # 历史踩坑（R30c-B7 修复）：这里选择"坏了也放行"（fail-open）——如果配置
-    # 文件损坏就直接全拒，agent 会整个被砖死；但以前出错时静默吞掉不打日志，
-    # 这道安全防线等于无声消失，所以现在必须显式打 ERROR。
+    # 这里选择"坏了也放行"（fail-open）——如果配置
+    # 文件损坏就直接全拒，agent 会整个被砖死；但出错时若静默吞掉不打日志，
+    # 这道安全防线等于无声消失，所以必须显式打 ERROR。
     try:
         from agent.tool_permissions import is_tool_denied
         tool_names = [n for n in tool_names if not is_tool_denied(n)]
@@ -156,12 +156,12 @@ async def handle_function_call(
     omnimate_home=None,
     tool_call_id: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
-    hooks_registry=None,  # P2-T7 新增
-    bg_manager=None,      # P2b-T7 新增
-    team_bus=None,               # P4a-T6 新增
-    team_coordinator=None,       # P4a-T6 新增
-    team_name=None,              # P4a-T6 新增
-    agent_ref=None,              # P4b-T2 新增
+    hooks_registry=None,
+    bg_manager=None,
+    team_bus=None,
+    team_coordinator=None,
+    team_name=None,
+    agent_ref=None,
 ) -> str:
     """执行 LLM 发来的工具调用，返回 JSON 字符串形式的结果。
 
@@ -201,10 +201,10 @@ async def handle_function_call(
     # 先修一遍参数类型（LLM 偶尔会把整数传成字符串之类的低级错误）
     function_args = _coerce_tool_args(function_name, function_args)
 
-    # 执行前的钩子（P2-T7 引入）
+    # 执行前的钩子
     hooks_enabled = (config or {}).get("hooks", {}).get("enabled", True)
     if hooks_registry and hooks_enabled:
-        # 历史踩坑（R30 审计 Medium-6 修复）：钩子链可能要等子进程跑完，
+        # 钩子链可能要等子进程跑完，
         # 直接在事件循环线程里等会把整个循环冻住（流式输出、并发工具全停），
         # 所以丢到旁边的工作线程去执行
         deny_reason, modified_args = await asyncio.to_thread(
@@ -232,15 +232,15 @@ async def handle_function_call(
         omnimate_home=omnimate_home,
         tool_call_id=tool_call_id,
         config=config,
-        bg_manager=bg_manager,  # P2b-T7 新增
-        team_bus=team_bus,               # P4a-T6 新增
-        team_coordinator=team_coordinator,   # P4a-T6 新增
-        team_name=team_name,             # P4a-T6 新增
-        agent_ref=agent_ref,             # P4b-T2 新增
-        hooks_registry=hooks_registry,    # round3 D2 新增：接着往下传给 task_tools 等下游工具用
+        bg_manager=bg_manager,
+        team_bus=team_bus,
+        team_coordinator=team_coordinator,
+        team_name=team_name,
+        agent_ref=agent_ref,
+        hooks_registry=hooks_registry,    # 接着往下传给 task_tools 等下游工具用
     )
 
-    # 执行后的钩子（P2-T7 引入）
+    # 执行后的钩子
     if hooks_registry and hooks_enabled:
         # 同执行前钩子：移出事件循环线程（钩子链可能一个个等子进程）
         result = await asyncio.to_thread(
@@ -249,7 +249,7 @@ async def handle_function_call(
             session_id=session_id or "",
         )
 
-    # 工具失败的钩子（round3 D2 引入）
+    # 工具失败的钩子
     # 执行后钩子跑完，再看结果里带没带 error/error_type——带了就触发
     # "失败审计"钩子。原则：审计钩子自己出事绝不影响主流程（fail-open）。
     if hooks_registry and hooks_enabled:
@@ -261,11 +261,11 @@ async def handle_function_call(
                     "tool": function_name,
                     "error": parsed.get("error", ""),
                     "error_type": parsed.get("error_type", ""),
-                })  # 这种审计钩子很轻、不等子进程，直接调就行（Medium-6 的例外）
+                })  # 这种审计钩子很轻、不等子进程，直接调就行
         except Exception:
             pass  # fail-open：审计失败不声张、不挡路
 
-    # 空结果保护（R20 第 33 项，对齐 Claude Code 的 toolResultStorage）
+    # 空结果保护
     # 为什么要多此一举：工具啥都没返回时（空串/纯空白/空 dict {}），
     # 部分 API 会把空工具结果当成"流出了异常"，模型也可能误判这轮没跑完。
     # 所以换成一句显式的话"该工具跑完了但没有输出"。

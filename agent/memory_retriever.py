@@ -9,7 +9,7 @@
 失败策略是 fail-open（出了问题就当没有）：LLM 超时、返回坏 JSON、
 空响应等任何异常都返回空列表，绝不影响主对话。
 
-R30f-H9 借鉴的两个反噪音设计：
+两个反噪音设计：
 - active_tools（正在使用的工具）：不召回这些工具的"用法文档"类记忆
   （用户正在用，不需要教程）；"坑/警告"类仍然召回
 - exclude_ids（跨轮去重）：之前轮次已注入过的记忆不再占名额
@@ -43,7 +43,7 @@ RETRIEVAL_PROMPT_TEMPLATE = """你是记忆检索助手。当前用户消息：
 新记忆优先，旧记忆只作历史背景（例如"用户在用 React 16"是旧信息，"已升到 React 19"是新信息，应返回后者）。
 """
 
-# R30f-H9 设计取舍：用户正在用的工具，不需要再教用法；而且查询里带工具名 +
+# 设计取舍：用户正在用的工具，不需要再教用法；而且查询里带工具名 +
 # 记忆描述里也带工具名，纯关键词匹配会假阳性（看着相关其实没用）。
 # 但"这工具有坑"的记忆此时反而最有价值，所以要保留。"坑/警告"类放行。
 _ACTIVE_TOOLS_RULE = """
@@ -53,7 +53,7 @@ _ACTIVE_TOOLS_RULE = """
 这些工具的「坑/警告/注意事项/已知问题」类记忆**仍然可选**。
 """
 
-# R30f-H9 设计取舍：同一批记忆反复注入只是浪费上下文名额（对齐 CCB alreadySurfaced）
+# 设计取舍：同一批记忆反复注入只是浪费上下文名额
 _EXCLUDE_RULE = """
 
 以下记忆 ID 已在之前轮次注入过对话，不要重复选择（除非 query 与之强相关
@@ -63,7 +63,7 @@ _EXCLUDE_RULE = """
 
 
 def annotate_index_with_age(index_text: str, link_age_days: dict) -> str:
-    """给索引的每一行末尾加上年龄标注 `[age: Nd]`（T4 特性，防召回过期记忆）。
+    """给索引的每一行末尾加上年龄标注 `[age: Nd]`（防召回过期记忆）。
 
     背景：LLM 看不出哪条记忆是三年前的哪条是今天的，得把"这记忆几天没更新了"
     写在行尾让它自己判断新旧。
@@ -100,8 +100,8 @@ async def retrieve_relevant(
 ) -> List[str]:
     """让 LLM 从索引里挑出最相关的 N 个记忆 ID。失败返回空列表。
 
-    历史踩坑（Task D4 修复）：本函数必须是 async 并 await 底层调用。
-    之前用同步方式调一个 async 方法，拿到的是 coroutine 对象，
+    历史踩坑：本函数必须是 async 并 await 底层调用。
+    用同步方式调一个 async 方法，拿到的是 coroutine 对象，
     被 except 当 TypeError 捕获后静默返回空列表——记忆检索看起来
     正常其实一直没工作。
 
@@ -111,9 +111,9 @@ async def retrieve_relevant(
     - llm_client：LLM 客户端（chat_completions 已是 async）
     - model：检索用的模型名
     - max_results：最多返回几个 ID（默认 5）
-    - active_tools：当前对话正在使用的工具名列表（R30f-H9 反噪音：
+    - active_tools：当前对话正在使用的工具名列表（反噪音：
       非空时 prompt 注入"用法文档类不选"规则）
-    - exclude_ids：已注入过的记忆 ID 集合（R30f-H9：prompt 提示之外
+    - exclude_ids：已注入过的记忆 ID 集合（prompt 提示之外
       还做**确定性后过滤**——LLM 不听话也能滤掉）
 
     返回：记忆 ID 字符串列表；失败或无相关返回 []。
@@ -134,7 +134,7 @@ async def retrieve_relevant(
 
     prompt = RETRIEVAL_PROMPT_TEMPLATE.format(
         query=query[:1000],  # 防查询过长撑爆 prompt
-        index_text=index_text[:25000],  # 检索索引上限对齐 25KB：记忆多时检索更完整
+        index_text=index_text[:25000],  # 检索索引上限 25KB：记忆多时检索更完整
         max_results=max_results,
         active_tools_rule=tools_rule,
         exclude_rule=exclude_rule,
@@ -167,7 +167,7 @@ async def retrieve_relevant(
 
     if not isinstance(result, list):
         return []
-    # 只留字符串元素；R30f-H9：确定性排除已注入过的（不信任 LLM 会听话）；最后掐到上限
+    # 只留字符串元素；确定性排除已注入过的（不信任 LLM 会听话）；最后掐到上限
     picked = [str(x) for x in result if isinstance(x, str)]
     if exclude_ids:
         picked = [x for x in picked if x not in exclude_ids]

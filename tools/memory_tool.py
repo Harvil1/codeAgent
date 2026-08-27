@@ -30,10 +30,10 @@ MEMORY_SCHEMA = {
         "  - load: 读完整 body（必需 id）\n"
         "  - list: 列出所有记忆\n\n"
         "type 可选值: user / feedback / project / reference / other\n"
-        "topic: 可选主题（对齐 Claude Code topic 文件），记忆按主题组织到 .memory/{topic}.jsonl；\n"
+        "topic: 可选主题，记忆按主题组织到 .memory/{topic}.jsonl；\n"
         "        默认 general。同一主题下建议用一致的 name，同 name 会自动更新而非堆积。\n\n"
         "⚠️ 写入即维护：保存前先用 action=list 查重，同主题同 name 用 update 更新，\n"
-        "   避免记忆无限堆积（对齐 Claude Code：索引应保持精简）。\n\n"
+        "   避免记忆无限堆积（索引应保持精简）。\n\n"
         "CCALS 三级粒度：\n"
         "  - name: L0 标题层（索引定位用）\n"
         "  - description: L0.5 一句话钩子（索引行展示）\n"
@@ -62,7 +62,7 @@ MEMORY_SCHEMA = {
             "body": {"type": "string", "description": "save/update 时可选"},
             "topic": {
                 "type": "string",
-                "description": "主题（save 可选，默认 general；对齐 Claude Code topic 文件）",
+                "description": "主题（save 可选，默认 general）",
             },
         },
         "required": ["action"],
@@ -96,7 +96,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
             topic = args.get("topic", "general")
             name = args.get("name", "")
             # 「保存前先查重」：同 topic 同 name 已有 → 本次自动算更新，不会越存越多
-            # 历史踩坑（R30d-D9 修复）：查重必须限定在 save 实际会写入的那个分区，
+            # 查重必须限定在 save 实际会写入的那个分区，
             # 否则可能出现「回复说已更新、实际却在另一个分区新建了一条」的谎报
             existing = store.find_by_topic_name(
                 topic, name, type=args.get("type", "other"),
@@ -161,7 +161,7 @@ def _handle_memory(args: dict, **kwargs) -> str:
                 "success": True, "id": mid,
                 "name": entry.name, "description": entry.description,
                 "type": entry.type, "body": entry.body,
-                "summary": entry.summary,  # summary 字段是 CCALS-P0-1 轮引入的，方便先看摘要再决定是否读全文
+                "summary": entry.summary,  # summary 字段方便先看摘要再决定是否读全文
                 "created_at": entry.created_at.isoformat(timespec="seconds"),
                 "updated_at": entry.updated_at.isoformat(timespec="seconds"),
             }, ensure_ascii=False)

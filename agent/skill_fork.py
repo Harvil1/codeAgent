@@ -59,7 +59,7 @@ def run_skill_in_fork(
             effort_level=getattr(agent_ref, "effort_level", None),
             hooks_registry=_hooks,
         )
-        # 历史轮次（round4）补的：fork 子代理不走 delegate_tool 的 _run_child 通道，
+        # fork 子代理不走 delegate_tool 的 _run_child 通道，
         # 那边会自动发的 subagent 审计事件这里得手动补发，否则 hook 看不见这次派生
         _fork_success = False
         if _hooks is not None:
@@ -71,7 +71,7 @@ def run_skill_in_fork(
             except Exception:
                 pass
         try:
-            # 历史踩坑（Task D4 修复）：AIAgent.chat 已改成 async，而本函数是
+            # 历史踩坑：AIAgent.chat 是 async，而本函数是
             # 同步的、从 cli.py 直接调（那里没有事件循环）——漏了 asyncio.run
             # 驱动会直接拿到协程对象而不是结果，等于白跑。
             import asyncio

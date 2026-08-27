@@ -1,4 +1,4 @@
-"""检索式记忆注入（CCAR10 轮次引入，对标 CCB findRelevantMemories）。
+"""检索式记忆注入。
 
 记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）怎么送到 LLM 面前？
 旧做法是把整个记忆目录塞进 system prompt——但中途改 system prompt 会让
@@ -17,7 +17,7 @@ from agent.memory_retriever import retrieve_relevant
 logger = logging.getLogger(__name__)
 
 # 同一轮的去重缓存：只记住上一次 (query, 结果) 这一对（相当于容量为 1 的缓存）
-# R30c-C1 历史踩坑：原来是模块级全局变量，同进程里并发的多个 agent
+# 历史踩坑：不能用模块级全局变量，同进程里并发的多个 agent
 # （asyncio task / to_thread 里的子代理）会互相看到对方的缓存，串味。
 # 改成 ContextVar 后各并发上下文各持一份副本，互不可见；
 # 主循环自己在同一个 task 里顺序轮次，行为不变。
@@ -48,7 +48,7 @@ async def build_relevant_memories_message(
     - memory_store：记忆库（提供索引和按 ID 取条目）
     - aux_llm_router：辅助 LLM 路由（做检索挑选）
     - max_results：最多注入几条（默认 5）
-    - active_tools：当前对话正在使用的工具名（R30f-H9 反噪音——
+    - active_tools：当前对话正在使用的工具名（反噪音——
       这些工具的"用法文档"类记忆不召回）
     - surfaced：调用方持有的"已注入记忆 ID"集合，一物两用：传给检索层
       做跨轮去重（已注入的不占名额），同时本轮新选中的 ID 也会收进去
@@ -66,7 +66,7 @@ async def build_relevant_memories_message(
         return _last_result_var.get()
 
     try:
-        # T4 特性：索引带年龄标注（[age: Nd] + prompt 里"新记忆优先"规则），防召回过期信息
+        # 索引带年龄标注（[age: Nd] + prompt 里"新记忆优先"规则），防召回过期信息
         index_text = memory_store.full_index_text_with_age()
         if not index_text or not index_text.strip():
             _last_query_var.set(query)
@@ -97,7 +97,7 @@ async def build_relevant_memories_message(
         if entry is None:
             continue
         body = (getattr(entry, "body", "") or "")[:500]
-        # R30f-H9（对齐 CCB staleness caveat）：超过 1 天的记忆里 file:line
+        # 超过 1 天的记忆里 file:line
         # 引用很可能已过时——旧引用会让错误断言显得有凭有据，必须提示核对
         stale_note = ""
         updated = getattr(entry, "updated_at", None)

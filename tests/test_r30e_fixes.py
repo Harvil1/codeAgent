@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""R30e（H 轮借鉴第一批）回归测试。
+"""工具输出健壮性回归测试。
 
-  H1 terminal 大输出先无损落盘再截断兜底（stdout+stderr 都接 offload）
-  H2 read_file 同文件同 range mtime+size 去重（file_unchanged stub）+ 写后失效
-  H3 search_files offset 分页 + 上下文行 + 大小写开关
-  M1 危险前缀黑名单——经核实 curated 表派生已结构性覆盖（无裸壳可入库），
-     无行为变更，无测试。
+  terminal 大输出先无损落盘再截断兜底（stdout+stderr 都接 offload）
+  read_file 同文件同 range mtime+size 去重（file_unchanged stub）+ 写后失效
+  search_files offset 分页 + 上下文行 + 大小写开关
 """
 import json
 from pathlib import Path
@@ -13,7 +11,7 @@ from types import SimpleNamespace
 
 
 # ======================================================================
-# H1：terminal 大输出无损落盘
+# terminal 大输出无损落盘
 # ======================================================================
 
 def test_terminal_big_output_offload_full_h1(tmp_path, monkeypatch):
@@ -61,7 +59,7 @@ def test_terminal_small_output_untouched_h1(tmp_path, monkeypatch):
 
 
 # ======================================================================
-# H2：read_file 去重
+# read_file 去重
 # ======================================================================
 
 def test_read_dedup_and_invalidation_h2(tmp_path):
@@ -95,7 +93,7 @@ def test_read_dedup_and_invalidation_h2(tmp_path):
 
 
 # ======================================================================
-# H3：search_files 分页/上下文/大小写
+# search_files 分页/上下文/大小写
 # ======================================================================
 
 def test_search_pagination_context_case_h3(tmp_path):

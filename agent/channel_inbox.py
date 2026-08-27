@@ -108,7 +108,7 @@ class ChannelInbox:
             msg_ids：要删的消息 id 列表。
         返回：实际删掉的条数。
 
-        设计取舍（R30c-C7 裁决，有意为之）：流程是"unconsumed 读文件列表 →
+        设计取舍（有意为之）：流程是"unconsumed 读文件列表 →
         注入 user 消息 → mark_consumed 按 id 删文件"，前两步和第三步之间
         没有原子性保证。如果注入完、还没来得及删，进程崩了——下一轮会把
         同一批消息再注入一遍。这是 at-least-once（至少送达一次）的投递语义：

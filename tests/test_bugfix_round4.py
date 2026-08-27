@@ -1,4 +1,4 @@
-"""第 4 轮 bug 修复测试：严重级 bug（5 个）。"""
+"""严重级 bug 修复测试（5 个）。"""
 import re
 import inspect
 from unittest.mock import MagicMock, patch
@@ -7,11 +7,11 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# X9: HandoffStore 密钥正则应支持新格式 OpenAI key（含 _ 和 -）
+# HandoffStore 密钥正则应支持新格式 OpenAI key（含 _ 和 -）
 # ---------------------------------------------------------------------------
 
 def test_secret_pattern_catches_modern_openai_keys():
-    """X9 fix: 密钥正则应支持 sk-proj-XXX（含 _ 和 -）格式。"""
+    """密钥正则应支持 sk-proj-XXX（含 _ 和 -）格式。"""
     from agent.handoff import SECRET_PATTERN
 
     # 老格式 sk-XXXX（纯字母数字）应匹配
@@ -35,11 +35,11 @@ def test_secret_pattern_avoids_false_positive_for_short_strings():
 
 
 # ---------------------------------------------------------------------------
-# X13: _fix_tool_call_pairs 反向孤儿应按"截至当前位置"判断，不用全局集合
+# _fix_tool_call_pairs 反向孤儿应按"截至当前位置"判断，不用全局集合
 # ---------------------------------------------------------------------------
 
 def test_fix_tool_call_pairs_drops_reverse_orphan_correctly():
-    """X13 fix: tool(result of B) 出现在 assistant(tc B) 之前应被删（即使 B 后面存在）。"""
+    """tool(result of B) 出现在 assistant(tc B) 之前应被删（即使 B 后面存在）。"""
     from agent.context_compressor import _fix_tool_call_pairs
 
     messages = [
@@ -90,11 +90,11 @@ def test_fix_tool_call_pairs_keeps_well_ordered_pairs():
 
 
 # ---------------------------------------------------------------------------
-# X5: reflection supersedes 必须同 type 才匹配
+# reflection supersedes 必须同 type 才匹配
 # ---------------------------------------------------------------------------
 
 def test_reflection_supersedes_respects_type():
-    """X5 fix: supersedes 匹配应同时检查 name + type，不跨类型误降。"""
+    """supersedes 匹配应同时检查 name + type，不跨类型误降。"""
     from agent.reflection import apply_reflection
     from agent.memory_store import MemoryEntry
     from datetime import datetime, timezone
@@ -125,18 +125,18 @@ def test_reflection_supersedes_respects_type():
             session_id="s1",
         )
 
-    # X5: 不应调 update（feedback 不应被 project supersede）
+    # 不应调 update（feedback 不应被 project supersede）
     assert store.update.call_count == 0, (
         f"supersede 不应跨类型，update 不该被调，实际 calls: {store.update.call_args_list}"
     )
 
 
 # ---------------------------------------------------------------------------
-# X8: get_messages 同秒排序应按 rowid，不按 timestamp DESC
+# get_messages 同秒排序应按 rowid，不按 timestamp DESC
 # ---------------------------------------------------------------------------
 
 def test_get_messages_subquery_uses_rowid_not_timestamp():
-    """X8 fix: get_messages 源码子查询应用 ORDER BY rowid DESC（取最后 N 条），
+    """get_messages 源码子查询应用 ORDER BY rowid DESC（取最后 N 条），
     外层按 rowid ASC（恢复时序），不再用 timestamp DESC（同秒乱序）。
     """
     from agent.session_store import SessionStore
@@ -151,11 +151,11 @@ def test_get_messages_subquery_uses_rowid_not_timestamp():
 
 
 # ---------------------------------------------------------------------------
-# X14: reflection 批内 supersedes 应在所有写入后再 supersede
+# reflection 批内 supersedes 应在所有写入后再 supersede
 # ---------------------------------------------------------------------------
 
 def test_reflection_supersedes_handles_intra_batch():
-    """X14 fix: 批内 supersedes 应在所有写入后处理，否则推翻刚写入的新条目失效。"""
+    """批内 supersedes 应在所有写入后处理，否则推翻刚写入的新条目失效。"""
     from agent.reflection import apply_reflection
     from agent.memory_store import MemoryEntry
     from datetime import datetime, timezone
@@ -198,7 +198,7 @@ def test_reflection_supersedes_handles_intra_batch():
         )
 
     # 第二条 insight 想 supersede "测试流程"（project），库里现在有（同批写入的）
-    # 应触发 update（X14 修复后批内 supersede 工作）
+    # 应触发 update（批内 supersede 生效）
     assert len(updated_ids) >= 1, (
         f"批内 supersede 应生效（至少 1 次 update），实际 updated_ids: {updated_ids}"
     )

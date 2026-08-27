@@ -32,7 +32,7 @@ def test_build_system_prompt_no_guidance():
 
 
 def test_build_system_prompt_with_memory(tmp_path):
-    """CCAR10 Task 2：snapshot 从 system prompt 退役——不再含记忆索引段。
+    """snapshot 从 system prompt 退役——不含记忆索引段。
 
     检索改走 ephemeral 注入（_pending_ephemeral_messages），
     system prompt 永不含记忆索引（保护 prompt cache）。
@@ -49,14 +49,14 @@ def test_build_system_prompt_with_memory(tmp_path):
     )
 
     sp = build_system_prompt(memory_store=store)
-    # CCAR10: 记忆索引段已退役——不再注入 system prompt
+    # 记忆索引段已退役——不注入 system prompt
     assert "## 记忆索引" not in sp
     # 记忆描述也不应通过索引进入 system prompt
     assert "测试记忆条目" not in sp
 
 
 def test_system_prompt_no_memory_index_section(tmp_path):
-    """集成验证：带 memory_store 构建的 system prompt 无记忆索引（CCAR10 Task 2）。"""
+    """集成验证：带 memory_store 构建的 system prompt 无记忆索引。"""
     from agent.memory_store import MemoryStore
     from agent.prompt_builder import build_system_prompt
 

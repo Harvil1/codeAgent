@@ -1,4 +1,4 @@
-"""Task N 测试：AgentDefinition 扩展 4 字段 + delegate_tool 接入。
+"""AgentDefinition 扩展 4 字段 + delegate_tool 接入测试。
 
 覆盖：
 1. AgentDefinition 加 4 字段（omit_claude_md / initial_prompt / required_mcp_servers / critical_reminder）
@@ -332,7 +332,7 @@ def test_file_changed_hook_fires_on_write_file(tmp_path):
         session_id = "test-session"
         _checkpoint_track = None
 
-    # CCAR13 Task 4: check_path 闸门 3 恢复白名单语义——tmp_path 不在
+    # check_path 闸门 3 恢复白名单语义——tmp_path 不在
     # cwd 白名单内，注册为 extra root 才能走到写盘（finally clear 防泄漏）。
     add_extra_allowed_root(str(tmp_path))
     try:
@@ -401,7 +401,7 @@ def test_file_changed_no_hook_no_crash(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Task N Important fix: critical_reminder 在 fork 路径不丢失
+# 8. critical_reminder 在 fork 路径不丢失
 # ---------------------------------------------------------------------------
 
 def test_run_child_fork_preserves_critical_reminder(monkeypatch):

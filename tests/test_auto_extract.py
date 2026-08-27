@@ -1,4 +1,4 @@
-"""auto_extract 对话级记忆提取测试（R26 #13 机械查证）。"""
+"""auto_extract 对话级记忆提取测试（机械查证）。"""
 from agent import auto_extract
 
 

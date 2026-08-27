@@ -1,4 +1,4 @@
-"""WebFetch 工具测试（对齐 Claude Code WebFetch）。"""
+"""WebFetch 工具测试。"""
 
 import json
 

@@ -9,21 +9,17 @@ from agent.hooks import (
 # ---------------------------------------------------------------------------
 
 def test_hook_event_has_four_values():
-    """枚举值集合（P2-13 后扩到 11 个，round3 再加 7 个，P3.3-P3.4 再加 3 个，Task N 再加 6 个，共 27 个）。"""
+    """枚举值集合（共 27 个）。"""
     assert {e.value for e in HookEvent} == {
         "user_prompt_submit", "pre_tool_use", "post_tool_use", "stop",
         "pre_llm_call", "post_llm_call",
-        # P2-13 新增
         "session_start", "session_end",
         "pre_compact", "post_compact",
         "config_change",
-        # round3 新增
         "post_tool_use_failure", "subagent_start", "subagent_stop",
         "task_created", "task_completed",
         "permission_request", "permission_denied",
-        # P3.3-P3.4 新增
         "stop_failure", "worktree_create", "worktree_remove",
-        # Task N 新增
         "file_changed", "cwd_changed", "instructions_loaded",
         "setup", "teammate_idle", "elicitation_started",
     }
@@ -109,9 +105,9 @@ def test_pre_tool_use_deny():
 def test_pre_tool_use_deny_short_circuits():
     """首个 deny 胜出。
 
-    R30g-H5 语义更新：所有匹配 hook 都会执行（并行聚合，对齐 CCB——
-    一个 hook 的判决不应掩盖其他 hook 的判决/改参），deny 聚合后返回
-    首个（注册序）deny 的原因。旧"短路不跑后续"已被聚合取代。
+    语义：所有匹配 hook 都会执行（并行聚合——一个 hook 的判决
+    不应掩盖其他 hook 的判决/改参），deny 聚合后返回首个（注册序）
+    deny 的原因。
     """
     calls = []
     def h1(n, a): calls.append("h1"); return {"deny": "first"}
@@ -478,7 +474,7 @@ def test_new_hooks_isolated_per_registry():
 def test_http_hook_posts_and_parses(monkeypatch):
     """http 类型 hook：POST JSON，解析响应。
 
-    R16 #4 起 run_http_hook 有 SSRF 预检（真实 getaddrinfo）——测试用
+    run_http_hook 有 SSRF 预检（真实 getaddrinfo）——测试用
     环回地址保持 hermetic（假域名会被本机 DNS 劫持成私网地址而误拦）。
     """
     import agent.hook_exec as he
@@ -594,18 +590,17 @@ def test_round3_hook_events_fail_open():
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-6：慢 hook 不得冻结事件循环
+# 慢 hook 不得冻结事件循环
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_pre_tool_use_slow_hook_does_not_block_event_loop():
     """async 调用点的 hook 链必须移出事件循环线程执行。
 
-    旧实现：model_tools.handle_function_call（async）直调
+    若 model_tools.handle_function_call（async）直调
     hooks_registry.run_pre_tool_use（sync，内部等待声明式子进程 hook/
-    线程池结果）→ 事件循环线程被阻塞，流式输出与并发 safe 工具全部冻结，
-    与 hooks.py docstring "不拖累主循环" 的宣称不符（只对 hook 之间成立）。
-    修复：热点调用点（PRE/POST_TOOL_USE 等）经 asyncio.to_thread 执行。
+    线程池结果）→ 事件循环线程被阻塞，流式输出与并发 safe 工具全部冻结。
+    要求：热点调用点（PRE/POST_TOOL_USE 等）经 asyncio.to_thread 执行。
     """
     import asyncio as _aio
     import time as _time
@@ -638,21 +633,21 @@ async def test_pre_tool_use_slow_hook_does_not_block_event_loop():
     except _aio.CancelledError:
         pass
     # 0.4s 慢 hook 期间 20ms 间隔的 ticker 应跳动 ~20 次；
-    # 旧实现循环被阻塞 → ticks 停在 1-2
+    # 循环若被阻塞 → ticks 停在 1-2
     assert len(ticks) >= 5, f"事件循环被慢 hook 阻塞（ticks={len(ticks)}）"
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 L14：并行 hook 的 modify_args 有序合并
+# 并行 hook 的 modify_args 有序合并
 # ---------------------------------------------------------------------------
 
 def test_pre_tool_use_parallel_modify_args_merged(monkeypatch):
-    """多个 declarative hook 同时改参：按注册顺序叠加合并，不再后到整体替换。
+    """多个 declarative hook 同时改参：按注册顺序叠加合并。
 
     并行路径每个 hook 基于**原始参数**计算（programmatic 串行链式天然带前序
-    修改，掩盖不了这个 bug）；旧聚合 modified_args = 后到者整体替换，先到
-    hook 的修改静默丢失。新语义：首个 hook 的返回为基底，后续按键覆盖叠加
-    （同键后到胜、异键并集），与 docstring "按注册顺序叠加" 一致。
+    修改，掩盖不了聚合 bug）；聚合若用"后到者整体替换"，先到 hook 的修改会
+    静默丢失。语义：首个 hook 的返回为基底，后续按键覆盖叠加（同键后到胜、
+    异键并集），与 docstring "按注册顺序叠加" 一致。
     """
     from agent.hooks import HookRegistry, Hook, HookEvent, HookScriptConfig
 
@@ -678,7 +673,7 @@ def test_pre_tool_use_parallel_modify_args_merged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# C4（CCB 借鉴）：async hook + asyncRewake + statusMessage
+# async hook + asyncRewake + statusMessage
 # ---------------------------------------------------------------------------
 
 def test_async_command_hook_nonblocking_with_rewake():

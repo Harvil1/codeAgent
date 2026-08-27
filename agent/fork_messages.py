@@ -1,6 +1,6 @@
 """fork（分叉——复制一份现有会话去另开分支，不影响原会话）子代理的初始消息构造。
 
-核心思想（借鉴 Claude Code 的 forkSubagent.ts）：
+核心思想：
 1. 父代理的 system prompt 一字不改地复用 → 得到 cache-identical（缓存一致——
    前缀字节完全相同，服务端的 prompt cache 才会命中）的开头
 2. 父代理最近 N 轮 assistant 回复也原样复用，配上占位的 tool_result → 对话前缀也能共享缓存

@@ -23,7 +23,7 @@ SAFE_TOOLS = {
     # 文件类（只读）
     "read_file",        # 读文件内容
     "search_files",     # grep 文件内容
-    "glob",             # CCAR11 Task 1: 文件名模式匹配（只读，不读内容）
+    "glob",             # 文件名模式匹配（只读，不读内容）
     # 技能类（只读）
     "skills_list",      # 列技能目录
     "skill_view",       # 看技能正文（bump view 是小副作用，对并发不致命）
@@ -40,14 +40,14 @@ SAFE_TOOLS = {
     # 团队（只读）
     "team_members",     # 列成员状态
     # 上下文自查（只读）
-    "ctx_inspect",      # Task L: 读 messages_count / cache_stats / token 估算
-    "brief",            # CCAR8 Task 2: 纯 echo 输出格式约定，无副作用
+    "ctx_inspect",      # 读 messages_count / cache_stats / token 估算
+    "brief",            # 纯 echo 输出格式约定，无副作用
     # mailbox（只读）
-    "mailbox_check",    # CCAR8 Task 8: 读自己 mailbox 的邮件
+    "mailbox_check",    # 读自己 mailbox 的邮件
     # Goal（只读）
-    "goal_status",      # CCAR12 Task 4: 查 goal 状态（objective/status/预算）
+    "goal_status",      # 查 goal 状态（objective/status/预算）
     # Config（只读）
-    "config_get",       # CCAR12 Task 7: 读白名单配置键的当前值
+    "config_get",       # 读白名单配置键的当前值
 }
 
 # Safe=False：有副作用 / 外部调用 / 交互式 / 状态变更工具。
@@ -56,21 +56,21 @@ UNSAFE_TOOLS = {
     # 文件类（写入）
     "write_file",       # 写文件
     "str_replace",      # 改文件内容
-    "notebook_edit",    # R20 #35: notebook 单元格编辑（写文件）
+    "notebook_edit",    # notebook 单元格编辑（写文件）
     # 执行类
     "terminal",         # shell 命令（最强副作用）
-    "lsp",              # R26 #17: pylsp 子进程 stdin/stdout 有状态 JSON-RPC 交互
+    "lsp",              # pylsp 子进程 stdin/stdout 有状态 JSON-RPC 交互
     # 交互式
     "ask_user",         # 阻塞等用户输入（并发会导致提示交错）
     # 上下文管理（副作用）
     "compact",          # 触发 LLM 压缩（改消息历史）
-    "snip",             # Task L: 剪早期历史（改 conversation_history）
+    "snip",             # 剪早期历史（改 conversation_history）
     # 子代理（副作用）
     "subagent",         # spawn 子 agent（重资源 + 改子任务状态）
     "delegate_task",    # subagent 的 _compat alias
-    "subagent_kill",    # Task K: set cancel_event + 改注册表（副作用）
-    "subagent_resume",  # CCAR10 Task 4: 重启 AIAgent 子代理（重资源 + 写 transcript）
-    "workflow",         # R28 W4: 批量子代理 spawn + journal 落盘（大量副作用）
+    "subagent_kill",    # set cancel_event + 改注册表（副作用）
+    "subagent_resume",  # 重启 AIAgent 子代理（重资源 + 写 transcript）
+    "workflow",         # 批量子代理 spawn + journal 落盘（大量副作用）
     # 图像（外部 API）
     "image_analyze",    # vision API 调用
     "image_ocr",        # OCR API 调用
@@ -103,26 +103,26 @@ UNSAFE_TOOLS = {
     "team_shutdown",    # 关子 agent 进程
     "idle",             # 改 worker 状态机
     # mailbox（副作用）
-    "mailbox_send",     # CCAR8 Task 8: 写投递邮件
-    "mailbox_clear",    # CCAR8 Task 8: 清空 mailbox
+    "mailbox_send",     # 写投递邮件
+    "mailbox_clear",    # 清空 mailbox
     # 网络（外部调用）
     "web_fetch",        # 抓 URL
     "web_search",       # Tavily 搜索
     # 记忆召回（外部 LLM）
-    "memory_recall",    # CCAR8 Task 3: 调 aux_llm（retrieve_relevant），消耗配额
-    # Cron 定时任务（CCAR12 Task 3：写 jobs.json + 影响调度行为）
+    "memory_recall",    # 调 aux_llm（retrieve_relevant），消耗配额
+    # Cron 定时任务（写 jobs.json + 影响调度行为）
     "cron_create",
     "cron_list",        # 按 brief 归 UNSAFE（与 create/delete 同组管理）
     "cron_delete",
-    # Goal（CCAR12 Task 4：改 goal 状态机 + 写/删持久化文件）
+    # Goal（改 goal 状态机 + 写/删持久化文件）
     "goal_start",
     "goal_pause",
     "goal_resume",
     "goal_clear",
-    # Worktree（CCAR12 Task 6：改会话级全局 cwd + 建/删 worktree）
+    # Worktree（改会话级全局 cwd + 建/删 worktree）
     "worktree_enter",
     "worktree_exit",
-    # Config（CCAR12 Task 7：写 settings.json + 改 runtime config + hook）
+    # Config（写 settings.json + 改 runtime config + hook）
     "config_set",
 }
 
@@ -178,7 +178,7 @@ def test_safe_subset_consistent_with_plan():
 
     如果新增了只读工具，记得更新本 expected 值 + SAFE_TOOLS 集合。
     """
-    expected_safe_count = 17  # CCAR12 Task 7: config_get 加入（只读查配置）
+    expected_safe_count = 17  # 只读工具数（config_get 等查询类）
     assert len(SAFE_TOOLS) == expected_safe_count, (
         f"SAFE_TOOLS 数量变了（{len(SAFE_TOOLS)} != {expected_safe_count}），"
         "如果新增了只读工具，更新 expected_safe_count；如果是误删，请补回。"
@@ -186,12 +186,12 @@ def test_safe_subset_consistent_with_plan():
 
 
 def test_all_builtin_schemas_use_openai_parameters_key():
-    """【CCAR11 防回归】所有内置工具 schema 必须用 "parameters" 键（OpenAI 格式）。
+    """【防回归】所有内置工具 schema 必须用 "parameters" 键（OpenAI 格式）。
 
     背景：registry.get_definitions 直接 {"type":"function","function":schema}
-    塞给 LLM——参数键必须是 "parameters"（OpenAI 标准）。CCAR8-10 曾有 5 个
-    工具误用 Anthropic 风格 "inputSchema"，导致参数定义对 LLM 不可见
-    （handler 靠 args.get 能跑，测试全过——silent-dead-code 第 5 例）。
+    塞给 LLM——参数键必须是 "parameters"（OpenAI 标准）。若误用 Anthropic
+    风格 "inputSchema"，参数定义对 LLM 不可见（handler 靠 args.get 照样能跑、
+    测试照样全过——典型 silent-dead-code）。
     """
     builtin_names = {
         n for n in registry.list_all() if not n.startswith("mcp__")
@@ -210,7 +210,7 @@ def test_all_builtin_schemas_use_openai_parameters_key():
 
 
 def test_async_disallow_contains_goal_activation():
-    """【CCAR12 Task 4 review】goal 循环激活工具必须禁用于 async 子代理。
+    """goal 循环激活工具必须禁用于 async 子代理。
 
     goal-continue 分支无 spawn_depth 守卫——async 子代理（daemon 线程，
     不可中断）激活 goal 会持续烧 token。goal_start/goal_resume 禁；
@@ -222,7 +222,7 @@ def test_async_disallow_contains_goal_activation():
 
 
 def test_async_disallow_contains_worktree_enter():
-    """【CCAR12 Task 6 fix】worktree_enter 必须禁用于 async 子代理。
+    """worktree_enter 必须禁用于 async 子代理。
 
     async 子代理 enter 会置位模块级 _session_worktree——主对话再 enter
     被 already_in_worktree 卡死（会话级全局状态污染）。worktree_exit

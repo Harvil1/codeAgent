@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """LLM 观察后端：用辅助 LLM（aux_llm）做行为观察。
 
-（历史轮次 CCAR15 Task 4 引入，对标 CCB sessionObserver 的 LLM 模式。）
-
 启发式观察器（observer.py）只会认四类写死的正则模式；这个后端更聪明——
 把整轮轨迹（用户消息 + 工具调用 + 工具结果）整理好交给一个便宜的辅助
 LLM 去提炼习惯，要求它只回 JSON：
@@ -211,7 +209,7 @@ def _parse_instincts(raw: str) -> List[dict]:
             continue  # 关键字段缺的条目直接丢——宁缺毋滥，不猜
         try:
             conf = float(it.get("confidence"))
-            # 历史踩坑（T4 评审快修）：NaN 不能直接走 min/max 收敛——
+            # 历史踩坑：NaN 不能直接走 min/max 收敛——
             # min(1.0, nan) 会返回 1.0（nan 参与比较是 False，方向反了），
             # 把最不可信的值洗成满分。所以 NaN/Infinity 先拦下，落保守默认值。
             if math.isnan(conf) or math.isinf(conf):

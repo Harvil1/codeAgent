@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""R30c 修复轮回归测试（C 类并发/一致性 7 项 + B5/B7）。
+"""并发/一致性修复回归测试。
 
-对应修复（源码内搜 R30c- 前缀注释）：
-  C1 memory_injection ContextVar 隔离 + delegation_queue 实例定向
-  C2 team bus 锁超时 fail-closed（MessageBusLockTimeout）
-  C3 workflow 预算事前预留 + 事后结算（reserve/settle）
-  C4 DAG 依赖删除/缺失自动解链
-  C5 cron catch_up 单次语义（文档化，无行为变更——cron 既有测试覆盖）
-  C6 CLI 对象哨兵 + agent drain 跳过非 str 项
-  C7 journal save_meta 原子写
-  B5 GUI 判定 token 级（_is_gui_launch）
-  B7 deny 防御失效显式 ERROR 日志
+覆盖：
+  memory_injection ContextVar 隔离 + delegation_queue 实例定向
+  team bus 锁超时 fail-closed（MessageBusLockTimeout）
+  workflow 预算事前预留 + 事后结算（reserve/settle）
+  DAG 依赖删除/缺失自动解链
+  cron catch_up 单次语义（无行为变更，cron 既有测试覆盖）
+  CLI 对象哨兵 + agent drain 跳过非 str 项
+  journal save_meta 原子写
+  GUI 判定 token 级（_is_gui_launch）
+  deny 防御失效显式 ERROR 日志
 """
 import asyncio
 import json
@@ -22,7 +22,7 @@ import pytest
 
 
 # ======================================================================
-# C1：delegation_queue 实例定向
+# delegation_queue 实例定向
 # ======================================================================
 
 def test_aiagent_has_own_delegation_queue_c1(tmp_path):
@@ -75,7 +75,7 @@ def test_memory_injection_cache_isolated_across_tasks_c1():
 
 
 # ======================================================================
-# C2：bus 锁超时 fail-closed
+# bus 锁超时 fail-closed
 # ======================================================================
 
 def test_bus_lock_timeout_fail_closed_c2(tmp_path, monkeypatch):
@@ -104,7 +104,7 @@ def test_bus_normal_path_unaffected_c2(tmp_path):
 
 
 # ======================================================================
-# C3：workflow 预算 reserve/settle
+# workflow 预算 reserve/settle
 # ======================================================================
 
 def test_workflow_budget_reserve_settle_c3():
@@ -146,7 +146,7 @@ async def test_workflow_budget_exhausted_before_second_run_c3():
 
 
 # ======================================================================
-# C4：DAG 依赖删除/缺失自动解链
+# DAG 依赖删除/缺失自动解链
 # ======================================================================
 
 def test_can_start_deleted_dependency_unlinks_c4(tmp_path):
@@ -174,7 +174,7 @@ def test_can_start_missing_dependency_file_unlinks_c4(tmp_path):
 
 
 # ======================================================================
-# C6：agent drain 跳过非 str 项（对象哨兵）
+# agent drain 跳过非 str 项（对象哨兵）
 # ======================================================================
 
 def test_drain_queued_input_skips_non_str_c6(tmp_path):
@@ -193,7 +193,7 @@ def test_drain_queued_input_skips_non_str_c6(tmp_path):
 
 
 # ======================================================================
-# C7：journal save_meta 原子写
+# journal save_meta 原子写
 # ======================================================================
 
 def test_journal_save_meta_atomic_c7(tmp_path, monkeypatch):
@@ -217,7 +217,7 @@ def test_journal_save_meta_atomic_c7(tmp_path, monkeypatch):
 
 
 # ======================================================================
-# B5：GUI 判定 token 级
+# GUI 判定 token 级
 # ======================================================================
 
 def test_is_gui_launch_token_level_b5():
@@ -236,7 +236,7 @@ def test_is_gui_launch_token_level_b5():
 
 
 # ======================================================================
-# B7：deny 防御失效显式 ERROR
+# deny 防御失效显式 ERROR
 # ======================================================================
 
 @pytest.mark.asyncio

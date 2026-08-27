@@ -1,8 +1,8 @@
 """async 子代理完成通知送达父代理的端到端测试。
 
-Bug 背景：CCAR5 加了 _delegate_async → push 到 DelegationCompletionQueue，
-但父代理主循环没 drain，async 结果永远无法送达父代理。
-Fix：_drain_injected_messages drain delegation_queue + _assemble_turn_messages 注入。
+机制：_delegate_async 完成后 push 到 DelegationCompletionQueue，
+父代理主循环经 _drain_injected_messages drain delegation_queue +
+_assemble_turn_messages 注入，async 结果才能送达父代理。
 """
 
 import json
@@ -58,7 +58,7 @@ def isolated_queue(monkeypatch):
 def test_drain_injected_messages_pulls_delegation(isolated_queue, tmp_path):
     """_drain_injected_messages 真读 delegation_queue。
 
-    R30c-C1：drain 读 agent 实例队列（delegate push 侧定向到 agent_ref），
+    drain 读 agent 实例队列（delegate push 侧定向到 agent_ref），
     测试直接把实例队列换成 isolated_queue。
     """
     from agent import AIAgent
@@ -132,7 +132,7 @@ def test_drain_injected_messages_fail_open(isolated_queue, tmp_path, monkeypatch
     agent.team_bus = None
     agent.team_name = None
 
-    # mock 实例队列抛异常（R30c-C1：drain 读 agent 实例队列）
+    # mock 实例队列抛异常（drain 读 agent 实例队列）
     class _BoomQueue:
         def has_pending(self):
             raise RuntimeError("queue 挂了")
@@ -333,7 +333,7 @@ def test_end_to_end_drain_to_assemble(isolated_queue, tmp_path):
     agent.team_bus = None
     agent.team_name = None
     agent.conversation_history = []
-    agent._delegation_queue = isolated_queue  # R30c-C1：drain 读实例队列
+    agent._delegation_queue = isolated_queue  # drain 读实例队列
 
     # step 1：push 两个 async 子代理完成
     isolated_queue.push({
@@ -387,7 +387,7 @@ def test_second_drain_after_first_consumed(isolated_queue, tmp_path):
     agent.team_bus = None
     agent.team_name = None
     agent.conversation_history = []
-    agent._delegation_queue = isolated_queue  # R30c-C1：drain 读实例队列
+    agent._delegation_queue = isolated_queue  # drain 读实例队列
 
     isolated_queue.push({
         "delegation_id": "del_once",
@@ -411,7 +411,7 @@ def test_second_drain_after_first_consumed(isolated_queue, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-5：消费型注入必须带 _ephemeral
+# 消费型注入必须带 _ephemeral
 # ---------------------------------------------------------------------------
 
 def test_assemble_consumable_injections_are_ephemeral(tmp_path):

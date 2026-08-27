@@ -1,4 +1,4 @@
-"""R27 #21：bashlex AST wrapper 测试（真 bashlex，非 mock）。"""
+"""bashlex AST wrapper 测试（真 bashlex，非 mock）。"""
 
 
 class TestParseInfo:

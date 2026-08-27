@@ -369,7 +369,7 @@ class TestRunConversationCancelEvent:
         agent._interrupt_requested = False
         agent._budget_grace_call = False
         agent._grace_triggered = False
-        agent._pending_skill_paths = []  # R26 #16/T8 flush：每条 user 消息重置会调 _flush_skill_activations
+        agent._pending_skill_paths = []  # 每条 user 消息重置会调 _flush_skill_activations
         agent._idle_requested = False
         agent.iteration_budget = MagicMock()
         agent.iteration_budget.remaining = 100
@@ -400,7 +400,7 @@ class TestRunConversationCancelEvent:
         agent.aux_llm_router = None
         agent.plan_approval_callback = None
         agent.memory_store = None
-        # CCAR10 Task 2: 新增字段（主循环检索式记忆注入用）
+        # 主循环检索式记忆注入用的字段
         agent.spawn_depth = 0
         agent._pending_ephemeral_messages = []
         agent._snapshot_injected = False
@@ -408,7 +408,7 @@ class TestRunConversationCancelEvent:
         agent._sync_memory = MagicMock()
         agent._trigger_reflection_async = lambda: None
         agent._run_prompt_submit_hook = lambda msg: msg
-        # Task 2.5: _initial_memory_recall 已删除（记忆注入走 CCAR10 ephemeral）
+        # 记忆注入走 ephemeral（无 _initial_memory_recall 字段，无需 mock）
         agent._drain_injected_messages = lambda: {
             "bg_notifications": [], "cron_messages": [], "team_messages_text": "",
         }

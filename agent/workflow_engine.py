@@ -1,4 +1,4 @@
-"""工作流引擎——把一串步骤写成一个受限 Python 脚本，一次跑完（R28 落地，设计蓝图在 .superpowers/sdd/r28-workflow-blueprint.md）。
+"""工作流引擎——把一串步骤写成一个受限 Python 脚本，一次跑完（设计蓝图在 .superpowers/sdd/r28-workflow-blueprint.md）。
 
 在项目里的位置：由 tools/workflow_tool.py 包成工具暴露给 LLM，跑腿的
 子代理走 tools/delegate_tool.py 的 _run_child；执行日志（journal）由
@@ -14,7 +14,7 @@ workflow 是"一次工具调用内按写好的脚本一口气跑完"，确定性
 
 安全声明：跑之前先做 AST 白名单校验——禁止 import、exec、eval、open、
 __import__、双下划线名字（dunder），内置函数也只放开一小撮。注意这是
-"防手滑"不是"防坏人"（对齐参考实现 script.ts 的自我声明）：想逃逸的写法
+"防手滑"不是"防坏人"：想逃逸的写法
 在校验层就直接拒绝，但别指望它当安全边界用。
 
 预算口径：只统计子代理最终产出的文本量（按 len(text)//4 粗算 token）；
@@ -40,10 +40,10 @@ class WorkflowBudgetExceeded(Exception):
 class WorkflowBudget:
     """整个工作流共享的一个 token 预算池（估算口径，蓝图 §1）。
 
-    历史踩坑（R30c-C3 修复）：以前是纯事后记账——子代理跑完才扣钱，
+    历史踩坑：不能纯事后记账（子代理跑完才扣钱）——
     一次远超剩余额度的调用会先把 token 真实花掉才报超限；而且几路
     agent 并发时，大家能同时通过"余额还大于 0"的检查，各自都超额。
-    现在改成"事前预留 + 事后结算"：调用前先 reserve（预留）一笔额度，
+    所以用"事前预留 + 事后结算"：调用前先 reserve（预留）一笔额度，
     能同时开几路受剩余额度约束；跑完 settle（结算）实际花费、多退少补。
     因为输出长度没法提前精确知道，超支上限约等于单次预留额度——这已经
     是估算口径下能做到的最紧约束。
@@ -178,7 +178,7 @@ async def run_workflow(
     agent_runner: Callable[[str], Any],
     validator: Optional[Callable[[str], bool]] = None,
     budget_total: int = 500_000,
-    reserve_per_call: int = 50_000,   # 每次调子代理前预留的额度（R30c-C3 的事前预留机制）
+    reserve_per_call: int = 50_000,   # 每次调子代理前预留的额度（事前预留机制）
     max_concurrency: int = 5,
     journal=None,          # 可选的执行日志（WorkflowJournal）；None = 不记日志
     cancel_event=None,     # run 级取消开关（kill 动作会触发它）
@@ -224,7 +224,7 @@ async def run_workflow(
         """
         key = None
         if journal is not None:
-            from agent.workflow_journal import call_key  # W2 模块，journal 路径才触达
+            from agent.workflow_journal import call_key  # 懒加载，记 journal 的路径才触达
             key = call_key(prompt, schema)
             cached = journal.lookup(key)
             if cached is not None:
@@ -239,7 +239,7 @@ async def run_workflow(
         if _cancelled():
             raise asyncio.CancelledError()
 
-        # 先预留再跑（R30c-C3）：预算耗尽在开跑前就拒；并发路数也被剩余额度卡住
+        # 先预留再跑：预算耗尽在开跑前就拒；并发路数也被剩余额度卡住
         granted = budget.reserve(reserve_per_call)
 
         # 结构化输出：把 schema 的 JSON 拼在 prompt 末尾，让子代理照着格式答（蓝图 §5）

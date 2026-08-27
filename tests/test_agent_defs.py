@@ -118,7 +118,7 @@ def test_parse_defaults_when_fields_absent(tmp_path):
     assert ad.mcp_servers == []
 
 
-# ===== R29 #2：AgentDefinition.source 来源标记 =====
+# ===== AgentDefinition.source 来源标记 =====
 
 class TestAgentDefSource:
     def test_project_def_marked(self, tmp_path, monkeypatch):
@@ -172,10 +172,10 @@ class TestAgentDefSource:
 
 
 def test_builtin_explore_plan_omit_project_memory():
-    """C1（CCB 借鉴）：内置 Explore/Plan 子代理默认剥离项目 OMNIMATE.md。
+    """内置 Explore/Plan 子代理默认剥离项目 OMNIMATE.md。
 
-    研究/计划型子代理不需要项目约定（CCB 同款优化，注释称每周省
-    5-15 Gtoken）；verification 依赖项目上下文找 build/test 命令，不剥离。
+    研究/计划型子代理不需要项目约定；verification 依赖项目上下文找
+    build/test 命令，不剥离。
     """
     defs = scan_agent_defs()
     assert defs["explore"].omit_claude_md is True, "explore 应剥离项目 OMNIMATE.md"

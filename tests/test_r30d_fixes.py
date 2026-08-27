@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
-"""R30d 修复轮回归测试（D 轮 12 项中的可单测子集）。
+"""细分行为修复回归测试。
 
-对应修复（源码内搜 R30d- 前缀注释）：
-  B6a hook env 最小化（build_safe_env）
-  H-1 http hook 响应体上限 / H-2 prompt hook 安全 format
-  D-1 L4 总量上限移除（见 test_context_pipeline.py 的 r30d 用例）
-  D-3 _drop_leading_system 防御
-  D-6 trace 中英混合 token 估算
-  D-9 find_by_topic_name 目标区查重
-  C-8 排队 slash 命令分流（agent drain → _queued_cli_commands）
-  C-9 history 文件锁（行为不变，锁文件出现）
-  C-10 粘贴内容寻址（见 test_r21_small.py 更新的用例）
-  C-11 /poor off 回滚快照
+覆盖：
+  hook env 最小化（build_safe_env）
+  http hook 响应体上限 / prompt hook 安全 format
+  L4 总量上限移除（见 test_context_pipeline.py 用例）
+  _drop_leading_system 防御
+  trace 中英混合 token 估算
+  find_by_topic_name 目标区查重
+  排队 slash 命令分流（agent drain → _queued_cli_commands）
+  history 文件锁（行为不变，锁文件出现）
+  粘贴内容寻址（见 test_r21_small.py 用例）
+  /poor off 回滚快照
 """
 import queue as queue_mod
 from types import SimpleNamespace
 
 
 # ======================================================================
-# H-1：http hook 响应体上限
+# http hook 响应体上限
 # ======================================================================
 
 def test_http_hook_body_cap_h1(monkeypatch):
@@ -37,7 +37,7 @@ def test_http_hook_body_cap_h1(monkeypatch):
 
 
 # ======================================================================
-# H-2：prompt hook 安全 format
+# prompt hook 安全 format
 # ======================================================================
 
 def test_prompt_hook_safe_format_h2(monkeypatch):
@@ -63,7 +63,7 @@ def test_prompt_hook_safe_format_h2(monkeypatch):
 
 
 # ======================================================================
-# B6a：hook 子进程 env 最小化
+# hook 子进程 env 最小化
 # ======================================================================
 
 def test_script_hook_env_sanitized_b6a(monkeypatch):
@@ -89,7 +89,7 @@ def test_script_hook_env_sanitized_b6a(monkeypatch):
 
 
 # ======================================================================
-# D-3：_drop_leading_system
+# _drop_leading_system
 # ======================================================================
 
 def test_drop_leading_system_d3():
@@ -104,7 +104,7 @@ def test_drop_leading_system_d3():
 
 
 # ======================================================================
-# D-6：trace 中英混合估算
+# trace 中英混合估算
 # ======================================================================
 
 def test_trace_cjk_estimate_d6():
@@ -117,7 +117,7 @@ def test_trace_cjk_estimate_d6():
 
 
 # ======================================================================
-# D-9：find_by_topic_name 目标区查重
+# find_by_topic_name 目标区查重
 # ======================================================================
 
 def test_find_by_topic_name_type_scoped_d9(tmp_path):
@@ -135,7 +135,7 @@ def test_find_by_topic_name_type_scoped_d9(tmp_path):
 
 
 # ======================================================================
-# C-8：排队 slash 命令分流
+# 排队 slash 命令分流
 # ======================================================================
 
 def test_drain_splits_cli_commands_c8(tmp_path):
@@ -159,7 +159,7 @@ def test_drain_splits_cli_commands_c8(tmp_path):
 
 
 # ======================================================================
-# C-9：history 锁文件 + 行为不回归
+# history 锁文件 + 行为不回归
 # ======================================================================
 
 def test_history_lock_and_behavior_c9(tmp_path):
@@ -172,7 +172,7 @@ def test_history_lock_and_behavior_c9(tmp_path):
 
 
 # ======================================================================
-# C-11：/poor on 快照 + off 回滚
+# /poor on 快照 + off 回滚
 # ======================================================================
 
 def test_poor_on_off_roundtrip_c11(tmp_path):

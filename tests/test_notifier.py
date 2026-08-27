@@ -1,9 +1,9 @@
-"""CCAR11 Task 6 测试：notifier + 触发点接线。
+"""notifier + 触发点接线测试。
 
 覆盖：
 1. notifier 本身：Windows toast / fail-open / 非 Windows / 节流 / config 关
 2. 触发点接线：权限审批（真实 PermissionChecker 路径）+
-   bg 完成（真实 _drain_injected_messages 路径，见文件末尾 CCAR13 用例）
+   bg 完成（真实 _drain_injected_messages 路径，见文件末尾用例）
 """
 from unittest.mock import patch, MagicMock
 
@@ -90,7 +90,7 @@ def test_trigger_permission_approval_notifies(monkeypatch):
 
 
 # ============================================================================
-# CCAR13 Task 2 B6：bg title 带 task_id（不同任务不互吞节流）
+# bg title 带 task_id（不同任务不互吞节流）
 # ============================================================================
 
 def test_bg_title_with_task_id_no_throttle_conflict():

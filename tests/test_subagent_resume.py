@@ -1,4 +1,4 @@
-"""subagent_resume 工具测试（CCAR10 Task 4，补 CCAR5-I Phase 2）。
+"""subagent_resume 工具测试。
 
 关键约束：
 - subagent_persistence 的函数不接 base_dir 参数（走 _sessions_dir()），
@@ -115,7 +115,7 @@ def test_resume_spawn_failure_returns_error(isolated_sessions):
 
 
 def test_handler_dispatch_contract():
-    """签名契约：handler(args, **kwargs)（CCAR8 教训防 silent-dead-code）。"""
+    """签名契约：handler(args, **kwargs)——防 silent-dead-code。"""
     from tools.subagent_resume_tool import _handle_subagent_resume
     sig = inspect.signature(_handle_subagent_resume)
     params = list(sig.parameters.values())
@@ -163,9 +163,9 @@ def test_tool_registered_in_core_toolset():
 
 
 # ===========================================================================
-# Task 5: /resumable CLI 命令测试
+# /resumable CLI 命令测试
 #
-# 关键 API 约束（与 Task 4 测试一致）：
+# 关键 API 约束（与上方工具测试一致）：
 # - subagent_persistence 的 list_resumable/write_metadata **不接 base_dir 参数**
 #   （走模块级 _sessions_dir()），所以测试用 monkeypatch 替换 _sessions_dir
 #   指向 tmp_path/.agent-sessions

@@ -708,7 +708,7 @@ def test_load_mcp_config_backward_compat_no_transport(tmp_path):
     assert servers["github"]["url"] == "https://api.github-mcp.com/v1"
 
 
-# ===== R25 #3：项目级 .mcp.json 首连审批 =====
+# ===== 项目级 .mcp.json 首连审批 =====
 
 class TestProjectMcpApproval:
     def _setup(self, tmp_path, monkeypatch, approved_keys=None):
@@ -783,7 +783,7 @@ class TestProjectMcpApproval:
         assert connected == []
 
 
-# ===== R29 #3：审批 key 内容指纹 =====
+# ===== 审批 key 内容指纹 =====
 
 class TestApprovalKeyFingerprint:
     def test_fingerprint_stable_and_config_sensitive(self):
@@ -853,7 +853,7 @@ class TestApprovalKeyFingerprint:
         return data.get("mcp", {}).get("approved_project_servers", [])
 
 
-# ===== R29 #2：项目级 agent 内联 MCP 首连审批 =====
+# ===== 项目级 agent 内联 MCP 首连审批 =====
 
 class TestInlineMcpApproval:
     def _setup_inline(self, tmp_path, monkeypatch, approved_keys=None):

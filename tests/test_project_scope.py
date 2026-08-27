@@ -1,4 +1,4 @@
-"""tests/test_project_scope.py — 项目键计算测试（CCAR9 Task 1）。
+"""tests/test_project_scope.py — 项目键计算测试。
 
 对标 claude-code-main findCanonicalGitRoot：canonical git root（worktree 归一），
 非 git 退 cwd。fail-open：git 命令失败 → 退 base。
@@ -57,7 +57,7 @@ def test_sanitize_replaces_unsafe_chars(tmp_path):
 
 
 def test_worktree_normalizes_to_main_repo(tmp_path):
-    """worktree 里算 key 归一到主 repo（对齐 CCB canonical root）。"""
+    """worktree 里算 key 归一到主 repo（canonical git root）。"""
     env = _ensure_git_identity(os.environ)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
     subprocess.run(
@@ -111,7 +111,7 @@ def test_key_cached_per_base(tmp_path):
 def test_daemon_thread_inherits_workspace_cwd():
     """daemon thread 用 copy_context 启动后能看到主线程的 workspace_cwd。
 
-    CCAR9 final review Important：curator/reflection 线程不传 contextvars
+    curator/reflection 线程不传 contextvars
     会 fallback os.getcwd()，导致多项目场景漏扫/写错项目区。
     """
     import contextvars

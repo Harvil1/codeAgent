@@ -1,7 +1,6 @@
 """上下文压缩的工具函数集（被 context_pipeline 压缩管线调用的零件库）。
 
-背景：旧的单层方案 maybe_compress（一超限就直接调 LLM 摘要）已在
-Phase 1 Commit 7 删除，由 agent/context_pipeline.py 的多层管线接管。
+背景：压缩的编排调度在 agent/context_pipeline.py 的多层管线里，
 本文件留下的是管线要复用的零件：
     - ``_summarize_conversation``：调 LLM 做摘要（9 段式格式 + 超长重试 + 熔断器）
     - ``_rule_based_summary``：LLM 不可用时的降级方案（机械抽取，不花钱）
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 改造点 ②：9 段式结构化摘要 prompt 模板（下面这个字符串是代码，别改内容）
+# 9 段式结构化摘要 prompt 模板（下面这个字符串是代码，别改内容）
 # ---------------------------------------------------------------------------
 
 SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要。
@@ -50,16 +49,16 @@ SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要�
 
 
 # ---------------------------------------------------------------------------
-# 改造点 ②：熔断器状态（模块级全局；熔断=连续失败太多次就暂停调 LLM）
+# 熔断器状态（模块级全局；熔断=连续失败太多次就暂停调 LLM）
 # ---------------------------------------------------------------------------
 
 _consecutive_failures = 0
 MAX_CONSECUTIVE_FAILURES = 3
 _compact_circuit_open = False
 
-# R18 #18：最近一次摘要是否「降级产出」（LLM 失败 → 用规则总结凑合）。
+# 最近一次摘要是否「降级产出」（LLM 失败 → 用规则总结凑合）。
 # 调度层（compress_if_needed）读它判定 L4 触发质量失败——降级摘要虽然能用
-# 但有损，连续降级就该停触发 L4（对齐 CC autocompact 失败即停）。
+# 但有损，连续降级就该停触发 L4。
 # 放模块级全局：压缩在主循环里串行执行，不存在并发竞争；子代理各有独立模块态可接受。
 _last_summary_degraded = False
 
@@ -68,7 +67,7 @@ MAX_PTL_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
-# R18 #16：媒体块剥离（防压缩请求自己被图片撑爆报超长）
+# 媒体块剥离（防压缩请求自己被图片撑爆报超长）
 # ---------------------------------------------------------------------------
 
 # 图片块类型（OpenAI 的 image_url / Anthropic 的 image / 新式 input_image）
@@ -78,7 +77,7 @@ _DOC_BLOCK_TYPES = frozenset({"document", "file", "input_file"})
 
 
 def strip_media_blocks(messages: list) -> list:
-    """把消息里的图片/文档块换成文本标记（R18 #16，对齐 CCB 的 stripImagesFromMessages）。
+    """把消息里的图片/文档块换成文本标记。
 
     为什么：压缩调用本身也受上下文长度限制，带图片的多模态消息很容易把
     「用来压缩的请求」自己撑爆（报 prompt_too_long）。
@@ -88,7 +87,7 @@ def strip_media_blocks(messages: list) -> list:
     对话排版函数只认字符串）。content 本来就是字符串的消息原样不动。
     不改入参（有改动的消息复制新 dict）。
 
-    与 R18 #15 前缀复用的配合：没有多模态消息时本函数等于什么都没做（前缀
+    与前缀复用的配合：没有多模态消息时本函数等于什么都没做（前缀
     逐字节一致，缓存照常命中）；有图片时剥掉（缓存 miss 可接受——总比压缩
     调用自己爆掉强）。
 
@@ -144,7 +143,7 @@ async def _summarize_conversation(
     """调 LLM 把一段对话历史总结成摘要文本（async；9 段式固定格式）。
 
     背景：L4 压缩的核心动作。带四套保命机制：
-    - **9 段式结构化 prompt**（改造点 ②）：强制逐字保留文件路径/错误消息/用户原话
+    - **9 段式结构化 prompt**：强制逐字保留文件路径/错误消息/用户原话
     - **PTL 重试**：摘要请求自己报 prompt_too_long 时，丢掉一部分旧消息再试
       （最多 MAX_PTL_RETRIES 次）
     - **熔断器**：连续 MAX_CONSECUTIVE_FAILURES 次失败后不再调 LLM，直接走规则总结
@@ -160,21 +159,20 @@ async def _summarize_conversation(
         session_memory：预提取的会话记忆；非空就直接返回它当摘要
         from_idx：从第几条开始摘要（默认 0 = 从头）
         up_to_idx：摘要到第几条为止（默认 -1 = 到末尾）——两者配合实现局部压缩
-          （Task C partial compact，只摘要中间一段）；局部段不足 2 条返回空串不压
-        fork_prefix_messages：完整对话（含 system）。R18 #15（对齐 CC 的
-          streamCompactSummary）：有值且没配 summary_model 时，摘要请求 =
-          完整对话前缀 + 追加一句摘要指令（tools 与主调用相同）——请求开头和
-          主对话一模一样，能命中服务商的前缀缓存，省一次全量缓存写入；
-          不设 max_tokens（对齐 CC：设了参数不一致会破缓存）。fork 失败/空回复
+          （只摘要中间一段）；局部段不足 2 条返回空串不压
+        fork_prefix_messages：完整对话（含 system）。有值且没配 summary_model 时，
+          摘要请求 = 完整对话前缀 + 追加一句摘要指令（tools 与主调用相同）——
+          请求开头和主对话一模一样，能命中服务商的前缀缓存，省一次全量缓存写入；
+          不设 max_tokens（设了参数不一致会破缓存）。fork 失败/空回复
           就降级走独立调用（前缀已失效可接受）；配了 summary_model 时不用 fork
           （专用小模型和主对话的缓存空间不同，用户显式配置优先）
         tools：当前工具 schema 列表，fork 请求带上（保持和主调用一致）
     返回：摘要文本；拿不到 LLM 摘要时返回规则总结的降级版本。
     """
     global _consecutive_failures, _compact_circuit_open, _last_summary_degraded
-    _last_summary_degraded = False  # 每次调用先重置（R18 #18）
+    _last_summary_degraded = False  # 每次调用先重置
 
-    # Task C：局部提取（from_idx/up_to_idx）
+    # 局部提取（from_idx/up_to_idx）
     is_partial = from_idx != 0 or up_to_idx != -1
     effective_up_to = len(messages) if up_to_idx < 0 else up_to_idx
     to_summarize = messages[from_idx:effective_up_to]
@@ -191,7 +189,7 @@ async def _summarize_conversation(
             "摘要熔断器开启（连续 %d 次失败），跳过 LLM 摘要",
             _consecutive_failures,
         )
-        _last_summary_degraded = True  # R18 #18：标记这次是降级产出
+        _last_summary_degraded = True  # 标记这次是降级产出
         return _rule_based_summary(to_summarize)
 
     # 2. 预提取的会话记忆优先（有就直接用，省一次 LLM 调用）
@@ -204,13 +202,13 @@ async def _summarize_conversation(
         return _rule_based_summary(to_summarize)
 
     # 4. 排版对话 + 拼 9 段式 prompt（用 to_summarize 段，不是全量 messages）
-    # R18 #16：先剥媒体块（image/document → [image]/[document] 文本标记），
+    # 先剥媒体块（image/document → [image]/[document] 文本标记），
     # 防多模态消息把压缩调用自己撑爆；纯文本消息不受影响。
     working_messages = strip_media_blocks(to_summarize)  # 不改入参（PTL 重试还要再切片）
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
 
-    # === R18 #15：fork 前缀复用（先试它，失败降级独立调用路径）===
+    # === fork 前缀复用（先试它，失败降级独立调用路径）===
     if fork_prefix_messages and not summary_model:
         fork_messages = strip_media_blocks(fork_prefix_messages) + [
             {"role": "user", "content": prompt},
@@ -235,13 +233,10 @@ async def _summarize_conversation(
             logger.warning("fork 摘要失败（降级独立调用）: %s", e)
 
     # 5. PTL 重试（最多 MAX_PTL_RETRIES 次）
-    # Task E：用 tokenGap 精确算法取代旧的「丢 20%」粗略丢法
-    # 改造点 ② review fix：按 spec 伪代码传 system message（你是技术对话摘要助手）
-    # + model 参数（model 优先于 summary_model——spec 由
-    # tests/test_summarize_9section.py 锁定；旧注释把优先级写反了，精读轮修正）。
-    # 历史背景：OpenAICompatClient
-    # 会把 model kwarg 弹掉、用自己构造时绑定的模型，但 aux_llm_router 或
-    # 未来的其他 client 实现可能用外部传入的 model——保持与 spec 一致。
+    # 独立调用路径：传 system message（你是技术对话摘要助手）+ model 参数
+    # （model 优先于 summary_model，由 tests/test_summarize_9section.py 锁定）。
+    # OpenAICompatClient 会把 model kwarg 弹掉、用自己构造时绑定的模型，
+    # 但 aux_llm_router 或未来的其他 client 实现可能用外部传入的 model——保持一致。
     summary_system_prompt = "你是技术对话摘要助手。"
     effective_model = model or summary_model
     for retry in range(MAX_PTL_RETRIES + 1):
@@ -263,7 +258,7 @@ async def _summarize_conversation(
             err_str = str(e).lower()
             is_ptl = "prompt_too_long" in err_str or "context_length" in err_str
             if is_ptl and retry < MAX_PTL_RETRIES:
-                # Task E：精确算法取代旧的「丢 20%」
+                # 用 tokenGap 精确算法计算该丢多少条
                 # _compute_ptl_drop_count 内部在错误消息解析不出数字时也会退回 20%
                 drop_count = _compute_ptl_drop_count(
                     working_messages, str(e),
@@ -287,7 +282,7 @@ async def _summarize_conversation(
                     _consecutive_failures,
                 )
             logger.warning("LLM 摘要失败（降级规则总结）: %s", e)
-            _last_summary_degraded = True  # R18 #18：标记这次是降级产出
+            _last_summary_degraded = True  # 标记这次是降级产出
             return _rule_based_summary(working_messages)
 
     return _rule_based_summary(working_messages)
@@ -296,7 +291,7 @@ async def _summarize_conversation(
 def _format_dialog_for_summary(messages: list) -> str:
     """把消息列表排版成摘要 prompt 里「对话内容」那一段纯文本。
 
-    从原 _summarize_conversation 里抽出来的排版逻辑：
+    排版逻辑：
     - 工具结果：截断到 200 字符（别把摘要 prompt 撑爆）
     - assistant 的工具调用：只显示调了哪些工具（名字列表）
     - 其他：原样显示角色 + 内容
@@ -390,14 +385,14 @@ def _fix_tool_call_pairs(messages: list) -> list:
     返回：修复配对后的消息列表。
     """
     # 第一遍：收集全部出现过的工具调用 id（当「全场已知 id 集合」用；
-    # 反向孤儿判定实际用下面的 seen_so_far，见 X13 fix）
+    # 反向孤儿判定实际用下面的 seen_so_far）
     seen_tool_call_ids = set()
     for msg in messages:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 seen_tool_call_ids.add(tc.get("id"))
 
-    # 历史踩坑（X13 fix）：反向孤儿要按「截至当前位置见过哪些 id」判断（逐步累加）。
+    # 历史踩坑：反向孤儿要按「截至当前位置见过哪些 id」判断（逐步累加）。
     # 之前用全量集合会漏判错序：结果 B 出现在发起 B 的调用之前也放行了
     # （因为 B 在全量集合里），导致 API 400。
     seen_so_far = set()
@@ -439,12 +434,12 @@ def _fix_tool_call_pairs(messages: list) -> list:
                 tid = tc.get("id")
                 if tid:
                     pending_tool_calls[tid] = tc["function"]["name"]
-                    # X13 fix：累加到 seen_so_far（之后的位置才能引用这个 id）
+                    # 累加到 seen_so_far（之后的位置才能引用这个 id）
                     seen_so_far.add(tid)
             fixed.append(msg)
         elif msg.get("role") == "tool":
             call_id = msg.get("tool_call_id")
-            # X13 fix：反向孤儿按「截至当前位置」判断（seen_so_far），不用全局集合
+            # 反向孤儿按「截至当前位置」判断（seen_so_far），不用全局集合
             if call_id not in seen_so_far:
                 # 反向孤儿：有结果但前面没发起它的调用 → 删掉
                 dropped_orphans += 1
@@ -496,7 +491,7 @@ def estimate_message_tokens(messages: list) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Task E：PTL（对话超长报错）的 tokenGap 精确丢条数算法
+# PTL（对话超长报错）的 tokenGap 精确丢条数算法
 # ---------------------------------------------------------------------------
 
 
@@ -528,14 +523,13 @@ def _compute_ptl_drop_count(
 ) -> int:
     """报 prompt_too_long 之后，精确算出该丢几条消息再重试。
 
-    tokenGap 算法（借鉴 claude-code-main）：
+    tokenGap 算法：
       1. 从报错文本里提取 token 上限和实际 token 数（能解析出来的话）
       2. 算预算（上限 × safety_margin，留 15% 给输出等开销）
       3. 算超了多少
       4. 按平均每条大小换算成要丢的条数（多丢 10% 保险，免得丢完还超）
 
-    兜底：报错文本解析不出数字时，退回旧的「丢 20%」算法（max(1, len // 5)），
-    保证不比老版本差。
+    兜底：报错文本解析不出数字时，退回「丢 20%」算法（max(1, len // 5)）。
     保护：无论算出丢多少，至少留 2 条（不能丢光）。
 
     参数：
@@ -545,7 +539,7 @@ def _compute_ptl_drop_count(
         safety_margin：安全系数（默认 0.85）
     返回：该丢弃的消息条数。
     """
-    # 兜底：错误消息解析不了（空 / 不含数字）退回旧的「丢 20%」
+    # 兜底：错误消息解析不了（空 / 不含数字）退回「丢 20%」
     if not error_msg:
         return max(1, len(messages) // 5)
 

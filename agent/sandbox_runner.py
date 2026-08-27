@@ -1,7 +1,7 @@
 """OS 沙箱的"包装器构造器"：把要在沙箱里跑的命令包装成各平台需要的形态。
 
 沙箱（sandbox）就是给命令造一个受限的笼子——命令在里面跑，搞不坏系统
-其他部分。这个文件负责跨平台统一入口，行为对齐 Claude Code 的 /sandbox：
+其他部分。这个文件负责跨平台统一入口：
 
   - Linux:  Bubblewrap（bwrap，系统级隔离工具）——用内核的命名空间机制
             把命令关进独立的"小房间"，只有指定目录可写
@@ -169,9 +169,8 @@ def run_with_job_object(
 ) -> subprocess.CompletedProcess:
     """Windows Job Object 模式下跑一条命令的完整流程（统一入口）。
 
-    背景：terminal 工具和 hook 执行原先各写了一份几乎相同的流程
-    （从两处原样提取合并，行为逐字对齐），这里抽成公共函数。流程是：
-    启动进程 → 套笼子 → 收输出 → 关笼子。
+    背景：terminal 工具和 hook 执行都要走同一套流程，这里抽成公共函数。
+    流程是：启动进程 → 套笼子 → 收输出 → 关笼子。
 
     参数：
         cmd: 要跑的命令。terminal 传的是字符串并配 shell=True；
@@ -195,8 +194,8 @@ def run_with_job_object(
       - 超时的处理分两种情况：有笼子时，finally 里的 job.close() 自带
         "关笼杀全笼"，超时进程会被清掉，不用重复杀；没笼子时（attach
         失败降级），超时进程会变孤儿继续赖着跑——必须手动补杀一刀，
-        再 communicate 收尸，防止进程和管道僵死（历史修复 CCAR13 A2，
-        对齐标准库 subprocess.run 的内部做法）。两种情况最后都会把
+        再 communicate 收尸，防止进程和管道僵死（与标准库
+        subprocess.run 的内部做法一致）。两种情况最后都会把
         TimeoutExpired 异常重新抛出去——至于超时算错误还是算别的，
         由各调用方自己决定（terminal 转成 error JSON，hook 返回 None）。
     """
@@ -298,7 +297,7 @@ def _bwrap_wrap(
             argv += ["--ro-bind", d, d]
 
     # /tmp 用沙箱内部的临时内存盘，和宿主机的 /tmp 隔开
-    # 历史踩坑（I2 修复）：当 cwd 本身就在 /tmp 下时跳过这一步——
+    # 历史踩坑：当 cwd 本身就在 /tmp 下时跳过这一步——
     # 下面又要往沙箱里挂真正的 /tmp/cwd，和这里的临时盘会打架
     _cwd_str = str(cwd)
     if not (_cwd_str == "/tmp" or _cwd_str.startswith("/tmp/")):
@@ -456,7 +455,7 @@ def _write_seatbelt_profile(
 
 
 def _cleanup_old_seatbelt_profiles(sandbox_dir: Path, *, max_age_days: int = 7) -> int:
-    """清掉超过 max_age_days 天没动过的老 .sb 规则文件（防无限堆积，X15 修复）。
+    """清掉超过 max_age_days 天没动过的老 .sb 规则文件（防无限堆积）。
 
     参数：
         sandbox_dir: 规则文件所在目录

@@ -1,9 +1,8 @@
-"""HTTP hook（用 HTTP 请求触发的钩子）的 SSRF（服务器端请求伪造）防护，R16 安全专项第 4 项。
+"""HTTP hook（用 HTTP 请求触发的钩子）的 SSRF（服务器端请求伪造）防护。
 
 背景：http hook 会让程序主动向外发 HTTP 请求。如果配置里写了个内网地址，
 攻击者就可能借它去摸云服务器的"元数据接口"（能拿到云账号密钥）或公司内网。
-这个模块就是在请求发出去之前做一道安检，参照 CCB 的 ssrfGuard.ts +
-execHttpHook.ts 核心子集实现，并适配 Python 的 requests 库：
+这个模块就是在请求发出去之前做一道安检（适配 Python 的 requests 库）：
 
 - 地址段检查：把目标域名做 DNS 解析（域名变 IP），只要解析出来的 IP 落在
   "禁达名单"里就拒绝。禁达名单包括：0/8、10/8（家庭/公司内网）、
@@ -13,23 +12,21 @@ execHttpHook.ts 核心子集实现，并适配 Python 的 requests 库：
   fc00::/7（内网唯一地址）、fe80::/10（链路本地）；
   ::ffff:<v4> 这种"IPv6 皮 IPv4 心"的映射地址按里面的 IPv4 判定
 - 环回地址（127/8 和 ::1，也就是"本机"）放行——本地开发时 hook 常指向
-  本机的 policy server，这是主流用法（CC 也是这么取舍的）
+  本机的 policy server，这是主流用法
 - 直接写 IP 的 URL 同样检查（http://169.254.169.254/ 直接拒）
 - 配了环境代理（HTTP_PROXY 等）时跳过检查——代理会替我们做 DNS，
-  本地再查会把走公司内网代理的正常场景误杀（对齐 CC 的 envProxyActive 语义）
+  本地再查会把走公司内网代理的正常场景误杀
 - URL 里带换行/回车/NUL 控制字符就拒（防止伪造请求行或 HTTP 头）
 - 禁止重定向（调用方设 allow_redirects=False）——重定向可能把一个
   安全的 URL"弹"到内网地址，绕过预检
 
-和 CC 的已知差异（如实记录）：
+已知限制（如实记录）：
 - requests 没法自定义 DNS 解析函数，检查发生在请求前的 getaddrinfo——
   检查完到真正建连接之间理论上存在 DNS rebinding（域名解析结果被
-  掉包）的窗口。CC 用 axios 的 lookup 选项把检查过的 IP 直接钉到
-  socket 连接上，消除了这个窗口。预检已挡住配置型 hook 指向
-  元数据/内网的绝大多数场景。
-- OmniMate 的 http hook 没有 headers/env 插值配置（headers 写死
-  Content-Type），所以 CC 的 env 插值白名单 + 头部 CRLF 清洗在这里
-  没有对应攻击面；URL 层的 CRLF 清洗保留。
+  掉包）的窗口（无法把检查过的 IP 直接钉到 socket 连接上来消除它）。
+  预检已挡住配置型 hook 指向元数据/内网的绝大多数场景。
+- http hook 没有 headers/env 插值配置（headers 写死 Content-Type），
+  所以头部 CRLF 清洗在这里没有对应攻击面；URL 层的 CRLF 清洗保留。
 
 除 validate_url_for_ssrf 要做 DNS 解析外，其余校验函数都是纯函数
 （不发网络请求），方便单测。
@@ -43,7 +40,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-# IPv4 禁达段（对齐 ssrfGuard 的 isBlockedV4；127/8 环回放行不在这表里）
+# IPv4 禁达段（127/8 环回放行不在这表里）
 _BLOCKED_V4_NETS = [
     ipaddress.ip_network("0.0.0.0/8"),        # "本网络"保留段
     ipaddress.ip_network("10.0.0.0/8"),       # 内网
@@ -166,7 +163,7 @@ def validate_url_for_ssrf(url: str) -> Optional[str]:
             return f"目标 {hostname} 在禁达段（私网/链路本地/云元数据）"
         return None  # 本机环回或公网 IP 字面量，放行
 
-    # 配了环境代理就跳过后续检查（对齐 CC envProxyActive 语义）
+    # 配了环境代理就跳过后续检查（DNS 由代理侧解析，本地查会误杀内网代理场景）
     if _env_proxy_active(url):
         return None
 
@@ -189,7 +186,7 @@ def validate_url_for_ssrf(url: str) -> Optional[str]:
 
 
 def url_matches_pattern(url: str, pattern: str) -> bool:
-    """判断 URL 是否匹配一个 allowlist（允许清单）模式，* 是通配符（对齐 CC 的 urlMatchesPattern）。
+    """判断 URL 是否匹配一个 allowlist（允许清单）模式，* 是通配符。
 
     背景：allowlist 里每条是一个模式串，模式要求整串匹配（相当于自动加
     ^...$），* 可以匹配任意字符。
@@ -205,10 +202,9 @@ def url_matches_pattern(url: str, pattern: str) -> bool:
 
 
 def check_url_against_allowlist(url: str, allowed: Optional[List[str]]) -> Optional[str]:
-    """URL allowlist（允许清单）检查，R16 安全专项第 4 项。
+    """URL allowlist（允许清单）检查。
 
-    背景：除了禁达段，还可以配置"只许访问这些 URL"。语义对齐 CC 的
-    allowedHttpHookUrls：
+    背景：除了禁达段，还可以配置"只许访问这些 URL"。语义：
     - 传 None → 不限制（默认行为）
     - 传空列表 → 全部拒绝
     - 传非空列表 → 必须至少匹配其中一个模式，否则拒

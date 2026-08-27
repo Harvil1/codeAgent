@@ -1,4 +1,4 @@
-"""CLI 的共享输出工具（R30 给 cli.py 瘦身时抽出来的）。
+"""CLI 的共享输出工具。
 
 为什么单独一个文件：Rich 的 Console（终端美化输出的对象）必须全局只有
 一份。cli.py 和各个 cli_*_cmds 命令模块都从这儿 import 同一个 console，

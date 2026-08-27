@@ -233,12 +233,12 @@ def test_get_current_profile_default(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 Task 8: context 配置块 + MemoryManager.on_pre_compress
+# context 配置块 + MemoryManager.on_pre_compress
 # ---------------------------------------------------------------------------
 
 
 def test_default_config_has_context_block():
-    """config.py 的 DEFAULT_CONFIG 应含 context 块及所有 Phase 1 阈值。"""
+    """config.py 的 DEFAULT_CONFIG 应含 context 块及所有压缩阈值。"""
     from config import DEFAULT_CONFIG
     ctx = DEFAULT_CONFIG["context"]
     expected_keys = {
@@ -268,7 +268,7 @@ def test_memory_manager_on_pre_compress_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2a Task 5: hooks 配置块
+# hooks 配置块
 # ---------------------------------------------------------------------------
 
 
@@ -297,7 +297,7 @@ def test_default_config_hooks_settings_path_default_none():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2b Task 3: bg_task 配置块
+# bg_task 配置块
 # ---------------------------------------------------------------------------
 
 
@@ -325,7 +325,7 @@ def test_default_config_bg_task_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2b Task 4: bg toolset
+# bg toolset
 # ---------------------------------------------------------------------------
 
 
@@ -340,7 +340,7 @@ def test_bg_toolset_exists():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2c Task 3: cron 配置块
+# cron 配置块
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +363,7 @@ def test_default_config_cron_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 Task 4 & 6: memory 多文件字段
+# memory 多文件字段
 # ---------------------------------------------------------------------------
 
 
@@ -391,7 +391,7 @@ def test_default_config_memory_multifile_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4a Task 5: team 配置块 + toolset
+# team 配置块 + toolset
 # ---------------------------------------------------------------------------
 
 
@@ -419,7 +419,7 @@ def test_default_config_team_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4b Task 4: team autonomous 字段
+# team autonomous 字段
 # ---------------------------------------------------------------------------
 
 
@@ -450,7 +450,7 @@ def test_team_toolset_exists():
 
 
 # ---------------------------------------------------------------------------
-# Sandbox Task 7: config sandbox 字段
+# config sandbox 字段
 # ---------------------------------------------------------------------------
 
 

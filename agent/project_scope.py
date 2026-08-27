@@ -1,4 +1,4 @@
-"""记忆项目区的分区键计算（CCAR9 引入，对标 CCB findCanonicalGitRoot）。
+"""记忆项目区的分区键计算。
 
 背景：记忆（AI 沉淀的事实条目）分两类存放——user/feedback 类是用户全局的，
 所有项目共享；project/reference 类按项目分家，各项目互相看不见。
@@ -35,7 +35,7 @@ def _git_toplevel(base: str) -> Optional[str]:
     的路径（没有归一），同仓库的不同 worktree 会算出不同的项目键——所以
     不能直接用。
 
-    正确做法（对齐 CCB findCanonicalGitRoot 语义）：用
+    正确做法：用
     `git rev-parse --git-common-dir` 取"公共 git 目录"（worktree 场景返回
     主仓库的 .git，普通场景返回当前 .git），再取它的父目录就是主仓库根。
     这样同仓库的所有 worktree 共享同一个项目键。

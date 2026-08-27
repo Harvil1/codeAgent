@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """InstinctStore（instinct 行为记忆）单元测试。
 
-CCAR15 Task 1：置信度累积存储层，对标 CCB instinctStore。
-覆盖：合并累积 / scope 隔离 / cluster 归一化分组 / prune 过期 / JSON round-trip。
+置信度累积存储层。覆盖：合并累积 / scope 隔离 / cluster 归一化分组 / prune 过期 / JSON round-trip。
 """
 import json
 import time
@@ -200,7 +199,7 @@ class TestPersistence:
 
 
 # ======================================================================
-# Task 2：HeuristicObserver 四类启发信号
+# HeuristicObserver 四类启发信号
 # ======================================================================
 from unittest.mock import patch
 
@@ -330,7 +329,7 @@ class TestProjectConvention:
 
 
 # ======================================================================
-# Task 3：SkillEvolver（簇达标 → 生成 SKILL.md）+ 主循环接线
+# SkillEvolver（簇达标 → 生成 SKILL.md）+ 主循环接线
 # ======================================================================
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -566,7 +565,7 @@ class TestFailOpen:
 
 
 # ======================================================================
-# Task 4：LLM 观察后端 + config 白名单 + /skill-learning CLI
+# LLM 观察后端 + config 白名单 + /skill-learning CLI
 # ======================================================================
 from agent.skill_learning import llm_observer
 from agent.skill_learning.llm_observer import (

@@ -223,7 +223,7 @@ def test_task_update_blocked_route(tmp_path: Path):
     from tools.task_tools import _handle_task_update
     from agent.task_store import get_task_store
 
-    # R30b-A5：get_task_store 按 home 键控缓存，不再有"设置全局单例"的副作用；
+    # get_task_store 按 home 键控缓存（无"设置全局单例"副作用）；
     # handler 按真实契约从 kwargs 拿 omnimate_home
     store = get_task_store(omnimate_home=str(tmp_path))
     task = store.create(subject="A", description="")

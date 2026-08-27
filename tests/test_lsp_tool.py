@@ -1,4 +1,4 @@
-"""R26 #17：LSP 工具测试（JSON-RPC 层可注入 fake，不起真 pylsp）。
+"""LSP 工具测试（JSON-RPC 层可注入 fake，不起真 pylsp）。
 
 实现约定：_rpc_request 是唯一的 JSON-RPC 接缝——fake 它即可让 handler
 全路径跑通；_ensure_server 恒 False 使 didOpen 跳过，机器装了 pylsp

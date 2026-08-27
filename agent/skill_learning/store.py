@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """InstinctStore：instinct 行为记忆的存储层。
 
-（历史轮次 CCAR15 Task 1 引入，对标 CCB 项目的 instinctStore。）
-
 核心思想：agent 在某个 trigger（触发情境）下反复选择某个 action（做法），
 说明这是一条值得记住的「条件反射」。每重复观察到一次，置信度按
 衰减累积公式上涨——
@@ -26,7 +24,7 @@
 trigger 归一化 = 转小写 + 压缩空白（"Run  Tests " 和 "run tests" 算同一个）。
 
 本层故意不做 fail-open（存储失败可以抛异常）；调用方接线
-（历史轮次 T3）负责在外面包异常兜底。
+负责在外面包异常兜底。
 """
 import re
 from dataclasses import dataclass, field

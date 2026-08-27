@@ -80,5 +80,5 @@ registry.register(
     handler=_handle_brief,
     toolset="core",
     emoji="📋",
-    isConcurrencySafe=True,  # 纯回显没副作用（CCAR8 修复时定的分类），随便并发
+    isConcurrencySafe=True,  # 纯回显没副作用，随便并发
 )

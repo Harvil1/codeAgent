@@ -1,5 +1,5 @@
 # tests/test_cli_commands.py
-"""CCAR8 Task 12：6 个新 CLI 命令的单元测试。
+"""6 个 CLI 命令的单元测试。
 
 覆盖：
 - /goal status（无 active goal）
@@ -364,7 +364,7 @@ def test_resume_list_with_bundles(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 2: /compact + /context
+# /compact + /context
 # ---------------------------------------------------------------------------
 
 class _FakeCompactLLM:
@@ -513,7 +513,7 @@ def test_resume_load_bundle_into_history(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 3: /status + /doctor + /diff
+# /status + /doctor + /diff
 # ---------------------------------------------------------------------------
 
 class _FakeMCPClient:
@@ -682,7 +682,7 @@ def test_help_contains_three_commands(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 4: /add-dir 运行时白名单 + 持久化
+# /add-dir 运行时白名单 + 持久化
 # ---------------------------------------------------------------------------
 
 def _clear_extra_roots():
@@ -739,7 +739,7 @@ def test_add_dir_runtime_and_persist(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "已添加" in out
 
-    # 运行时生效：safe_path 放行（Task 4 核心断言）
+    # 运行时生效：safe_path 放行（核心断言）
     assert safe_path(probe, write=True).allowed is True
 
     # 持久化：settings.json 的 security.extra_allowed_roots 出现该路径
@@ -813,9 +813,9 @@ def test_add_dir_end_to_end_via_load_config(tmp_path, monkeypatch):
     """端到端闭环：_persist_extra_root 写 settings.json → load_config 真实函数
     读回该路径 → _load_persisted_extra_roots 灌回运行时白名单。
 
-    防"写错轨"回归：此前写 config.yaml，而 load_config 默认只读
+    防"写错轨"回归：持久化必须写 settings.json——load_config 默认只读
     settings.json（首次启动还会把 config.yaml 迁走改名 .bak），
-    真实部署灌回 0 条。
+    写 config.yaml 在真实部署灌回 0 条。
     """
     import constants
     from config import load_config
@@ -878,7 +878,7 @@ def test_help_contains_add_dir(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 5: /paste 剪贴板图片
+# /paste 剪贴板图片
 # ---------------------------------------------------------------------------
 
 def _fake_ps_run_factory(returncode: int, create_file: bool = True, exc: Exception = None):
@@ -1091,7 +1091,7 @@ def test_manage_whitelist_lists_and_removes_roots(tmp_path, monkeypatch, capsys)
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 High-3：Ctrl+C 哨兵去重窗口
+# Ctrl+C 哨兵去重窗口
 # ---------------------------------------------------------------------------
 
 def test_interrupt_sentinel_dedup_window():
@@ -1115,17 +1115,15 @@ def test_interrupt_sentinel_dedup_window():
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-8：审批回调的路径判定启发式
+# 审批回调的路径判定启发式
 # ---------------------------------------------------------------------------
 
 def test_is_path_item_heuristic():
-    """命令/路径判定：多 token 命令不再被误判为路径审批。
+    """命令/路径判定：多 token 命令不被误判为路径审批。
 
-    旧启发式 `"/" in item ...` 把 `del /s /q tmp`、`rm -rf build/` 这类
-    含斜杠的**命令**判成路径——提示语变成"即将写入路径"且出现
-    "a=总是允许并记住"选项（走的是命令分支，语义完全错位）；
-    另有三元优先级问题（len<3 时整体 False，"~" 单字符漏判）。
-    新规则：多 token 一律命令；~ 开头 / 盘符 / 单 token 含分隔符才算路径。
+    含斜杠的**命令**（`del /s /q tmp`、`rm -rf build/`）若被判成路径，
+    提示语会变成"即将写入路径"且出现"a=总是允许并记住"选项（语义错位）。
+    规则：多 token 一律命令；~ 开头 / 盘符 / 单 token 含分隔符才算路径。
     """
     from cli import _is_path_item
 
@@ -1148,17 +1146,16 @@ def test_is_path_item_heuristic():
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-7：/new 会话级状态清理
+# /new 会话级状态清理
 # ---------------------------------------------------------------------------
 
 def test_new_session_resets_session_scoped_state(tmp_path, monkeypatch):
     """/new 后会话级状态不得跨会话泄漏。
 
-    旧行为只做三件事（新 session_id + 清 history + invalidate prompt）：
-    - checkpoint_mgr 仍指向旧会话 → 此后快照全写进旧目录，/rewind 回滚错对象
-      （对照 resume_session 会重建——同文件内不对称，漏项）
-    - 压缩状态（cooldown/熔断计数）、auto_extract 游标（history 已清但游标
-      仍指旧长度）、记忆注入去重、context_tip、中断残留等全部继承
+    需要覆盖的点（不只是新 session_id + 清 history + invalidate prompt）：
+    - checkpoint_mgr 须重建绑定新会话（否则快照写进旧目录，/rewind 回滚错对象）
+    - 压缩状态（cooldown/熔断计数）、auto_extract 游标、记忆注入去重、
+      context_tip、中断残留等全部重置
     """
     monkeypatch.setenv("OMNIMATE_HOME", str(tmp_path))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key-for-test")

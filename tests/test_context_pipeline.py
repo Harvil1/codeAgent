@@ -382,7 +382,7 @@ def test_micro_below_threshold_noop():
 
 
 def test_micro_replaces_old_tool_content():
-    # 对齐 Claude Code microCompact：按单条大小折叠（threshold=50，content 100 > 50）
+    # microCompact：按单条大小折叠（threshold=50，content 100 > 50）
     msgs = _mk_with_tools(5)  # 5 个 tool 消息，各 ~100 字符
     out, changed = micro_compact(msgs, keep_recent=3, threshold=50)
     assert changed is True
@@ -440,7 +440,7 @@ async def test_llm_below_threshold_noop():
 
 
 async def test_llm_over_token_threshold_compacts():
-    # 对齐 Claude Code：压缩由 token 驱动。161 条消息 token ~266，设阈值 100 触发。
+    # 压缩由 token 驱动。161 条消息 token ~266，设阈值 100 触发。
     msgs = _mk_msgs(80)  # 1 + 160 = 161 条
     out, changed = await llm_compact(
         msgs, llm_client=_FakeLLM(), model="x",
@@ -549,7 +549,7 @@ def test_reactive_short_history_kept_as_is():
     assert "紧急上下文压缩" in out[1]["content"]
 
 
-# ============ Task D：冷却窗口 + 多次触发测试 ============
+# ============ 冷却窗口 + 多次触发测试 ============
 
 def test_reactive_cooldown_blocks_within_window():
     """冷却窗口内（< 60s）拒绝触发。"""
@@ -660,7 +660,7 @@ async def test_compress_runs_l1_only_for_medium_conv(tmp_path):
 
 
 async def test_compress_runs_l4_for_huge_conv(tmp_path):
-    """token 超限时触发 L4（对齐 Claude Code：token 驱动）。"""
+    """token 超限时触发 L4（token 驱动）。"""
     # 降低 L4 token 阈值让测试能触发（161 条消息 token ~266 > 100）
     # 禁 L1（snip）避免先裁消息导致 token 估算变小、L4 不触发
     cfg = {**_DEFAULT_CFG, "llm_compact_token_threshold": 100,
@@ -677,11 +677,11 @@ async def test_compress_runs_l4_for_huge_conv(tmp_path):
 
 
 async def test_compress_no_total_attempt_cap_r30d(tmp_path):
-    """R30d-D1：L4 不再有总量上限——count 到 3 后仍可继续触发（只受
-    cooldown + 连续失败熔断约束，对齐 CCB；长会话不再退化为紧急截断）。"""
+    """L4 无总量上限——count 到 3 后仍可继续触发（只受
+    cooldown + 连续失败熔断约束；长会话不退化为紧急截断）。"""
     msgs = _mk_msgs(80)
     state = CompressionSessionState()
-    state.llm_compact_count = 3  # 旧语义下已达上限
+    state.llm_compact_count = 3  # 预置 3 次，验证无总量上限拦截
     cfg = {**_DEFAULT_CFG, "llm_compact_token_threshold": 1}
     out, changed, _ = await compress_if_needed(
         msgs, llm_client=_FakeLLM(), model="x",
@@ -928,11 +928,11 @@ async def test_compress_runs_offload_before_micro(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 对齐 Claude Code：压缩频率（token 主导，接近窗口才压缩）
+# 压缩频率（token 主导，接近窗口才压缩）
 # ---------------------------------------------------------------------------
 
 async def test_l4_not_triggered_below_msg_threshold():
-    """150 条消息(>旧100 但 <新500)→ L4 不触发(非 1M 模型)。"""
+    """150 条消息（介于 100 与 500 之间）→ L4 不触发(非 1M 模型)。"""
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
     from types import SimpleNamespace
     conv = [{"role": "user", "content": "m"} for _ in range(150)]
@@ -948,7 +948,7 @@ async def test_l4_not_triggered_below_msg_threshold():
 
 
 async def test_l4_triggered_above_token():
-    """token 超阈值（接近窗口）→ L4 触发（对齐 Claude Code：token 驱动）。"""
+    """token 超阈值（接近窗口）→ L4 触发（token 驱动）。"""
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
     # 600 条 x ~1 字符 ≈ 200 token，设阈值 100 触发
     conv = [{"role": "user", "content": "m"} for _ in range(600)]
@@ -997,7 +997,7 @@ async def test_l4_1m_model_msg_threshold_relaxed():
 
 
 # ---------------------------------------------------------------------------
-# Task P1.1: L4 context_collapse 折叠（spec §7.1）
+# L4 context_collapse 折叠
 #
 # 触发：估算 token / context_window > threshold_ratio（默认 0.8）
 # 动作：保留 system + pinned + 最近 N 轮，中间段折叠成占位（可逆，原文见 transcript）
@@ -1196,7 +1196,7 @@ def test_context_collapse_flag_on_integrates_via_compress_if_needed():
     asyncio.run(_run())
 
 
-# ===== R25 #6：任一层压缩变更 → notify_compaction =====
+# ===== 任一层压缩变更 → notify_compaction =====
 
 class TestCompressNotifyCompaction:
     async def test_offload_change_notifies(self, tmp_path, monkeypatch):
@@ -1245,14 +1245,14 @@ class TestCompressNotifyCompaction:
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-4：changed（有变化）与 compacted（LLM 摘要级）分离
+# changed（有变化）与 compacted（LLM 摘要级）分离
 # ---------------------------------------------------------------------------
 
 async def test_compress_if_needed_distinguishes_lossless_from_compact(tmp_path):
     """无损层（L2 offload）触发时 changed=True 但 compacted=False。
 
-    只有 L4 llm_compact（LLM 摘要，有损）才算 compacted；此前 changed 语义
-    过宽——一次大工具结果落盘也会让 _run_context_compression 执行全套
+    只有 L4 llm_compact（LLM 摘要，有损）才算 compacted；changed 语义
+    若过宽——一次大工具结果落盘也会让 _run_context_compression 执行全套
     "压缩仪式"（invalidate prompt cache / [COMPACT_BOUNDARY] /
     <post_compress_brief>"历史已被总结"），误导模型且白白打穿缓存。
     """

@@ -1,4 +1,4 @@
-"""bash 命令的结构化解析器（R27 #21 引入）——把命令拆成语法树，供权限系统用。
+"""bash 命令的结构化解析器——把命令拆成语法树，供权限系统用。
 
 大白话：判断一条命令危不危险，最土的办法是用正则去切字符串。但正则有个致命
 盲区——它不认引号。比如 ``echo "a && rm -rf /"`` 里的 && 只是引号里的一段
@@ -46,7 +46,7 @@ def parse_info(command: str) -> Optional[dict]:
     cmd = (command or "").strip()
     if not cmd:
         return None
-    # 历史踩坑（R27 终审 follow-up）：bash 把 \r 也当命令分隔符，但 bashlex
+    # 历史踩坑：bash 把 \r 也当命令分隔符，但 bashlex
     # 不认——不先归一成 \n 的话，"ls \r rm xxx" 会被当成一条命令，危险的后
     # 半段就溜进只读通道了
     cmd = cmd.replace("\r\n", "\n").replace("\r", "\n")
@@ -85,7 +85,7 @@ def parse_info(command: str) -> Optional[dict]:
                     toks.append(text)
             if toks:
                 segments.append(toks)
-        # 历史踩坑（R27 复审 Critical 修复）：这里不能扫到 command 节点就提前
+        # 历史踩坑：这里不能扫到 command 节点就提前
         # return——word 子节点的更深层还嵌着命令替换/进程替换/重定向节点，必须
         # 把整棵树都走完。否则 `echo $(rm -rf /)` 里的替换体漏检，
         # has_substitution 就永远是 False。副作用（方向正确的收紧）：替换体里

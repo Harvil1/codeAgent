@@ -1,4 +1,4 @@
-"""第 3 轮 bug 修复测试：功能失效 + LLM 韧性。"""
+"""bug 修复测试：功能失效 + LLM 韧性。"""
 import inspect
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
@@ -92,11 +92,11 @@ def test_run_conversation_redrains_each_iteration():
 
 
 # ---------------------------------------------------------------------------
-# X6: call_with_retry max_retries=0 不能 raise None
+# call_with_retry max_retries=0 不能 raise None
 # ---------------------------------------------------------------------------
 
 async def test_call_with_retry_rejects_zero_retries():
-    """X6 fix: max_retries=0 应抛 ValueError 或 RuntimeError，不能 raise None。"""
+    """max_retries=0 应抛 ValueError 或 RuntimeError，不能 raise None。"""
     from agent.llm_retry import call_with_retry
 
     fake_client = MagicMock()
@@ -127,11 +127,11 @@ async def test_call_with_retry_normal_path_still_works():
 
 
 # ---------------------------------------------------------------------------
-# X7: _compute_backoff 必须有上限（防止数小时 sleep）
+# _compute_backoff 必须有上限（防止数小时 sleep）
 # ---------------------------------------------------------------------------
 
 def test_compute_backoff_capped_at_maximum():
-    """X7 fix: _compute_backoff 应有 MAX_BACKOFF 上限（默认 60s 或类似）。"""
+    """_compute_backoff 应有 MAX_BACKOFF 上限（默认 60s 或类似）。"""
     from agent.llm_retry import _compute_backoff
 
     # 大 retry_after（1 小时）应被封顶

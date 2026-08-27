@@ -1,6 +1,6 @@
-"""压力测试 Round 4：CCAR9 新代码（记忆项目隔离 + /init + project_scope）。
+"""压力测试：记忆项目隔离 + /init + project_scope。
 
-CCAR9 改动面：memory_store 双区路由 / project_scope git 子进程 /
+覆盖面：memory_store 双区路由 / project_scope git 子进程 /
 _ensure_index_fresh 的 cwd 切换感知 / /init 目录收集。
 
 重点风险：
@@ -38,7 +38,7 @@ def _mk_proj(tmp_path, name: str) -> Path:
 def test_stress_mixed_writes_2000(tmp_path):
     """2000 条 user/project 交替写入（双区路由 + 缓存键切换开销）。
 
-    Round 3 基线：纯全局 2000 条 0.28s。路由后应同量级（<2s）。
+    基线：纯全局 2000 条 0.28s。路由后应同量级（<2s）。
     """
     home = tmp_path / "home"
     proj = _mk_proj(tmp_path, "projA")

@@ -1,4 +1,4 @@
-"""R28 W1：workflow 引擎核心测试（mock agent_runner，不碰 IO/LLM）。
+"""workflow 引擎核心测试（mock agent_runner，不碰 IO/LLM）。
 
 pytest-asyncio asyncio_mode=auto，async 测试直接写。
 """

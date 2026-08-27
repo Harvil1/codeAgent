@@ -20,10 +20,9 @@
   - 只有重命名键、改动结构这种"伤筋动骨"的变更才需要把
     _config_version 版本号 +1 触发迁移
 
-注意（历史踩坑）：save_config/save_config_value 现在仍然写 yaml
-（遗留的老路子）。运行时真正想持久化配置，唯一正道是
-agent/settings.py 的 save_settings——写 yaml 是"断轨"的，写完
-下次启动也读不回来。
+注意：save_config/save_config_value 写的是 yaml。运行时真正想
+持久化配置，唯一正道是 agent/settings.py 的 save_settings——
+写 yaml 是"断轨"的，写完下次启动也读不回来。
 """
 
 import copy
@@ -45,7 +44,7 @@ _config_version = 1
 DEFAULT_CONFIG: Dict[str, Any] = {
     "_config_version": _config_version,
 
-    # 输出风格名（借鉴 CCB 的 outputStyles 功能）。None = 关闭。
+    # 输出风格名。None = 关闭。
     # 谁在读它：AIAgent._get_system_prompt → resolve_output_style
     # （注意这是真实有代码在读的键，不是摆设）；/output-style 命令负责写入。
     "output_style": None,
@@ -97,7 +96,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "message_offload_threshold": 200000,        # 单条消息累计超过 20 万字符就落盘
         "offload_decision_freeze": True,            # 落盘决定跨轮次不变（反复变会让缓存失效）
         # ── L1 裁剪层 ──
-        # 对齐 Claude Code：是否压缩主要看 token 量，消息条数阈值放宽，
+        # 是否压缩主要看 token 量，消息条数阈值放宽，
         # 避免动不动就把中间的对话裁掉
         "snip_message_threshold": 200,
         "snip_release_threshold": 30,
@@ -106,8 +105,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # ── L2 微压缩：按单条消息大小折叠老的工具结果，最近 3 条不动 ──
         "micro_keep_recent_results": 3,
         # 按时间清理：距最后一条 AI 回复超过 60 分钟的旧工具结果，
-        # 替换成"已清理"标记（最近 5 条保留）。跟 Claude Code 的
-        # microCompact 时间触发逻辑对齐
+        # 替换成"已清理"标记（最近 5 条保留）
         "time_based_mc_enabled": True,
         "time_based_mc_gap_minutes": 60,
         "time_based_mc_keep_recent": 5,
@@ -119,9 +117,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "llm_compact_message_threshold": 500,
         "llm_compact_keep_recent": 30,
         "llm_compact_cooldown_turns": 5,
-        # 历史决策（R30d-D1）：曾经有"每会话最多压缩 N 次"的总量帽，
-        # 后来删了——长会话用完次数后就永久失去 L4，只能频繁紧急截断，
-        # 得不偿失。现在只留冷却轮数 + 连续失败熔断（跟 CCB 一致）
+        # 不设"每会话最多压缩 N 次"的总量帽——长会话用完次数后会永久
+        # 失去 L4，只能频繁紧急截断，得不偿失；只留冷却轮数 + 连续失败熔断
         # 单轮增长预估（防"压完马上又涨回去"的震荡）：判断条件是
         # "当前量 + 预计下一轮增量 >= 阈值"就提前压；增量取最近
         # growth_window 轮里最猛的一轮，历史数据不够就用默认值
@@ -313,7 +310,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "permission_mode": "default",    # 权限模式："default" | "bypassPermissions"（全放行）| "acceptEdits"（编辑自动批）
         # terminal 超时上限（秒）——模型传再大的 timeout 也会被压到这个值
         "max_terminal_timeout": 600,
-        # OS 沙箱：给命令执行再套一层操作系统级隔离（对齐 Claude Code 的 /sandbox）
+        # OS 沙箱：给命令执行再套一层操作系统级隔离
         "sandbox_mode": "off",           # "off" | "on"（启动时灌进 PermissionChecker）
         "sandbox_writable_roots": [],    # 沙箱里额外允许写的目录（默认已含 cwd + ~/.OmniMate）
         # /add-dir 命令持久化的写白名单：运行时用户加目录就追加到这里

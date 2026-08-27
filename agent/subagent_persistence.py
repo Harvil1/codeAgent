@@ -1,10 +1,10 @@
-"""子代理轨迹（transcript——谁在什么时候说了什么的过程记录）落盘持久化（借鉴 claude-code-main）。
+"""子代理轨迹（transcript——谁在什么时候说了什么的过程记录）落盘持久化。
 
 子代理在主对话之外独立跑（sidechain，旁路对话），跑挂了或中断后想恢复（resume）
 就得有轨迹可查。本模块负责把轨迹和元数据写到磁盘：
 
 - ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 轨迹正文，一行一条消息
-  （CCAR13 Task 3 起的口径：user 指令 + 每轮 assistant 文本）
+  （口径：user 指令 + 每轮 assistant 文本）
 - ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据
   （agent_id / agent_type / parent_session / status / created_at / updated_at）
 
@@ -13,8 +13,8 @@ agent_id 长这样：sub-{父会话id前8位}-{YYYYMMDD-HHMMSS}-{随机8位}
 
 status 状态流：running（在跑）→ completed（完成）/ failed（失败）/ interrupted（被中断）
 
-历史踩坑（CCAR13 Task 3，补 CCAR5-I Phase 2）：旧版只在 on_response 回调里记
-最终响应——子代理中途被打断就一点轨迹都没有，没法 resume。修复后改为每轮追加：
+历史踩坑：只在 on_response 回调里记最终响应不行——
+子代理中途被打断就一点轨迹都没有，没法 resume。必须每轮追加：
 _run_child 给子代理挂一个独立 HookRegistry 的 POST_LLM_CALL 程序式 hook，
 LLM 每回一次话就立刻落盘该轮 assistant 文本。
 口径约束：轨迹只存 user 指令 + 每轮 assistant 文本；tool_calls / tool result

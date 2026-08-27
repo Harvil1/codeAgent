@@ -1,9 +1,9 @@
-"""cron_tool 测试（CCAR12 Task 3）：LLM 可自主创建/列出/删除定时任务。
+"""cron_tool 测试：LLM 可自主创建/列出/删除定时任务。
 
 覆盖四层：
 1. 工具 handler 行为（mock scheduler：创建/列表/删除/非法表达式 + not_configured）
 2. handler dispatch 契约（args, **kwargs，防 silent-dead-code）
-3. schema 键契约（OpenAI "parameters"，CCAR11 第 5 例教训）
+3. schema 键契约（OpenAI "parameters"）
 4. 真实 CronScheduler 的 add_job/remove_job/list_jobs 方法（工具包装的底层）
 """
 import inspect
@@ -153,7 +153,7 @@ class TestCronDelete:
 
 
 # ---------------------------------------------------------------------------
-# 2. dispatch 契约（CCAR8 教训：handler 必须是 (args, **kwargs)）
+# 2. dispatch 契约（handler 必须是 (args, **kwargs)）
 # ---------------------------------------------------------------------------
 
 def test_handler_signature_matches_dispatch_contract():
@@ -167,7 +167,7 @@ def test_handler_signature_matches_dispatch_contract():
 
 
 # ---------------------------------------------------------------------------
-# 3. schema 键契约（CCAR11：OpenAI "parameters" 不是 "inputSchema"）
+# 3. schema 键契约（OpenAI "parameters" 不是 "inputSchema"）
 # ---------------------------------------------------------------------------
 
 def test_schemas_use_openai_parameters_key():
@@ -179,7 +179,7 @@ def test_schemas_use_openai_parameters_key():
 def test_create_schema_required_fields():
     props = CRON_CREATE_SCHEMA["parameters"]["properties"]
     assert set(props) == {"cron", "message", "catch_up", "recurring", "template"}
-    # R26 #18：template 模式下 cron/message 可省略（取模板值），不再硬性 required
+    # template 模式下 cron/message 可省略（取模板值），不硬性 required
     assert not CRON_CREATE_SCHEMA["parameters"].get("required")
     assert props["catch_up"]["default"] is False
 
@@ -274,8 +274,8 @@ class TestCronSchedulerCrud:
 
 
 # ---------------------------------------------------------------------------
-# 6. 模板/显式 recurring 透传（R26 #18 review：模板写 recurring: false
-#    此前被 loader 解析但没透传 add_job → 一次性任务实际永久循环）
+# 6. 模板/显式 recurring 透传（模板的 recurring: false 必须透传到
+#    add_job，否则一次性任务实际永久循环）
 # ---------------------------------------------------------------------------
 
 class TestCronTemplateRecurring:

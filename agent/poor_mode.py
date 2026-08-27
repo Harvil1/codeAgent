@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # 7 个开关：点号分隔的配置键 → 要设成的值（这里全是 False = 全关）
-# 历史踩坑（review 修正）：reactive_compact 真正被读取的开关是
+# 历史踩坑：reactive_compact 真正被读取的开关是
 # features.reactive_compact.enabled（agent/__init__.py 用 is_feature_enabled 读）。
 # 早期写的旧键 context.reactive_compact_enabled 在整个仓库里没有任何代码读它——
 # 属于"写了也白写"的死配置。所以这里改写 features 键，语义保持一致：

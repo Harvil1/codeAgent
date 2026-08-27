@@ -132,8 +132,8 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
     返回：JSON 字符串，含用户选的 answers；用户中断/无桥接层/参数不合法
     时返回对应 error。
 
-    历史踩坑：早期 CLI 忘了接桥接层，这个工具一被调用就干等 300 秒，
-    界面看起来像死机。所以现在没桥接层就秒回错误（fail-fast）。
+    注意：没接桥接层的话，这个工具一被调用就干等 300 秒，
+    界面看起来像死机。所以没桥接层就秒回错误（fail-fast）。
     """
     question = (args.get("question") or "").strip()
     options = args.get("options") or []

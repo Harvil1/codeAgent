@@ -1,4 +1,4 @@
-"""技能/记忆类命令集（R30 给 cli.py 瘦身时原样搬过来的，行为没变）。
+"""技能/记忆类命令集。
 
 这里放的是"管理 agent 知识库"的命令处理函数：/skills 看技能列表打分推荐、
 /memory 看和编辑记忆、/skill-learning 管控行为学习管线。被 cli.py 的主
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _handle_skill_learning_command(args: str, rt) -> bool:
-    """/skill-learning 命令：管理 skillLearning 行为学习管线（CCAR15 Task 4）。
+    """/skill-learning 命令：管理 skillLearning 行为学习管线。
 
     背景：skillLearning 是"agent 从使用中攒经验"的系统——平时观察用户行为
     存成 instinct（本能条目），攒够一簇相似的就演化成正式技能。这个命令
@@ -281,8 +281,7 @@ def _show_memory(rt: RuntimeContext):
 
     背景：记忆分两摊展示——agent 笔记（MEMORY.md 相关，project/reference
     等类型）和用户画像（USER.md 相关，user/feedback 类型）。看完后弹出
-    小菜单：按 m 编辑 MEMORY.md、按 u 编辑 USER.md，对齐 Claude Code 的
-    /memory 体验。
+    小菜单：按 m 编辑 MEMORY.md、按 u 编辑 USER.md。
 
     参数：
         rt：RuntimeContext（取 memory_store 用）
@@ -294,9 +293,8 @@ def _show_memory(rt: RuntimeContext):
         console.print("[yellow]记忆系统未启用[/yellow]")
         return
 
-    # 历史踩坑（2026-08-17 修复）：原实现访问了根本不存在的
-    # memory_entries/user_entries 属性，/memory 一跑必崩 AttributeError。
-    # 现在改成 list_all() 拿全量再按类型自己分组。
+    # memory_store 上没有按类分好的现成属性，用 list_all() 拿全量
+    # 再按类型自己分组。
     entries = rt.memory_store.list_all()
     agent_entries = [e for e in entries if e.type not in ("user", "feedback")]
     user_entries = [e for e in entries if e.type in ("user", "feedback")]
@@ -315,7 +313,7 @@ def _show_memory(rt: RuntimeContext):
     if not user_entries:
         console.print("  [dim]（空）[/dim]")
 
-    # 菜单：让用户直接打开 MEMORY.md / USER.md 编辑（体验对齐 Claude Code）
+    # 菜单：让用户直接打开 MEMORY.md / USER.md 编辑
     console.print(
         "\n[dim]输入 [cyan]m[/cyan] 编辑 MEMORY.md，[cyan]u[/cyan] 编辑 USER.md，"
         "其他键返回[/dim]"
@@ -349,7 +347,7 @@ def _open_in_editor(path: Path) -> None:
 def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
     """输入以 `#` 开头时的快捷存记忆：弹菜单选类型，直接存 MemoryStore。
 
-    背景：对齐 Claude Code 的 `#` 快捷键体验——用户一句话就能存，不用
+    背景：`#` 快捷键——用户一句话就能存，不用
     等模型来调工具。
 
     参数：

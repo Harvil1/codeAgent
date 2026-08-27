@@ -1,4 +1,4 @@
-"""R26 #18：cron 任务模板（~/.OmniMate/templates + <cwd>/.omnimate/templates）。"""
+"""cron 任务模板测试（~/.OmniMate/templates + <cwd>/.omnimate/templates）。"""
 import json
 from unittest.mock import MagicMock
 

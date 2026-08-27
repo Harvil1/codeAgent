@@ -459,7 +459,7 @@ async def test_terminal_safe_command_not_blocked():
 
 
 # ---------------------------------------------------------------------------
-# bypassPermissions 模式（TDD B1）
+# bypassPermissions 模式
 # ---------------------------------------------------------------------------
 
 def test_bypass_permissions_allows_destructive():
@@ -497,7 +497,7 @@ def test_bypass_permissions_fatal_patterns():
 
 
 # ---------------------------------------------------------------------------
-# B1 Fix: fatal 正则漏洞修复（rm -rf / --no-preserve-root + fork bomb 空格变体）
+# fatal 正则漏洞修复（rm -rf / --no-preserve-root + fork bomb 空格变体）
 # ---------------------------------------------------------------------------
 def test_bypass_blocks_rm_rf_root_with_preserve_root_flag():
     """bypass 下 rm -rf / --no-preserve-root 仍拒（fatal 底线）。"""
@@ -715,13 +715,13 @@ def test_accept_edits_rejects_compound_commands(tmp_path, monkeypatch):
 
 
 def test_accept_edits_rejects_home_expansion_tokens(tmp_path, monkeypatch):
-    """R30 审计 High-1 回归：~ / $HOME 形态的 token 不进 acceptEdits 自动批。
+    """~ / $HOME 形态的 token 不进 acceptEdits 自动批。
 
-    漏洞场景：_is_safe_fs_in_cwd 之前不做 expanduser/expandvars——
+    风险场景：若不做 expanduser/expandvars，
     Path("~/x") 在 Python 里是相对路径 → 解析成 <cwd>/~/x → "在 cwd 内" →
     自动放行；而 shell(shell=True) 会把 ~/$HOME 展开到家目录 →
     ``rm -rf ~/test_dir`` 在 acceptEdits 下无审批删家目录。
-    修复：token 先 expanduser + expandvars 再判；展开后仍含 $
+    防线：token 先 expanduser + expandvars 再判；展开后仍含 $
     （未定义变量）一律不自动批（识别不了的形态不算 safe）。
     """
     import os
@@ -800,7 +800,7 @@ class _MockAuxLLM:
         self.response = response  # _MockResp 或 None
         self.exc = exc            # 抛异常
         self.calls = 0
-        self.last_messages = None  # R26 #11：记录最近一次收到的 messages（验 nl_rules 注入）
+        self.last_messages = None  # 记录最近一次收到的 messages（验 nl_rules 注入）
 
     async def chat_completions(self, messages, **kwargs):
         self.calls += 1
@@ -860,7 +860,7 @@ def test_whitelist_prefix_not_partial():
 
 
 # ---------- _classify_bash_command 单元测试 ----------
-# R26 #11 起返回三向 verdict 形态（旧 safe 输出仍兼容解析）。
+# 返回三向 verdict 形态（旧式 safe 输出仍兼容解析）。
 
 @pytest.mark.asyncio
 async def test_classify_returns_safe():
@@ -914,7 +914,7 @@ async def test_classify_markdown_wrapped_json():
 
 @pytest.mark.asyncio
 async def test_classify_unknown_verdict_becomes_ask():
-    """R26 #11: LLM 输出不认识的 verdict → 保守回落 ask（不再 fail-open error）。"""
+    """LLM 输出不认识的 verdict → 保守回落 ask（不 fail-open error）。"""
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "ok"}'))
     result = await _classify_bash_command("ls", aux)
     assert result == {"verdict": "ask"}
@@ -1078,12 +1078,11 @@ def test_gate4_bypass_mode_skipped():
 
 
 # ---------------------------------------------------------------------------
-# CCAR13 Task 4: check_path 感知 extra_allowed_roots（/add-dir 后 write_file 生效）
+# check_path 感知 extra_allowed_roots（/add-dir 后 write_file 生效）
 #
-# 历史包袱：dcec556b 曾把 check_path 闸门 3 放开为"其他全通过"（用户授权
-# 除项目代码外都可写），导致白名单语义在 check_path 层失效——/add-dir 加的
-# 额外白名单对 write_file/str_replace 毫无意义。Task 4 恢复闸门 3 的白名单
-# 语义：workspace cwd / ~/.OmniMate / extra roots 之内放行，之外拒。
+# 闸门 3 的白名单语义：workspace cwd / ~/.OmniMate / extra roots 之内放行，
+# 之外拒。若在 check_path 层放开为"其他全通过"，/add-dir 加的额外白名单
+# 对 write_file/str_replace 就毫无意义。
 # 顺序铁律：闸门 1（受保护路径）/ 闸门 2（项目代码写保护）在前——
 # 白名单加 home 根也写不了 ~/.ssh（白名单绕不过硬底线）。
 # ---------------------------------------------------------------------------
@@ -1203,7 +1202,7 @@ def test_check_path_cwd_and_bypass_semantics(tmp_path, monkeypatch):
 
 
 def test_accept_edits_cannot_write_agent_own_code(tmp_path, monkeypatch):
-    """【CCAR14 Task 1】acceptEdits 不能绕过写保护（agent 自身代码）。
+    """acceptEdits 不能绕过写保护（agent 自身代码）。
 
     闸门 2 本该是全模式硬底线（bypass 也保留），但 acceptEdits 分支
     插在它前面——cwd 是 agent repo 时能自动批改自身源码。
@@ -1228,7 +1227,7 @@ def test_accept_edits_still_allows_cwd_normal_files(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CCAR14 Task 3: check_path 闸门 3 白名单外审批通道
+# check_path 闸门 3 白名单外审批通道
 # （default / acceptEdits cwd 外可"批一次"，批准后父目录进会话缓存）
 # ---------------------------------------------------------------------------
 
@@ -1340,7 +1339,7 @@ def test_check_path_gates_1_2_still_hard_before_approval(tmp_path, monkeypatch):
 
 
 def test_check_path_approval_triggers_hook_and_notify(tmp_path, monkeypatch):
-    """Task 3 fix：check_path 审批点接 PERMISSION_REQUEST hook + toast。
+    """check_path 审批点接 PERMISSION_REQUEST hook + toast。
 
     与 terminal 审批点（check 闸门 2）同构：进入用户审批前触发
     run_permission_request 审计 + notify toast，两者 fail-open。
@@ -1499,7 +1498,7 @@ def test_check_path_always_allow_gates_hard_before(tmp_path, monkeypatch):
     assert r.allowed is False
 
 
-# ===== R25 #2：审批前缀规则（curated 表派生）=====
+# ===== 审批前缀规则（curated 表派生）=====
 
 class TestCommandPrefix:
     def test_derive_test_command(self):
@@ -1626,7 +1625,7 @@ class TestApprovalPrefixWhitelist:
 
 
 # ===========================================================================
-# R26 #11：分类器三向（allow/deny/ask）+ 自然语言规则
+# 分类器三向（allow/deny/ask）+ 自然语言规则
 # ===========================================================================
 
 class TestThreeWayClassifier:
@@ -1663,10 +1662,10 @@ class TestThreeWayClassifier:
         assert "{nl_rules}" in _CLASSIFY_PROMPT_TEMPLATE
 
 
-# ---------- _check_llm_classifier ask 行为（R26 #11）----------
+# ---------- _check_llm_classifier ask 行为 ----------
 
 def test_gate4_llm_ask_goes_to_approval_not_deny():
-    """R26 #11: LLM 判 ask → 升审批（callback 被问），不直接拒。"""
+    """LLM 判 ask → 升审批（callback 被问），不直接拒。"""
     asked = []
 
     def callback(cmd):
@@ -1685,7 +1684,7 @@ def test_gate4_llm_ask_goes_to_approval_not_deny():
 
 
 def test_gate4_llm_ask_no_callback_denies():
-    """R26 #11: ask + 无审批 callback → 拒（保守，不 fail-open 放行）。"""
+    """ask + 无审批 callback → 拒（保守，不 fail-open 放行）。"""
     checker = PermissionChecker()  # 无 callback
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "ask"}'))
     checker.set_aux_llm_provider(lambda: aux)
@@ -1696,7 +1695,7 @@ def test_gate4_llm_ask_no_callback_denies():
 
 
 def test_gate4_low_confidence_deny_becomes_ask_approval():
-    """R26 #11: 低置信度 deny（conf<0.7）→ ask → 升审批而非直接拒。"""
+    """低置信度 deny（conf<0.7）→ ask → 升审批而非直接拒。"""
     checker = PermissionChecker(approval_callback=lambda cmd: False)
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "deny", "confidence": 0.5}'))
     checker.set_aux_llm_provider(lambda: aux)
@@ -1707,7 +1706,7 @@ def test_gate4_low_confidence_deny_becomes_ask_approval():
 
 
 def test_gate4_nl_rules_injected_into_prompt():
-    """R26 #11: settings.json permissions.nl_rules 注入分类 prompt。"""
+    """settings.json permissions.nl_rules 注入分类 prompt。"""
     checker = PermissionChecker()
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "allow"}'))
     checker.set_aux_llm_provider(lambda: aux)
@@ -1721,7 +1720,7 @@ def test_gate4_nl_rules_injected_into_prompt():
 
 
 def test_gate4_deny_still_counts_toward_denial_fallback():
-    """R26 #11: deny 分支照旧计数（连续 3 次拒 → 停用闸门 4 回落人工）。"""
+    """deny 分支照旧计数（连续 3 次拒 → 停用闸门 4 回落人工）。"""
     checker = PermissionChecker()
     aux = _MockAuxLLM(response=_MockResp('{"verdict": "deny", "reason": "可疑"}'))
     checker.set_aux_llm_provider(lambda: aux)
@@ -1736,7 +1735,7 @@ def test_gate4_deny_still_counts_toward_denial_fallback():
     assert r4.gate == "ok"
 
 
-# ===== R27 #21：只读快速通道 AST 兜底 =====
+# ===== 只读快速通道 AST 兜底 =====
 
 class TestReadonlyAstFallback:
     def test_quoted_ampersand_now_readonly(self):
@@ -1773,7 +1772,7 @@ class TestReadonlyAstFallback:
         assert _is_readonly_command("cat <(ls)") is False
 
     def test_background_ampersand_not_readonly(self):
-        """& 后台分隔的复合命令不整串判只读（R27 终审 follow-up）。"""
+        """& 后台分隔的复合命令不整串判只读。"""
         from agent.permission import _is_readonly_command
         assert _is_readonly_command("ls & rm -rf build") is False
 
@@ -1805,15 +1804,15 @@ class TestReadonlyAstFallback:
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 Medium-9：闸门 4 分类器在事件循环线程内不得静默 fail-open
+# 闸门 4 分类器在事件循环线程内不得静默 fail-open
 # ---------------------------------------------------------------------------
 
 def test_llm_classifier_runs_when_called_on_loop_thread(monkeypatch):
     """事件循环线程内直调 check 时，分类器必须真正执行而不是静默跳过。
 
-    旧实现：asyncio.run 在已有事件循环的上下文抛 RuntimeError → fail-open
-    返回 None（跳过分类，安全层在该执行路径无声消失，仅一条 warning）。
-    新实现：降级到工作线程的独立事件循环执行（保持 check() 同步契约），
+    风险：asyncio.run 在已有事件循环的上下文会抛 RuntimeError，若直接
+    fail-open 返回 None（跳过分类），安全层在该执行路径无声消失。
+    实现：降级到工作线程的独立事件循环执行（保持 check() 同步契约），
     分类结果必须产出。
     """
     import asyncio
@@ -1850,7 +1849,7 @@ def test_llm_classifier_runs_when_called_on_loop_thread(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R30 审计 L13：白名单并发写一致性
+# 白名单并发写一致性
 # ---------------------------------------------------------------------------
 
 def test_concurrent_approvals_whitelist_consistency(tmp_path):

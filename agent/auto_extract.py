@@ -1,4 +1,4 @@
-"""对话级轻量记忆提取（R19 #21 引入）。
+"""对话级轻量记忆提取。
 
 记忆（AI 对用户/项目沉淀下来的事实条目，跨会话保留）的自动积累有两条路：
 - reflection（agent/reflection.py）：任务做完后对整段轨迹做一次完整复盘，
@@ -7,26 +7,22 @@
 
 两者互补，像"每次做完项目写总结报告"和"随手记便签"的区别。
 
-与 CC（被对标的实现）的差异（如实记录）：
-- CC 用 fork 出的子代理 + 工具白名单（Read/Grep/Glob + Bash 只读）能实地
-  查证；OmniMate 用辅助模型（aux_llm，便宜模型）单轮无工具提取——
-  因为每轮都跑，成本敏感；需要查证的重活留给 reflection/curator
-- CC 的 maxTurns=5（防子代理跑偏）在这里不适用（我们没有工具循环）
+设计取舍：用辅助模型（aux_llm，便宜模型）单轮无工具提取——
+因为每轮都跑，成本敏感；需要实地查证的重活留给 reflection/curator。
 
-互斥规则（对齐 CC"主 agent 写入互斥"）：本轮 LLM 自己调过 memory
+互斥规则：本轮 LLM 自己调过 memory
 save/update 的话，自动提取就让位——主 agent 已经写过，别重复抢写；
 游标照样推进（跳过的不回头补看）。
 
 节流：每 every_n_turns 轮才跑一次（config memory.auto_extract）。
 防重复：把已有记忆清单（与 reflection 共用 build_memory_manifest）预先
 给 LLM 看，让它别写重复的。
-秘密扫描：memory_store.save 内置（R19 #24），提取产物里混进密钥会被自动拒绝。
+秘密扫描：memory_store.save 内置，提取产物里混进密钥会被自动拒绝。
 整条链 fail-open：任何异常都不影响主对话。
 
-机械查证（R26 #13 的裁决）：CC 用带工具的 fork agent 查证；OmniMate 裁决
-为**机械验证**——提取产物里出现的文件路径必须真实存在，不存在就丢弃该条。
+机械查证：提取产物里出现的文件路径必须真实存在，不存在就丢弃该条。
 零 LLM 成本，且正好挡住最主要的幻觉形态（编造路径入库）。
-完整的带工具查证不搬（每轮都跑，成本不可接受）。
+完整的带工具查证不做（每轮都跑，成本不可接受）。
 """
 import json
 import logging
@@ -47,7 +43,7 @@ _PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z]{1,4}")
 
 
 def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
-    """机械查证（R26 #13）：条目里提到的文件路径必须真实存在。
+    """机械查证：条目里提到的文件路径必须真实存在。
 
     背景：LLM 提取最常见的幻觉是编造文件路径——编出来的路径一旦入库，
     之后的会话会把它当真。所以宁缺毋滥：提到不存在路径的条目直接丢弃。
@@ -121,7 +117,7 @@ async def run_auto_extract(agent, start_idx: int) -> int:
             return 0
 
         items = _parse_items(content)
-        # R26 #13：机械查证（提到不存在路径的条目丢弃）
+        # 机械查证（提到不存在路径的条目丢弃）
         from agent.workspace_context import get_workspace_cwd
         try:
             base_dir = get_workspace_cwd()
@@ -147,7 +143,7 @@ async def run_auto_extract(agent, start_idx: int) -> int:
                 )
                 saved += 1
             except Exception as e:
-                # 包括 R19 #24 的秘密拒绝——单条失败不连累其余条目
+                # 包括秘密拒绝——单条失败不连累其余条目
                 logger.debug("auto_extract 保存单条失败: %s", e)
         if saved:
             logger.info("auto_extract 增量提取保存 %d 条记忆", saved)

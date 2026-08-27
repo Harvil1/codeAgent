@@ -38,7 +38,7 @@ def _make_final_response(text="done"):
 
 
 # ============================================================================
-# Task 1: 压缩后 brief 注入
+# 压缩后 brief 注入
 # ============================================================================
 
 async def test_brief_injected_when_compressed():
@@ -49,7 +49,7 @@ async def test_brief_injected_when_compressed():
 
     def fake_compress(messages, **kwargs):
         # 模拟压缩：返回原 messages + changed=True
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -75,7 +75,7 @@ async def test_no_brief_when_not_compressed():
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, False, False  # Medium-4 契约
+        return messages, False, False  # 契约
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -101,7 +101,7 @@ async def test_brief_omits_todo_when_empty():
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -130,7 +130,7 @@ async def test_brief_marks_plan_mode_when_true():
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -158,7 +158,7 @@ async def test_brief_marks_normal_mode_when_false():
     captured_messages_list = []
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     async def fake_call_with_retry(client, messages, **kwargs):
         captured_messages_list.append(list(messages))
@@ -182,7 +182,7 @@ async def test_brief_not_in_conversation_history():
     agent = _make_minimal_agent()
 
     def fake_compress(messages, **kwargs):
-        return messages, True, True  # Medium-4 契约：(messages, changed, compacted)
+        return messages, True, True  # 契约：(messages, changed, compacted)
 
     with patch("agent.context_pipeline.compress_if_needed", side_effect=fake_compress), \
          patch("agent.llm_retry.call_with_retry", new=AsyncMock(return_value=_make_final_response("ok"))) as mock_llm:

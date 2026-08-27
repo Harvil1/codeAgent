@@ -62,7 +62,7 @@ def test_create_job_for_subprocess_failopen(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CCAR12 Task 2: terminal 工具端到端（真实 job，无 mock）
+# terminal 工具端到端（真实 job，无 mock）
 # ---------------------------------------------------------------------------
 
 def test_terminal_sandbox_on_real_job_end_to_end():

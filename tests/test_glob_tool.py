@@ -1,6 +1,6 @@
-"""glob 工具测试（CCAR11 Task 1）。
+"""glob 工具测试。
 
-对齐 Claude Code GlobTool：文件名模式匹配，不读内容。
+文件名模式匹配，不读内容。
 结果按 mtime 降序（最近改的在前）。
 """
 import inspect
@@ -90,7 +90,7 @@ def test_glob_protected_path_rejected():
 
 
 def test_glob_dispatch_contract():
-    """handler 签名 (args, **kwargs)——CCAR8 教训：防 silent-dead-code。"""
+    """handler 签名 (args, **kwargs)——防 silent-dead-code。"""
     sig = inspect.signature(_handle_glob)
     params = list(sig.parameters.values())
     assert params[0].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD

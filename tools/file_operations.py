@@ -39,7 +39,7 @@ def _content_hash(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# R30e-H2：read 结果去重（借鉴 Claude Code 的 file_unchanged 机制）——
+# read 结果去重——
 # 同一个文件、同一段范围（range），而且修改时间+大小都没变的话，
 # 不再重复把全文塞进上下文烧 token，只回一句"文件没变"。
 # 为什么用两个因子（mtime_ns 纳秒级修改时间 + size 文件大小）判断"变没变"：
@@ -118,7 +118,7 @@ READ_FILE_SCHEMA = {
     },
 }
 
-# R20 #34：Read 双重上限（对齐 Claude Code 的做法——超限直接报错而不是截断）
+# Read 双重上限（超限直接报错而不是截断）
 READ_MAX_FILE_BYTES = 256 * 1024   # 第一道：文件大小预检上限（256KB），不读盘就能拒
 READ_MAX_OUTPUT_TOKENS = 25_000    # 第二道：输出 token 上限（字符数/3 粗略估算）
 
@@ -159,8 +159,8 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     if not path.is_file():
         return json.dumps({"error": f"不是文件: {path}"}, ensure_ascii=False)
 
-    # === R20 #34：超限改为报错而不是截断（对齐 Claude Code）===
-    # 为什么报错更好：CC 试过截断，结果 LLM 没意识到内容不全反复重读，
+    # === 超限改为报错而不是截断 ===
+    # 为什么报错更好：截断的话 LLM 意识不到内容不全，会反复重读，
     # token 反而花得更多——直接报错让它自己分段读更省。
     # 预检第一道：文件超过 256KB，连盘都不用读直接拒
     try:
@@ -169,7 +169,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     except OSError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-    # === R30e-H2：同文件同范围且修改时间+大小都没变 → 回"文件未变"提示 ===
+    # === 同文件同范围且修改时间+大小都没变 → 回"文件未变"提示 ===
     try:
         _seen_key = str(path.resolve())
         _sig = (_st.st_mtime_ns, _st.st_size)
@@ -219,7 +219,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         ]
         raw_content = "\n".join(numbered)
 
-        # === R20 #34 第二道检查：估算输出超过 25K token → 报错（不截断）===
+        # === 第二道检查：估算输出超过 25K token → 报错（不截断）===
         # 估算方法很粗：字符数除以 3（和 estimate_message_tokens 同一套口径）。
         # 超了说明分段还不够细——报错引导再切小一点，避免大内容不打招呼就涌进上下文。
         if len(raw_content) // 3 > READ_MAX_OUTPUT_TOKENS:
@@ -261,7 +261,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
             final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
             content_offloaded = final_content != raw_content
 
-        # R30e-H2：记下这次读取的"签名"（下次同范围且没变就回省 token 提示）
+        # 记下这次读取的"签名"（下次同范围且没变就回省 token 提示）
         try:
             _READ_SEEN[_seen_key] = {
                 "sig": _sig,
@@ -331,7 +331,7 @@ WRITE_FILE_SCHEMA = {
 def _track_checkpoint(path, kwargs) -> None:
     """文件改完后，通知"存档追踪器"记一笔，支撑 /rewind（回退到之前版本）功能。
 
-    背景：对齐 Claude Code 的 /rewind——像游戏存档一样，改过的文件可以退回去。
+    背景：像游戏存档一样，改过的文件可以退回去（/rewind）。
     只追踪编辑工具自己改的文件（write_file/str_replace）；
     bash 命令改的东西不追踪（没法可靠知道它动了哪些文件）。
 
@@ -353,7 +353,7 @@ def _track_checkpoint(path, kwargs) -> None:
 def _trigger_file_changed(path, op: str, kwargs) -> None:
     """文件写入成功后，广播一条"文件变了"事件（FILE_CHANGED hook）。
 
-    背景（Task N 新增）：对齐 Claude Code 的 file_changed 事件——
+    背景：广播 file_changed 事件——
     外部可以挂监听器（hook）做 IDE 联动、自动重载、操作记录等。
     纯通知，不关心有没有人听；出问题也不影响写文件本身（fail-open）。
 
@@ -447,14 +447,14 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             with path.open("a", encoding="utf-8") as f:
                 f.write(content + "\n")
         else:
-            # 历史踩坑（X16 修复）：改用原子写（先写临时文件、刷盘、再一步换过去）。
-            # 之前直接 write_text，写到一半程序崩了会留下半截文件——
+            # 必须原子写（先写临时文件、刷盘、再一步换过去）。
+            # 直接 write_text 的话，写到一半程序崩了会留下半截文件——
             # 原子写要么完整的新的，要么还是旧的，绝不出现半截
             from agent.atomic_io import atomic_write_text
             atomic_write_text(path, content)
 
         _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-        _read_seen_invalidate(path)  # R30e-H2：刚写过，读去重缓存立刻作废
+        _read_seen_invalidate(path)  # 刚写过，读去重缓存立刻作废
         _trigger_file_changed(path, "append" if append else "write", kwargs)  # 广播"文件变了"事件
 
         return json.dumps({
@@ -570,7 +570,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     file_glob = args.get("glob") or "**/*"
     max_matches = max(1, int(args.get("max_matches", 50)))
     include_hidden = bool(args.get("include_hidden", False))
-    # R30e-H3：加的能力——offset 翻页、匹配附带上下文行、大小写开关
+    # 支持的能力——offset 翻页、匹配附带上下文行、大小写开关
     page_offset = max(0, int(args.get("offset", 0) or 0))
     context = min(10, max(0, int(args.get("context", 0) or 0)))
     ignore_case = bool(args.get("case_insensitive", False))
@@ -578,8 +578,8 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     if not pattern:
         return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
 
-    # 历史踩坑（S3 修复）：search_files 以前没过安全闸门，
-    # 能把 ~/.ssh/id_rsa 私钥的内容片段搜出来——现在必须先过 safe_path 安检
+    # search_files 必须先过 safe_path 安检——不过的话
+    # 能把 ~/.ssh/id_rsa 私钥的内容片段搜出来
     from agent.permission import safe_path
     perm = safe_path(search_path, write=False)
     if not perm.allowed:
@@ -606,7 +606,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
     # 不需要把总数全数一遍——大目录数总数太浪费）
     collect_limit = page_offset + max_matches + 1
     try:
-        # R30e-H3：文件列表先排序——翻页要求两次调用之间顺序稳定，
+        # 文件列表先排序——翻页要求两次调用之间顺序稳定，
         # 否则第 2 页可能重复或漏掉第 1 页的内容
         for file_path in sorted(search_path.glob(file_glob)):
             if not file_path.is_file():
@@ -825,7 +825,7 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-    _read_seen_invalidate(path)  # R30e-H2：刚改过，读去重缓存立刻作废
+    _read_seen_invalidate(path)  # 刚改过，读去重缓存立刻作废
     _trigger_file_changed(path, "edit", kwargs)  # 广播"文件变了"事件
 
     return json.dumps({
@@ -846,7 +846,7 @@ registry.register(
 
 
 # ---------------------------------------------------------------------------
-# NotebookEdit（R20 #35，对齐 Claude Code 的 NotebookEdit：编辑 Jupyter notebook 单元格）
+# NotebookEdit：编辑 Jupyter notebook 单元格
 # ---------------------------------------------------------------------------
 
 NOTEBOOK_EDIT_SCHEMA = {

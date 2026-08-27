@@ -1,4 +1,4 @@
-"""R26 终审 follow-up：ThreadedLLMClient 跨事件循环安全（per-call 独立 client）。"""
+"""ThreadedLLMClient 跨事件循环安全测试（per-call 独立 client）。"""
 
 
 class TestThreadedLLMClient:

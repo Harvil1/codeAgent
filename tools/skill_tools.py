@@ -105,14 +105,14 @@ def _find_skill_md(name: str, dirs) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 历史出处（R22 第 27 项）：TF-IDF 技能搜索——借鉴 Claude Code localSearch 做的轻量版。
+# TF-IDF 技能搜索（轻量版）。
 # TF-IDF 是搜索排序的老办法：一个词在这份文档里出现越多（TF）、同时在别的文档里越少见（IDF），
 # 就越能代表这份文档，得分越高。
 # ---------------------------------------------------------------------------
 
 # 停用词表（搜索时直接忽略的词）：中文虚词 + 英文常见功能词。
 # 为什么需要：「的」「如何」这类词到处都是，没有任何区分度，留着只会干扰打分。
-# （对齐 Claude Code 的 STOP_WORDS，取精简版）
+# （取精简版）
 _SKILL_STOP_WORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of",
     "in", "for", "on", "at", "by", "with", "and", "or", "not", "no", "do",
@@ -243,7 +243,7 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
                 "state": rec.get("state", "active"),
             }
 
-    # 历史出处（R22 第 27 项）：带 query 参数时按 TF-IDF 相关性排序——
+    # 带 query 参数时按 TF-IDF 相关性排序——
     # 搜得到就只返回匹配的；搜不到就返回提示让 LLM 去掉 query 看全量
     query = (args.get("query") or "").strip()
     if query:
@@ -358,7 +358,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
     usage_dir = _get_usage_dir(kwargs)
     dirs = _get_skills_dirs(kwargs)
 
-    # 历史出处（batch1-T3）：支持传 bundle:<束名> 一次加载一整组技能
+    # 支持传 bundle:<束名> 一次加载一整组技能
     if name.startswith("bundle:"):
         bundle_name = name[len("bundle:"):]
         from agent.skill_bundle import load_bundle
@@ -379,12 +379,12 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
     # 把文件头元信息区（frontmatter）剥掉，只留指令正文
     frontmatter, body = parse_frontmatter(content)
 
-    # 历史出处（T3，核心机制对齐第 3 项）：frontmatter 里写了 files: 时，把参考文件一起读进来当附件
+    # frontmatter 里写了 files: 时，把参考文件一起读进来当附件
     attachments = _load_skill_attachments(skill_md.parent, frontmatter.get("files"), kwargs)
 
     bump_view(usage_dir, name)  # 加载也算一次查看，进统计
 
-    # 历史出处（round3）：声明了 context:fork 的技能不可以在主对话里直接跑，要派子代理去跑
+    # 声明了 context:fork 的技能不可以在主对话里直接跑，要派子代理去跑
     if frontmatter.get("context") == "fork":
         return json.dumps({
             "name": name,
@@ -418,7 +418,6 @@ def _load_skill_attachments(skill_dir, files, kwargs: dict) -> list:
     """读取技能声明的附件文件（参考文件），返回内容列表。
 
     背景：技能除了说明书正文还可以带几个参考文件，加载技能时一起读进来。
-    历史出处：T3（核心机制对齐第 3 项）。
 
     参数：
     - skill_dir：技能所在目录（附件相对它找）

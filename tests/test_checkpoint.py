@@ -1,4 +1,4 @@
-"""Checkpoint / Rewind 测试（对齐 Claude Code 的文件快照 + 回滚）。"""
+"""Checkpoint / Rewind 测试（文件快照 + 回滚）。"""
 
 import json
 from pathlib import Path

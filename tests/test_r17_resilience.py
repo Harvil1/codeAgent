@@ -1,11 +1,11 @@
-"""R17 韧性专项测试。
+"""韧性专项测试。
 
-#12 流空闲看门狗（90s 无 chunk abort）
-#10 max_tokens 完整恢复链（64k 升级 + 续写 3 次）
-#13 max_tokens 400 溢出自适应重试
-#44 unattended 退避帽
-#14 终止原因枚举化
-#9 扣留-恢复模式
+流空闲看门狗（90s 无 chunk abort）
+max_tokens 完整恢复链（64k 升级 + 续写 3 次）
+max_tokens 400 溢出自适应重试
+unattended 退避帽
+终止原因枚举化
+扣留-恢复模式
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from agent.llm_client import (
 
 
 # ---------------------------------------------------------------------------
-# R17 #12：流空闲看门狗
+# 流空闲看门狗
 # ---------------------------------------------------------------------------
 
 class _FakeStream:
@@ -121,7 +121,7 @@ def test_client_default_and_config_watchdog():
 
 
 # ---------------------------------------------------------------------------
-# R17 #10：max_tokens 完整恢复链（64k + 续写 3 次）
+# max_tokens 完整恢复链（64k + 续写 3 次）
 # ---------------------------------------------------------------------------
 
 from agent.llm_retry import (
@@ -136,7 +136,7 @@ from agent.llm_retry import (
 
 
 def test_escalated_max_tokens_is_64k():
-    """升级值对齐 CC ESCALATED_MAX_TOKENS=64k。"""
+    """max_tokens 升级目标值为 64k。"""
     assert DEFAULT_ESCALATED_MAX_TOKENS == 64000
     assert DEFAULT_OUTPUT_RECOVERY_LIMIT == 3
     esc = MaxTokensEscalator()
@@ -263,7 +263,7 @@ async def test_recover_limit_zero_disabled(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R17 #13：400 溢出自适应
+# 400 溢出自适应
 # ---------------------------------------------------------------------------
 
 class _Fake400(Exception):
@@ -346,7 +346,7 @@ async def test_call_with_retry_plain_400_raises():
 
 
 # ---------------------------------------------------------------------------
-# R17 #44：unattended 退避帽 5min
+# unattended 退避帽 5min
 # ---------------------------------------------------------------------------
 
 def test_compute_backoff_caps():
@@ -366,7 +366,7 @@ def test_compute_backoff_caps():
 
 
 # ---------------------------------------------------------------------------
-# R17 #9：扣留-恢复模式 + R17 #14：终止原因枚举
+# 扣留-恢复模式 + 终止原因枚举
 # ---------------------------------------------------------------------------
 
 from agent import AIAgent, LoopExitReason
@@ -453,7 +453,7 @@ async def test_withheld_stream_idle_recovery_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_withheld_ptl_recovers_without_flag(monkeypatch):
-    """PTL 错误无视 reactive flag 也尝试压缩恢复（R17 #9 扣留语义）。"""
+    """PTL 错误无视 reactive flag 也尝试压缩恢复（扣留语义）。"""
     agent = _mk_full_agent()  # config 无 reactive_compact flag（默认关）
     agent._stream_callback = lambda ch: None  # 走流式路径
 
@@ -505,7 +505,7 @@ async def test_withheld_ptl_cooldown_gives_up(monkeypatch):
     assert agent._last_llm_error_kind == "prompt_too_long"
 
 
-# ---- R17 #14：LoopExitReason ----
+# ---- LoopExitReason ----
 
 def test_loop_exit_reason_values():
     """旧值保留（测试兼容）+ 新增细分。"""

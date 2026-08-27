@@ -1,8 +1,7 @@
-"""Task J: async 子代理默认拒审批（autoDeny permission_mode）测试。
+"""async 子代理默认拒审批（autoDeny permission_mode）测试。
 
-借鉴 Claude Code `shouldAvoidPermissionPrompts: true`：async 子代理
-（background=True）不能弹审批 UI（用户不在场），所有需审批的命令/文件操作
-直接返 permission_denied（fail-closed）。
+async 子代理（background=True）不能弹审批 UI（用户不在场），所有需审批的
+命令/文件操作直接返 permission_denied（fail-closed）。
 
 测试要点：
 1. auto_deny 模式拒绝破坏性命令（rm 等）的审批请求

@@ -417,7 +417,7 @@ def _handle_task_create(args: dict, **kwargs) -> str:
         owner=args.get("owner"),
     )
 
-    # 历史出处（round3 D2 新增）：建完任务后触发 TASK_CREATED 钩子
+    # 建完任务后触发 TASK_CREATED 钩子
     # （钩子 = 用户配置的附加动作，比如发通知）。fail-open：钩子挂了不影响建任务。
     _hooks = kwargs.get("hooks_registry")
     if _hooks is None:
@@ -443,7 +443,7 @@ def _handle_task_update(args: dict, task, **kwargs) -> str:
 
     特殊分支：状态改成 blocked（卡住）时不能直接改，要走仓库的 mark_blocked
     专用通道——它会记下卡住的历史，而且同一种卡法连续 3 次会自动升级成
-    triage（转给调度者处理），避免死循环空转（历史出处：06 轮新增）。
+    triage（转给调度者处理），避免死循环空转。
 
     参数：
         args：LLM 传的参数——id（任务 ID）、status、owner、description、
@@ -528,7 +528,7 @@ def _handle_task_complete(args: dict, task, **kwargs) -> str:
         for t in store.find_ready()
     ]
 
-    # 历史出处（round3 D2 新增）：任务完成时触发 TASK_COMPLETED 钩子（fail-open，挂了不影响主流程）
+    # 任务完成时触发 TASK_COMPLETED 钩子（fail-open，挂了不影响主流程）
     _hooks = kwargs.get("hooks_registry")
     if _hooks is None:
         _agent = kwargs.get("agent_ref")
@@ -544,7 +544,6 @@ def _handle_task_complete(args: dict, task, **kwargs) -> str:
         except Exception:
             pass  # fail-open
 
-    # 历史出处（R21 #48，对齐 Claude Code TodoWrite 的 allDone/nudge 行为）：
     # 检查是否全部任务都完成了 + 该不该提醒「记得验证」
     extra = _all_done_cleanup(store)
     nudge = _verification_nudge(store)
@@ -566,11 +565,10 @@ _VERIF_KEYWORDS = ("verif", "验证", "test", "测试", "检查")
 def _all_done_cleanup(store) -> dict:
     """检查是不是所有任务都做完了，做完了就在结果里附一个 all_done 标志。
 
-    设计取舍（历史出处 R21 #48，对齐 Claude Code TodoWrite 的 allDone 语义）：
-    「清空清单」只是显示层的概念，这里只加一个 all_done=true 的标志来提示
-    LLM「全部做完了，别再列任务」。**不真去删任务**——completed 状态留着
-    随时可查；真删的话会破坏 test_task_complete_allows_matching_id 等
-    既有行为语义（当时的裁决：不删）。
+    设计取舍：「清空清单」只是显示层的概念，这里只加一个 all_done=true
+    的标志来提示 LLM「全部做完了，别再列任务」。**不真去删任务**——
+    completed 状态留着随时可查；真删的话会破坏 test_task_complete_allows_
+    matching_id 等既有行为语义（裁决过：不删）。
 
     参数：
         store：任务仓库。
@@ -594,7 +592,7 @@ def _all_done_cleanup(store) -> dict:
 def _verification_nudge(store) -> "str | None":
     """活够 3 条任务且都没提验证字样时，返回一句「别忘了验证」的提醒。
 
-    历史出处 R21 #48。提醒文本直接附在 complete 的工具结果里——LLM 天然
+    提醒文本直接附在 complete 的工具结果里——LLM 天然
     看得见，一行主循环代码都不用改。
 
     参数：

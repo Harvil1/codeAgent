@@ -329,7 +329,7 @@ def restore_skill(skills_dir: Path, skill_name: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# 历史出处（B4）：技能评分 + 推荐功能
+# 技能评分 + 推荐功能
 # ---------------------------------------------------------------------------
 
 def set_rating(skills_dir: Path, skill_name: str, rating: int) -> tuple:

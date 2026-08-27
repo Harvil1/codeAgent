@@ -393,8 +393,8 @@ class TestEndToEndRunChild:
         assert meta["agent_type"] in ("general-purpose", "leaf")
         assert "completed_at" in meta
 
-        # 3. 验证 AIAgent 构造时收到了独立 hooks_registry（CCAR13 Task 3：
-        #    轮级 transcript 走 POST_LLM_CALL 程序式 hook，不再用 on_response）
+        # 3. 验证 AIAgent 构造时收到了独立 hooks_registry：
+        #    轮级 transcript 走 POST_LLM_CALL 程序式 hook，不用 on_response
         assert mock_ctor.called
         _, kwargs = mock_ctor.call_args
         assert kwargs.get("hooks_registry") is not None
@@ -442,10 +442,10 @@ class TestEndToEndRunChild:
         assert meta["status"] == "failed"
 
     def test_on_response_appends_transcript(self, isolated_sessions_dir, monkeypatch):
-        """（CCAR13 Task 3 改写）轮级 hook 把每轮 assistant 文本写入 transcript。
+        """轮级 hook 把每轮 assistant 文本写入 transcript。
 
-        旧版 on_response 只记最终响应；现在子代理拿独立 hooks_registry，
-        每轮 LLM 响应（POST_LLM_CALL）都会 append。
+        子代理拿独立 hooks_registry，每轮 LLM 响应（POST_LLM_CALL）都会
+        append（on_response 语义只记最终响应，给不了完整轨迹）。
         """
         import agent.subagent_persistence as sp
 
@@ -507,7 +507,7 @@ class TestEndToEndRunChild:
 
 
 # ---------------------------------------------------------------------------
-# CCAR13 Task 3: 轮级 transcript（POST_LLM_CALL 程序式 hook，每轮 append）
+# 轮级 transcript（POST_LLM_CALL 程序式 hook，每轮 append）
 # ---------------------------------------------------------------------------
 
 def _spawn_mock_child(monkeypatch, goal="test goal", context=""):
@@ -559,7 +559,7 @@ def _llm_resp(content, tool_calls=None):
 
 
 class TestPerTurnTranscript:
-    """CCAR13 Task 3：subagent transcript 每轮 append（完整轨迹，可 resume 中断代理）。"""
+    """subagent transcript 每轮 append（完整轨迹，可 resume 中断代理）。"""
 
     def test_transcript_records_multiple_turns(self, isolated_sessions_dir, monkeypatch):
         """mock 2 轮 LLM 响应 → transcript ≥3 条（user + 2 assistant）。"""

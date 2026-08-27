@@ -1,4 +1,4 @@
-"""R28 W2：journal 断点恢复测试。"""
+"""journal 断点恢复测试。"""
 from agent.workflow_journal import call_key
 
 SRC = "async def main():\n    return 1\n"

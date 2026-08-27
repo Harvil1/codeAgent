@@ -1,12 +1,12 @@
-"""cron 任务模板（R26 #18）——把常用的定时作业写成"菜谱卡片"，照单点菜即可。
+"""cron 任务模板——把常用的定时作业写成"菜谱卡片"，照单点菜即可。
 
 cron（定时调度）的基础知识：让程序按时间表自动干活，比如"每天早上 9 点
-跑一次日报"。以前每次创建定时任务都得口述一遍配置；有了模板，写一张
+跑一次日报"。每次创建定时任务不用口述一遍配置：写一张
 卡片放固定目录，cron_create(template=名字) 直接按卡片下单。
 
 在项目里的位置：给 tools/cron_tool.py 提供模板目录；解析 frontmatter
 （Markdown 顶部 --- 包起来的元数据块）复用 agent/skill_commands.py 的
-parse_frontmatter，不重复造轮子。对齐 CCB 的 jobs/templates.ts。
+parse_frontmatter，不重复造轮子。
 
 扫两个目录（项目级同名覆盖用户级）：
   - ~/.OmniMate/templates/*.md        用户级（跨项目通用）

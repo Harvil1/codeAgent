@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 # 输出超过这个字符数就截断——不然一条命令的海量输出会撑爆对话上下文（context）
 MAX_OUTPUT_CHARS = 50000
 
-# 历史借鉴（R30g-H10）：超时上限。模型有时会传 1e9 这种天文数字当超时，
+# 超时上限。模型有时会传 1e9 这种天文数字当超时，
 # 会把整个会话挂死，所以钳到 600 秒封顶；想调可改 config 的
-# security.max_terminal_timeout（做法对齐 Claude Code 的 getMaxTimeoutMs）
+# security.max_terminal_timeout（单条命令超时上限，毫秒）
 MAX_TIMEOUT_SECONDS = 600
-# 历史借鉴（R30g-H10）：拦截"光睡大觉"的命令。裸 sleep 就是干等，
+# 拦截"光睡大觉"的命令。裸 sleep 就是干等，
 # 白白占满超时窗口还什么都没干，遇到该引导模型改用后台任务工具 bg_task
 _BARE_SLEEP_RE = re.compile(r"^\s*sleep\s+(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
 
@@ -52,9 +52,9 @@ _GUI_SEG_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 def _is_gui_launch(command: str) -> bool:
     """判断一条命令是不是在启动带窗口的 GUI 程序（如 chrome.exe）。
 
-    背景：历史上踩过一个坑（R30c-B5 修复）——早期用"关键字在命令里出现就算"，
-    结果 `echo "chrome.exe"` 这种只是想把名字打印出来的命令也被当成启动浏览器，
-    输出被全部丢弃，模型拿到假结果。现在改成只看每个分段（用 && | ; 切开）
+    背景：不能按"关键字在命令里出现就算"来判断——
+    `echo "chrome.exe"` 这种只是想把名字打印出来的命令也会被误判成启动浏览器，
+    输出被全部丢弃，模型拿到假结果。所以只看每个分段（用 && | ; 切开）
     的第一个词（剥掉引号和标点、只取文件名部分）是不是 GUI 程序名——
     程序名出现在参数位置的一律不算。
 
@@ -141,7 +141,7 @@ TERMINAL_SCHEMA = {
 def _load_session_env_overrides() -> dict:
     """从环境变量 $OMNIMATE_ENV_FILE 指向的文件里读出"export 键=值"形式的行，打包成字典返回。
 
-    背景（做法对齐 Claude Code 的 CLAUDE_ENV_FILE）：会话启动钩子（SessionStart
+    背景：会话启动钩子（SessionStart
     hook）设置的环境变量会写进这个文件"存档"。终端工具每次执行命令前把这份
     存档合并进子进程的环境变量，这样钩子里配好的东西（比如 nvm/pyenv/conda
     这类工具的路径设置）在后面每条命令里都能生效——这是这类用户的刚需。
@@ -213,7 +213,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
     except (TypeError, ValueError):
         timeout = 120.0
 
-    # 历史借鉴（R30g-H10）：裸 sleep 2 秒以上就是干等，占满超时窗口还没产出，拦下来引导改用后台任务
+    # 裸 sleep 2 秒以上就是干等，占满超时窗口还没产出，拦下来引导改用后台任务
     _sleep_m = _BARE_SLEEP_RE.match(command)
     if _sleep_m and float(_sleep_m.group(1)) >= 2:
         return json.dumps({
@@ -225,7 +225,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             "command": command,
         }, ensure_ascii=False)
 
-    # 历史借鉴（R30g-H10）：超时封顶——防止模型传 1e9 这种数字把会话挂死
+    # 超时封顶——防止模型传 1e9 这种数字把会话挂死
     _cfg = kwargs.get("config") if isinstance(kwargs.get("config"), dict) else {}
     _max_timeout = float(
         (_cfg.get("security") or {}).get("max_terminal_timeout")
@@ -242,8 +242,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         from agent.workspace_context import get_workspace_cwd
         cwd = get_workspace_cwd()
 
-    # 历史踩坑（S4 修复）：工作目录本身也必须过 safe_path 安检——
-    # 以前漏检，模型可以把工作目录设到 ~/.ssh 再跑 cat * 偷读私钥
+    # 工作目录本身也必须过 safe_path 安检——
+    # 漏检的话模型可以把工作目录设到 ~/.ssh 再跑 cat * 偷读私钥
     from agent.permission import safe_path
     cwd_perm = safe_path(cwd, write=False)
     if not cwd_perm.allowed:
@@ -256,7 +256,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
 
     # 权限三道闸门检查。优先用外面注入进来的检查器（cli.py 注入的那个带
     # "问用户"的回调），没有就用全局默认的（没回调，只能自动裁决）。
-    # 历史修复（必修 1）：子代理的权限模式必须透传——从 agent_ref 里取出
+    # 子代理的权限模式必须透传——从 agent_ref 里取出
     # 子代理自己的权限模式覆盖值，让它按自己的模式做决策，而不是去改
     # 全局检查器（那样会污染别的线程，不安全）。
     checker = kwargs.get("permission_checker") or get_default_checker()
@@ -272,10 +272,10 @@ def _handle_terminal(args: dict, **kwargs) -> str:
 
     # === OS 沙箱（操作系统级隔离笼子）套壳 ===
     # 沙箱开着时：Linux/macOS 把命令包进 bwrap/seatbelt 的启动参数里；
-    # Windows（CCAR12 引入）走 Job Object 模式——命令原样跑，启动后把整个
+    # Windows 走 Job Object 模式——命令原样跑，启动后把整个
     # 进程树挂进一个"作业对象"里管起来；沙箱工具不可用时放行降级（fail-open，
     # 警告一声但照跑，不能因为沙箱缺失把功能整个废掉）。
-    # 历史修复（C1）：沙箱开关优先从 kwargs 读（方便测试和子代理透传）；
+    # 沙箱开关优先从 kwargs 读（方便测试和子代理透传）；
     # 没传时从默认权限检查器上读（生产路径：用户敲 /sandbox on 就是设在它身上）
     sandbox_mode = kwargs.get("sandbox_mode")
     if sandbox_mode is None:
@@ -285,7 +285,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             sandbox_mode = "off"
     wrapped_argv = None
     sandbox_active = False
-    win_job_mode = False  # Windows Job Object 模式：命令不包装，启动后再挂进作业对象（CCAR12）
+    win_job_mode = False  # Windows Job Object 模式：命令不包装，启动后再挂进作业对象
     if sandbox_mode == "on":
         # GUI 程序在沙箱里根本起不来，只能跳过沙箱
         is_gui_launch = _is_gui_launch(command)  # 判定方式见 _is_gui_launch 的说明（首个词级）
@@ -299,13 +299,12 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 )
                 if is_available():
                     if uses_job_object():
-                        # Windows Job Object（CCAR12）：命令不包装，
+                        # Windows Job Object：命令不包装，
                         # 正常启动后把进程挂进作业对象里管控
                         sandbox_active = True
                         win_job_mode = True
                     else:
                         # 收集沙箱里允许写的目录：cwd + ~/.OmniMate + 配置里额外加的
-                        # 历史清理（I5 修复）：删掉多余的函数内重复 import（Path 顶部已导入）
                         writable_roots = []
                         try:
                             from constants import get_omnimate_home
@@ -353,8 +352,8 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 cwd=cwd,
                 env=safe_env,
             )
-            # 历史修复（R30c-B5）：如实说明"没抓到输出"——以前假装有结果返回
-            # "(GUI 程序已启动)"，会误导模型以为那是命令的真实输出
+            # 如实说明"没抓到输出"——假装有结果返回
+            # "(GUI 程序已启动)"会误导模型以为那是命令的真实输出
             return json.dumps({
                 "stdout": "(GUI 程序已启动；其 stdout/stderr 未捕获——不建管道防卡死，输出不可用)",
                 "stderr": "",
@@ -363,7 +362,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 "cwd": cwd,
             }, ensure_ascii=False)
         elif sandbox_active and win_job_mode:
-            # Windows Job Object 模式（CCAR12）：命令原样启动，启动后把整棵
+            # Windows Job Object 模式：命令原样启动，启动后把整棵
             # 进程树挂进作业对象管控（挂失败也放行继续跑，fail-open）。
             # 公共流程抽到了 sandbox_runner.run_with_job_object（超时后先收拾
             # 残局再抛 TimeoutExpired，由本函数外层的 except 转成 error JSON）
@@ -402,10 +401,9 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 encoding="utf-8",
                 errors="replace",
             )
-        # 历史修复（R30e-H1）：大输出先把完整原文存到磁盘（offload，回传预览
-        # + 文件位置指针），实在存不了才截断。以前的顺序反着来——先截断再落盘，
-        # 结果磁盘上存的也是残缺版，中间那段永久丢了；而且当时 stderr 根本
-        # 没接落盘这条路。
+        # 大输出先把完整原文存到磁盘（offload，回传预览
+        # + 文件位置指针），实在存不了才截断。顺序不能反——先截断再落盘的话，
+        # 磁盘上存的也是残缺版，中间那段永久丢了；stderr 也走同一条落盘路。
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
         omnimate_home = kwargs.get("omnimate_home")
@@ -444,7 +442,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             "stderr_offloaded": stderr_offloaded,
         }, ensure_ascii=False)
     except subprocess.TimeoutExpired:
-        # 历史借鉴（R30g-H10）：超时了就引导改用后台任务——terminal 超时会
+        # 超时了就引导改用后台任务——terminal 超时会
         # 杀掉进程，长任务应该用 bg_task 后台跑（不堵对话，跑完还通知）
         return json.dumps({
             "error": (

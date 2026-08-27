@@ -220,7 +220,7 @@ async def test_no_max_tokens_not_passed():
     assert "max_tokens" not in kwargs
 
 
-# ===== R25 #4：后台调用遇 529 立即放弃（防放大）=====
+# ===== 后台调用遇 529 立即放弃（防重试放大）=====
 
 class FakeConnection529Error(Exception):
     """名字含 connection 让 is_retryable 兜底命中；带 status_code=529。"""
@@ -279,7 +279,7 @@ class TestBackground529GiveUp:
         assert client.calls == 2  # 前台语义不变：重试后成功
 
 
-# ===== R25 #5：长退避分片心跳 =====
+# ===== 长退避分片心跳 =====
 
 class TestSleepWithHeartbeat:
     async def test_chunks_and_callbacks(self, monkeypatch):
@@ -328,7 +328,7 @@ class TestSleepWithHeartbeat:
         )
 
 
-# ===== R26 #10：连接重置 → 重建 client 再重试 =====
+# ===== 连接重置 → 重建 client 再重试 =====
 
 class TestConnectionResetRecovery:
     async def test_is_connection_reset_by_cause(self):

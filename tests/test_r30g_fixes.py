@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
-"""R30g（H 轮第三批）回归测试。
+"""权限与超时钳制回归测试。
 
-  H5 pre_tool_use hook 并行 + deny>ask>allow 聚合 + ask 档 fail-closed
-  H10 terminal 超时钳制 + 裸 sleep 拦截 + 超时引导
-  M2 复合命令段数上限（>50 升审批）
-  M3 cd+git 组合审批闸门（bare-repo RCE 防护）
-  M8 SessionEnd hook 超时钳制（timeout_cap 传导）
-  H7 分级 autocompact buffer：裁决不做——现有"1M 留 30%"是有意设计
-     且 PTL 恢复链已兜底"压缩全关"场景，照搬 CCB 分级会推翻既有裁决。
+  pre_tool_use hook 并行 + deny>ask>allow 聚合 + ask 档 fail-closed
+  terminal 超时钳制 + 裸 sleep 拦截 + 超时引导
+  复合命令段数上限（>50 升审批）
+  cd+git 组合审批闸门（bare-repo RCE 防护）
+  SessionEnd hook 超时钳制（timeout_cap 传导）
 """
 import json
 from types import SimpleNamespace
 
 
 # ======================================================================
-# H5：ask 档 + 聚合
+# ask 档 + 聚合
 # ======================================================================
 
 def test_pre_tool_ask_fails_closed_h5():
@@ -68,7 +66,7 @@ def test_pre_tool_parallel_declarative_h5(monkeypatch):
 
 
 # ======================================================================
-# M2/M3：权限闸门
+# 权限闸门
 # ======================================================================
 
 def test_compound_segment_cap_m2(tmp_path):
@@ -98,7 +96,7 @@ def test_cd_git_combo_gate_m3(tmp_path):
 
 
 # ======================================================================
-# H10：terminal 超时钳制 + sleep 拦截
+# terminal 超时钳制 + sleep 拦截
 # ======================================================================
 
 def test_terminal_timeout_clamped_h10(tmp_path, monkeypatch):
@@ -132,7 +130,7 @@ def test_terminal_bare_sleep_blocked_h10(tmp_path):
 
 
 # ======================================================================
-# M8：SessionEnd 超时钳制传导
+# SessionEnd 超时钳制传导
 # ======================================================================
 
 def test_run_script_hook_timeout_cap_m8(monkeypatch):

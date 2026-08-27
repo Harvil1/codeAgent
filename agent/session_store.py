@@ -11,14 +11,14 @@
   └── <session_id>.jsonl.bak  # 删除会话时只是改名为 .bak 备份（可恢复，不真删）
 
 设计权衡（为啥不用 SQLite 数据库）：
-  - Windows 上 SQLite 的文件锁反复出过问题（历史踩坑：X8 rowid bug 等）
+  - Windows 上 SQLite 的文件锁反复出过问题（历史踩坑：rowid bug 等）
   - 符合项目"文件优先"的哲学（memory/tasks 也都是纯文件）
   - 用户可以直接用记事本打开看/改 JSONL
   - 跨平台行为一致
   - 代价：全文搜索退化为 Python re 正则扫描（单用户小规模够用）
 
-对外接口和原 SQLite 版本完全一致——cli.py / agent/__init__.py 等
-调用方一行都不用改。
+对外接口是通用的存取语义——cli.py / agent/__init__.py 等
+调用方不依赖具体存储实现。
 """
 
 import json
@@ -84,7 +84,7 @@ class SessionStore:
         self._index_path = self._sessions_dir / "index.json"
         self._lock = threading.Lock()
         self._index_cache: Optional[List[dict]] = None  # 目录卡片的内存缓存（第一次访问时加载）
-        # 消息缓存（Round 3 压力优化）：session_id -> ((mtime, size), msgs)。
+        # 消息缓存（热路径优化）：session_id -> ((mtime, size), msgs)。
         # 为什么要缓存：search/get_messages/get_stats 是热路径，每次都
         # 读盘 + JSON 解析太慢；文件一变（mtime/size 变）缓存自动失效。
         # 为什么键用 mtime+size 双因子：Windows 的 mtime 精度只有 ~15ms，
@@ -144,7 +144,7 @@ class SessionStore:
     def _read_session_msgs(self, session_id: str) -> List[dict]:
         """（内部）读某个会话 .jsonl 里的全部消息（只读，不动 index）。
 
-        背景（Round 3 压力优化）：search/get_messages/get_stats/fork
+        背景（热路径优化）：search/get_messages/get_stats/fork
         每次都全量读盘 + 逐行 JSON 解析，是热路径——上万条消息时一次
         要 100ms 以上。所以加了缓存：记下 (mtime, size)，文件没变就
         直接用上次解析好的结果；调用方拿到后只做只读遍历，不会互相污染。
@@ -361,7 +361,7 @@ class SessionStore:
             content：消息正文
             tool_calls：assistant 消息携带的工具调用列表（可不填）
             tool_call_id：tool 消息对应的调用 ID，用于配对（可不填）
-            name：tool 消息的工具名（对齐 Claude Code 的会话恢复格式）
+            name：tool 消息的工具名（会话恢复格式用）
 
         返回：这条消息自己的 msg_id（UUID 字符串）。
         """
@@ -490,7 +490,7 @@ class SessionStore:
 
         这是项目"完全可逆"铁律的体现，符合数据永不真删的约定。
 
-        历史踩坑（S7 修复）：要从目录卡片移除和文件改名这两步在
+        历史踩坑：要从目录卡片移除和文件改名这两步在
         同一把锁里做完，否则中途被打断会出现两步只做一半的脏状态。
 
         参数：
@@ -515,7 +515,7 @@ class SessionStore:
             self._save_index()
 
     # ------------------------------------------------------------------
-    # P2-12: 会话 fork（克隆）
+    # 会话 fork（克隆）
     # ------------------------------------------------------------------
 
     def fork_session(

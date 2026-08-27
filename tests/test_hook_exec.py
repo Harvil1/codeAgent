@@ -84,7 +84,7 @@ def test_run_script_env_vars_passed():
     assert result == {"v": "xyz"}
 
 
-# ===== R25 #8：http hook ${VAR} 插值白名单 =====
+# ===== http hook ${VAR} 插值白名单 =====
 
 class TestInterpolateEnvVars:
     def test_whitelisted_var_interpolated(self, monkeypatch):

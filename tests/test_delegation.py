@@ -433,7 +433,7 @@ def test_run_child_general_purpose_unchanged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CCAR5 Important 1 回归：非 custom_def 路径下 disabled_tools 透传
+# 回归：非 custom_def 路径下 disabled_tools 透传
 # ---------------------------------------------------------------------------
 
 def _make_fake_child(captured: dict):
@@ -465,11 +465,11 @@ def _patch_run_child_env(monkeypatch):
 
 
 def test_run_child_passes_injected_disabled_tools_without_custom_def(monkeypatch):
-    """CCAR5 Important 1：非 custom_def 路径下，kwargs["config"]["disabled_tools"]
+    """非 custom_def 路径下，kwargs["config"]["disabled_tools"]
     必须透传到 AIAgent 的 config.disabled_tools。
 
-    场景：_delegate_async（Task F）在 kwargs["config"]["disabled_tools"] 注入黑名单，
-    但 stype=general-purpose（无 custom_def），修复前 child_config 永远是 None，
+    场景：_delegate_async 在 kwargs["config"]["disabled_tools"] 注入黑名单，
+    但 stype=general-purpose（无 custom_def），若 child_config 恒为 None，
     注入的黑名单完全丢失。
     """
     captured = {}
@@ -493,7 +493,7 @@ def test_run_child_passes_injected_disabled_tools_without_custom_def(monkeypatch
                             config={"disabled_tools": ["bg_start", "team_spawn"]},
                         )
 
-    # 修复前：config 为 None；修复后：config 含 disabled_tools
+    # 期望：config 含 disabled_tools（不能为 None）
     assert captured["config"] is not None, (
         "非 custom_def 路径下 child_config 不应为 None（CCAR5 Important 1）"
     )
@@ -503,7 +503,7 @@ def test_run_child_passes_injected_disabled_tools_without_custom_def(monkeypatch
 
 
 def test_run_child_merges_custom_def_and_injected_disabled_tools(monkeypatch):
-    """CCAR5 Important 1：custom_def.disallowed_tools 和 kwargs 注入的 disabled_tools
+    """custom_def.disallowed_tools 和 kwargs 注入的 disabled_tools
     取并集（保序去重），不互相覆盖。
     """
     from agent.agent_defs import AgentDefinition
@@ -546,7 +546,7 @@ def test_run_child_merges_custom_def_and_injected_disabled_tools(monkeypatch):
 
 
 def test_run_child_no_disabled_tools_yields_none_child_config(monkeypatch):
-    """CCAR5 Important 1 回归保护：无任何 disabled_tools 时，child_config 仍为 None
+    """回归保护：无任何 disabled_tools 时，child_config 仍为 None
     （不破坏 test_run_child_general_purpose_unchanged 的契约）。
     """
     captured = {}
@@ -572,7 +572,7 @@ def test_run_child_no_disabled_tools_yields_none_child_config(monkeypatch):
 
 
 def test_run_child_preserves_other_config_keys_with_disabled(monkeypatch):
-    """CCAR5 Important 1：构造 child_config 时其他 config 键不丢失。"""
+    """构造 child_config 时其他 config 键不丢失。"""
     captured = {}
     FakeChild = _make_fake_child(captured)
 
@@ -606,7 +606,7 @@ def test_run_child_preserves_other_config_keys_with_disabled(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R26 #12：并发子代理 30s 进度摘要 ticker
+# 并发子代理 30s 进度摘要 ticker
 # ---------------------------------------------------------------------------
 
 class TestProgressTicker:

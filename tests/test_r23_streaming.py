@@ -1,4 +1,4 @@
-"""R23 流式并发执行测试（#7）。"""
+"""流式并发执行测试。"""
 
 import asyncio
 import json
@@ -61,7 +61,7 @@ def _mk_agent(config=None, handled=None):
     a._tool_failure_streak = 0
     a._activated_conditional_skills = set()
     a._memory_touched_this_turn = False
-    a._pending_skill_paths = []  # R26 #16：pre-callback 收集-批量执行新字段
+    a._pending_skill_paths = []  # pre-callback 收集-批量执行字段
     a._streaming_preset_results = {}
     a._stream_callback = None
     a.llm_client = None

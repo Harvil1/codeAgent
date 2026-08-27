@@ -1,10 +1,10 @@
-"""R18 上下文成本专项测试。
+"""上下文成本专项测试。
 
-#16 压缩请求图片剥离
-#18 autocompact 触发熔断
-#15 压缩调用复用缓存前缀
-#17 token 权威计数
-#19 tool_use 批间摘要
+压缩请求图片剥离
+autocompact 触发熔断
+压缩调用复用缓存前缀
+token 权威计数
+tool_use 批间摘要
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from agent.context_pipeline import (
 
 
 # ---------------------------------------------------------------------------
-# R18 #16：媒体块剥离
+# 媒体块剥离
 # ---------------------------------------------------------------------------
 
 def test_strip_media_blocks_basic():
@@ -98,7 +98,7 @@ async def test_summarize_strips_media(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R18 #18：L4 触发熔断
+# L4 触发熔断
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ def test_l4_failure_reset_on_success():
 
 
 # ---------------------------------------------------------------------------
-# R18 #15：压缩调用复用缓存前缀（fork）
+# 压缩调用复用缓存前缀（fork）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -297,7 +297,7 @@ async def test_llm_compact_passes_fork_prefix():
 
 
 # ---------------------------------------------------------------------------
-# R18 #17：token 权威计数（usage 回溯 + 粗估混合）
+# token 权威计数（usage 回溯 + 粗估混合）
 # ---------------------------------------------------------------------------
 
 from agent.context_pipeline import estimate_tokens_hybrid
@@ -347,7 +347,7 @@ def test_record_llm_usage_anchor():
 
 
 # ---------------------------------------------------------------------------
-# R18 #19：tool_use 批间摘要
+# tool_use 批间摘要
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -431,11 +431,12 @@ async def test_tool_batch_summary_gate_disabled():
 
 
 def test_tool_batch_summary_survives_loop_teardown(monkeypatch):
-    """R30 审计 High-2 回归：批间摘要任务不随 per-turn 事件循环销毁被取消。
+    """批间摘要任务不随 per-turn 事件循环销毁被取消。
 
     CLI per-turn asyncio.run 模型下，最后一批工具的摘要 create_task 在循环
-    销毁时被取消 → 下一回合永远注入不了该摘要。新实现须与主循环生命周期解耦。
-    （旧实现在无活循环处调用还会因 create_task 抛 RuntimeError 被 fail-open 吞掉。）
+    销毁时被取消 → 下一回合永远注入不了该摘要。摘要任务须与主循环生命周期
+    解耦（在无活循环处调用也不能因 create_task 抛 RuntimeError 被 fail-open
+    吞掉）。
     """
     import threading
     from agent import AIAgent
@@ -474,7 +475,7 @@ def test_tool_batch_summary_config_default():
     assert DEFAULT_CONFIG["context"]["tool_batch_summary_enabled"] is False
 
 
-# ===== R25 #7：摘要 prompt 防伪造条款（契约测试防回归）=====
+# ===== 摘要 prompt 防伪造条款（契约测试防回归）=====
 
 class TestSummaryPromptAntiForgery:
     def test_prompt_contains_anti_forgery_clause(self):

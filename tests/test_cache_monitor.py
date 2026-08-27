@@ -697,7 +697,7 @@ def test_reset_called_in_init(tmp_path):
 
 
 # ============================================================================
-# CCAR4 Task A: 12 维度扩展 + per-tool hash + diff 文件 + TTL 分析
+# 12 维度扩展 + per-tool hash + diff 文件 + TTL 分析
 # ============================================================================
 
 def _make_tool(name, schema=None):

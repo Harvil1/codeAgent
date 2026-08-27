@@ -1,4 +1,4 @@
-"""Mailbox 异步队列测试（CCAR8 Task 8）。
+"""Mailbox 异步队列测试。
 
 测试覆盖：
 - send + check_unread 基本投递

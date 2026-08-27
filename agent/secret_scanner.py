@@ -1,8 +1,7 @@
-"""公共秘密扫描器（R19 #24 引入）。
+"""公共秘密扫描器。
 
-防止 API 密钥、token 这类敏感信息混进持久化数据。规则族对齐 CC
-teamMemorySync/secretScanner 的 gitleaks 核心规则：把 handoff 里已有
-的 5 类模式抽出来做成公共模块并扩充，然后接入四条链路（各链路策略不同，
+防止 API 密钥、token 这类敏感信息混进持久化数据。规则族覆盖
+gitleaks 的核心规则，接入四条链路（各链路策略不同，
 按"秘密该不该出现在这里"分寸处理）：
 
 - **记忆写入**（memory_store.save/update）：命中 → 直接 ValueError 拒绝写入

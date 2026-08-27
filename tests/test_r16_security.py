@@ -1,10 +1,10 @@
-"""R16 安全专项测试。
+"""安全专项测试。
 
-#2 Windows 路径绕过检测（suspicious 前置检查）
-#5 双路径检查（原始词法 + realpath 都过保护表）
-#6 危险删除路径判定（rm/del 目标参数化）
-#1 Bash 注入面检查（命中升审批）
-（#4 SSRF / #3 内容级规则见各自段落）
+Windows 路径绕过检测（suspicious 前置检查）
+双路径检查（原始词法 + realpath 都过保护表）
+危险删除路径判定（rm/del 目标参数化）
+Bash 注入面检查（命中升审批）
+（SSRF / 内容级规则见各自段落）
 """
 
 import os
@@ -23,7 +23,7 @@ from agent.permission import (
 
 
 # ---------------------------------------------------------------------------
-# R16 #2：可疑路径形态检测
+# 可疑路径形态检测
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("path,expected_keyword", [
@@ -74,7 +74,7 @@ def test_colon_legal_on_posix_suspicious_on_windows():
     """POSIX 冒号文件名合法不拦；win32 上位置≥2 的冒号视为 ADS。
 
     注：单字母前缀 + 冒号（a:b）在 Windows 是盘符相对路径，不判 ADS
-    （对齐 CCB indexOf(':', 2) 语义）。
+    （冒号位置 ≥2 才判，跳过盘符冒号）。
     """
     assert check_suspicious_path("ab:c") is not None
     assert check_suspicious_path("a:b") is None
@@ -130,7 +130,7 @@ def test_legit_write_still_works(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R16 #5：双路径检查（词法 + realpath 都过保护表）
+# 双路径检查（词法 + realpath 都过保护表）
 # ---------------------------------------------------------------------------
 
 import agent.permission as perm_mod
@@ -200,7 +200,7 @@ def test_dual_path_lexical_form_still_checked(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R16 #6：危险删除路径判定
+# 危险删除路径判定
 # ---------------------------------------------------------------------------
 
 from agent.permission import (
@@ -288,7 +288,7 @@ def test_dangerous_removal_compound(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R16 #4：HTTP hook SSRF 防护
+# HTTP hook SSRF 防护
 # ---------------------------------------------------------------------------
 
 import agent.ssrf_guard as ssrf_mod
@@ -373,7 +373,7 @@ def test_validate_url_dns_fail_open(monkeypatch):
 
 
 def test_validate_url_env_proxy_skips_guard(monkeypatch):
-    """环境代理激活 → 跳过地址段预检（对齐 CC 语义）。"""
+    """环境代理激活 → 跳过地址段预检。"""
     monkeypatch.setattr(ssrf_mod, "_env_proxy_active", lambda url: True)
     monkeypatch.setattr(
         ssrf_mod.socket, "getaddrinfo",
@@ -473,7 +473,7 @@ def test_run_http_hook_allowlist_gate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R16 #1：Bash 注入面检查（命中升审批）
+# Bash 注入面检查（命中升审批）
 # ---------------------------------------------------------------------------
 
 from agent.bash_injection import check_injection_surface
@@ -611,7 +611,7 @@ def test_hard_deny_before_injection():
 
 
 # ---------------------------------------------------------------------------
-# R16 #3：内容级权限规则（Bash(cmd:*) 语法 + 遮蔽检测）
+# 内容级权限规则（Bash(cmd:*) 语法 + 遮蔽检测）
 # ---------------------------------------------------------------------------
 
 import agent.tool_permissions as tp
@@ -703,7 +703,7 @@ def test_content_rule_allow_skips_approval_gates(monkeypatch):
     """内容级 allow：跳过注入面/破坏性审批；硬底线不受影响。
 
     注意前缀是词边界语义：build:* 匹配 "rm -rf build" 不匹配 "rm -rf build/"
-    （对齐 CC prefix 匹配的词边界行为）。
+    （prefix 匹配是词边界行为）。
     """
     _patch_rules(monkeypatch, allow=["Bash(rm -rf build:*)"])
     checker = PermissionChecker()  # 无 callback——正常会拒
@@ -715,7 +715,7 @@ def test_content_rule_allow_skips_approval_gates(monkeypatch):
     assert r2.allowed and r2.gate == "rule_allow"
     # 硬底线不受 content allow 影响
     assert not checker.check("sudo rm -rf build").allowed           # 闸门 0/1
-    assert not checker.check("rm -rf /usr").allowed                 # R16 #6
+    assert not checker.check("rm -rf /usr").allowed                 # 危险删除不可审批解锁
     # 词边界外 / 不匹配前缀的破坏性命令仍走审批
     assert not checker.check("rm -rf build/").allowed
     assert not checker.check("rm -rf dist/").allowed

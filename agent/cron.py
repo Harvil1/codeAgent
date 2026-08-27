@@ -33,7 +33,7 @@ class CronJob:
     - cron：cron 表达式（定闹钟的时间规则）
     - message：到点要通知的内容
     - enabled：开关；False=暂停这条任务但不删除
-    - catch_up：补跑开关（P1-7 引入）——True 时，程序重启后会补一次停机期间错过的触发
+    - catch_up：补跑开关——True 时，程序重启后会补一次停机期间错过的触发
     - created_at：创建时间（ISO 格式字符串）；老版本 jobs.json 没这个字段，读取时自动补当前时间
     - recurring：True=循环任务（到点每次都响）；False=一次性任务，响一次就自动停用（不删除）
     - last_fired_at：上次真正触发的时间（精确到分钟）；空=还没触发过
@@ -43,16 +43,16 @@ class CronJob:
     message: str
     enabled: bool = True
     catch_up: bool = False  # 补跑开关：True 时启动会补跑错过的一次触发
-    # === CronRecurringExpiry 新增字段 ===
+    # === 任务生命周期字段 ===
     created_at: str = ""    # ISO 时间戳；老 jobs.json 缺时 _parse_job 自动补当前时间
     recurring: bool = True  # False = 一次性，触发后自动停用（不删除，留档可查）
-    # === P1-7 新增字段 ===
+    # === 补跑相关字段 ===
     last_fired_at: str = ""  # 上次实际触发时间（ISO 格式精确到分钟）；空=从没触发过
     # 补跑扫描窗口上限（小时）：上次触发太久远就不补了，免得逐分钟扫描太费劲。
     # 默认 24 小时：用户重启间隔通常不到一天；隔更久的基本算废弃任务，不补。
 
 
-# P1-7 定的默认值：补跑扫描窗口上限（小时），超过就不补
+# 默认值：补跑扫描窗口上限（小时），超过就不补
 DEFAULT_CATCH_UP_WINDOW_HOURS = 24
 
 
@@ -65,7 +65,7 @@ class CronScheduler:
         jobs_path: Path,
         poll_interval_seconds: float = 30.0,
         enabled: bool = True,
-        max_age_days: int = 7,  # CronRecurringExpiry 新增：任务最多活几天，超龄自动停用
+        max_age_days: int = 7,  # 任务最多活几天，超龄自动停用
     ):
         """建一个调度器。
 
@@ -86,7 +86,7 @@ class CronScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._jobs_path = jobs_path
-        # CronRecurringExpiry 新增：超龄天数从构造参数读——
+        # 超龄天数从构造参数读——
         # 正式运行时 RuntimeContext 从 config["cron"]["max_age_days"] 传入，
         # 测试可以直接构造时覆盖，不用改全局配置
         self._max_age_days = max_age_days
@@ -100,7 +100,7 @@ class CronScheduler:
         """
         if self._thread and self._thread.is_alive():
             return
-        # P1-7 设计：起线程前先补跑停机期间错过的触发（只针对开了 catch_up 的任务）
+        # 起线程前先补跑停机期间错过的触发（只针对开了 catch_up 的任务）
         try:
             self._apply_catch_up(datetime.now())
         except Exception as e:
@@ -115,7 +115,7 @@ class CronScheduler:
     def _apply_catch_up(
         self, now: datetime, *, window_hours: int = DEFAULT_CATCH_UP_WINDOW_HOURS,
     ):
-        """启动时补跑：把停机期间错过的一次触发补上通知（P1-7 引入）。
+        """启动时补跑：把停机期间错过的一次触发补上通知。
 
         背景：比如闹钟定的是每小时响，但电脑关了一晚，重开后总得告诉用户
         "你错过了"。做法是逐分钟扫停机时间段，找到第一个该触发的点就补一条通知。
@@ -128,7 +128,7 @@ class CronScheduler:
         补跑只发一条（不重复轰炸），通知里带 catch_up=True 和真实触发区分开。
         扫描本身不更新 last_fired_at（留给下次正常扫描更新）。
 
-        R30c-C5 定下的明确语义：每条任务每次启动只补 1 次——停机 8 小时
+        明确语义：每条任务每次启动只补 1 次——停机 8 小时
         错过 8 次每小时触发也只补 1 次（补跑是"提醒你错过了"，不是
         "把历史重放一遍"，防止通知风暴；完整错过区间用 missed_between
         字段标注）。
@@ -200,7 +200,7 @@ class CronScheduler:
                     scan_end.isoformat(timespec="minutes"),
                 )
         # 注意：补跑后不更新 last_fired_at 存档（补跑不算"实际触发"，
-        # 留给下次正常扫描更新——原来这里有个空 if 死代码，R30c-C5 清理掉了）。
+        # 留给下次正常扫描更新）。
 
     def stop(self) -> None:
         """停掉后台线程（最多等它 5 秒）。重复调用无害（幂等）。参数无，返回无。"""
@@ -241,7 +241,7 @@ class CronScheduler:
             self._notifications.clear()
         return self._load_jobs(path)
 
-    # ---- 增删查（CCAR12 Task 3：tools/cron_tool.py 把这些方法包装成工具，
+    # ---- 增删查（tools/cron_tool.py 把这些方法包装成工具，
     # 让 LLM 能自己管理定时任务）----
     def add_job(
         self,
@@ -250,7 +250,7 @@ class CronScheduler:
         *,
         catch_up: bool = False,
         job_id: Optional[str] = None,
-        recurring: bool = True,  # R26 #18 复审定的：模板的一次性属性要透传到这里（False=一次性）
+        recurring: bool = True,  # 模板的一次性属性要透传到这里（False=一次性）
     ) -> CronJob:
         """新增一条定时任务（自动生成编号 + 立刻存盘）。
 
@@ -386,11 +386,11 @@ class CronScheduler:
         if not message:
             logger.warning("cron job '%s' 缺 message 字段，跳过", job_id)
             return None
-        # === CronRecurringExpiry 新增：老格式文件的字段兼容 ===
-        # X10 修复：created_at 默认用 UTC 时间——不然跨时区/夏令时会让"任务年龄"跳来跳去
+        # === 老格式文件的字段兼容 ===
+        # created_at 默认用 UTC 时间——不然跨时区/夏令时会让"任务年龄"跳来跳去
         created_at = h.get("created_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")
         recurring = h.get("recurring", True)
-        # P1-7：last_fired_at 兼容——老文件没这个字段就当空（首次触发后才写上）
+        # last_fired_at 兼容——老文件没这个字段就当空（首次触发后才写上）
         last_fired_at = h.get("last_fired_at", "")
         return CronJob(
             id=job_id,
@@ -409,7 +409,7 @@ class CronScheduler:
         单次查询出错只记日志不退出——调度线程挂了所有闹钟就全哑了。
         参数无，返回无。
         """
-        # 超龄天数启动时从配置读好，循环里直接用（CronRecurringExpiry 新增）
+        # 超龄天数启动时从配置读好，循环里直接用
         max_age_days = self._max_age_days
         while not self._stop_event.is_set():
             if self._enabled:
@@ -440,13 +440,13 @@ class CronScheduler:
 
         expired_ids: set = set()
         fired_oneshot_ids: set = set()
-        fired_any = False  # P1-7：只要有触发就得存档（更新 last_fired_at 给补跑用）
+        fired_any = False  # 只要有触发就得存档（更新 last_fired_at 给补跑用）
 
         for job in jobs_snapshot:
             if not job.enabled:
                 continue
 
-            # === CronRecurringExpiry 新增：超龄检查，过期的僵尸任务自动停用 ===
+            # === 超龄检查，过期的僵尸任务自动停用 ===
             if job.created_at:
                 try:
                     created = datetime.fromisoformat(job.created_at)
@@ -474,7 +474,7 @@ class CronScheduler:
                 if self._last_fired.get(job.id) == minute_marker:
                     continue  # 这分钟已经触发过了，不重复
                 self._last_fired[job.id] = minute_marker
-                # P1-7：触发时间写进任务对象（后面统一存档，下次启动补跑靠它）
+                # 触发时间写进任务对象（后面统一存档，下次启动补跑靠它）
                 job.last_fired_at = now.isoformat(timespec="minutes")
                 self._notifications.append({
                     "job_id": job.id,
@@ -483,19 +483,19 @@ class CronScheduler:
                 })
                 fired_any = True
 
-                # X11 修复：一次性任务触发后立刻停用并存盘，不等这轮循环扫完——
+                # 一次性任务触发后立刻停用并存盘，不等这轮循环扫完——
                 # 不然进程在这中间被杀，下次启动补跑会把它再触发一遍
                 if not job.recurring:
                     job.enabled = False
                     self._persist_jobs_unlocked()
                     logger.info("cron 一次性 job %s 触发后立即 disable", job.id)
 
-            # === CronRecurringExpiry 新增：记下一次性任务（上面已立刻停用，
+            # === 记下一次性任务（上面已立刻停用，
             # 这里只是加进集合，凑给循环末尾的日志统计用） ===
             if not job.recurring:
                 fired_oneshot_ids.add(job.id)
 
-        # === CronRecurringExpiry 新增：把过期和一次性任务统一停用 + 存盘 ===
+        # === 把过期和一次性任务统一停用 + 存盘 ===
         to_disable = expired_ids | fired_oneshot_ids
         if to_disable:
             with self._lock:
@@ -508,7 +508,7 @@ class CronScheduler:
                 len(to_disable), len(expired_ids), len(fired_oneshot_ids),
             )
         elif fired_any:
-            # P1-7：没有要停用的但有触发 → 也要存盘（把新的 last_fired_at 写进去）
+            # 没有要停用的但有触发 → 也要存盘（把新的 last_fired_at 写进去）
             with self._lock:
                 self._persist_jobs_unlocked()
 
@@ -533,7 +533,7 @@ class CronScheduler:
                         "catch_up": j.catch_up,
                         "created_at": j.created_at,
                         "recurring": j.recurring,
-                        "last_fired_at": j.last_fired_at,  # P1-7 加的字段：上次触发时间（补跑要用）
+                        "last_fired_at": j.last_fired_at,  # 上次触发时间（补跑要用）
                     }
                     for j in self._jobs
                 ]

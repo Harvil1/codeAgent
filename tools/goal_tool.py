@@ -10,8 +10,8 @@
 - goal_pause / goal_resume / goal_clear：暂停/恢复/取消，操作的是
   agent._goal_state 里那个目标状态对象
 
-怎么拿到 agent：从 dispatch_kwargs["agent_ref"] 取（沿用 CCAR8 引入的
-mailbox 接线模式）。目标激活后主循环的 goal-continue 分支会自动推进，
+怎么拿到 agent：从 dispatch_kwargs["agent_ref"] 取（沿用
+mailbox 的接线模式）。目标激活后主循环的 goal-continue 分支会自动推进，
 这里不用额外接线。
 
 并发分类：goal_status 标 isConcurrencySafe=True（只读，可并发）；

@@ -46,7 +46,7 @@ def test_is_available_macos_with_sandbox_exec():
 
 
 def test_is_available_windows_with_job_object(monkeypatch):
-    """CCAR12: Windows + win_job_object 可导入 → True（Job Object 模式）。"""
+    """Windows + win_job_object 可导入 → True（Job Object 模式）。"""
     import agent.sandbox_runner as mod
     monkeypatch.setattr(sys, "platform", "win32")
     mod._availability_cache = None
@@ -55,7 +55,7 @@ def test_is_available_windows_with_job_object(monkeypatch):
 
 
 def test_is_available_windows_import_fails_failopen(monkeypatch):
-    """CCAR12: Windows + win_job_object 导入失败 → False（fail-open）。"""
+    """Windows + win_job_object 导入失败 → False（fail-open）。"""
     import agent.sandbox_runner as mod
     monkeypatch.setattr(sys, "platform", "win32")
     # sys.modules 塞 None 让 `from agent.win_job_object import ...` 抛 ImportError
@@ -161,7 +161,7 @@ def test_bwrap_wrap_no_unshare_net():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: macOS Seatbelt
+# macOS Seatbelt
 # ---------------------------------------------------------------------------
 
 def test_seatbelt_profile_has_deny_default(tmp_path, monkeypatch):
@@ -233,7 +233,7 @@ def test_seatbelt_profile_filename_unique(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: terminal_tool 注入 sandbox wrapper（集成测试）
+# terminal_tool 注入 sandbox wrapper（集成测试）
 # ---------------------------------------------------------------------------
 
 def test_terminal_with_sandbox_off_uses_shell_true(monkeypatch):
@@ -276,7 +276,7 @@ def test_terminal_with_sandbox_on_uses_argv(monkeypatch):
         return R()
 
     monkeypatch.setattr(sr, "is_available", lambda: True)
-    # CCAR12: 这些测试验证 bwrap/seatbelt argv 路径，强制关 Job Object 模式
+    # 这些测试验证 bwrap/seatbelt argv 路径，强制关 Job Object 模式
     monkeypatch.setattr(sr, "uses_job_object", lambda: False)
     monkeypatch.setattr(sr, "wrap_command",
                         lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
@@ -384,7 +384,7 @@ def test_terminal_reads_sandbox_mode_from_default_checker(monkeypatch):
         set_default_checker(temp_checker)
 
         monkeypatch.setattr(sr, "is_available", lambda: True)
-        # CCAR12: 验证 argv 路径，强制关 Job Object 模式
+        # 验证 argv 路径，强制关 Job Object 模式
         monkeypatch.setattr(sr, "uses_job_object", lambda: False)
         monkeypatch.setattr(sr, "wrap_command",
                             lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
@@ -464,7 +464,7 @@ def test_bwrap_wrap_cwd_under_tmp_skips_tmpfs():
 
 
 # ---------------------------------------------------------------------------
-# CCAR12 Task 2: Windows Job Object 模式
+# Windows Job Object 模式
 # ---------------------------------------------------------------------------
 
 def test_uses_job_object_only_on_windows(monkeypatch):
@@ -637,7 +637,7 @@ def test_terminal_sandbox_windows_timeout_closes_job(monkeypatch):
 
 
 def test_terminal_sandbox_windows_timeout_kills_process_without_job(monkeypatch):
-    """超时 + attach 失败（job=None）→ proc.kill() 必须被调（CCAR13 A2）。
+    """超时 + attach 失败（job=None）→ proc.kill() 必须被调。
 
     job=None 时没有 KILL_ON_JOB_CLOSE 兜底，不杀就变孤儿进程继续跑；
     杀完还要 communicate 收尸（回收管道/句柄，对齐 subprocess.run 内部语义）。
@@ -672,7 +672,7 @@ def test_terminal_sandbox_windows_timeout_kills_process_without_job(monkeypatch)
 
 def test_terminal_sandbox_windows_timeout_with_job_does_not_kill(monkeypatch):
     """超时 + job 非 None → 不调 proc.kill()（finally 的 job.close 带
-    KILL_ON_JOB_CLOSE 清整棵树，重复杀是多余动作——CCAR13 A2 约束）。"""
+    KILL_ON_JOB_CLOSE 清整棵树，重复杀是多余动作）。"""
     import json
     import subprocess as sp
     import tools.terminal_tool as tt

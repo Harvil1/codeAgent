@@ -1,11 +1,11 @@
-"""config_tool 测试（CCAR12 Task 7）：LLM 安全改配置（白名单 7 键精确匹配）。
+"""config_tool 测试：LLM 安全改配置（白名单键精确匹配）。
 
 覆盖五层：
 1. config_get：读值（runtime 优先）/ 白名单外拒
 2. config_set：白名单外拒 / round-trip 落盘 / runtime 生效 / 类型强转 / hook 触发
 3. handler dispatch 契约（args, **kwargs，防 silent-dead-code）
-4. schema 键契约（OpenAI "parameters"，CCAR11 第 5 例教训）
-5. 白名单本身（frozenset 精确匹配，7 键）
+4. schema 键契约（OpenAI "parameters"）
+5. 白名单本身（frozenset 精确匹配）
 """
 import inspect
 import json
@@ -45,7 +45,7 @@ def _make_agent_ref(config=None):
 
 class TestWhitelist:
     def test_whitelist_exact_nine_keys(self):
-        """白名单恰好 9 键（CCAR12 brief 7 键 + CCAR15 Task 4 加 2 键），frozenset。"""
+        """白名单恰好 9 键，frozenset。"""
         assert isinstance(_CONFIG_WHITELIST, frozenset)
         assert len(_CONFIG_WHITELIST) == 9
 
@@ -55,7 +55,7 @@ class TestWhitelist:
         assert "context.reactive_compact_max_per_session" in _CONFIG_WHITELIST
 
     def test_whitelist_dead_keys_removed(self):
-        """dead key（全仓无读取点）绝不能回白名单（review 教训防回归）。"""
+        """dead key（全仓无读取点）绝不能回白名单（防回归）。"""
         assert "trace.retention_days" not in _CONFIG_WHITELIST  # trace.py 无 retention 逻辑
         assert "context.reactive_compact_enabled" not in _CONFIG_WHITELIST  # 真实开关在 features.*
 
@@ -68,7 +68,7 @@ class TestWhitelist:
         assert "llm.base_url" not in _CONFIG_WHITELIST  # 敏感键必须拒
 
     def test_whitelist_all_keys_have_read_points(self):
-        """CCAR13 A4 逐键核对 + CCAR15 T4 扩展：9 键全有真实读取点（无 dead key）。
+        """9 键全有真实读取点（无 dead key）。
 
         读取点清单（file:line 为核对时快照）：
           memory.curator.enabled              → agent/memory_curator.py:191
@@ -95,7 +95,7 @@ class TestWhitelist:
 
 
 # ---------------------------------------------------------------------------
-# 1.5 reactive 键 schema 提示（CCAR13 A3）
+# 1.5 reactive 键 schema 提示
 # ---------------------------------------------------------------------------
 
 class TestReactiveKeyHint:
@@ -334,7 +334,7 @@ class TestConfigSet:
         assert data["error_type"] == "invalid_args"
 
     def test_set_skill_learning_keys(self, settings_home):
-        """CCAR15 Task 4：skill_learning 两键在白名单内可设（runtime + 落盘）。"""
+        """skill_learning 两键在白名单内可设（runtime + 落盘）。"""
         ref = _make_agent_ref({"skill_learning": {
             "enabled": False, "observer": "heuristic"}})
         result = _handle_config_set(
@@ -351,7 +351,7 @@ class TestConfigSet:
         assert ref.config["skill_learning"]["observer"] == "llm"
 
     def test_observer_enum_validated(self, settings_home):
-        """CCAR15 T4 review 快修：observer 是枚举键（heuristic|llm）。
+        """observer 是枚举键（heuristic|llm）。
 
         大小写不敏感归一（"LLM" → "llm"，防拼错静默走启发式还假报生效）；
         非法枚举值拒绝（invalid_args），不落盘。
@@ -433,7 +433,7 @@ class TestContract:
     def test_handler_signature_matches_dispatch_contract(self, handler):
         """handler 必须 (args, **kwargs)——registry.dispatch 调
         handler(args, **dispatch_kwargs)，缺 VAR_KEYWORD 会变
-        silent-dead-code（CCAR8 教训）。"""
+        silent-dead-code。"""
         sig = inspect.signature(handler)
         params = list(sig.parameters.values())
         assert len(params) >= 1

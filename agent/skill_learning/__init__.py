@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""skill_learning 子包：instinct 行为记忆（历史轮次 CCAR15 引入）。
+"""skill_learning 子包：instinct 行为记忆。
 
 instinct（本能/条件反射）= 从对话轨迹里提炼出的「遇到什么情况 → 该怎么
 做」的习惯，比如「用户要求跑测试 → 先跑 pytest 再汇报」。每重复观察到

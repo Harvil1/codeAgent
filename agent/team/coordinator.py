@@ -53,7 +53,7 @@ class TeamCoordinator:
         self._registry_lock = self._team_dir / "registry.lock"
         self._team_dir.mkdir(parents=True, exist_ok=True)
         self._bus = MessageBus(team_dir=self._team_dir)
-        # 历史踩坑（P4a-final 修复）：必须把 Popen 对象存下来，
+        # 历史踩坑：必须把 Popen 对象存下来，
         # shutdown_all 靠它们才能找到子进程去 terminate——只记 pid 不够
         self._processes: dict = {}
 

@@ -35,7 +35,7 @@ def _make_server_check(mgr: MCPManager, sname: str):
 def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
     """把 MCP server 的工具批量登记进 registry。
 
-    背景：启动时全量登记；但 R24 #38 的内联临时 server 只需要暴露
+    背景：启动时全量登记；但内联临时 server 只需要暴露
     agent 声明的那几个，所以加了 servers 过滤参数。
 
     参数：
@@ -96,7 +96,7 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
         except Exception as e:
             logger.warning("注册 MCP 工具 %s 失败: %s", full_name, e)
 
-    # CCAR12 Task 5：给每个连着的 server 追加 resources（资源清单）协议工具，
+    # 给每个连着的 server 追加 resources（资源清单）协议工具，
     # 命名对齐 mcp__<server>__<tool> 动态模式，check_fn 用同款 per-server 门控
     count += _register_resource_tools(manager)
 
@@ -202,8 +202,8 @@ def initialize_mcp(approval_callback=None) -> int:
 
     背景：审批只针对"项目级"配置——用户级 ~/.OmniMate/.mcp.json 是用户
     自己手写的，天然可信；但项目里的 .mcp.json 可能是 clone 陌生仓库
-    带进来的，所以每个 server 第一次连接前必须先过审批（R25 #3，
-    对齐 Claude Code 的 mcpServerApproval）。没批准、或者压根没有
+    带进来的，所以每个 server 第一次连接前必须先过审批。
+    没批准、或者压根没有
     approval_callback（非交互场景）→ fail-closed 直接跳过不连。
 
     参数：
@@ -218,7 +218,7 @@ def initialize_mcp(approval_callback=None) -> int:
         # 用户级配置（用户直接控制，直接连）
         manager.connect_all()
 
-        # R25 #3：项目级 .mcp.json 首连审批
+        # 项目级 .mcp.json 首连审批
         from agent.mcp_client import load_mcp_config, load_project_mcp_config
         from agent.settings import is_project_mcp_approved, persist_project_mcp_approval
 
@@ -257,7 +257,7 @@ def initialize_mcp(approval_callback=None) -> int:
             if approved_now:
                 manager.connect_all(approved_now)
 
-        # R29 #2：项目级 agent .md 里内联声明的 MCP server 走同款首连审批
+        # 项目级 agent .md 里内联声明的 MCP server 走同款首连审批
         # （威胁模型跟项目 .mcp.json 一样：clone 陌生 repo 可能带进恶意配置）
         try:
             from agent.agent_defs import project_inline_mcp_servers

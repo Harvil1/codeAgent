@@ -150,9 +150,8 @@ def test_registered_in_registry():
 def test_memory_recall_in_core_tools():
     """memory_recall 必须进 _CORE_TOOLS 才对 LLM 可见（发现 ≠ 可见）。
 
-    历史 bug：注册 toolset="memory" 但 "memory" 不在 TOOLSETS 定义，
-    导致工具实现了却从未暴露给 LLM（silent-dead-code）。
-    对齐 Claude Code LocalMemoryRecallTool 的 core 定位。
+    防回归点：注册 toolset="memory" 但 "memory" 不在 TOOLSETS 定义的话，
+    工具实现了却从未暴露给 LLM（silent-dead-code）。
     """
     from toolsets import _CORE_TOOLS
     assert "memory_recall" in _CORE_TOOLS

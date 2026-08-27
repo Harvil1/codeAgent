@@ -1,8 +1,8 @@
-"""worktree 的 LLM 工具（历史出处 CCAR12 Task 6）：让主对话整个搬进搬出 worktree。
+"""worktree 的 LLM 工具：让主对话整个搬进搬出 worktree。
 
 这个文件是干嘛的：把 tools/worktree.py 的隔离能力包装成两个 LLM 能调的
-工具——worktree_enter（搬进去）和 worktree_exit（搬出来）。语义对齐 CCB
-的 EnterWorktree/ExitWorktree：LLM 可以把**当前主对话**切进一个 git
+工具——worktree_enter（搬进去）和 worktree_exit（搬出来）。LLM 可以把
+**当前主对话**切进一个 git
 worktree（隔离目录 + 独立分支，好比给主对话临时开了间独立办公室），之后
 所有工具问「当前目录在哪」（get_workspace_cwd()）得到的都是 worktree 的
 路径，直到调 worktree_exit 才搬回来。
@@ -12,7 +12,7 @@ worktree（隔离目录 + 独立分支，好比给主对话临时开了间独立
     这里是**长期搬家**——会话级切换（set_session_workspace_cwd），不显式
     调 exit 就一直在 worktree 里待着。
 
-底层复用 CCAR5 轮建好的基建（tools/worktree.py）：
+底层复用 tools/worktree.py 的基建：
     - 创建：git worktree add（分支叫 omnimate/<名字>/<8位短ID>，目录在
       <仓库根>/.worktrees/<名字>）；非 git 目录降级用系统临时目录
     - 清理：先聪明检测有没有改动（has_worktree_changes）再决定
@@ -101,8 +101,8 @@ def _reset_session_worktree() -> None:
 
 
 # ---------------------------------------------------------------------------
-# schema（工具说明书；注意参数键必须是 OpenAI 的 "parameters"——历史踩坑
-# CCAR11 契约：用错键 LLM 就看不见参数定义，第 5 次翻车后立了规矩）
+# schema（工具说明书；注意参数键必须是 OpenAI 的 "parameters"——
+# 用错键 LLM 就看不见参数定义，历史上因此翻过多次车）
 # ---------------------------------------------------------------------------
 
 WORKTREE_ENTER_SCHEMA = {
@@ -200,7 +200,7 @@ def _create_session_worktree(name: str):
 
     规则：在 git 仓库里就建 .worktrees/<名字>（目录已经存在就直接拿来
     复用——可能是上次会话留下的）；不在 git 仓库（或 git 建砸了）就退化用
-    系统临时目录。降级语义沿用 CCAR5 轮定下的规矩。
+    系统临时目录。
 
     参数：
         name：worktree 名字（已提前洗干净，拼接安全）。
@@ -231,7 +231,7 @@ def _create_session_worktree(name: str):
         except Exception as e:
             logger.warning("git worktree 创建失败，降级到临时目录: %s", e)
 
-    # 非 git（或 git 建砸了降级）：系统临时目录（沿用 CCAR5 _create_temp_workspace 的语义）
+    # 非 git（或 git 建砸了降级）：系统临时目录（语义同 tools/worktree.py 的临时工作区）
     tmp = Path(tempfile.mkdtemp(prefix=f"omnimate-wt-{name}-"))
     return _SessionWorktree(tmp, None, "temp", reused=False)
 
@@ -239,7 +239,7 @@ def _create_session_worktree(name: str):
 async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
     """worktree_enter 的实现：把主对话搬进一个 worktree（建/复用 + 切目录 + 发通知）。
 
-    为什么必须是 async def（历史踩坑，CCAR12 Task 6 修复，评审定级 Critical）：
+    为什么必须是 async def（关键坑，评审定级 Critical）：
     registry.dispatch 对同步 handler 会走 asyncio.to_thread——那会把当前
     context **拷贝**一份到工作线程。`set_session_workspace_cwd` 底层的
     ContextVar 一 set，改的只是拷贝，主循环毫无感知（enter 看似成功实则
@@ -258,7 +258,7 @@ async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
     """
     global _session_worktree
 
-    # 历史踩坑（CCAR13 A1，CCAR12 终审 follow-up）：子代理（spawn_depth>0，
+    # 子代理（spawn_depth>0，
     # 即派生层级大于 0 的分身）不许切会话级 worktree——ContextVar 是整个
     # 进程共享的，子代理一 enter 就把主对话的目录劫持了，而且子代理结束时
     # 未必会 exit（会话级语义被滥用）。
@@ -360,11 +360,11 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
         )
 
     cleaned = cleanup_worktree_smart(wt.path)
-    # git 模式新建的分支要连着一起删。分工规矩（CCAR5-G 定的）：
+    # git 模式新建的分支要连着一起删。分工规矩：
     # cleanup_worktree_smart 只删目录不删分支——分支删除由知道分支名的
     # 调用方负责，正好这里知道。
     # 仓库位置用 enter 时记下的 wt.repo_root——此刻 cwd 已经搬回原处，
-    # 再靠「当前目录」反查仓库就查错地方了（历史出处：Minor 2 修复）
+    # 再靠「当前目录」反查仓库就查错地方了
     if wt.branch and wt.workspace_type == "git":
         repo_root = wt.repo_root or get_repo_root(Path.cwd())
         if repo_root is not None:
@@ -383,7 +383,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
 # is_async=True 的原因：handler 是 async def——dispatch 会直接 await（同一个
 # 任务同一个 context），不走 to_thread 的 context 拷贝。会话目录的
 # set/reset 必须在主循环 context 里执行，否则 enter 静默失效 + exit 的
-# reset 跨 context 直接炸 ValueError（详见 handler docstring 里的历史踩坑）
+# reset 跨 context 直接炸 ValueError（详见 handler docstring 里的踩坑说明）
 registry.register(
     name="worktree_enter",
     toolset="core",

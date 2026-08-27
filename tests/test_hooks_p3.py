@@ -499,8 +499,8 @@ def test_p38_sandbox_not_enabled_by_default():
 
 
 # ============================================================================
-# CCAR14 Task 2: Windows + use_sandbox=True 接 Job Object
-# （对齐 terminal_tool 的 CCAR12 模式：命令不包装 + Popen + attach_job +
+# Windows + use_sandbox=True 接 Job Object
+# （与 terminal_tool 同款模式：命令不包装 + Popen + attach_job +
 #   try communicate / finally close）
 # ============================================================================
 
@@ -515,7 +515,7 @@ class _FakeJob:
 
 
 class _FakeHookPopen:
-    """假 Popen：配合 hook_exec 的 Windows job 分支（照 CCAR12 Task 2 模式）。"""
+    """假 Popen：配合 hook_exec 的 Windows job 分支（与 terminal 同款模式）。"""
 
     def __init__(self, argv, events, **kwargs):
         self.argv = argv

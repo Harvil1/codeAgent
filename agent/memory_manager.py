@@ -265,7 +265,7 @@ class MemoryManager:
     def build_system_prompt(self) -> str:
         """拼出要塞进 system prompt 的记忆部分。
 
-        背景（CCAR10 Task 2 的历史决策）：内置记忆的固定快照已经从
+        背景：内置记忆的固定快照已经从
         system prompt 里退役——中途改 prompt 会击穿缓存。现在只保留
         外部 provider 的静态块（这个块在会话开始时确定，之后不变，
         不伤缓存）。

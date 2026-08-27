@@ -1,7 +1,6 @@
 """上下文压缩（compact，把长对话浓缩成摘要腾地方）之后的关键信息"补发"模块。
 
-背景（CCAR4 Task B，借鉴 claude-code-main 的 createPostCompactFileAttachments
-+ createSkillAttachmentIfNeeded）：压缩会把对话历史浓缩，模型刚读过的工作
+背景：压缩会把对话历史浓缩，模型刚读过的工作
 材料也一起被浓缩没了，导致它"失忆"手忙脚乱。所以在压缩完成后，把下面
 这些东西作为 user 消息重新塞回去：
 1. 最近读过的 N 个文件路径 + 内容开头（每文件最多 1K 字符）
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# 预算常量（对齐 claude-code-main + Task B 的约定）
+# 预算常量
 # ============================================================================
 MAX_RECENT_FILES = 5                      # 最多补发几个最近文件
 RECENT_FILE_PREVIEW_CHARS = 1000           # 每个文件正文开头最多给多少字符
@@ -54,7 +53,7 @@ def _est_tokens(text: str) -> int:
 def build_post_compact_brief(agent: "AIAgent") -> str:
     """压缩完成后构建"补发摘要"（recovery brief）。
 
-    背景（T2，核心机制对齐第 2 项）：压缩后模型丢了工作材料，这里统一
+    背景：压缩后模型丢了工作材料，这里统一
     按 token 预算把最重要的东西补回去，并新增计划/后台任务状态的恢复。
     - 总预算：config context.post_compact_recovery_budget（默认 40000
       tokens，按"字符数/4"估算）
@@ -79,13 +78,13 @@ def build_post_compact_brief(agent: "AIAgent") -> str:
         max_skills = ctx_cfg.get("post_compact_recovery_max_skills", MAX_INVOKED_SKILLS)
         # 向后兼容：老配置键 reinject_char_limit 当作技能预算用
         skill_budget = ctx_cfg.get("reinject_char_limit", SKILL_BUDGET_CHARS)
-        # T2：总预算（token 数）
+        # 总预算（token 数）
         budget_tokens = ctx_cfg.get("post_compact_recovery_budget", 40000)
 
         # 按优先级从高到低收集各段
         sections = []
 
-        # 1. 计划 / 后台任务状态（T2 新增，最高优先——丢了最致命）
+        # 1. 计划 / 后台任务状态（最高优先——丢了最致命）
         state_brief = _build_plan_async_state_brief(agent)
         if state_brief:
             sections.append(state_brief)
@@ -121,7 +120,7 @@ _MIN_SECTION_TOKENS = 200
 
 
 def _apply_budget(sections: list, budget_tokens: int) -> list:
-    """按优先级顺序给各段分预算（T2 引入的统一统筹）。
+    """按优先级顺序给各段分预算（统一统筹）。
 
     规则：每段按"字符数/4"估算 token；整段装得下就整段放；装不下但
     剩余预算还够 200 token 就截断着放；再不够就整段丢——后面的段自然
@@ -149,7 +148,7 @@ def _apply_budget(sections: list, budget_tokens: int) -> list:
 
 
 def _build_plan_async_state_brief(agent: "AIAgent") -> str:
-    """构建"计划 / 后台任务状态"补发段（T2 新增的恢复源，fail-open）。
+    """构建"计划 / 后台任务状态"补发段（fail-open）。
 
     三种情况各自成段：
     - agent.plan_mode 为 True → 提醒模型当前在计划调研模式
@@ -277,7 +276,7 @@ def _build_invoked_skills_brief(
     used = 0
     any_success = False
 
-    # 倒着取：最近用过的技能优先补（对齐 Claude Code 的语义）
+    # 倒着取：最近用过的技能优先补
     for name in reversed(recent_skills):
         try:
             body = agent._load_skill_body(name)

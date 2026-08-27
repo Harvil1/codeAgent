@@ -105,7 +105,7 @@ class HandoffBundleMeta:
     message_count: int
     handoff_state: str
     file_size: int
-    # CCAR8 Task 7 新增字段（向后兼容：旧 bundle 没这两项，就取默认值 None/False）
+    # 向后兼容字段（旧 bundle 没这两项，就取默认值 None/False）
     source_cwd: Optional[str] = None
     auto_saved: bool = False
 
@@ -185,10 +185,10 @@ def _compute_checksum(transcript: List[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 密钥扫描（Task 3 / R19 #24 迁移公共扫描器）
+# 密钥扫描（识别规则在公共扫描器 agent/secret_scanner）
 # ---------------------------------------------------------------------------
 
-# 历史取舍（R19 #24）：密钥识别规则统一搬到 agent/secret_scanner 了（覆盖
+# 密钥识别规则统一在 agent/secret_scanner（覆盖
 # gitleaks 扩展：github-pat/aws/google/slack/jwt/anthropic 等密钥形态）。
 # 这里只留一个向后兼容的别名，别的模块老代码 import 这个名字还能用。
 from agent.secret_scanner import SECRET_RULES_RE as SECRET_PATTERN  # noqa: F401
@@ -199,7 +199,7 @@ def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
 
     参数：
         transcript：消息列表（ [{"role": ..., "content": ...}, ...] ）。
-    实际识别走公共扫描器 agent/secret_scanner（R19 #24 迁移）；这里只是把
+    实际识别走公共扫描器 agent/secret_scanner；这里只是把
     结果包装成 transcript 视角——标明命中发生在第几条消息、什么角色。
     """
     from agent.secret_scanner import scan_text
@@ -255,7 +255,7 @@ class HandoffStore:
         notes: Optional[str] = None,
         source_platform: str = "cli",
         allow_secrets: bool = False,
-        # CCAR8 Task 7 新增：
+        # 跨项目恢复相关：
         source_cwd: Optional[str] = None,
         auto_saved: bool = False,
     ) -> str:
@@ -274,7 +274,7 @@ class HandoffStore:
             source_platform：来源平台标识，默认 "cli"。
             allow_secrets：设 True 才允许跳过密钥扫描强行保存；默认 False
                 （扫出密钥直接拒收，防止把 API 钥匙打包带走）。
-            source_cwd：来源项目目录（CCAR8 Task 7 新增，跨项目恢复时用）。
+            source_cwd：来源项目目录（跨项目恢复时用）。
             auto_saved：是否系统自动保存的标记（区别于用户手动 /handoff save）。
 
         返回：
@@ -310,7 +310,7 @@ class HandoffStore:
             "handoff_state": "pending",
             "notes": notes,
             "schema_checksum": checksum,
-            # CCAR8 Task 7 新增：
+            # 跨项目恢复相关：
             "source_cwd": source_cwd,
             "auto_saved": auto_saved,
         }
@@ -409,7 +409,7 @@ class HandoffStore:
                     message_count=len(data.get("transcript", [])),
                     handoff_state=data.get("handoff_state", "pending"),
                     file_size=path.stat().st_size,
-                    # CCAR8 Task 7 加的字段：旧 bundle 文件里没有，取默认值即可
+                    # 兼容字段：旧 bundle 文件里没有，取默认值即可
                     source_cwd=data.get("source_cwd"),
                     auto_saved=data.get("auto_saved", False),
                 ))

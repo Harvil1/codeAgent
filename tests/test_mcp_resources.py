@@ -1,4 +1,4 @@
-"""MCP Resources 协议测试（CCAR12 Task 5）。
+"""MCP Resources 协议测试。
 
 mock transport 的 send_request，断言协议方法名/参数正确：
 - MCPTransport 基类默认实现（resources/list + resources/read + fail-open）
@@ -306,7 +306,7 @@ def test_resource_tool_check_fn_gates_disconnected():
 # ---------------------------------------------------------------------------
 
 def test_resource_tool_handler_signature_matches_dispatch_contract():
-    """handler 签名必须是 (args, **kwargs)（CCAR8 教训：防 silent-dead-code）。"""
+    """handler 签名必须是 (args, **kwargs)——防 silent-dead-code。"""
     for name in ("mcp__srv__list_resources", "mcp__srv__read_resource"):
         entry = registry.get(name)
         assert entry is not None, f"{name} 未注册"

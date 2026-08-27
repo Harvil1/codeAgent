@@ -60,7 +60,7 @@ def test_config_to_checker_to_tool_pipeline(monkeypatch):
         set_default_checker(checker)
 
         monkeypatch.setattr(sr, "is_available", lambda: True)
-        # CCAR12: 验证 argv 路径，强制关 Job Object 模式
+        # 验证 argv 路径，强制关 Job Object 模式
         monkeypatch.setattr(sr, "uses_job_object", lambda: False)
         monkeypatch.setattr(sr, "wrap_command",
                             lambda cmd, **kw: ["bwrap", "--", "bash", "-c", cmd])
@@ -304,7 +304,7 @@ def test_writable_roots_extension_via_config(monkeypatch):
         return R()
 
     monkeypatch.setattr(sr, "is_available", lambda: True)
-    # CCAR12: 验证 wrap_command 路径，强制关 Job Object 模式
+    # 验证 wrap_command 路径，强制关 Job Object 模式
     monkeypatch.setattr(sr, "uses_job_object", lambda: False)
     monkeypatch.setattr(sr, "wrap_command", fake_wrap)
     monkeypatch.setattr(tt.subprocess, "run", fake_run)
@@ -403,7 +403,7 @@ def test_terminal_tool_handles_wrap_command_exception(monkeypatch):
         raise sr.SandboxUnavailableError("mock failure")
 
     monkeypatch.setattr(sr, "is_available", lambda: True)
-    # CCAR12: 验证 wrap_command 异常路径，强制关 Job Object 模式
+    # 验证 wrap_command 异常路径，强制关 Job Object 模式
     monkeypatch.setattr(sr, "uses_job_object", lambda: False)
     monkeypatch.setattr(sr, "wrap_command", exploding_wrap)
     monkeypatch.setattr(tt.subprocess, "run", fake_run)
@@ -441,7 +441,7 @@ def test_terminal_tool_handles_generic_exception_fail_open(monkeypatch):
         raise RuntimeError("unexpected bug")
 
     monkeypatch.setattr(sr, "is_available", lambda: True)
-    # CCAR12: 验证 wrap_command 异常路径，强制关 Job Object 模式
+    # 验证 wrap_command 异常路径，强制关 Job Object 模式
     monkeypatch.setattr(sr, "uses_job_object", lambda: False)
     monkeypatch.setattr(sr, "wrap_command", exploding_wrap)
     monkeypatch.setattr(tt.subprocess, "run", fake_run)

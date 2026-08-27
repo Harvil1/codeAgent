@@ -392,7 +392,7 @@ def test_run_reflection_accepts_reference_type():
     assert result[0]["name"] == "Linear 工单 PROJ-123"
 
 
-# ============ CCAR9 Task 5: 预注入已有记忆清单（防重复存储） ============
+# ============ 预注入已有记忆清单（防重复存储） ============
 
 
 def test_reflection_prompt_includes_existing_manifest(tmp_path):

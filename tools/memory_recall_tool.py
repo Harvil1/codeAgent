@@ -99,7 +99,7 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
 
     try:
         # full_index_text 是现场实时生成的（不走缓存快照，也不截断）；
-        # 用带年龄标注的版本（每条标 [age: Nd]，并在提示里让模型优先看新记忆）——T4 轮引入
+        # 用带年龄标注的版本（每条标 [age: Nd]，并在提示里让模型优先看新记忆）
         index_text = memory_store.full_index_text_with_age()
         memory_ids = await retrieve_relevant(
             query=query,
@@ -137,9 +137,8 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
 
 # 在模块顶部注册（这个文件一被 import，工具就自动登记生效）
 # toolset="memory" 只是记忆族的分组标签；LLM 到底能不能看见它，由 toolsets._CORE_TOOLS 决定
-# （历史踩坑：「登记了」不等于「可见」——早期 toolset="memory" 没列进任何 TOOLSETS 定义，
-# 结果工具注册了却对 LLM 隐身；现已列入 _CORE_TOOLS，对齐 Claude Code 里
-# LocalMemoryRecallTool 属于核心工具的定位）
+# （注意：「登记了」不等于「可见」——工具必须列入 toolsets._CORE_TOOLS 清单，
+# 否则注册了也对 LLM 隐身；本工具已列入 _CORE_TOOLS，属于核心工具）
 # is_async=True：handler 是 async 函数，显式标注对齐 registry 语义（虽然 dispatch
 # 实际会用 inspect 自动识别，标上更保险）
 registry.register(
@@ -149,5 +148,5 @@ registry.register(
     toolset="memory",
     is_async=True,
     emoji="🔍",
-    isConcurrencySafe=False,  # 历史踩坑（CCAR8 修复）：会调辅助 LLM 消耗配额，串行跑更稳，避免并发狂烧
+    isConcurrencySafe=False,  # 会调辅助 LLM 消耗配额，串行跑更稳，避免并发狂烧
 )

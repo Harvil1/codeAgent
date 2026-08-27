@@ -17,7 +17,7 @@ import pytest
 
 
 # ============================================================================
-# Task 1: plan 工具集
+# plan 工具集
 # ============================================================================
 
 def test_plan_toolset_defined():
@@ -54,7 +54,7 @@ def test_plan_toolset_excludes_destructive_tools():
 
 
 # ============================================================================
-# Task 2: exit_plan_mode handler
+# exit_plan_mode handler
 # ============================================================================
 
 def test_exit_plan_mode_registered():
@@ -111,7 +111,7 @@ async def test_exit_plan_mode_whitespace_only_plan_returns_invalid_args():
 
 
 # ============================================================================
-# Task 3: AIAgent.plan_mode 字段
+# AIAgent.plan_mode 字段
 # ============================================================================
 
 def _make_minimal_agent(**overrides):
@@ -152,7 +152,7 @@ def test_agent_accepts_plan_approval_callback():
 
 
 # ============================================================================
-# Task 4: 工具集切换
+# 工具集切换
 # ============================================================================
 
 async def test_plan_mode_switches_toolset_to_plan():
@@ -208,7 +208,7 @@ async def test_normal_mode_uses_enabled_toolsets():
 
 
 # ============================================================================
-# Task 5: Plan Mode reminder 注入
+# Plan Mode reminder 注入
 # ============================================================================
 
 async def test_plan_mode_reminder_injected_when_plan_mode_true():
@@ -286,7 +286,7 @@ async def test_plan_mode_reminder_not_in_conversation_history():
 
 
 # ============================================================================
-# Task 6: 审批分支
+# 审批分支
 # ============================================================================
 
 def _make_exit_plan_mode_tool_call(plan_text):
@@ -404,7 +404,7 @@ async def test_plan_approval_callback_exception_treated_as_reject():
 
 
 # ============================================================================
-# Task 7: config 默认值
+# config 默认值
 # ============================================================================
 
 def test_default_config_has_plan_mode_enabled():
@@ -415,7 +415,7 @@ def test_default_config_has_plan_mode_enabled():
 
 
 # ============================================================================
-# Task 8: CLI slash 命令 + 审批回调
+# CLI slash 命令 + 审批回调
 # ============================================================================
 
 def test_cli_plan_approval_callback_approve_with_y():
@@ -502,7 +502,7 @@ def test_plan_off_slash_command_idempotent_when_not_in_plan_mode():
 
 
 # ============================================================================
-# Task 9: 端到端集成
+# 端到端集成
 # ============================================================================
 
 async def test_e2e_plan_approve_then_execute():

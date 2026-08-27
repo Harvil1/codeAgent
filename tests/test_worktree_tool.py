@@ -1,4 +1,4 @@
-"""worktree_tool 测试（CCAR12 Task 6）：会话级 worktree 进出。
+"""worktree_tool 测试：会话级 worktree 进出。
 
 覆盖四层：
 1. workspace_context 的 set/clear_session_workspace_cwd（长效 set + 幂等 clear）
@@ -101,9 +101,8 @@ class TestSessionWorkspaceCwd:
 class TestWorktreeEnter:
 
     async def test_enter_denied_for_subagent(self):
-        """spawn_depth>0 的子代理不能切主对话的会话 worktree（CCAR13 A1，
-        CCAR12 final review follow-up：ContextVar 进程级共享，子代理 enter
-        会劫持主对话 cwd）。"""
+        """spawn_depth>0 的子代理不能切主对话的会话 worktree
+        （ContextVar 进程级共享，子代理 enter 会劫持主对话 cwd）。"""
         agent = MagicMock()
         agent.spawn_depth = 1
         result = await _handle_worktree_enter({}, agent_ref=agent)
@@ -290,7 +289,7 @@ class TestWorktreeExit:
 
 
 # ---------------------------------------------------------------------------
-# 3. dispatch 契约（CCAR8 教训：handler 必须是 (args, **kwargs)）
+# 3. dispatch 契约（handler 必须是 (args, **kwargs)）
 # ---------------------------------------------------------------------------
 
 def test_handler_signature_matches_dispatch_contract():
@@ -304,7 +303,7 @@ def test_handler_signature_matches_dispatch_contract():
 
 
 # ---------------------------------------------------------------------------
-# 4. schema 键契约（CCAR11：OpenAI "parameters" 不是 "inputSchema"）
+# 4. schema 键契约（OpenAI "parameters" 不是 "inputSchema"）
 # ---------------------------------------------------------------------------
 
 def test_schemas_use_openai_parameters_key():
@@ -341,7 +340,7 @@ def test_worktree_tools_in_core_toolset_visible():
 
 
 def test_handlers_are_async_not_threaded():
-    """【Task 6 fix Critical】handler 必须是 async def（is_async=True）。
+    """【Critical】handler 必须是 async def（is_async=True）。
 
     sync handler 经 dispatch 的 asyncio.to_thread 跑在 context 拷贝里——
     会话 cwd set 不回透主循环 + exit 的 token reset 跨 context 必炸。
@@ -357,8 +356,8 @@ def test_handlers_are_async_not_threaded():
 
 
 # ---------------------------------------------------------------------------
-# 6. dispatch 端到端（Task 6 fix Critical 回归——单元直调绕过 to_thread，
-#    这就是漏检原因；必须经 registry.dispatch 验证 context 回透）
+# 6. dispatch 端到端（单元直调绕过 to_thread，检不出 context 问题；
+#    必须经 registry.dispatch 验证 context 回透）
 # ---------------------------------------------------------------------------
 
 async def test_enter_exit_via_registry_dispatch(tmp_path):

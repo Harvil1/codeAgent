@@ -17,7 +17,7 @@ def store(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 1: TaskStore 新字段 + 4 方法
+# TaskStore 新字段 + 4 方法
 # ---------------------------------------------------------------------------
 
 def test_create_includes_new_fields(store):
@@ -92,7 +92,7 @@ def test_legacy_task_compat(store, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: task_heartbeat handler
+# task_heartbeat handler
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import _handle_task_heartbeat, _infer_author
@@ -148,7 +148,7 @@ def test_infer_author():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: task_comment handler
+# task_comment handler
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import _handle_task_comment
@@ -196,7 +196,7 @@ def test_comment_handler_blocks_foreign_id(store, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: task_artifacts handler + validation
+# task_artifacts handler + validation
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import (
@@ -319,7 +319,7 @@ def test_validate_artifact_path_oversized(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: task_complete artifacts 扩展
+# task_complete artifacts 扩展
 # ---------------------------------------------------------------------------
 
 from tools.task_tools import _handle_task_complete

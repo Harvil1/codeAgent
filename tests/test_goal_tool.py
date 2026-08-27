@@ -1,4 +1,4 @@
-"""goal_tool 测试（CCAR12 Task 4）：LLM 可自主管理 goal + 共享函数抽取。
+"""goal_tool 测试：LLM 可自主管理 goal + 共享函数抽取。
 
 覆盖四层：
 1. 共享函数 start_goal_agent（pause 旧 / 建新 / 持久化 / 挂 agent / 路径解析）
@@ -269,7 +269,7 @@ class TestGoalClearHandler:
 
 
 # ---------------------------------------------------------------------------
-# 3. dispatch 契约 + schema 键契约（CCAR8/CCAR11 教训）
+# 3. dispatch 契约 + schema 键契约
 # ---------------------------------------------------------------------------
 
 _ALL_HANDLERS = (

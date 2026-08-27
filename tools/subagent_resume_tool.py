@@ -1,8 +1,8 @@
 """subagent_resume 工具：让中断的子代理（主对话派出去帮忙干活的分身）从断点继续干活。
 
-背景：CCAR5-I 那一轮已经把子代理的对话记录写到磁盘
-（~/.OmniMate/.agent-sessions/<agent_id>.jsonl），但只做了"存"这一半；
-CCAR10 Task 4 补上"取"的入口，整体流程是：
+背景：子代理的对话记录会写到磁盘
+（~/.OmniMate/.agent-sessions/<agent_id>.jsonl）；本工具是"取"的入口，
+整体流程是：
 - load_transcript 把历史消息读回来
 - 用 initial_messages 重新启动一个 AIAgent 子代理
   （深度 = 父深度+1、只给 minimal 最小工具集、关掉摘要压缩）
@@ -13,7 +13,7 @@ CCAR10 Task 4 补上"取"的入口，整体流程是：
 运行时状态——重建内存代价太高，对话记录已经够用了。
 
 设计要点（历史踩坑，别丢）：
-- **handler 签名必须是 (args, **dispatch_kwargs)**——CCAR8 踩过坑：
+- **handler 签名必须是 (args, **dispatch_kwargs)**——注意：
   签名不符时 dispatch 静默不调用，代码成了摆设（silent-dead-code）
 - **fail-open**：读文件/追加/标记完成任何一步失败都不崩，返回错误 JSON
 - **重资源要串行**：要重启一个 AIAgent，所以 isConcurrencySafe=False
@@ -53,7 +53,7 @@ def _spawn_resumed_agent(
     - 只给 minimal 最小工具集（跟 leaf 叶子子代理对齐，免得它乱派活）
     - 关掉 summary_only（resume 要的是完整结果，不是 300 字摘要）
     - 同步执行（用 asyncio.run 驱动 child.chat 这个 async 方法）
-    - memory_store 透传（Task 5 follow-up：历史踩坑——漏传的话续跑子代理
+    - memory_store 透传（漏传的话续跑子代理
       用不上父对话的记忆库，等于失忆）
 
     参数：
@@ -117,8 +117,8 @@ def _spawn_resumed_agent(
         spawn_depth=child_spawn_depth,
         permission_mode="default",
         config=config,
-        memory_store=memory_store,  # 历史踩坑（Task 5 修复）：必须透传父记忆库
-        initial_messages=messages,  # 复用 CCAR5 的 initial_messages 机制带入历史
+        memory_store=memory_store,  # 必须透传父记忆库（漏了续跑子代理等于失忆）
+        initial_messages=messages,  # 用 initial_messages 机制带入历史
         on_response=None,  # resume 不再递归落盘（主入口已经统一 append 了）
     )
 
@@ -133,13 +133,13 @@ def _spawn_resumed_agent(
 
 
 # ---------------------------------------------------------------------------
-# 恢复入口（工具 handler 和 Task 5 CLI 共用）
+# 恢复入口（工具 handler 和 CLI 共用）
 # ---------------------------------------------------------------------------
 
 def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
     """恢复一个中断的子代理：读历史 → 起子代理续跑 → 续写记录 → 标记完成。
 
-    背景：这是工具 handler 和 Task 5 CLI 共用的入口，逻辑集中在一处免得
+    背景：这是工具 handler 和 CLI 共用的入口，逻辑集中在一处免得
     两边跑偏。流程：
     1. load_transcript(agent_id) 读出历史消息
     2. 组装续跑用的 messages = 历史 + 末尾的 user 指令
@@ -198,7 +198,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
     # ③④ 起子代理续跑（接缝函数，测试可能 patch 掉）。
     # instruction 不塞进 initial_messages：_spawn_resumed_agent 内部用
     # chat(instruction) 触发对话，它会作为新 user 轮追加，塞了会重复。
-    # Task 5 follow-up（历史踩坑）：从 agent_ref 拿 memory_store 透传，
+    # 从 agent_ref 拿 memory_store 透传，
     # 让续跑子代理复用父记忆库
     _agent_ref = dispatch_kwargs.get("agent_ref")
     _memory_store = dispatch_kwargs.get("memory_store")
@@ -268,7 +268,7 @@ def _handle_subagent_resume(args: dict, **dispatch_kwargs) -> str:
     """工具 handler：LLM 调 subagent_resume 时进这里，校验参数后转 _run_resume。
 
     背景：handler 签名必须严格是 (args: dict, **dispatch_kwargs) → JSON 字符串
-    （CCAR8 踩坑：签名不符时 dispatch 静默不调用，代码等于白写）。
+    （签名不符时 dispatch 静默不调用，代码等于白写）。
     LLM 传的字段从 args 取，命名上下文（agent_ref / config 等）从
     dispatch_kwargs 取。
     """
@@ -290,7 +290,7 @@ def _handle_subagent_resume(args: dict, **dispatch_kwargs) -> str:
 SUBAGENT_RESUME_SCHEMA = {
     "name": "subagent_resume",
     "description": (
-        "恢复一个中断的子代理继续执行（CCAR10 Task 4）。"
+        "恢复一个中断的子代理继续执行。"
         "transcript 已持久化到 ~/.OmniMate/.agent-sessions/<agent_id>.jsonl，"
         "传入 agent_id 加载历史对话并续跑，续写记录到同一文件。\n\n"
         "**适用场景**：\n"

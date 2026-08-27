@@ -1,5 +1,5 @@
 # tests/test_output_styles.py
-"""C6（CCB 借鉴 outputStyles）：输出风格目录发现 + prompt 注入 + /output-style。
+"""输出风格目录发现 + prompt 注入 + /output-style。
 
 - 风格 = 一个 .md 文件：文件名即风格名，frontmatter（name/description 可选），
   正文即提示词。

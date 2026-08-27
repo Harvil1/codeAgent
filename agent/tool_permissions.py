@@ -1,4 +1,4 @@
-"""工具可见性规则（T6 引入）+ 命令内容级权限规则（R16 #3 引入）。
+"""工具可见性规则 + 命令内容级权限规则。
 
 大白话：这个文件管两件事——"哪些工具允许给 AI 看到"和"哪些命令内容要
 拦/要问"。规则全部来自 settings.json 的 permissions 段，长这样：
@@ -43,7 +43,7 @@ tool_matches 里永远匹配不到工具名）。内容有三种写法：
     - allow 命中 → 跳过注入面/破坏性审批（但 fatal 硬底线/黑名单/危险删除
       这些更靠前的检查不受影响）
 
-遮蔽检测（对齐 CC 的 shadowedRuleDetection）：allow 的内容级规则如果被
+遮蔽检测：allow 的内容级规则如果被
 同工具的整级规则（裸的 "Bash"/"Terminal"）deny/ask 盖住，就永远不会生效
 ——加载时用 logger.warning 提醒用户（detect_shadowed_command_rules）。
 
@@ -83,8 +83,8 @@ def load_tool_permission_rules() -> Dict[str, List[str]]:
     规则为准。缓存用 mtime+size 双因子判断文件变没变（原因见模块头的历史
     踩坑说明），没变就直接用上次的解析结果。
 
-    返回：{"allow": [...], "deny": [...], "ask": [...]}。R16 #3 起新增 ask
-    列表（内容级强制审批规则）。文件不存在或读取出错时返回三个空列表
+    返回：{"allow": [...], "deny": [...], "ask": [...]}（ask 是
+    内容级强制审批规则）。文件不存在或读取出错时返回三个空列表
     （fail-open，出错就当没有任何规则，不拦正常使用）。缓存未命中（首次
     加载或文件刚改过）时会顺带跑一次遮蔽检测并告警。
     """
@@ -107,12 +107,12 @@ def load_tool_permission_rules() -> Dict[str, List[str]]:
             rules = {
                 "allow": [str(r) for r in (sec.get("allow") or []) if isinstance(r, (str,))],
                 "deny": [str(r) for r in (sec.get("deny") or []) if isinstance(r, (str,))],
-                # R16 #3 加的 ask 列表（内容级强制审批规则）
+                # ask 列表（内容级强制审批规则）
                 "ask": [str(r) for r in (sec.get("ask") or []) if isinstance(r, (str,))],
             }
         _rules_cache["key"] = key
         _rules_cache["rules"] = rules
-        # R16 #3 的遮蔽检测：只在缓存未命中时跑（首次加载/文件刚改过）
+        # 遮蔽检测：只在缓存未命中时跑（首次加载/文件刚改过）
         for warning in detect_shadowed_command_rules(rules):
             logger.warning("权限规则遮蔽: %s", warning)
         return rules
@@ -172,10 +172,10 @@ def is_tool_denied(tool_name: str, rules: Optional[Dict[str, List[str]]] = None)
 
 
 # ---------------------------------------------------------------------------
-# R16 #3：内容级权限规则（Bash(...) / Terminal(...) 语法）
+# 内容级权限规则（Bash(...) / Terminal(...) 语法）
 # ---------------------------------------------------------------------------
 
-# 内容级规则的外壳格式（Bash 沿用 CC 的语法习惯；Terminal 是本项目原生工具名）
+# 内容级规则的外壳格式（Bash / Terminal 是两种命令执行工具名，都认）
 _CMD_RULE_RE = re.compile(r"^(?:Bash|Terminal)\((.*)\)$", re.IGNORECASE | re.DOTALL)
 # 旧前缀语法（以 x:* 结尾）
 _LEGACY_PREFIX_RE = re.compile(r"^(.+):\*$", re.DOTALL)
@@ -316,8 +316,7 @@ def _wildcard_regex(pattern: str) -> "re.Pattern":
 
 
 # ---------------------------------------------------------------------------
-# R25 #1：命令形态归一化——剥掉命令头部的"伪装前缀"，防规则被绕过。
-# 对齐 CCB 的 stripAllLeadingEnvVars + SAFE_WRAPPER 剥离逻辑。
+# 命令形态归一化——剥掉命令头部的"伪装前缀"，防规则被绕过。
 # ---------------------------------------------------------------------------
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
@@ -334,7 +333,7 @@ def _normalize_command_for_rules(command: str, *, aggressive: bool = False) -> s
     ``rm xxx``，再做规则匹配。
 
     为什么需要：防绕过。用户 deny 了 ``Bash(rm:*)``，如果直接拿原文匹配，
-    ``FOO=1 rm xxx`` 就对不上规则、溜过去了。只剥**头部**（对齐 CCB 语义）；
+    ``FOO=1 rm xxx`` 就对不上规则、溜过去了。只剥**头部**；
     复合命令中段的 env 赋值（``a && B=1 rm``）是既有匹配语义没覆盖的形态，
     记为已知限制，这里不处理。
 
@@ -345,9 +344,9 @@ def _normalize_command_for_rules(command: str, *, aggressive: bool = False) -> s
     剥离形态（循环剥直到剥不动为止）：
       - ``NAME=value`` 赋值 token。含引号/命令替换等可疑字符时按 aggressive
         分流：默认（allow 匹配用）整条停手不剥——剥一半会造出更怪的形态，
-        保守返回原命令；aggressive=True（deny/ask 匹配用）照样剥——历史踩坑
-        （R30b-B2）：不剥的话 ``FOO="x" rm -rf data`` 就绕过了
-        ``deny Bash(rm:*)``。这是对齐 CCB 的不对称语义：收紧方向（deny/ask）
+        保守返回原命令；aggressive=True（deny/ask 匹配用）照样剥——历史踩坑：
+        不剥的话 ``FOO="x" rm -rf data`` 就绕过了
+        ``deny Bash(rm:*)``。这是不对称语义：收紧方向（deny/ask）
         永不因剥不动而放行
       - ``env`` 本身 + 它的 ``-`` 开头选项及选项参数（``-i`` / ``-u NAME``）
         + 后续赋值 token
@@ -422,7 +421,7 @@ def command_rule_matches(rule: str, command: str) -> bool:
 
 
 def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = None) -> str:
-    """内容级规则判定的主入口（R16 #3 引入），PermissionChecker.check 调它。
+    """内容级规则判定的主入口，PermissionChecker.check 调它。
 
     干什么：拿一条命令去对照 allow/deny/ask 三张规则表，给出最终裁决。
 
@@ -436,21 +435,21 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
     返回："deny" / "ask" / "allow" / "none" 之一，优先级 deny > ask > allow。
     工具可见性条目（read_file 这类不带括号的）不参与——解析时返回 None。
 
-    几条重要的匹配规则（历史演进的取舍，都有对应轮次）：
-    - R25 #1：匹配前先剥掉 env 前缀/安全包装词——FOO=bar rm xxx 绕不过
+    几条重要的匹配规则（历史演进攒下的取舍）：
+    - 匹配前先剥掉 env 前缀/安全包装词——FOO=bar rm xxx 绕不过
       deny(rm)。
-    - R30b-B2：剥离是不对称的——deny/ask 用激进剥离（可疑 env token 也剥），
+    - 剥离是不对称的——deny/ask 用激进剥离（可疑 env token 也剥），
       allow 只认保守剥离（防 ``FOO=$(evil) cmd`` 被激进剥完后误命中 allow）。
-    - R27 #21：AST 解析成功时 deny/ask **逐段**匹配（复合命令后半段命中
+    - AST 解析成功时 deny/ask **逐段**匹配（复合命令后半段命中
       即命中——只收紧不放宽）；allow 保持整串匹配且在复合命令上不生效
-      （对齐 CC 的"allow 必须覆盖全部段"语义）；AST 解析失败时 deny/ask
-      整串仍生效，但 allow 整串命中也不放行（R30b-B3 的 fail-safe：解析
+      （"allow 必须覆盖全部段"语义）；AST 解析失败时 deny/ask
+      整串仍生效，但 allow 整串命中也不放行（fail-safe：解析
       不了就不放宽，宁可多问一次）。
     """
     if rules is None:
         rules = load_tool_permission_rules()
-    # R30b-B2：归一化出两个版本——deny/ask 用激进剥离（可疑 env token 也剥），
-    # allow 用保守剥离（碰到可疑 env token 就停手）。对齐 CCB 的不对称语义。
+    # 归一化出两个版本——deny/ask 用激进剥离（可疑 env token 也剥），
+    # allow 用保守剥离（碰到可疑 env token 就停手）。不对称语义。
     cmd_c = _normalize_command_for_rules(command)
     cmd_a = _normalize_command_for_rules(command, aggressive=True)
 
@@ -478,8 +477,7 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
         return "none"
 
     whole = _match_pair(cmd_c, cmd_a)
-    # R27 #21 的 AST 逐段信息；R30b-B3 补的规则：AST 解析失败时 allow
-    # 整串命中也不再放行（fail-safe）
+    # AST 逐段信息；AST 解析失败时 allow 整串命中也不再放行（fail-safe）
     from agent.bash_ast import parse_info
     info = parse_info(cmd_c)
     if whole == "allow" and (
@@ -487,9 +485,9 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
         or (len(info["segments"]) > 1 and not info["has_substitution"])
     ):
         # 顶层复合命令（&&/;/| 且无命令替换）上 allow 整串命中也不放宽——
-        # 否则前缀规则会盖到 && 后面的段（对齐 CC 的"allow 须覆盖全部段"）。
+        # 否则前缀规则会盖到 && 后面的段（"allow 须覆盖全部段"）。
         # AST 解析失败（info is None）：没法证明"allow 覆盖了全部段"，同样
-        # 不放宽（fail-safe，对齐 CC"解析不了就升审批"的方向；历史踩坑：
+        # 不放宽（fail-safe，宁可升审批也不误放行；历史踩坑：
         # 此前 fail-open 直接放行是一个绕过面）。
         # 含命令替换时（rm -rf x $(gen)）维持整串 allow 的现状（fail-open，
         # 不为了收紧 allow 引入新的拒绝面）。
@@ -512,7 +510,7 @@ def check_command_rules(command: str, rules: Optional[Dict[str, List[str]]] = No
 
 
 def detect_shadowed_command_rules(rules: Dict[str, List[str]]) -> List[str]:
-    """遮蔽检测（对齐 CC shadowedRuleDetection 的核心子集）。
+    """遮蔽检测。
 
     干什么：找出永远不会生效的 allow 规则并给出告警文案。
 
@@ -524,9 +522,8 @@ def detect_shadowed_command_rules(rules: Dict[str, List[str]]) -> List[str]:
         rules: 已加载的规则字典（allow/deny/ask 三列表）。
 
     返回：告警消息列表（每条对应一个被遮蔽的 allow 规则）；没有遮蔽
-    返回空列表。CC 有多配置来源（用户级/项目级…）需要跨源比对，本项目
-    只有单一 settings.json，所以只做同源判定；CC 的 sandbox 豁免特例
-    也不适用。
+    返回空列表。本项目只有单一 settings.json（没有多配置来源要跨源
+    比对），所以只做同源判定。
     """
     warnings: List[str] = []
     tool_wide = {"Bash", "Terminal"}

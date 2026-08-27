@@ -24,9 +24,9 @@ def get_mode_override_from_kwargs(kwargs: dict) -> Optional[str]:
     if agent_ref is None:
         return None
     mode = getattr(agent_ref, "permission_mode", None)
-    # 历史踩坑（S2 修复）：acceptEdits 漏了透传，模式会悄悄退回 default，功能等于没生效
-    # 历史踩坑（Task J 修复）：autoDeny 也漏过——async 子代理的破坏性命令悄悄降级到
-    # default 去走用户审批，"自动拒绝"这条短路在生产路径上根本不触发
+    # 注意：四种模式都必须在这里透传——漏了 acceptEdits 的话模式会悄悄退回
+    # default，功能等于没生效；漏了 autoDeny 的话 async 子代理的破坏性命令
+    # 会悄悄降级到 default 去走用户审批，"自动拒绝"这条短路根本不触发
     if mode in ("default", "bypassPermissions", "acceptEdits", "autoDeny"):
         return mode
     return None

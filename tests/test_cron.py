@@ -136,7 +136,7 @@ def test_daemon_thread_starts_and_stops(tmp_path: Path):
 
 
 # ============================================================================
-# Task 1: CronJob 字段扩展 + _parse_job 兼容 + _persist_jobs_unlocked
+# CronJob 字段扩展 + _parse_job 兼容 + _persist_jobs_unlocked
 # ============================================================================
 
 def test_parse_job_fills_created_at_when_missing():
@@ -251,7 +251,7 @@ def test_persist_jobs_unlocked_atomic_replace():
 
 
 # ============================================================================
-# Task 2: _tick 加 7 天过期 + 一次性 disable
+# _tick 加 7 天过期 + 一次性 disable
 # ============================================================================
 
 def test_tick_expires_job_over_7_days():
@@ -423,7 +423,7 @@ def test_tick_expired_takes_precedence_over_cron_match():
 
 
 # ============================================================================
-# Task 3: config + __init__ 参数
+# config + __init__ 参数
 # ============================================================================
 
 def test_default_config_has_cron_max_age_days():

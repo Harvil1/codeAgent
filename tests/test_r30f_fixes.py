@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""R30f（H 轮第二批）回归测试。
+"""记忆检索与用量统计回归测试。
 
-  H9 记忆检索三件套：recentTools 反噪音 / alreadySurfaced 跨轮去重 /
+  记忆检索三件套：recentTools 反噪音 / alreadySurfaced 跨轮去重 /
      staleness 过期警示（memory_retriever + memory_injection + agent 接线）
-  H8 per-model token/成本追踪（usage_tracker + _record_llm_usage 接线）
+  per-model token/成本追踪（usage_tracker + _record_llm_usage 接线）
 """
 import asyncio
 import json
@@ -22,7 +22,7 @@ def _fake_llm(raw_ids: str, captured: dict):
 
 
 # ======================================================================
-# H9：检索器反噪音 + 跨轮去重
+# 检索器反噪音 + 跨轮去重
 # ======================================================================
 
 def test_retriever_active_tools_rule_h9():
@@ -61,7 +61,7 @@ def test_retriever_exclude_ids_filtered_h9():
 
 
 # ======================================================================
-# H9：注入侧 surfaced 汇 + staleness 警示
+# 注入侧 surfaced 汇 + staleness 警示
 # ======================================================================
 
 def _entry(name, days_ago, eid):
@@ -122,7 +122,7 @@ def test_agent_recent_active_tools_h9(tmp_path):
 
 
 # ======================================================================
-# H8：UsageTracker
+# UsageTracker
 # ======================================================================
 
 def test_usage_tracker_record_summary_persist_h8(tmp_path):

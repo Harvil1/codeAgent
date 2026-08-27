@@ -307,7 +307,7 @@ class TestCtxInspectTool:
 
 
 # ---------------------------------------------------------------------------
-# 工具注册测试（关键：防 CCAR6 的 check_fn 签名 bug）
+# 工具注册测试（关键：防 check_fn 签名 bug）
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration:
@@ -326,7 +326,7 @@ class TestToolRegistration:
     def test_get_tool_definitions_includes_snip_and_ctx_inspect(self):
         """get_tool_definitions(['core']) 真返回 snip 和 ctx_inspect。
 
-        关键测试：防 check_fn 签名错导致工具被过滤（CCAR6 出过这 bug）。
+        关键测试：防 check_fn 签名错导致工具被过滤。
         """
         from model_tools import get_tool_definitions, ensure_tools_discovered
         ensure_tools_discovered()

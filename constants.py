@@ -220,8 +220,7 @@ def sessions_db_path() -> Path:
 def session_dir() -> Path:
     """会话级临时数据目录（放各会话自己的 env 文件等）。
 
-    背景（对齐 Claude Code 的 CLAUDE_ENV_FILE 机制）：
-    每个会话有一个专属 env 文件（路径放在 OMNIMATE_ENV_FILE
+    背景：每个会话有一个专属 env 文件（路径放在 OMNIMATE_ENV_FILE
     环境变量里传给 hook），SessionStart hook 可以往里追加
     `export K=V` 这类行；之后 terminal 工具执行命令时会把
     这个文件的内容合并进子进程的环境变量——相当于"会话开始时

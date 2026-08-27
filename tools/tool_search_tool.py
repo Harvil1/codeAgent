@@ -1,6 +1,6 @@
 """tool_search 工具：MCP 工具的详细参数定义按需加载，省 token。
 
-背景：对齐 Claude Code 的 ToolSearch 机制。LLM 平时只看到 MCP 工具的
+背景：LLM 平时只看到 MCP 工具的
 精简目录条目（名字 + 一句话描述），真要用某个工具时调本工具按关键字
 搜索，拿回完整参数定义（schema）。
 

@@ -1,4 +1,4 @@
-"""R28 W4：workflow 工具 + registry 测试。"""
+"""workflow 工具 + registry 测试。"""
 
 SRC = (
     "async def main():\n"
@@ -206,10 +206,10 @@ class TestResumeBudgetCumulative:
 
     async def test_run_detached_returns_immediately_and_killable(
             self, monkeypatch, tmp_path):
-        """C3（CCB detached launch）：wait=false 立即返回 run_id 不阻塞主循环。
+        """detached launch：wait=false 立即返回 run_id 不阻塞主循环。
 
         - 返回 detached=true + running 状态（引擎还在跑）
-        - 同会话可 kill（此前前台 run 阻塞主循环，kill 只能靠另一会话）
+        - 同会话可 kill（前台 run 阻塞主循环时 kill 只能靠另一会话发起）
         - 完成后 meta 落盘 + 后台通知送达（delegation 队列）
         """
         import asyncio
@@ -283,7 +283,7 @@ class TestResumeBudgetCumulative:
         assert notes[0]["delegation_id"] == out["run_id"]
 
     async def test_run_dir_cleanup_lru_cap(self, monkeypatch, tmp_path):
-        """C3（CCB KEEP_MAX_RUNS）：run 目录超 50 个按 LRU 清理最旧（跳过活跃）。"""
+        """run 目录超 KEEP_MAX_RUNS（50）按 LRU 清理最旧（跳过活跃）。"""
         import json
         import os
         import time

@@ -1,10 +1,10 @@
 """Checkpoint（检查点）/ Rewind（回退）："后悔药"系统——给文件和对话拍快照，出了问题可以倒回去。
 
-借鉴 Claude Code 的做法：每次处理用户 prompt 之前，把 agent 改过的文件
+每次处理用户 prompt 之前，把 agent 改过的文件
 都复制一份存起来；用户敲 /rewind 就能把文件和对话一起回滚到某个时间点。
 
 边界（设计如此）：只追踪 write_file / str_replace 这类编辑工具的直接修改；
-bash 命令改的文件不管——Claude Code 也明确说过这玩意不能当 Git 用。
+bash 命令改的文件不管——这套快照本来就明确不当 Git 用。
 """
 
 import hashlib

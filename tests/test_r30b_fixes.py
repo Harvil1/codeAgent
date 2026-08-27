@@ -1,28 +1,28 @@
 # -*- coding: utf-8 -*-
-"""R30b 修复轮回归测试（全量对比产出 A1-A6 行为 bug + B1-B4 安全绕过）。
+"""行为与安全修复回归测试。
 
-对应修复（源码内搜 R30b- 前缀注释）：
-  A1 _offload_decisions 不再被 AIAgent.__init__ 全局清空（test_offload_refined.py 内翻转）
-  A2 续写恢复保留 tool_calls（本文件）
-  A3 memory save() 新建路径时间戳 UTC（本文件）
-  A4 curator stale 状态机落盘 + update() 支持 state（本文件）
-  A5 get_task_store 按 home 键控缓存（本文件）
-  A6 声明式 hook fail_closed 语义传导（本文件）
-  B1 危险删除切分正则补 & 和 \r\n（本文件）
-  B2 deny/ask 激进剥 env 前缀 + allow 保守（本文件）
-  B3 AST 解析失败时 allow 不生效（本文件）
-  B4 git diff --output 不判只读（本文件）
+覆盖：
+  _offload_decisions 不被 AIAgent.__init__ 全局清空（test_offload_refined.py）
+  续写恢复保留 tool_calls
+  memory save() 新建路径时间戳 UTC
+  curator stale 状态机落盘 + update() 支持 state
+  get_task_store 按 home 键控缓存（防单例污染）
+  声明式 hook fail_closed 语义传导
+  危险删除切分正则含 & 和 \r\n
+  deny/ask 激进剥 env 前缀 + allow 保守
+  AST 解析失败时 allow 不生效
+  git diff --output 不判只读
 """
 from types import SimpleNamespace
 
 
 # ======================================================================
-# B1：危险删除换行/后台符绕过
+# 危险删除换行/后台符绕过
 # ======================================================================
 
 def test_dangerous_removal_newline_bypass_b1():
     from agent.permission import check_dangerous_removal
-    # 换行切分：第二行 rm 才是删除动词（切分正则曾不含 \r\n/&，整段 verb=echo 漏过）
+    # 换行切分：第二行 rm 才是删除动词（切分必须认 \r\n/&，否则整段 verb=echo 漏过）
     assert check_dangerous_removal("echo hi\nrm -rf /usr") is not None
     assert check_dangerous_removal("echo hi\rrm -rf /usr") is not None
     assert check_dangerous_removal("echo hi & rm -rf /usr") is not None
@@ -31,7 +31,7 @@ def test_dangerous_removal_newline_bypass_b1():
 
 
 # ======================================================================
-# B4：git diff --output 不判只读
+# git diff --output 不判只读
 # ======================================================================
 
 def test_readonly_git_diff_output_rejected_b4():
@@ -42,13 +42,13 @@ def test_readonly_git_diff_output_rejected_b4():
 
 
 # ======================================================================
-# B2/B3：内容级规则的双形态归一化 + AST 失败 fail-safe
+# 内容级规则的双形态归一化 + AST 失败 fail-safe
 # ======================================================================
 
 def test_suspicious_env_prefix_deny_aggressive_b2():
     from agent.tool_permissions import check_command_rules
     rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
-    # 引号/$ 形态的 env 赋值此前整条停手不剥 → deny 绕过
+    # 引号/$ 形态的 env 赋值若不剥掉 → deny 被绕过
     assert check_command_rules('FOO="x" rm -rf build/x', rules) == "deny"
     assert check_command_rules("FOO=$x rm -rf build/x", rules) == "deny"
 
@@ -75,7 +75,7 @@ def test_ast_failure_allow_not_applied_b3(monkeypatch):
 
 
 # ======================================================================
-# A3：memory save() 新建路径 UTC 时间戳
+# memory save() 新建路径 UTC 时间戳
 # ======================================================================
 
 def test_save_created_at_utc_aware_a3(tmp_path):
@@ -94,7 +94,7 @@ def test_save_created_at_utc_aware_a3(tmp_path):
 
 
 # ======================================================================
-# A4：curator stale 状态机真正落盘 + state-only 更新不刷 updated_at
+# curator stale 状态机真正落盘 + state-only 更新不刷 updated_at
 # ======================================================================
 
 def test_update_state_only_no_updated_at_bump_a4(tmp_path):
@@ -138,7 +138,7 @@ def test_apply_transitions_stale_persists_a4(tmp_path):
 
 
 # ======================================================================
-# A5：get_task_store 按 home 键控缓存（单例污染修复）
+# get_task_store 按 home 键控缓存（防单例污染）
 # ======================================================================
 
 def test_get_task_store_keyed_cache_a5(tmp_path):
@@ -157,7 +157,7 @@ def test_get_task_store_keyed_cache_a5(tmp_path):
 
 
 # ======================================================================
-# A6：声明式 hook fail_closed 语义传导
+# 声明式 hook fail_closed 语义传导
 # ======================================================================
 
 def _make_declarative_hook(name, fail_closed):
@@ -199,7 +199,7 @@ def test_declarative_pre_tool_fail_open_default_a6():
 
 
 # ======================================================================
-# A2：续写恢复保留 tool_calls
+# 续写恢复保留 tool_calls
 # ======================================================================
 
 def _truncated_response(content="part"):

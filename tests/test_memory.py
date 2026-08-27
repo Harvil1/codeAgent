@@ -264,7 +264,7 @@ def test_memory_tool_list_returns_summary(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 记忆注入上限（对齐 Claude Code 200 行 / 25KB）
+# 记忆注入上限（200 行 / 25KB）
 # ---------------------------------------------------------------------------
 
 def test_snapshot_truncated_over_line_limit(tmp_path: Path):
@@ -308,7 +308,7 @@ def test_snapshot_not_truncated_when_small(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 主题组织（对齐 Claude Code topic 文件）
+# 主题组织（topic 文件）
 # ---------------------------------------------------------------------------
 
 def test_save_to_topic_file(tmp_path: Path):
@@ -362,7 +362,7 @@ def test_clear_all_archives(tmp_path: Path):
 def test_index_grouped_by_topic(tmp_path: Path):
     """MEMORY.md 索引按主题分组。
 
-    注：save 是惰性 rebuild（Round 3 压力优化，防批量写 O(n²)），
+    注：save 是惰性 rebuild（防批量写 O(n²)），
     直接读 MEMORY.md 文件前需显式 flush（生产路径走 snapshot_for_prompt
     自动 ensure fresh）。
     """

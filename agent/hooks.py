@@ -8,19 +8,19 @@ hook（钩子）是什么：在对话流程的固定节点上自动触发的外�
 agent/hook_exec.py，配置文件解析在 agent/hook_loader.py。本文件只管
 "有哪些 hook、什么时候触发、结果怎么合并"。
 
-一共 27 种事件（按加入批次分组）：
-  最早的核心 6 种：用户提交问题（USER_PROMPT_SUBMIT）、工具调用前
+一共 27 种事件：
+  核心 6 种：用户提交问题（USER_PROMPT_SUBMIT）、工具调用前
     （PRE_TOOL_USE）、工具调用后（POST_TOOL_USE）、回答结束（STOP）、
-    LLM 调用前后（PRE_LLM_CALL / POST_LLM_CALL，batch2-T2 批次）
-  P2-13 批次加 5 种：会话开始/结束（SESSION_START / SESSION_END）、
+    LLM 调用前后（PRE_LLM_CALL / POST_LLM_CALL）
+  会话/压缩/配置 5 种：会话开始/结束（SESSION_START / SESSION_END）、
     上下文压缩前/后（PRE_COMPACT / POST_COMPACT）、配置变更（CONFIG_CHANGE）
-  round3 批次加 7 种：工具调用失败（POST_TOOL_USE_FAILURE）、子代理
+  关键生命周期/留痕 7 种：工具调用失败（POST_TOOL_USE_FAILURE）、子代理
     开始/结束（SUBAGENT_START / SUBAGENT_STOP）、任务创建/完成
     （TASK_CREATED / TASK_COMPLETED）、权限请求/拒绝
     （PERMISSION_REQUEST / PERMISSION_DENIED）
-  P3.3-P3.4 批次加 3 种：回答异常结束（STOP_FAILURE）、worktree 隔离工作区
-    创建/清理（WORKTREE_CREATE / WORKTREE_REMOVE）
-  Task N 批次加 6 种：文件被改（FILE_CHANGED）、工作目录切换
+  回答异常结束（STOP_FAILURE）、worktree 隔离工作区
+    创建/清理（WORKTREE_CREATE / WORKTREE_REMOVE）3 种
+  集成/通知类 6 种：文件被改（FILE_CHANGED）、工作目录切换
     （CWD_CHANGED）、项目说明文件加载完（INSTRUCTIONS_LOADED）、
     启动一次性事件（SETUP）、队友空闲（TEAMMATE_IDLE）、
     弹窗问用户前（ELICITATION_STARTED）
@@ -51,16 +51,16 @@ class HookEvent(Enum):
     PRE_TOOL_USE = "pre_tool_use"
     POST_TOOL_USE = "post_tool_use"
     STOP = "stop"
-    # batch2-T2 批次加的：LLM 调用前后各触发一次
+    # LLM 调用前后各触发一次
     PRE_LLM_CALL = "pre_llm_call"
     POST_LLM_CALL = "post_llm_call"
-    # P2-13 批次加的：会话/压缩/配置相关 5 个新事件
+    # 会话/压缩/配置相关 5 个事件
     SESSION_START = "session_start"
     SESSION_END = "session_end"
     PRE_COMPACT = "pre_compact"
     POST_COMPACT = "post_compact"
     CONFIG_CHANGE = "config_change"
-    # round3 批次加的：关键生命周期/留痕审计事件
+    # 关键生命周期/留痕审计事件
     POST_TOOL_USE_FAILURE = "post_tool_use_failure"
     SUBAGENT_START = "subagent_start"
     SUBAGENT_STOP = "subagent_stop"
@@ -68,12 +68,12 @@ class HookEvent(Enum):
     TASK_COMPLETED = "task_completed"
     PERMISSION_REQUEST = "permission_request"
     PERMISSION_DENIED = "permission_denied"
-    # P3.3 批次加的：STOP 的失败变体（主循环异常退出时才触发，区别于正常结束）
+    # STOP 的失败变体（主循环异常退出时才触发，区别于正常结束）
     STOP_FAILURE = "stop_failure"
-    # P3.4 批次加的：worktree 隔离工作区创建/清理的通知事件
+    # worktree 隔离工作区创建/清理的通知事件
     WORKTREE_CREATE = "worktree_create"
     WORKTREE_REMOVE = "worktree_remove"
-    # === Task N 批次加的 6 种（借鉴 Claude Code）===
+    # === 集成/通知类 6 种 ===
     FILE_CHANGED = "file_changed"                   # 文件写入成功后触发（做 IDE 集成的基础）
     CWD_CHANGED = "cwd_changed"                     # worktree 切目录时（配合 workspace_context）
     INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/OMNIMATE.md 加载完后
@@ -87,10 +87,10 @@ UserPromptSubmitFn = Callable[[str], Optional[str]]
 PreToolUseFn = Callable[[str, dict], Optional[dict]]
 PostToolUseFn = Callable[[str, dict, str], Optional[str]]
 StopFn = Callable[[], Optional[str]]
-# batch2-T2 批次：LLM 调用前后两个事件的签名
+# LLM 调用前后两个事件的签名
 PreLLMCallFn = Callable[[list, Optional[list]], Optional[tuple]]
 PostLLMCallFn = Callable[[object], Optional[object]]
-# P2-13 批次起的新事件统一用 dict 进、Optional[dict] 出的风格：
+# 新事件统一用 dict 进、Optional[dict] 出的风格：
 # - SESSION_START/END、POST_COMPACT、CONFIG_CHANGE 是纯通知型，返回值直接忽略
 # - PRE_COMPACT 特殊：返回 {"abort": True} 可以阻止这一层压缩
 PayloadFn = Callable[[dict], Optional[dict]]
@@ -109,7 +109,7 @@ class HookScriptConfig:
     - prompt:   让辅助小模型（aux_llm）单轮评估一次
     - agent:    让子代理（多轮）评估
 
-    P3.5 批次新增字段：
+    条件过滤字段：
     - if_condition: 声明式的条件过滤，写法沿用 permission rule 语法。
       只对 PRE_TOOL_USE / POST_TOOL_USE / POST_TOOL_USE_FAILURE /
       PERMISSION_REQUEST 这四种事件有意义；条件不匹配就跳过这个 hook
@@ -125,9 +125,9 @@ class HookScriptConfig:
     agent_name: Optional[str] = None  # 自定义子代理的名字，agent 类型用（可不填）
     timeout: float = 10.0
     env: Optional[dict] = None
-    # P3.5 批次新增：条件过滤（permission rule 语法；None/空字符串 = 不过滤、每次都匹配）
+    # 条件过滤（permission rule 语法；None/空字符串 = 不过滤、每次都匹配）
     if_condition: Optional[str] = None
-    # C4（借鉴 CCB）：异步 hook（只有 command 类型支持）
+    # 异步 hook（只有 command 类型支持）
     # - async_run: 放到后台线程跑，dispatch 立刻返回 None，不阻塞主流程。
     #   ⚠ 代价是"拦截"语义失效：异步的 PRE_TOOL_USE 就算想 deny 也来不及拦——
     #   所以 async 只该用在通知/审计这类"事后知道就行"的 hook 上
@@ -148,9 +148,9 @@ class Hook:
     fn: Optional[Callable] = None
     script: Optional[HookScriptConfig] = None
     fail_closed: bool = False
-    # P3.6 批次新增：once=True 表示"一次性"hook，跑过一次后就消费掉（后续触发直接跳过）
+    # once=True 表示"一次性"hook，跑过一次后就消费掉（后续触发直接跳过）
     once: bool = False
-    # P3.8 批次新增：声明式 command hook 是否套 OS 沙箱（只在 Unix 生效；Windows 上降级跳过沙箱）
+    # 声明式 command hook 是否套 OS 沙箱（只在 Unix 生效；Windows 上降级跳过沙箱）
     use_sandbox: bool = False
 
 
@@ -169,7 +169,7 @@ class HookRegistry:
     def __init__(self):
         self._hooks: dict = {e: [] for e in HookEvent}
         self._stop_fire_count: int = 0
-        # P3.6 批次新增：once=True 且已经跑过（被"消费"）的 hook 对象 id 集合
+        # once=True 且已经跑过（被"消费"）的 hook 对象 id 集合
         self._consumed: set = set()
 
     # ---- 注册（往登记簿上添条目） ----
@@ -224,7 +224,7 @@ class HookRegistry:
                  kind="programmatic", fn=fn)
         )
 
-    # ---- P2-13 批次：会话/压缩/配置事件的注册 ----
+    # ---- 会话/压缩/配置事件的注册 ----
     def register_session_start(self, fn, *, name=None):
         """登记会话开始事件 hook。fn(payload) -> None；
         payload 含 session_id、started_at、agent_home。参数：fn 为 hook 函数，name 为名字。"""
@@ -266,7 +266,7 @@ class HookRegistry:
                  kind="programmatic", fn=fn)
         )
 
-    # ---- batch2-T2 批次：LLM 调用前后的 hook 注册 ----
+    # ---- LLM 调用前后的 hook 注册 ----
     def register_pre_llm_call(self, fn, *, name=None):
         """登记"LLM 调用前"触发的 hook（可以在请求发出去之前改消息和工具表）。
 
@@ -312,21 +312,21 @@ class HookRegistry:
         else:
             self._hooks[event] = []
         self._stop_fire_count = 0
-        self._consumed.clear()  # P3.6 批次：一次性 hook 的消费记录也要一并清掉
+        self._consumed.clear()  # 一次性 hook 的消费记录也要一并清掉
 
-    # ---- P3.5/P3.6 批次的小工具 ----
+    # ---- 一次性/条件过滤的小工具 ----
 
     def _is_consumed(self, hook: "Hook") -> bool:
-        """P3.6 批次：判断一个 once=True 的 hook 是不是已经跑过（被消费）了。"""
+        """判断一个 once=True 的 hook 是不是已经跑过（被消费）了。"""
         return hook.once and id(hook) in self._consumed
 
     def _mark_consumed_if_once(self, hook: "Hook") -> None:
-        """P3.6 批次：声明式 hook 跑完后，如果是 once 就记下"已消费"，下次跳过。"""
+        """声明式 hook 跑完后，如果是 once 就记下"已消费"，下次跳过。"""
         if hook.once:
             self._consumed.add(id(hook))
 
     def _matches_if_condition(self, hook: "Hook", tool_name: str, args: dict) -> bool:
-        """P3.5 批次：声明式 hook 的 if 条件过滤——条件不匹配就不触发这个 hook。
+        """声明式 hook 的 if 条件过滤——条件不匹配就不触发这个 hook。
 
         参数：
         - hook：要检查的 hook
@@ -357,7 +357,7 @@ class HookRegistry:
         - prompt：用户原始输入
         - session_id：当前会话 id（拼进 hook 的 payload）
 
-        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
+        声明式 hook 支持 once（跑一次后消费）。
         """
         for hook in self._hooks[HookEvent.USER_PROMPT_SUBMIT]:
             if hook.kind == "declarative":
@@ -409,7 +409,7 @@ class HookRegistry:
         意见不一致时听谁的。返回 (deny_reason, modified_args)：
         deny_reason 非 None 就拒绝执行工具；modified_args 非 None 就替换参数。
 
-        怎么跑（R30g-H5 改成并行执行 + 聚合）：
+        怎么跑（并行执行 + 聚合）：
         - 所有匹配的 hook 先全跑完再合并结论。声明式（子进程，慢）的用
           线程池并行——一个慢 hook 不拖累其他 hook 和主循环；程序式
           （进程内的快函数）保持串行。
@@ -419,10 +419,10 @@ class HookRegistry:
           注意：并行跑时每个 hook 是基于**原始参数**做的判断——
           "多个 hook 同时改参互相看得见"的旧串行语义在并行下略有出入
           （罕见场景才碰得到）。
-        - ask 档（对齐 CCB 的 ask 语义）：本项目 pre_tool_use 没有通用的
+        - ask 档：本项目 pre_tool_use 没有通用的
           审批界面，ask 就按"宁可拒绝"（fail-closed）处理，报错里注明
           是 ask（用户可以去调整 hook 规则）。
-        - 配了 fail_closed 的 hook 出异常按 deny 汇总（历史踩坑 R30c-A6：
+        - 配了 fail_closed 的 hook 出异常按 deny 汇总（历史踩坑：
           此前异常被吞掉，fail_closed 分支根本走不到，语义必须保留）。
 
         参数：
@@ -430,8 +430,7 @@ class HookRegistry:
         - args：工具的原始参数
         - session_id：会话 id
 
-        P3.5 批次：声明式 hook 支持 if 条件过滤（permission rule 语法）。
-        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
+        声明式 hook 支持 if 条件过滤（permission rule 语法）和 once（跑一次后消费）。
         """
         matched = []
         for hook in self._hooks[HookEvent.PRE_TOOL_USE]:
@@ -501,7 +500,7 @@ class HookRegistry:
                 if not isinstance(mod, dict):
                     logger.warning("hook %s modify_args 非 dict，忽略", hook.name)
                     continue
-                # 历史踩坑（R30 审计 L14）：多个 hook 改参数必须按注册顺序
+                # 历史踩坑：多个 hook 改参数必须按注册顺序
                 # 叠加合并（outcomes 本身就是按注册序收集的）——旧实现是
                 # 后到者整体替换，先到的 hook 改的东西会静默丢掉。合并规则：
                 # 第一个 hook 的完整返回做基底，后面的按键覆盖（同键后到胜、异键并集）
@@ -533,7 +532,7 @@ class HookRegistry:
 
         返回：{"deny": 理由} / {"modify_args": 新参数} / None（放行）。
 
-        P3.7 批次：支持子进程 exit code 2 的拦截协议——
+        支持子进程 exit code 2 的拦截协议——
         dispatch_hook 会把它转成 {"action": "block", "reason": stderr}，
         这里再转成 {"deny": reason}。
         """
@@ -546,7 +545,7 @@ class HookRegistry:
             "tool_name": tool_name,
             "args": args,
         }
-        # 历史踩坑（R30b-A6）：这里必须传 propagate_error=True——fail_closed
+        # 历史踩坑：这里必须传 propagate_error=True——fail_closed
         # 的 hook 执行失败时异常要向上抛，让 run_pre_tool_use 的 except 分支
         # 转成 deny。此前 dispatch_hook 内部把一切异常都吞了，fail_closed
         # 分支永远走不到，等于白配
@@ -554,10 +553,10 @@ class HookRegistry:
         if result is None:
             return None
         action = result.get("action", "allow")
-        # P3.7 批次：block（exit code 2）等同于 deny
+        # block（exit code 2）等同于 deny
         if action in ("deny", "block"):
             return {"deny": result.get("reason", "unspecified")}
-        # R30g-H5 批次：ask 档（升审批语义——由 run_pre_tool_use 聚合层兑现）
+        # ask 档（升审批语义——由 run_pre_tool_use 聚合层兑现）
         if action == "ask":
             return {"ask": result.get("reason", "unspecified")}
         if action == "modify":
@@ -576,7 +575,7 @@ class HookRegistry:
         - result：工具的原始结果
         - session_id：会话 id
 
-        P3.5/P3.6 批次：声明式 hook 支持 if 条件过滤 + once 消费。
+        声明式 hook 支持 if 条件过滤 + once 消费。
         """
         for hook in self._hooks[HookEvent.POST_TOOL_USE]:
             if hook.kind == "declarative":
@@ -632,7 +631,7 @@ class HookRegistry:
         - session_id：会话 id
         - max_fires：本会话最多让 STOP hook"续命"几次（默认 3）
 
-        P3.6 批次：声明式 hook 支持 once（跑一次后消费）。
+        声明式 hook 支持 once（跑一次后消费）。
         """
         if self._stop_fire_count >= max_fires:
             logger.info("STOP hook 触发上限（%d/%d），本次跳过",
@@ -689,7 +688,7 @@ class HookRegistry:
         - session_id：会话 id
         - event：事件名字符串
         - timeout_cap：超时上限（非空时和 hook 自配的超时取较小者；
-          R30g-M8 批次加的，会话结束时用——退出不能被慢 hook 卡住）
+          会话结束时用——退出不能被慢 hook 卡住）
         - **extra：事件特定字段，原样并进 payload
 
         返回：dispatch_hook 的 dict 结果，或 None。
@@ -704,7 +703,7 @@ class HookRegistry:
         payload.update(extra)
         return dispatch_hook(hook, payload, timeout_cap=timeout_cap)
 
-    # ---- batch2-T2 批次：执行 LLM 调用前/后事件 ----
+    # ---- 执行 LLM 调用前/后事件 ----
     def run_pre_llm_call(self, messages: list, tools: Optional[list],
                          *, session_id: str = "") -> tuple:
         """请求发给 LLM 之前，把消息列表和工具表依次过一遍 hook（流水线）。
@@ -772,7 +771,7 @@ class HookRegistry:
                                hook.name, e)
         return response
 
-    # ---- P2-13 批次：会话/压缩/配置事件的执行 ----
+    # ---- 会话/压缩/配置事件的执行 ----
     def run_session_start(self, payload: dict) -> None:
         """通知型：会话开始时把所有 SESSION_START hook 都叫一遍，返回值
         一律忽略。单个 hook 出异常就跳过（fail-open）。
@@ -794,7 +793,7 @@ class HookRegistry:
                 logger.warning("SESSION_START hook %s 异常（忽略）: %s",
                                hook.name, e)
 
-    # R30g-M8 批次：会话结束 hook 的独立短超时（对齐 CCB 默认 1500ms）——
+    # 会话结束 hook 的独立短超时（默认 1500ms）——
     # 收尾阶段不能被慢 hook 卡死（退出时干等 10 秒体验太差）
     SESSION_END_TIMEOUT_CAP = 1.5
 
@@ -805,7 +804,7 @@ class HookRegistry:
         参数：
         - payload：事件数据（session_id、reason、ended_at 等）
 
-        R30g-M8 批次：声明式 hook 超时被钳到 SESSION_END_TIMEOUT_CAP
+        声明式 hook 超时被钳到 SESSION_END_TIMEOUT_CAP
         （hook 自己配得更短就尊重更短的值）。
         """
         session_id = payload.get("session_id", "") or ""
@@ -896,7 +895,7 @@ class HookRegistry:
                 logger.warning("CONFIG_CHANGE hook %s 异常（忽略）: %s",
                                hook.name, e)
 
-    # ---- round3 批次：7 个关键事件 ----
+    # ---- 7 个关键事件 ----
 
     def register_post_tool_use_failure(self, fn, *, name=None):
         """登记"工具调用失败后"通知 hook（result 里带 error 时触发）。
@@ -1087,7 +1086,7 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("PERMISSION_DENIED hook %s 异常: %s", hook.name, e)
 
-    # ---- P3.3 批次：STOP_FAILURE（回答异常结束）事件 ----
+    # ---- STOP_FAILURE（回答异常结束）事件 ----
 
     def register_stop_failure(self, fn, *, name=None):
         """登记 STOP_FAILURE hook（通知型，返回值忽略）。
@@ -1123,7 +1122,7 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("STOP_FAILURE hook %s 异常: %s", hook.name, e)
 
-    # ---- P3.4 批次：worktree（隔离工作区）创建/清理事件 ----
+    # ---- worktree（隔离工作区）创建/清理事件 ----
 
     def register_worktree_create(self, fn, *, name=None):
         """登记 WORKTREE_CREATE hook（通知型）。
@@ -1192,7 +1191,7 @@ class HookRegistry:
             except Exception as e:
                 logger.warning("WORKTREE_REMOVE hook %s 异常: %s", hook.name, e)
 
-    # ---- Task N 批次：6 个新事件 ----
+    # ---- 6 个通知/集成事件 ----
 
     def register_file_changed(self, fn, *, name=None):
         """登记 FILE_CHANGED hook（通知型）。

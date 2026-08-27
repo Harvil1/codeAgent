@@ -155,9 +155,9 @@ def build_system_prompt_layers(
     # volatile 层的素材（运行时才有的东西，从外面传进来）
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
-    # === Task N 新增：自定义子代理可跳过项目 OMNIMATE.md 注入（省 token）===
+    # === 自定义子代理可跳过项目 OMNIMATE.md 注入（省 token）===
     omit_project_memory: bool = False,
-    # === C6（借鉴 CCB outputStyles）：输出风格节的文本（拼进 context 层；空=未启用风格）===
+    # === 输出风格节的文本（拼进 context 层；空=未启用风格）===
     output_style_text: str = "",
 ) -> SystemPromptLayers:
     """组装出三层 system prompt。
@@ -168,8 +168,8 @@ def build_system_prompt_layers(
       - volatile：每轮可变（todo / 提醒），不指望命中缓存
 
     参数：
-        memory_store: 记忆仓库对象。历史包袱：现在已不再往 system prompt
-            注入记忆（CCAR10 Task 2 改成每轮按需检索注入），参数留着只是
+        memory_store: 记忆仓库对象。不再往 system prompt
+            注入记忆（记忆改成每轮按需检索注入），参数留着只是
             兼容旧调用，函数里不使用
         memory_manager: 记忆管理器，能产出扩展记忆块拼进 context 层；没有就不拼
         enabled_toolsets: 当前启用的工具集名字列表（目前本函数未直接使用）
@@ -180,7 +180,7 @@ def build_system_prompt_layers(
         task_state: 当前任务列表的文本快照，进 volatile 层
         reminder: 给模型的提醒文本，进 volatile 层
         omit_project_memory: True 时跳过项目 OMNIMATE.md 注入——给只读/
-            轻量子代理省 token 用（对齐 Claude Code 的 omitClaudeMd 字段）
+            轻量子代理省 token 用
         output_style_text: 输出风格节文本，拼在 context 层末尾；空串表示
             未启用风格、不拼
 
@@ -222,7 +222,7 @@ def build_system_prompt_layers(
         skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
-    # CCAR10 Task 2 的改动：记忆索引不再拼进 system prompt（否则每条新记忆
+    # 记忆索引不再拼进 system prompt（否则每条新记忆
     # 都会让整个前缀缓存报废）。改成"用完即扔"的临时注入（ephemeral）：
     # 每轮按当前问题检索相关记忆再注入消息里；没有辅助 LLM 路由时就退回
     # 老办法——开工时拍一次快照、一次性注入。
@@ -246,7 +246,7 @@ def build_system_prompt_layers(
     except Exception:
         pass
 
-    # MCP 路由提示（借鉴 DeerFlow）：用户在 .mcp.json 里可以给 server 加
+    # MCP 路由提示：用户在 .mcp.json 里可以给 server 加
     # keywords 字段，模型一看到关键词就知道该找哪个外部工具服务器。例如：
     #   "postgres": {"keywords": ["订单", "数据库", "SQL"]}
     try:
@@ -258,11 +258,10 @@ def build_system_prompt_layers(
         logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
 
     # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 OMNIMATE.md
-    # （对齐 Claude Code "递归向上找 CLAUDE.md" 的做法）
-    # 历史踩坑（Round 1 修复）：Path.cwd() 读的是整个进程的当前目录，
+    # 历史踩坑：Path.cwd() 读的是整个进程的当前目录，
     # 多个子代理并发跑时会互相踩。改用 get_workspace_cwd()（每个任务
     # 各自独立的上下文变量，互不干扰）。
-    # Task N：omit_project_memory=True 时跳过这整段（子代理省 token 用）
+    # omit_project_memory=True 时跳过这整段（子代理省 token 用）
     if not omit_project_memory:
         try:
             from agent.workspace_context import get_workspace_cwd
@@ -405,7 +404,7 @@ def _expand_imports(
 ) -> str:
     """展开 OMNIMATE.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）。
 
-    背景：对齐 Claude Code 的 @import 语法——项目记忆里写一行 @docs/api.md，
+    背景：项目记忆里写一行 @docs/api.md，
     读的时候自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
 
     规则：
@@ -501,8 +500,8 @@ def _expand_imports(
 def _scan_project_memory_files(cwd: Path) -> List[Path]:
     """从当前目录一路向上扫，收集沿途所有 OMNIMATE.md（项目的说明文件）。
 
-    背景：对齐 Claude Code"从当前目录向上递归读 CLAUDE.md"的做法——
-    项目每层目录都可以有自己的说明文件，全收集起来给模型看。
+    背景：项目每层目录都可以有自己的说明文件，从当前目录向上递归
+    收集起来全给模型看。
 
     停止规则：遇到含 .git 的目录（仓库根）就停，含这一层，不再往上。
     这是对 monorepo（一个大仓多个子项目）友好的设计：在子项目里跑时，

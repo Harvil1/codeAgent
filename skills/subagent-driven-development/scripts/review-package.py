@@ -19,7 +19,7 @@ def _git(args: list[str]) -> str:
         args  git 子命令及参数列表，如 ["log", "--oneline"]
 
     返回：命令的标准输出文本。
-    历史踩坑：Windows 上 text=True 默认按 GBK 解码，git 输出里的
+    注意：Windows 上 text=True 默认按 GBK 解码，git 输出里的
     UTF-8 中文 commit message 会乱码甚至崩溃，所以必须显式指定 utf-8。
     """
     return subprocess.check_output(

@@ -30,7 +30,7 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-# 流式「看门狗」的默认空闲超时（90 秒，参考 Claude Code 的同款设置）。
+# 流式「看门狗」的默认空闲超时（90 秒）。
 # 看门狗 = 盯着流式输出，太久没新数据就认为卡死并中止。
 DEFAULT_STREAM_IDLE_TIMEOUT = 90.0
 
@@ -59,8 +59,8 @@ async def _iterate_with_watchdog(
     __anext__() 并用 asyncio.wait_for 包一层；超时时 wait_for 会顺手
     取消那个还在傻等的接收协程（安全，不会留尾巴）。
 
-    与 Claude Code 的差异（有意为之）：CC 还有一套「半超时警告 + 停顿
-    计数」的遥测上报，本项目没有对应的遥测通道，只做超时中止。
+    设计取舍：只做超时中止，不做「半超时警告 + 停顿计数」遥测上报
+    （本项目没有对应的遥测通道）。
 
     参数：
         stream：原始的 async 迭代器（流式响应）
@@ -221,7 +221,7 @@ class LLMClient:
         }
 
     def reset_client(self) -> None:
-        """把底下的 HTTP 连接池整个换新（历史踩坑修复，R26 #10）。
+        """把底下的 HTTP 连接池整个换新（历史踩坑修复）。
 
         背景：连接一旦被重置弄坏，在坏连接池上重试大概率还是失败，
         所以重试逻辑会先调这个方法重建 client 再试。
@@ -257,14 +257,14 @@ class OpenAICompatClient(LLMClient):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.base_url = base_url
-        # 历史踩坑（R26 #10 修复）：把密钥自己存一份。SDK 不保证让你读回
+        # 历史踩坑：把密钥自己存一份。SDK 不保证让你读回
         # 旧 client 的密钥，重建时没存就得不偿失。
         self._api_key = api_key
         # 流式看门狗的空闲秒数；小于等于 0 表示关掉看门狗
         self.stream_idle_timeout = stream_idle_timeout
 
     def reset_client(self) -> None:
-        """扔掉可能坏掉的连接池，重新造一个 AsyncOpenAI（R26 #10）。"""
+        """扔掉可能坏掉的连接池，重新造一个 AsyncOpenAI。"""
         try:
             # 尽力关掉旧 client；它已经坏了也无所谓，反正要扔
             import asyncio as _aio
@@ -424,7 +424,7 @@ class AnthropicClient(LLMClient):
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
-        # 历史踩坑（R26 #10 修复）：把密钥/地址各存一份，
+        # 历史踩坑：把密钥/地址各存一份，
         # reset_client 重建时直接用，不指望 SDK 让你读回旧值
         self._api_key = api_key
         self._auth_token = auth_token
@@ -433,7 +433,7 @@ class AnthropicClient(LLMClient):
         self.stream_idle_timeout = stream_idle_timeout
 
     def reset_client(self) -> None:
-        """扔掉可能坏掉的连接池，按原来的配置重建 AsyncAnthropic（R26 #10）。"""
+        """扔掉可能坏掉的连接池，按原来的配置重建 AsyncAnthropic。"""
         try:
             # 尽力关掉旧 client；它已经坏了也无所谓，反正要扔
             import asyncio as _aio
@@ -895,7 +895,7 @@ async def aclose_llm_client(client) -> None:
 
 
 class ThreadedLLMClient(LLMClient):
-    """给「后台线程」专用的 LLM client（R26 终审 follow-up 修复的历史坑）。
+    """给「后台线程」专用的 LLM client。
 
     问题出在哪：HTTP 连接池（httpx）在第一次使用时会跟当时的「事件循环」
     （可以理解为异步调度中心）绑定死。后台守护线程（curator 维护工/

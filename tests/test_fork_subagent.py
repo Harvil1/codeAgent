@@ -1,4 +1,4 @@
-"""fork 子代理路径测试（Task H / CCAR5）。
+"""fork 子代理路径测试。
 
 测试 build_forked_messages + build_forked_system_prompt 的正确性：
 - 父对话前缀的字节级 cache-identical 保证

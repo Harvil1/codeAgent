@@ -1,6 +1,6 @@
 """prompt 缓存（LLM 服务商对"开头不变的部分"打折复用的机制）的破坏检测器。
 
-借鉴 claude-code-main 的 promptCacheBreakDetection。背景：缓存命中省钱
+背景：缓存命中省钱
 又提速，一旦开头内容变了缓存就全废（费用翻倍），所以要有个"哨兵"盯着
 每次调用、发现缓存掉了就报告是哪里变了。
 
@@ -9,13 +9,13 @@
 2. 调 API 后：check_cache_break 对比这次实际读到的缓存 token 数，掉了就查根因
 3. 确认缓存被破坏：打日志 + 记进历史 + 写 diff 文件（/cache-stats 命令展示用）
 
-盯的 12 个维度（对齐 claude-code-main promptCacheBreakDetection.ts）：
+盯的 12 个维度：
   1. system_hash（系统提示哈希）   2. tools_hash（工具集哈希）  3. model（模型名）
   4. cache_strategy               5. betas_hash                6. max_tokens
   7. temperature                  8. stream_mode（是否流式）   9. tool_choice
   10. user_content_prefix（用户消息前缀） 11. messages_count    12. system_boundary
 
-CCAR4 Task A 的扩展：
+另有三项扩展：
   - per-tool hash（每个工具单独记哈希，能指出具体是哪个工具变了）
   - diff 文件落盘（~/.OmniMate/.cache-breaks/cache-break-*.diff）
   - TTL 时长分析（区分 5 分钟 / 1 小时缓存过期）
@@ -46,16 +46,15 @@ class ToolHashEntry:
 class PromptState:
     """调 API 前给 prompt 各维度拍的快照（12 维度 + 每个工具各自的哈希）。
 
-    有了快照，下次缓存掉了就能逐项对比找出"是谁变了"。维度清单对齐
-    claude-code-main promptCacheBreakDetection.ts。
+    有了快照，下次缓存掉了就能逐项对比找出"是谁变了"。
     """
-    # 最早实现的 5 个核心维度
+    # 核心 5 维度
     system_hash: int = 0
     tools_hash: int = 0
     model: str = ""
     cache_strategy: str = ""
     betas_hash: int = 0
-    # CCAR4 Task A 补充的 7 个维度
+    # 其余 7 个维度
     max_tokens: int = 0
     temperature: Optional[float] = None
     stream_mode: bool = False

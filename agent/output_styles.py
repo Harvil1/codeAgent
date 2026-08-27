@@ -1,6 +1,6 @@
 """输出风格（output styles）模块——让用户一键切换模型的说话/排版方式。
 
-借鉴 CCB outputStyles 的极简版（C6 轮引入）。所谓"风格"就是一份 .md 文件：
+所谓"风格"就是一份 .md 文件：
 - 文件名去掉扩展名就是风格名（如 concise.md → 风格 concise）
 - 开头的 frontmatter 可选（可写 name/description，解析器和技能共用同一套）
 - 正文就是给模型的提示词（比如"回答保持三句话以内"）

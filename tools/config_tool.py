@@ -1,4 +1,4 @@
-"""config 工具（CCAR12 第 7 任务）：让 LLM 能安全地改运行时配置。
+"""config 工具：让 LLM 能安全地改运行时配置。
 
 只开放白名单里的 9 个键，而且必须精确匹配。在项目里的位置：tools 层的
 core 工具，读写都走 agent/settings.py 的 load_settings/save_settings，
@@ -11,8 +11,8 @@ core 工具，读写都走 agent/settings.py 的 load_settings/save_settings，
 （permission_denied）。
 
 config_set（改配置）分三步：
-  1. 读-改-写 settings.json（走 load_settings/save_settings，这是 CCAR11 定下的
-     唯一合法通道——config.yaml 那条老路已经断了，写了也读不回来）
+  1. 读-改-写 settings.json（走 load_settings/save_settings，这是
+     唯一合法持久化通道——config.yaml 不在读取路径上，写了也读不回来）
   2. 运行时立即生效：把 agent_ref.config 里的同一个键改掉
      （按嵌套路径写入——本会话马上生效，不用重启）
   3. 触发 CONFIG_CHANGE hook（钩子，供审计/缓存失效用；hook 出错也不影响写配置）
@@ -31,12 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 # 白名单（模块级不可变集合，精确匹配）。只收「改坏了顶多影响体验」的开关类键。
-# 历史踩坑（review 修正）：换掉过 2 个"死键"——trace.retention_days（trace.py 里
-# 根本没有 retention 清理逻辑，全仓无人读它）和 context.reactive_compact_enabled
-# （真正的开关在 features.reactive_compact.enabled）——写进没人读的键还谎报
-# "已生效"，是最危险的静默失败（silent-dead-code）。
-# 换进来的是 context.reactive_compact_cooldown_seconds / max_per_session
-# （这两个在 agent/__init__.py 的 reactive_compact 分支里有真实的读取点）。
+# 只收有真实读取点的键——写进没人读的"死键"还谎报"已生效"，是最危险的
+# 静默失败（silent-dead-code）。新收录键之前必须先 grep 确认有消费方。
 _CONFIG_WHITELIST = frozenset({
     "notifications.enabled",
     "statusline.enabled",
@@ -45,7 +41,7 @@ _CONFIG_WHITELIST = frozenset({
     "trace.enabled",
     "context.reactive_compact_cooldown_seconds",
     "context.reactive_compact_max_per_session",
-    # CCAR15 Task 4：skill_learning 开关 + 观察后端（读取点在
+    # skill_learning 开关 + 观察后端（读取点在
     # agent/__init__.py:_maybe_skill_learning，start/stop 也可走 CLI
     # /skill-learning，这里给 LLM 一条持久化通道）
     "skill_learning.enabled",
@@ -60,7 +56,7 @@ _NEXT_SESSION_KEYS = frozenset({
 })
 
 # 枚举键：值只能是列出来的那几个（统一转小写再比较）。
-# 历史踩坑（CCAR15 T4 review 快修）：observer 若被设成 "LLM" 或拼错单词，
+# observer 若被设成 "LLM" 或拼错单词，
 # 会静默回落到启发式，还谎报 runtime_applied=True——这就是"假报生效"在取值层面的
 # 变体，所以在校验这一层直接拦死。
 _ENUM_KEYS = {
@@ -325,7 +321,7 @@ def _handle_config_set(args: dict, **dispatch_kwargs) -> str:
 
         old_value = current
 
-        # 第 1 步：读-改-写 settings.json（这是 CCAR11 定下的唯一合法持久化通道）
+        # 第 1 步：读-改-写 settings.json（唯一合法持久化通道）
         _set_nested(settings, parts, coerced)
         save_settings(settings)
 

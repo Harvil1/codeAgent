@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class TraceSink:
     """记录器的本体：负责把一条条 trace 记录写进当天的 jsonl 文件。
 
-    用法示例（Task 5 通过 hook 接入 AIAgent，平时不直接调）::
+    用法示例（通过 hook 接入 AIAgent，平时不直接调）::
 
         sink = TraceSink(base_dir=Path("~/.OmniMate").expanduser())
         sink.emit("pre_llm_call", input_tokens=100, model="deepseek-chat")
@@ -49,7 +49,7 @@ class TraceSink:
 
         参数：
             agent_id：新名字，比如 "subagent_explore"（默认是 "main" 主代理）。
-        Task 5 接入 hook 时，在 ``register_subagent_start``（子代理启动钩子）里调。
+        接入 hook 时在 ``register_subagent_start``（子代理启动钩子）里调。
         """
         self._current_agent_id = agent_id
 
@@ -69,7 +69,7 @@ class TraceSink:
                 "event": event,
                 "agent_id": fields.pop("agent_id", self._current_agent_id),
             }
-            # R19 #24 加的保险：落盘前先给字段值"打码"——扫出疑似密钥就替换掉。
+            # 保险措施：落盘前先给字段值"打码"——扫出疑似密钥就替换掉。
             # 打码本身失败也不拦（fail-open），原样记录总比丢记录强
             try:
                 from agent.secret_scanner import redact_fields
@@ -176,7 +176,7 @@ class TraceSink:
 
 
 # =============================================================================
-# CCAR8 Task 5: 把 trace 记录器挂到 hook 上（这一步之后才算真正接到主循环）
+# 把 trace 记录器挂到 hook 上（这一步之后才算真正接到主循环）
 # =============================================================================
 
 
@@ -231,8 +231,8 @@ def _register_trace_hooks(hooks_registry, sink: "TraceSink") -> None:
         name="trace_post_tool_use",
     )
     # 历史踩坑：POST_TOOL_USE_FAILURE 的回调签名是 fn(payload: dict)（见
-    # hooks.py:622），不是 (tool_name, args, result)——当初设计简报上写错了，
-    # 这里按真实签名实现，写错参数签名就是静默失效
+    # hooks.py 的注册处），不是 (tool_name, args, result)——
+    # 写错参数签名就是静默失效
     hooks_registry.register_post_tool_use_failure(
         lambda payload: (
             sink.emit(
@@ -263,7 +263,7 @@ def _register_trace_hooks(hooks_registry, sink: "TraceSink") -> None:
 
 
 def _estimate_messages_tokens(messages: Optional[list]) -> int:
-    """粗略估算一批消息大约占多少 token（混合中英文比例，R30d-D6 调整）。
+    """粗略估算一批消息大约占多少 token（混合中英文比例）。
 
     为什么只能估：OpenAI/Anthropic 都没提供在本地数 token 的官方办法，
     只能按经验比例算：英文约 4 个字符算 1 个 token，中文约 1.5 个字符算

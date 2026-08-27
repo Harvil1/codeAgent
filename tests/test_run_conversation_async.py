@@ -221,7 +221,7 @@ async def test_memory_retrieval_llm_actually_awaited():
 #   - flag OFF：context_length_exceeded 错误不触发响应式回压（返回 None）
 #   - flag ON：context_length_exceeded 错误触发响应式回压（返回 _REACTIVE_RETRY）
 #   - flag ON 但已达上限：不二次触发（max_per_session）
-#   - Task D：flag ON + 冷却窗口外：可多次触发
+#   - flag ON + 冷却窗口外：可多次触发
 # ============================================================================
 
 def _make_prompt_too_long_llm_client():
@@ -239,10 +239,10 @@ def _make_prompt_too_long_llm_client():
 
 
 async def test_reactive_compact_flag_off_skips_retry(tmp_path):
-    """R17 #9 起语义变化：PTL 恢复不再受 reactive_compact flag 门控。
+    """PTL 恢复不受 reactive_compact flag 门控。
 
-    flag OFF（默认）时 context_length_exceeded 也走扣留恢复（对齐 CC
-    withheld：PTL 是可恢复错误）。Task P1.2 的 flag 门控语义已废弃。
+    flag OFF（默认）时 context_length_exceeded 也走扣留恢复
+    （withheld 语义：PTL 是可恢复错误）。
     """
     agent, _ = _make_minimal_agent(tmp_path)
     from agent import AIAgent

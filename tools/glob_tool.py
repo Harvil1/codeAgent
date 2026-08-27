@@ -1,10 +1,10 @@
-"""glob 工具：按文件名模式（如 **/*.py）查找文件（CCAR11 Task 1 引入，做法对齐 Claude Code 的 GlobTool）。
+"""glob 工具：按文件名模式（如 **/*.py）查找文件。
 
 跟 search_files 的分工：那个是 grep——在文件**内容**里找关键词；这个只看
 **文件名**长什么样，不读内容。结果按修改时间倒序排（最近改过的排最前），
 最多返回 1000 条。
 
-为什么需要它：以前模型想找个文件只能用 terminal 跑 ls / dir——既要去过
+为什么需要它：拿 terminal 跑 ls / dir 找文件，既要过
 权限闸门、又要启动子进程，开销大，而且 terminal 被标成"有副作用"没法并发。
 这个工具是纯只读的，标了 isConcurrencySafe=True，多条查找可以同时跑。
 """
@@ -86,7 +86,7 @@ def _handle_glob(args: dict, **dispatch_kwargs) -> str:
     max_results = max(1, min(1000, max_results))
 
     # 路径安检：受保护路径（~/.ssh、/etc、C:\Windows 等）一律拒绝
-    # 历史确认（CCAR11 Task 1 实施时查过）：safe_path 返回的是
+    # 注意：safe_path 返回的是
     # PermissionResult 对象（用 .allowed / .reason / .gate 三个字段），
     # 不是 tuple，别按 tuple 去解包
     perm = safe_path(path, write=False)

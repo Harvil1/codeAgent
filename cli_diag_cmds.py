@@ -1,4 +1,4 @@
-"""诊断/状态类命令集（R30 给 cli.py 瘦身时原样搬过来的，行为没变）。
+"""诊断/状态类命令集。
 
 这里放的是"给用户看病"的命令处理函数：/status 看当前状态、/doctor 自检
 环境、/context 看上下文占用、/compact 手动压缩上下文、/usage 看 token 花
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# CCAR11 Task 2 新增：/compact + /context 两个命令
+# /compact + /context 两个命令
 # ---------------------------------------------------------------------------
 
 def _sync_history_after_compact(agent, new_messages: list) -> None:
@@ -81,7 +81,7 @@ def _print_compact_delta(
         f"（节省 ~{saved}）"
     )
 def _handle_compact_cli(args: str, rt) -> bool:
-    """/compact 命令：用户手动触发一次上下文压缩（CCAR11 Task 2）。
+    """/compact 命令：用户手动触发一次上下文压缩。
 
     背景：上下文（对话历史）太长会撑爆模型窗口、烧钱。平时是自动压缩，
     这个命令让用户"现在就压"。三条路：
@@ -236,7 +236,7 @@ def _handle_context_cli(args: str, rt) -> bool:
     console.print(table)
     return True
 # ---------------------------------------------------------------------------
-# CCAR11 Task 3 新增：/status + /doctor + /diff 三个命令
+# /status + /doctor + /diff 三个命令
 # ---------------------------------------------------------------------------
 
 def _status_row(label: str, fn):
@@ -256,7 +256,7 @@ def _status_row(label: str, fn):
         logger.debug("/status 段 %s 读取失败: %s", label, e)
         return (label, f"[red]读取失败：{e}[/red]")
 def _handle_status_cli(args: str, rt) -> bool:
-    """/status 命令：一张表看全当前运行状态（CCAR11 Task 3）。
+    """/status 命令：一张表看全当前运行状态。
 
     背景：排查问题时用户需要一眼看到"用的什么模型、MCP 连没连上"。这张
     Rich 表逐项展示，每一项单独兜底——某一项读挂了只影响那一行：
@@ -444,7 +444,7 @@ def _show_usage(rt: RuntimeContext):
         console.print(f"迭代预算剩余: [bold]{rt.agent.iteration_budget.remaining}[/bold]"
                       f"/{rt.agent.iteration_budget.total}")
         console.print(f"对话历史长度: [bold]{len(rt.agent.conversation_history)}[/bold] 条消息")
-        # batch1-T2 加的：LLM token 用量统计
+        # LLM token 用量统计
         stats = rt.agent.llm_usage_stats
         if stats["total_calls"] > 0:
             console.print(f"\n[bold]LLM Token 用量：[/bold]")
@@ -458,7 +458,7 @@ def _show_usage(rt: RuntimeContext):
                 hit_rate = stats["total_cache_read_tokens"] / total_in * 100
                 console.print(f"  Cache 命中率:      [bold]{hit_rate:.1f}%[/bold]")
 
-            # R30f-H8 加的：按模型分账的用量。只在 usage_tracker
+            # 按模型分账的用量。只在 usage_tracker
             # 被注入时才有；辅助模型与主模型分开计（只统计 token 不算钱）
             tracker = getattr(rt, "usage_tracker", None)
             if tracker is not None:
@@ -551,7 +551,7 @@ def _show_stats(rt: RuntimeContext):
     else:
         console.print(f"\n[dim]暂无工具调用记录[/dim]")
 # ---------------------------------------------------------------------------
-# CCAR10 Task 3：statusline（每轮 AI 回答结束后在底部打的一行小状态）
+# statusline（每轮 AI 回答结束后在底部打的一行小状态）
 # ---------------------------------------------------------------------------
 # 设计取舍：等整轮 AI 响应完全输出完（而不是流式输出过程中）才用暗色打
 # 一行。不用 rich.Live 的原因：Windows 下 Live 和 input() 抢终端会打架，

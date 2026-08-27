@@ -1,6 +1,6 @@
-"""压力测试 Round 5：对话级端到端（CCAR10-14 新功能）。
+"""压力测试：对话级端到端。
 
-与 Round 1-4 的区别：mock LLM 按剧本返回 tool_calls，跑**真实
+与函数级压力测试的区别：mock LLM 按剧本返回 tool_calls，跑**真实
 run_conversation 主循环**——压的是 dispatch→handler→主循环粘合的
 完整链路（不是函数级）。
 
@@ -25,7 +25,7 @@ from agent.workspace_context import workspace_cwd_context, get_workspace_cwd
 # ---------------------------------------------------------------------------
 
 def _tc(call_id: str, name: str, arguments: dict):
-    """tool_call 对象（dispatch 读 tc.id/tc.function.name——CCAR11 教训：必须对象）。"""
+    """tool_call 对象（dispatch 读 tc.id/tc.function.name——必须对象，不能是 dict）。"""
     return SimpleNamespace(
         id=call_id, type="function",
         function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
@@ -131,13 +131,13 @@ async def test_conv_goal_tool_drives_continue_loop(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. worktree_enter/exit 经对话 dispatch（CCAR12 教训的端到端）
+# 3. worktree_enter/exit 经对话 dispatch（端到端）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_conv_worktree_enter_exit_via_dispatch(tmp_path):
     """对话中 LLM 调 worktree_enter → 主循环后续轮的 cwd 真切换 →
-    worktree_exit 恢复（dispatch 端到端——Round 4 教训：to_thread 拷贝 context）。"""
+    worktree_exit 恢复（dispatch 端到端——to_thread 拷贝 context 是漏检点）。"""
     import subprocess
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -223,7 +223,7 @@ async def test_conv_write_file_approval_flow(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 5. subagent 完整轨迹 + resume（CCAR13 端到端）
+# 5. subagent 完整轨迹 + resume（端到端）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio

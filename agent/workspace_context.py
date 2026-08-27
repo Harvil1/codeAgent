@@ -74,7 +74,7 @@ def workspace_cwd_context(path: Optional[str]):
 
 
 # ---------------------------------------------------------------------------
-# 会话级切换（CCAR12 Task 6，对齐 CCB EnterWorktree 语义）
+# 会话级切换
 # ---------------------------------------------------------------------------
 # 跟上面的 workspace_cwd_context（with 块、出了块就还原）不同，下面这对
 # 函数是"长效开关"：一切换，所有 get_workspace_cwd() 的调用方都跟着换，
@@ -94,7 +94,7 @@ _session_token: Optional[contextvars.Token] = None
 
 
 def set_session_workspace_cwd(path: Optional[str]) -> None:
-    """整个会话切换 cwd（对齐 CCB 的 EnterWorktree 行为：进 worktree 后全agent 跟着搬）。
+    """整个会话切换 cwd（进 worktree 后全 agent 跟着搬）。
 
     参数：
         path：要切去的目录；传 None 表示回到"没有会话级覆盖"的状态。

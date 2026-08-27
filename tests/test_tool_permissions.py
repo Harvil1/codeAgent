@@ -123,15 +123,15 @@ async def test_dispatch_allowed_tool_normal(tmp_path, monkeypatch):
     assert data.get("error_type") != "permission_denied"
 
 
-# ===== R25 #1：环境变量前缀/安全包装词剥离（防 deny 规则绕过）=====
+# ===== 环境变量前缀/安全包装词剥离（防 deny 规则绕过）=====
 
 class TestNormalizeCommandForRules:
     """FOO=bar rm xxx / nohup rm xxx 不能绕过 deny(rm ...) 规则。"""
 
     def test_env_prefix_stripped_for_deny(self):
         from agent.tool_permissions import check_command_rules
-        # 注：规则不能用 Bash(rm -rf build:*)——前缀是词边界语义（R16 #3，
-        # test_r16_security.py 已断言 build:* 不匹配 build/），改用 rm -rf 前缀。
+        # 注：规则不能用 Bash(rm -rf build:*)——前缀是词边界语义
+        # （test_r16_security.py 已断言 build:* 不匹配 build/），改用 rm -rf 前缀。
         rules = {"deny": ["Bash(rm -rf:*)"], "allow": [], "ask": []}
         assert check_command_rules("FOO=1 rm -rf build/x", rules) == "deny"
 
@@ -176,7 +176,7 @@ class TestNormalizeCommandForRules:
         assert _normalize_command_for_rules('FOO="a b" rm -rf build') == 'FOO="a b" rm -rf build'
 
 
-# ===== R27 #21：内容级规则 AST 逐段匹配 =====
+# ===== 内容级规则 AST 逐段匹配 =====
 
 class TestRuleAstSegmentMatching:
     def test_deny_matches_second_segment(self):

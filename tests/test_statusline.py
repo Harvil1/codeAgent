@@ -1,4 +1,4 @@
-"""CCAR10 Task 3: statusline 测试。
+"""statusline 测试。
 
 每轮 AI 响应后尾部打一行紧凑状态：model / 会话 token / goal / 项目名。
 """
@@ -182,7 +182,7 @@ def test_no_model_omits_model_segment():
 
 
 def test_failed_goal_shows_failed():
-    """goal failed 状态显示（CCAR10 final review #1：设计意图与实现对齐）。"""
+    """goal failed 状态显示。"""
     from cli import _render_statusline
     goal = MagicMock()
     goal.status = "failed"

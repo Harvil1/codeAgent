@@ -267,7 +267,7 @@ def test_mime_inference_all_formats():
 
 
 # ---------------------------------------------------------------------------
-# vision_client 配置（Task 2）
+# vision_client 配置
 # ---------------------------------------------------------------------------
 
 def test_vision_client_init_from_config(tmp_path, monkeypatch):

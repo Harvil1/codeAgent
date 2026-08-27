@@ -80,7 +80,7 @@ if _IS_WIN:
     _PROCESS_TERMINATE = 0x0001
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    # 历史踩坑（CCAR12 教训）：不显式声明返回值类型时，ctypes 默认按 32 位
+    # 历史踩坑：不显式声明返回值类型时，ctypes 默认按 32 位
     # 整数处理，会把 64 位的句柄截断——截断的句柄是无效句柄，后续调用全失败。
     # 所以每个函数的返回类型/参数类型都必须一一写明。
     _kernel32.CreateJobObjectW.restype = wintypes.HANDLE

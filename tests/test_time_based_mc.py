@@ -474,8 +474,8 @@ async def test_compress_if_needed_clears_when_enabled_and_overdue(tmp_path):
 
 # ---------- 端到端测试：_assemble_turn_messages → compress_if_needed → strip ----------
 # 防止"测试绿但生产死代码"再次发生——Critical fix 的根本保障。
-# Round 2 review 发现：strip_internal_fields 在 compress_if_needed 之前调用，
-# 导致 time-based MC 永远拿不到 _timestamp（死代码）。本测试验证完整生产链路。
+# strip_internal_fields 若在 compress_if_needed 之前调用，time-based MC
+# 会永远拿不到 _timestamp（死代码）。本测试验证完整生产链路。
 
 import time as _time_module
 from agent.context_pipeline import strip_internal_fields

@@ -35,7 +35,7 @@ def test_rebuild_index_excludes_archived(tmp_path):
 
 
 # ============================================================
-# Task 2: apply_automatic_transitions 状态转换纯函数
+# apply_automatic_transitions 状态转换纯函数
 # ============================================================
 
 from datetime import datetime, timedelta, timezone
@@ -131,7 +131,7 @@ def test_should_run_false_when_paused(tmp_path):
 
 
 # ============================================================
-# Task 4: curator_cli memory 子命令
+# curator_cli memory 子命令
 # ============================================================
 
 
@@ -169,7 +169,7 @@ def test_runtime_initialize_does_not_trigger_within_interval(tmp_path, monkeypat
 
 
 # ============================================================
-# Task 6: 第 2 阶段候选收集 + 分桶 + 分批
+# 第 2 阶段候选收集 + 分桶 + 分批
 # ============================================================
 
 
@@ -213,7 +213,7 @@ def test_chunk_batch_splits_large_list():
 
 
 # ============================================================
-# Task 7: YAML 解析 + action 执行 + 改写备份
+# YAML 解析 + action 执行 + 改写备份
 # ============================================================
 
 
@@ -323,7 +323,7 @@ def test_execute_action_unknown_skips(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 8: run_memory_review 主入口(第 2 阶段 LLM 合并 + 矛盾检测)
+# run_memory_review 主入口(第 2 阶段 LLM 合并 + 矛盾检测)
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +421,7 @@ def test_run_memory_review_handles_llm_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 9: 启动钩子接入第 2 阶段 + CLI run 完整模式
+# 启动钩子接入第 2 阶段 + CLI run 完整模式
 # ---------------------------------------------------------------------------
 
 
@@ -489,7 +489,7 @@ def test_curator_cli_memory_run_with_llm_phase(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 10: 配置集成(enabled / interval_hours / llm_review_enabled / max_batch_size)
+# 配置集成(enabled / interval_hours / llm_review_enabled / max_batch_size)
 # ---------------------------------------------------------------------------
 
 
