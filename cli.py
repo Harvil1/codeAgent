@@ -609,6 +609,26 @@ class RuntimeContext:
             except Exception as e:
                 logger.debug("子代理持久化清理失败（不阻塞）: %s", e)
 
+        # === 落盘产物清理：tool-results（mtime）+ scratchpad ===
+        # scratchpad 的 cleanup_old_scratchpads 此前定义了但从未被调用
+        # （死接线，文档承诺的 7 天清理实际没跑），这里一并接上
+        try:
+            from agent.output_offload import cleanup_old_tool_outputs
+            _to_n = cleanup_old_tool_outputs(
+                self.home,
+                retention_days=self.config.get("context", {}).get(
+                    "tool_output_retention_days", 14,
+                ),
+            )
+            from agent.scratchpad import cleanup_old_scratchpads
+            _sp_n = cleanup_old_scratchpads(self.home)
+            if _to_n or _sp_n:
+                logger.info(
+                    "落盘清理：tool-results=%d, scratchpad=%d", _to_n, _sp_n,
+                )
+        except Exception as e:
+            logger.debug("落盘产物清理失败（不阻塞）: %s", e)
+
         # === statusline 项目分区键（赋值一次，取不到就空着）===
         # 放在 initialize 末尾（所有依赖就绪后），失败不影响主流程
         try:

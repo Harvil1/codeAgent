@@ -138,6 +138,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 批间摘要的长任务自启开关：flag 关着但检测到长任务信号
         # （历史 >100 条或压缩过）时也自动开；False = 只认显式 flag
         "tool_batch_summary_auto_long_task": True,
+        # 落盘工具结果的 mtime 保留天数（.task_outputs/tool-results/，
+        # 启动时清理；0 = 关闭）
+        "tool_output_retention_days": 14,
         # 对话轨迹落盘
         "transcript_enabled": True,
         "transcript_trigger": "pre_llm_compact",

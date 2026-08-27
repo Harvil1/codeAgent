@@ -11,12 +11,14 @@
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_THRESHOLD = 50000
 DEFAULT_PREVIEW_CHARS = 2000
+DEFAULT_TOOL_OUTPUT_RETENTION_DAYS = 14
 
 
 def _sanitize_tool_call_id(tool_call_id: str) -> str:
@@ -148,3 +150,47 @@ def finalize_tool_output(
         threshold=cfg.get("output_offload_threshold", DEFAULT_THRESHOLD),
         preview_chars=cfg.get("output_offload_preview", DEFAULT_PREVIEW_CHARS),
     )
+
+
+def cleanup_old_tool_outputs(
+    agent_home=None,
+    retention_days: int = DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+) -> int:
+    """清理「超过 retention_days 天没动过」的落盘工具结果文件。返回清了几个。
+
+    .task_outputs/tool-results/ 只进不出（大结果落盘 + delegation
+    全文回流），长期使用磁盘无限涨——按 mtime 清理（占位引用的
+    preview 还在会话库里，删的是磁盘底稿；真要细节模型可以重跑工具）。
+    0 = 关闭。fail-open 全吞。
+
+    参数：
+        agent_home：agent 根目录，不传用默认 ~/.OmniMate
+        retention_days：保留天数（默认 14）
+    返回：删掉的文件数；任何异常返回 0。
+    """
+    try:
+        if retention_days <= 0:
+            return 0
+        if agent_home is None:
+            try:
+                from constants import get_omnimate_home
+                agent_home = get_omnimate_home()
+            except Exception:
+                return 0
+        root = Path(agent_home) / ".task_outputs" / "tool-results"
+        if not root.exists():
+            return 0
+        cutoff = time.time() - retention_days * 86400
+        removed = 0
+        for f in root.glob("*.txt"):
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except Exception:
+                continue
+        if removed:
+            logger.info("tool-results 清理 %d 个过期落盘文件", removed)
+        return removed
+    except Exception:
+        return 0

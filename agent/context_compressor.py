@@ -30,7 +30,10 @@ SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要�
 3. **Files and Code Sections**：涉及的文件路径（**逐字保留**）+ 关键代码段
 4. **Errors and fixes**：遇到的错误（**逐字保留错误消息**）+ 修复方法
 5. **Problem Solving**：问题解决过程、调试思路
-6. **All user messages**：所有用户消息原文（**逐字保留**，不能改写）
+6. **All user messages**：所有用户消息原文（**逐字保留**，不能改写；
+   纯短确认类消息（≤8 字且无信息量，如「继续」「好」「ok」）可合并
+   折叠成一行「…[已省略 N 条短确认]」省空间——长任务几百条确认
+   全量罗列会把摘要撑爆且无信息量）
 7. **Pending Tasks**：待办任务、未完成的工作
 8. **Current Work**：当前正在做什么
 9. **Optional Next Step**：可选的下一步
