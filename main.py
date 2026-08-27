@@ -37,11 +37,6 @@ get_omnimate_home().mkdir(parents=True, exist_ok=True)
 skills_dir().mkdir(parents=True, exist_ok=True)
 logs_dir().mkdir(parents=True, exist_ok=True)
 
-# 加载 .env 环境变量文件。顺序不能换：config 读配置时会用到这些 env，
-# 所以必须赶在 import config 之前把 env 准备好。
-from env_loader import load_env
-load_env()
-
 # 初始化配置：确保 settings.json 存在（第一次运行会自动生成/迁移旧配置）
 from agent.settings import ensure_default_settings
 ensure_default_settings()

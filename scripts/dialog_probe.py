@@ -63,11 +63,6 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # 不加根目录，import agent 这些顶层包会失败）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# 必须在 import config 之前先加载 .env（config 初始化时读环境变量）
-from env_loader import load_env  # noqa: E402
-
-load_env()
-
 
 class Ctx:
     """场景上下文：包着 RuntimeContext，外加对话历史和一组断言小工具。

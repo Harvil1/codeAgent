@@ -199,15 +199,6 @@ def config_path() -> Path:
     return get_omnimate_home() / "config.yaml"
 
 
-def env_file() -> Path:
-    """.env 文件的路径（存放 API 密钥等敏感值）。
-
-    返回：
-        Path 对象，指向 <agent home>/.env。
-    """
-    return get_omnimate_home() / ".env"
-
-
 def sessions_db_path() -> Path:
     """会话数据库文件的路径。
 
