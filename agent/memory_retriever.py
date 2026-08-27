@@ -62,6 +62,48 @@ _EXCLUDE_RULE = """
 """
 
 
+def balanced_truncate_index(index_text: str, limit: int = 25000) -> str:
+    """索引超长时按主题分节均衡截取，而不是从头硬砍。
+
+    硬砍的问题：排在索引后面的主题（新主题/项目区主题）对检索彻底隐身，
+    而且模型不知道"还有更多没看到"。均衡截取让每个主题都留代表条目，
+    并在尾部标注可用 memory_recall 深查。
+
+    参数：
+    - index_text：完整索引文本（MEMORY.md 结构，每主题一节 "## xxx"）
+    - limit：总字符预算
+
+    返回：截取后的文本（末尾带截断标注）；不超限时原样返回。
+    """
+    if len(index_text) <= limit:
+        return index_text
+    chunks = re.split(r"(?m)^(?=## )", index_text)
+    head = ""
+    sections = []
+    for c in chunks:
+        if c.lstrip().startswith("## "):
+            sections.append(c)
+        elif c.strip():
+            head = c
+    if not sections:
+        return index_text[:limit] + "\n…（索引超长已截断，可用 memory_recall 深查完整记忆库）"
+    budget = max(1000, limit - len(head) - 200)
+    per = max(500, budget // len(sections))
+    out = [head] if head else []
+    used = 0
+    for s in sections:
+        take = s if len(s) <= per else s[:per] + "\n…（本主题截断）\n"
+        out.append(take)
+        used += len(take)
+        if used >= budget:
+            break
+    out.append(
+        "\n（索引超长已按主题均衡截取；记忆库可能还有未列出的条目，"
+        "可用 memory_recall 工具深查）"
+    )
+    return "".join(out)
+
+
 def annotate_index_with_age(index_text: str, link_age_days: dict) -> str:
     """给索引的每一行末尾加上年龄标注 `[age: Nd]`（防召回过期记忆）。
 
@@ -133,7 +175,7 @@ async def retrieve_relevant(
 
     prompt = RETRIEVAL_PROMPT_TEMPLATE.format(
         query=query[:1000],  # 防查询过长撑爆 prompt
-        index_text=index_text[:25000],  # 检索索引上限 25KB：记忆多时检索更完整
+        index_text=balanced_truncate_index(index_text, 25000),  # 超长按主题均衡截取
         max_results=max_results,
         active_tools_rule=tools_rule,
         exclude_rule=exclude_rule,

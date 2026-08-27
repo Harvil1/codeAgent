@@ -105,6 +105,54 @@ _delegation_queue = DelegationCompletionQueue()
 # （这样进程内所有真并发跑着的后台子代理都能被 kill 工具定位到）
 _async_tasks: Dict[str, dict] = {}
 
+# === 同步批量子代理登记表 ===
+# Ctrl+C 的 KeyboardInterrupt 只投递给主线程，而批量任务跑在线程池线程里
+# 收不到信号——_delegate_batch 内部的 KeyboardInterrupt 处理对这个场景
+# 是死路。这里把每批的取消信号登记成全局表，让 CLI 的中断/退出路径能
+# 按下所有还在跑的子代理的取消旗。
+# value = {"cancel_events": [threading.Event, ...], "executor": 线程池}
+_active_batches: list = []
+
+
+def cancel_all_subagents(reason: str = "shutdown") -> int:
+    """按下所有正在跑的子代理（同步批量 + 异步花名册）的取消旗。
+
+    用在 CLI 的 Ctrl+C 中断和退出清理：子代理收到旗子后会在下一次调
+    LLM 前优雅退出（带走部分结果），进程不必等它们把任务跑完。
+
+    参数：
+      - reason：取消原因（写日志用）
+
+    返回：按下的取消旗数量。
+    """
+    count = 0
+    # 同步批量子代理
+    for batch in list(_active_batches):
+        for ev in batch.get("cancel_events", []):
+            try:
+                ev.set()
+                count += 1
+            except Exception:
+                pass
+        ex = batch.get("executor")
+        if ex is not None:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+    # 异步子代理花名册（subagent_kill 管的那个）
+    for info in _async_tasks.values():
+        ev = info.get("cancel_event")
+        try:
+            if ev is not None and not ev.is_set():
+                ev.set()
+                count += 1
+        except Exception:
+            pass
+    if count:
+        logger.info("已取消 %d 个活跃子代理（%s）", count, reason)
+    return count
+
 
 def get_delegation_queue() -> DelegationCompletionQueue:
     """拿全局兜底信箱（测试或直接调用路径用）。"""
@@ -225,8 +273,13 @@ DELEGATE_TASK_SCHEMA = {
             },
             "summary_only": {
                 "type": "boolean",
-                "description": "是否只返回摘要（默认 True）。超长结果用 LLM 压缩成 300 字摘要，节省父代理 context。",
+                "description": "是否只返回摘要（默认 True）。超长结果用 LLM 压缩成摘要，节省父代理 context。",
                 "default": True,
+            },
+            "summary_len": {
+                "type": "integer",
+                "description": "摘要字数上限（100-2000，默认 300）。深度调研/长任务的子代理结果建议 800-1500，避免关键发现被压丢。",
+                "default": 300,
             },
             "isolated_workspace": {
                 "type": "boolean",
@@ -697,6 +750,10 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     futures = {}
     # 每个任务一个取消信号（submit 时创建，传给 _run_child）
     batch_cancel_events = []
+    # 登记到全局表：本批跑在线程池线程里收不到 KeyboardInterrupt，
+    # Ctrl+C/退出清理靠 cancel_all_subagents() 顺藤摸瓜按下全部取消旗
+    _batch_entry = {"cancel_events": batch_cancel_events, "executor": executor}
+    _active_batches.append(_batch_entry)
     # 进度 ticker 的共享状态（tasks 没有名字字段，按序号起名；
     # 约定只改 value 不增删 key——ticker 线程遍历时就不会撞上字典变更）
     children_state = {}
@@ -712,6 +769,9 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
             batch_cancel_events.append(task_cancel)
             task_kwargs = dict(kwargs)
             task_kwargs["cancel_event"] = task_cancel
+            # 批量任务可各自指定摘要长度（不指定继承整个 subagent 调用的值）
+            if task.get("summary_len") is not None:
+                task_kwargs["summary_len"] = task["summary_len"]
 
             future = executor.submit(_run_child, goal, context, role, **task_kwargs)
             futures[future] = i
@@ -783,6 +843,11 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
         # 批量收场（含 Ctrl+C 中断）必须停掉进度播报线程（daemon 本身能兜底，
         # 但显式 set 让它立刻退，不在测试之间留下等待中的线程）
         _progress_stop.set()
+        # 从全局登记表划掉本批（收场了就不再接受外部取消）
+        try:
+            _active_batches.remove(_batch_entry)
+        except ValueError:
+            pass
 
     executor.shutdown(wait=True)
 
@@ -1391,9 +1456,17 @@ def _run_child(
             logger.warning("交接复审失败（fail-open）: %s", e)
 
         # summary_only：结果太长就用 LLM 压成摘要，省父代理的上下文空间
+        # summary_len：摘要长度（默认 300；长任务/深度调研可调大，见 schema 说明）
         summary_only = kwargs.get("summary_only", True)
         if summary_only and len(result) > 500:
-            result = _summarize_child_result(result, child.llm_client, child.model)
+            try:
+                summary_len = int(kwargs.get("summary_len", 300))
+            except (TypeError, ValueError):
+                summary_len = 300
+            summary_len = max(100, min(2000, summary_len))
+            result = _summarize_child_result(
+                result, child.llm_client, child.model, max_chars=summary_len,
+            )
 
         # 走到这里说明成功了，把成功标志立起来（finally 里靠它触发结束事件）
         _fork_success = True
@@ -1525,8 +1598,10 @@ def _review_handoff(result: str, parent_agent) -> str:
     return result
 
 
-def _summarize_child_result(result: str, client, model: str) -> str:
-    """用 LLM 把子代理的结果压成 300 字以内的摘要。
+def _summarize_child_result(
+    result: str, client, model: str, max_chars: int = 300,
+) -> str:
+    """用 LLM 把子代理的结果压成指定字数以内的摘要（默认 300 字）。
 
     子代理动辄输出几千字，全文塞回主对话太费上下文——超长结果先摘要。
     摘要失败就返回原文（不能因为压缩失败把整个委托卡死）。
@@ -1535,6 +1610,7 @@ def _summarize_child_result(result: str, client, model: str) -> str:
       - result：子代理的原始结果文本
       - client：子代理的 LLM 客户端（child.llm_client）
       - model：模型名
+      - max_chars：摘要字数上限（长任务的深度调研可调大，如 800/1500）
 
     返回：`[摘要] ...` 格式的压缩文本；失败时返回原文。
 
@@ -1542,13 +1618,15 @@ def _summarize_child_result(result: str, client, model: str) -> str:
     同步接口（调用方 _run_child 在独立线程里跑、没有事件循环），内部用
     asyncio.run() 驱动那个 async 函数。
     """
+    # 输入材料随目标长度放宽（要写更长摘要就得多给原文），封顶 30000
+    input_limit = min(30000, max(8000, max_chars * 10))
     prompt = (
-        "把以下子代理执行结果总结成 300 字以内的摘要，保留：\n"
+        f"把以下子代理执行结果总结成 {max_chars} 字以内的摘要，保留：\n"
         "1. 核心结论\n"
         "2. 关键发现和数据\n"
         "3. 重要的文件路径、命令、错误信息\n"
         "4. 待办事项\n\n"
-        f"子代理结果：\n{result[:8000]}"
+        f"子代理结果：\n{result[:input_limit]}"
     )
     try:
         import asyncio

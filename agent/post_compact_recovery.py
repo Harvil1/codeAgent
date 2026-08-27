@@ -160,6 +160,27 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
     返回：拼好的状态文本；全都没有时返回空串。
     """
     lines = []
+    # 长任务进度外存：模型在压缩提示引导下写入的中间结论（PROGRESS.md）。
+    # 放最前（最高优先）——这是模型自己刚写的任务进度，比任何摘要都贴近
+    # "现在干到哪了"；摘要有 200 字/段的损耗，这个文件原样回读零损耗
+    try:
+        from agent.scratchpad import scratchpad_dir
+        progress_file = scratchpad_dir(
+            getattr(agent, "session_id", "") or "default",
+            getattr(agent, "omnimate_home", None),
+        ) / "PROGRESS.md"
+        if progress_file.exists():
+            ptext = progress_file.read_text(
+                encoding="utf-8", errors="replace",
+            ).strip()
+            if ptext:
+                lines.append(
+                    "## 任务进度文件（你之前写入的中间结论，原样回读）\n"
+                    + ptext[:20000]
+                )
+    except Exception as e:
+        logger.debug("PROGRESS.md 回读失败（fail-open）: %s", e)
+
     try:
         if getattr(agent, "plan_mode", False):
             lines.append(
@@ -175,6 +196,40 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
             )
     except Exception as e:
         logger.debug("plan 状态恢复失败（fail-open）: %s", e)
+
+    # 任务清单（Task System 的权威数据，不是 LLM 摘要——长任务压缩后
+    # 模型对"做到第几步"的认知只靠摘要里 200 字的 Pending Tasks 段，
+    # 这里有现成的带状态完整清单就直接读它）
+    try:
+        from agent.task_store import get_task_store
+        store = get_task_store(getattr(agent, "omnimate_home", None))
+        task_lines = []
+        in_progress = store.list_all(status="in_progress")
+        if in_progress:
+            task_lines.append("### 进行中")
+            for t in in_progress[:10]:
+                owner = f"（owner: {t['owner']}）" if t.get("owner") else ""
+                task_lines.append(f"- {t['id']}: {t.get('subject', '')}{owner}")
+        ready = store.find_ready()
+        if ready:
+            task_lines.append("### 待办（可开工）")
+            for t in ready[:10]:
+                task_lines.append(f"- {t['id']}: {t.get('subject', '')}")
+        blocked = store.find_blocked()
+        if blocked:
+            task_lines.append("### 待办（被依赖挡住）")
+            for t in blocked[:10]:
+                deps = ",".join(t.get("blocked_by", [])[:3])
+                task_lines.append(
+                    f"- {t['id']}: {t.get('subject', '')}（等: {deps}）"
+                )
+        if task_lines:
+            lines.append(
+                "## 任务清单（权威数据，compact 后重注入）\n"
+                + "\n".join(task_lines)
+            )
+    except Exception as e:
+        logger.debug("task 状态恢复失败（fail-open）: %s", e)
 
     try:
         import time as _time

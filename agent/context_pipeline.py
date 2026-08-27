@@ -21,11 +21,50 @@ from typing import Optional, Tuple
 
 from agent.context_compressor import (
     _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
-    reset_compact_circuit_breaker,
+    reset_compact_circuit_breaker, extract_summary_anchor,
 )
 from agent.transcript import snapshot_if_needed
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_anchor_from_slice(messages_slice: list) -> tuple:
+    """从将被摘要的消息段里找上一次压缩的摘要，提取锚定段。
+
+    多次压缩时旧摘要会被送进 LLM 重摘要，"逐字保留"的文件路径/错误
+    消息/用户原话在第二代摘要里照样被改写丢失（代际损耗）。这里把
+    旧摘要的三段关键内容原文提出来，由调用方原样拼进新摘要头部。
+
+    返回：(锚定文本, 给摘要 LLM 的提示语)；没有旧摘要返回 ("", "")。
+    """
+    for m in messages_slice:
+        c = m.get("content")
+        if not isinstance(c, str) or not c or len(c) > 60000:
+            continue
+        # 旧摘要 placeholder 的特征标记（出现在消息开头附近）
+        if "[之前的对话已自动总结]" not in c and "[对话摘要" not in c[:300]:
+            continue
+        anchor = extract_summary_anchor(c)
+        if anchor:
+            note = (
+                "对话材料里含上一次压缩的摘要：其中 Files and Code Sections / "
+                "Errors and fixes / All user messages 三段已原样拼在最终摘要头部，"
+                "你本次输出的对应三段不要重复罗列这些旧内容（可写「见前次锚定段」），"
+                "专注新增内容。"
+            )
+            return anchor, note
+    return "", ""
+
+
+def _prepend_anchor(summary: str, anchor: str) -> str:
+    """把锚定段拼在摘要头部（带醒目标题，下次压缩还能识别提取）。"""
+    if not anchor:
+        return summary
+    return (
+        "### 前次压缩锚定保留（逐字未变，勿改写）\n\n"
+        f"{anchor}\n\n"
+        f"{summary}"
+    )
 
 
 def _split_system(messages: list) -> Tuple[Optional[dict], list]:
@@ -767,6 +806,11 @@ async def llm_compact(
         head = conv[:from_idx]
         tail = conv[effective_up_to:] if effective_up_to < len(conv) else []
 
+        # 被摘要段里若有上一次压缩的摘要 → 提锚定段防代际损耗
+        anchor, anchor_note = _extract_anchor_from_slice(
+            conv[from_idx:effective_up_to],
+        )
+
         summary = await _summarize_conversation(
             conv,  # 传完整 conv，由 _summarize_conversation 内部按 from/up_to 切片
             llm_client, model=model,
@@ -776,9 +820,11 @@ async def llm_compact(
             # fork 前缀 = 完整 messages（含 system），tools 与主调用一致
             fork_prefix_messages=messages,
             tools=tools,
+            anchor_note=anchor_note,
         )
         if not summary:
             return messages, False
+        summary = _prepend_anchor(summary, anchor)
 
         placeholder = {
             "role": "user",
@@ -817,15 +863,20 @@ async def llm_compact(
     to_summarize = conv[:-keep_recent]
     keep = conv[-keep_recent:]
 
+    # 被摘要段里若有上一次压缩的摘要 → 提锚定段防代际损耗
+    anchor, anchor_note = _extract_anchor_from_slice(to_summarize)
+
     summary = await _summarize_conversation(
         to_summarize, llm_client, model=model,
         session_memory=session_memory,
         # fork 前缀 = 完整 messages（含 system），tools 与主调用一致
         fork_prefix_messages=messages,
         tools=tools,
+        anchor_note=anchor_note,
     )
     if not summary:
         return messages, False
+    summary = _prepend_anchor(summary, anchor)
 
     placeholder = {
         "role": "user",

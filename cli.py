@@ -3735,6 +3735,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
             except KeyboardInterrupt:
                 rt.agent.interrupt()
+                try:
+                    from tools.delegate_tool import cancel_all_subagents
+                    cancel_all_subagents("用户中断（后台唤醒轮）")
+                except Exception:
+                    pass
                 _last_ctrl_c = time.monotonic()  # 给中断信号去重当锚点
                 console.print("[yellow]\n[已中断][/yellow]")
             except Exception as e:
@@ -3902,6 +3907,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
         except KeyboardInterrupt:
             rt.agent.interrupt()
+            # 批量/异步子代理跑在线程池里收不到 Ctrl+C 信号，
+            # 必须在这里显式按下它们的取消旗，否则进程退出被吊死
+            try:
+                from tools.delegate_tool import cancel_all_subagents
+                cancel_all_subagents("用户中断")
+            except Exception:
+                pass
             _last_ctrl_c = time.monotonic()  # 记下时间戳，给信号去重当锚点
             console.print("[yellow]\n[已中断][/yellow]")
         except Exception as e:
@@ -3909,6 +3921,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             logger.exception("agent 运行错误")
 
     # === 退出前清理后台任务 ===
+    # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）
+    try:
+        from tools.delegate_tool import cancel_all_subagents
+        if cancel_all_subagents("退出清理") > 0:
+            console.print("[dim]正在停止后台子代理…[/dim]")
+    except Exception:
+        pass
     rt.shutdown()
 
 

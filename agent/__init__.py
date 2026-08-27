@@ -2255,6 +2255,14 @@ class AIAgent:
         system_prompt = self._get_system_prompt()
         self._compression_attempts += 1
 
+        # 压缩把早期对话（含当时注入的记忆内容）摘要掉了——已注入记忆的
+        # 跨轮去重集合不再挡着，重新允许注入（否则长任务后期对这些记忆
+        # 彻底失明，而压缩后恰恰最需要它们补上下文）
+        try:
+            self._surfaced_memory_ids.clear()
+        except Exception:
+            pass
+
         # 压缩边界：压缩摘要的占位消息也写进会话库，恢复时
         # 模型知道「这之前的旧消息已被总结过」（避免困惑/重复总结）。
         # 占位前加 [COMPACT_BOUNDARY] 标记行——恢复会话时按最后一个
@@ -2298,6 +2306,20 @@ class AIAgent:
                 "以下是你最近加载的技能和读过的文件（压缩后重注入，帮助恢复上下文）：\n"
                 f"{reinject}"
             )
+
+        # 长任务进度外存：引导把关键中间结论写进会话涂鸦区的 PROGRESS.md——
+        # 摘要每段 200 字有损耗，这个文件下次压缩时被原样回读，零损耗
+        try:
+            from agent.scratchpad import ensure_scratchpad
+            sp_dir = ensure_scratchpad(self.session_id, self.omnimate_home)
+            if sp_dir is not None:
+                brief_parts.append(
+                    "长任务建议：把关键中间结论（重要决策/发现/架构判断/已完成步骤）"
+                    f"追加写入 {sp_dir / 'PROGRESS.md'}（一行一条，最新在前）。"
+                    "下次压缩时该文件会被原样回读，防止长任务细节在反复压缩中丢失。"
+                )
+        except Exception as e:
+            logger.debug("进度外存提示失败（fail-open）: %s", e)
 
         brief_parts.append("请继续之前的工作。")
         messages.append({

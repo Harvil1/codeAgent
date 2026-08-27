@@ -128,6 +128,53 @@ def strip_media_blocks(messages: list) -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 摘要锚定：多次压缩时防"摘要被再摘要"的代际损耗
+# ---------------------------------------------------------------------------
+
+# 三段"逐字保留"内容是长任务的生命线（文件路径/错误消息/用户原话），
+# 第二次压缩起它们由锚定机制原样传递，不再经过 LLM 重写
+_ANCHOR_SECTION_TITLES = (
+    "Files and Code Sections",
+    "Errors and fixes",
+    "All user messages",
+)
+
+_ANCHOR_SECTION_RE = re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?\*\*([^*\n]+)\*\*")
+
+
+def extract_summary_anchor(old_summary_text: str) -> str:
+    """从上一次压缩的摘要里提取要逐字保留的三段（文件/错误/用户原话）。
+
+    9 段摘要每段标题形如 "3. **Files and Code Sections**：..."——
+    按加粗标题切块，挑出三段关键内容原文。锚定头（"**Files and Code
+    Sections**：..."）也是同样格式，二次锚定时能被再次提取（累积有界，
+    不翻倍）。
+
+    参数：
+        old_summary_text: 旧摘要全文（placeholder 消息的 content）
+
+    返回：三段原文拼接（markdown）；一段都提不出来返回空串。
+    """
+    if not old_summary_text:
+        return ""
+    matches = list(_ANCHOR_SECTION_RE.finditer(old_summary_text))
+    if not matches:
+        return ""
+    sections = {}
+    for i, m in enumerate(matches):
+        title = m.group(1).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(old_summary_text)
+        sections.setdefault(title, old_summary_text[start:end].strip())
+    parts = []
+    for t in _ANCHOR_SECTION_TITLES:
+        body = sections.get(t, "")
+        if body:
+            parts.append(f"**{t}**：{body}")
+    return "\n\n".join(parts)
+
+
 async def _summarize_conversation(
     messages: list,
     llm_client=None,
@@ -139,6 +186,7 @@ async def _summarize_conversation(
     up_to_idx: int = -1,
     fork_prefix_messages: list = None,
     tools: list = None,
+    anchor_note: str = "",
 ) -> str:
     """调 LLM 把一段对话历史总结成摘要文本（async；9 段式固定格式）。
 
@@ -207,6 +255,9 @@ async def _summarize_conversation(
     working_messages = strip_media_blocks(to_summarize)  # 不改入参（PTL 重试还要再切片）
     dialog = _format_dialog_for_summary(working_messages)
     prompt = SUMMARIZE_PROMPT_9SECTION.format(dialog=dialog)
+    # 锚定提示：三段关键内容由调用方原样拼接，LLM 不必重复罗列（省输出 + 防重写矛盾）
+    if anchor_note:
+        prompt += "\n\n" + anchor_note
 
     # === fork 前缀复用（先试它，失败降级独立调用路径）===
     if fork_prefix_messages and not summary_model:
