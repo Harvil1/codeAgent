@@ -712,7 +712,7 @@ def apply_context_collapse(
         "content": (
             f"[context_collapse: 已折叠 {folded_turns} 轮早期对话"
             f"（{len(collapsible_indices)} 条消息），"
-            "完整记录见 .transcripts/latest.jsonl]"
+            "完整记录快照在 .transcripts/ 目录（latest.txt 指向最新一份）]"
         ),
     }
 
@@ -729,7 +729,9 @@ def apply_context_collapse(
     return new_messages, True
 
 
-def _build_compact_boundary(coverage: str, preserved: str) -> str:
+def _build_compact_boundary(
+    coverage: str, preserved: str, transcript_path: Optional[str] = None,
+) -> str:
     """构造压缩边界标注。
 
     写清楚三件事：什么时候压的 / 摘要覆盖了哪些内容 / 哪些段是原文保留的，
@@ -739,14 +741,24 @@ def _build_compact_boundary(coverage: str, preserved: str) -> str:
     参数：
         coverage：摘要覆盖的范围描述
         preserved：原样保留的段的范围描述
+        transcript_path：压缩前原文快照的落盘路径（None = 没快照，不加该行）
     返回：拼好的标注文本。
     """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    snapshot_line = ""
+    if transcript_path:
+        # 找回通道：被摘要段的原文在磁盘上，模型需要细节时可分段读回
+        snapshot_line = (
+            f"- 原文完整快照：{transcript_path}"
+            "（需要被摘要段的细节时用 read_file 读回，"
+            "文件可能很大，用 offset/limit 分段）\n"
+        )
     return (
         "[compact_boundary]\n"
         f"- 压缩时间：{ts}\n"
         f"- 摘要覆盖范围：{coverage}（由 LLM 转述，细节可能有省略）\n"
         f"- 保留段范围：{preserved}（原样保留，含工具结果原文）\n"
+        f"{snapshot_line}"
         "- 注意：保留段内容是精确的，摘要内容是转述；"
         "引用具体数据/路径/命令输出以保留段为准。\n"
     )
@@ -767,6 +779,7 @@ async def llm_compact(
     tools: Optional[list] = None,
     summary_scale_thresholds=None,
     summary_files_errors_limits=None,
+    transcript_path: Optional[str] = None,
 ) -> Tuple[list, bool]:
     """L4 第 4 层：前面几层压不下去、仍超 token 阈值时，调 LLM 把旧对话写成摘要。
 
@@ -837,6 +850,7 @@ async def llm_compact(
                     f"消息 {from_idx}-{effective_up_to}",
                     f"head（消息 0~{from_idx}，{len(head)} 条原文）"
                     f"+ tail（消息 {effective_up_to}~，{len(tail)} 条原文）",
+                    transcript_path=transcript_path,
                 )
                 + f"\n[对话摘要（{from_idx}-{effective_up_to}）]\n\n"
                 f"{summary}\n\n"
@@ -890,6 +904,7 @@ async def llm_compact(
             _build_compact_boundary(
                 f"conv 第 1~{len(to_summarize)} 条消息（共 {len(to_summarize)} 条）",
                 f"最近 {len(keep)} 条消息",
+                transcript_path=transcript_path,
             )
             + "\n[之前的对话已自动总结]\n\n"
             f"{summary}\n\n"
@@ -1368,9 +1383,11 @@ async def compress_if_needed(
     if over_threshold and cooldown_ok and not tripped:
         logger.info("L4 triggered")
         # L4 调用前先把 transcript 落盘（force=True 强制快照，因为 L4 是有损的）
+        # 快照路径传给 boundary——模型失忆后知道去哪找回被摘要段的原文
+        transcript_snapshot_path: Optional[str] = None
         if config.get("transcript_enabled", True):
             try:
-                snapshot_if_needed(
+                _snap = snapshot_if_needed(
                     messages,
                     agent_home=agent_home,
                     session_id=session_id,
@@ -1378,6 +1395,8 @@ async def compress_if_needed(
                     enabled=True,
                     retention=config.get("transcript_retention", 20),
                 )
+                if _snap is not None:
+                    transcript_snapshot_path = str(_snap)
             except Exception as e:
                 logger.warning("transcript snapshot 失败（不阻塞 L4）: %s", e)
 
@@ -1393,6 +1412,7 @@ async def compress_if_needed(
             tools=tools,  # fork 前缀复用要用
             summary_scale_thresholds=config.get("summary_scale_thresholds"),
             summary_files_errors_limits=config.get("summary_files_errors_limits"),
+            transcript_path=transcript_snapshot_path,
         )
         if c4:
             session_state.record_llm_compact()
