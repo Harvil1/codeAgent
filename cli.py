@@ -47,6 +47,7 @@ from agent.session_store import SessionStore
 from agent.skill_commands import scan_skill_commands, execute_skill, scan_bundle_commands, execute_bundle
 from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
+from agent.wake_budget import WakeBudget
 from config import load_config
 from constants import get_omnimate_home, skills_dir, sessions_db_path, all_skills_dirs
 from tools.skill_usage import bump_use, load_usage
@@ -3713,6 +3714,14 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         "或向用户汇报结果。"
     )
 
+    # 唤醒预算：防"唤醒→起新任务→完成→又唤醒"的自激励循环。
+    # 纯内存计数；用户真实输入即回血（见下方 reset 调用）。
+    _wake_budget = WakeBudget(
+        max_wakes=int(
+            (rt.config.get("bg_task") or {}).get("max_consecutive_wakes", 3)
+        )
+    )
+
     def _on_bg_wake():
         """后台完成的唤醒回调（在盯梢/委托线程里执行，必须便宜、非阻塞）。"""
         try:
@@ -3763,6 +3772,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         if user_input is _BG_WAKE_SENTINEL:
             if not rt.agent.has_pending_wake_payload():
                 continue
+            if not _wake_budget.consume():
+                console.print(
+                    "[dim][连续自动唤醒已达上限，后台通知暂存，"
+                    "等用户下次输入时一并处理][/dim]"
+                )
+                continue
             console.print("[dim][后台任务完成，自动继续][/dim]")
             # 唤醒消息按普通 user 消息入会话库（审计可见、恢复后上下文连贯）
             if rt.session_store and rt.session_id:
@@ -3806,6 +3821,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
         if not user_input:
             continue
+
+        # 用户真实输入：唤醒预算回血（自动唤醒不许自回血，只有真人说话算数）
+        _wake_budget.reset()
 
         # 大段粘贴内容转存外部文件 + 留占位符（会话库里只存
         # 占位符省空间，发送时再展开）
