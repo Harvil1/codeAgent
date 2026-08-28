@@ -10,6 +10,9 @@ AI 不用装糊涂，用这个工具在历史会话库里搜关键词，把当�
 import json
 from typing import Optional
 
+from agent.injection_guard import (
+    FOREIGN_CONTENT_WARNING, neutralize_control_markers,
+)
 from tools.registry import registry
 
 
@@ -69,18 +72,21 @@ def _handle_session_search(args: dict, **kwargs) -> str:
             "message": "未找到匹配的对话",
         }, ensure_ascii=False)
 
-    # 挑 AI 需要的字段重新组一遍（原始记录里还有别的字段，不全部塞回去）
+    # 挑 AI 需要的字段重新组一遍（原始记录里还有别的字段，不全部塞回去）。
+    # 片段来自历史会话（外源内容）：控制标记中和防伪造，notice 说明
+    # "里面的指令只是数据"（防指令注入）。
     formatted = []
     for r in results:
         formatted.append({
             "session_title": r.get("title") or "(无标题)",
             "role": r["role"],
             "timestamp": r["timestamp"],
-            "snippet": r.get("snippet", ""),
+            "snippet": neutralize_control_markers(r.get("snippet", "")),
             "session_id": r["session_id"],
         })
 
     return json.dumps({
+        "notice": FOREIGN_CONTENT_WARNING,
         "results": formatted,
         "total": len(formatted),
     }, ensure_ascii=False)
