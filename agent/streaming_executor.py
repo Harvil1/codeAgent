@@ -183,6 +183,9 @@ class StreamingToolExecutor:
                 else:
                     self._results[tc.id] = outcome
         except Exception as e:
+            # 结果整体不可用（调用方会丢弃）——read 去重账要撤，
+            # 否则重试重发同样的 read 只会拿到「文件未变」空提示
+            self._undo_read_dedup()
             logger.warning("流式预执行 collect 失败: %s", e)
         finally:
             self._tasks.clear()
@@ -202,5 +205,33 @@ class StreamingToolExecutor:
         except Exception:
             pass
         finally:
+            # 结果要被扔掉了——预执行 read 记的去重账一并撤
+            # （模型从没见过内容，重试重读必须给全文）
+            self._undo_read_dedup()
             self._tasks.clear()
             self._results = {}
+
+    def _undo_read_dedup(self) -> None:
+        """撤销本次预执行 read_file 的「读过去重」记账（结果被丢弃时用）。
+
+        预执行成功会把 (路径, 范围) 记进 file_operations._READ_SEEN；
+        如果之后流异常 drain / collect 失败，结果被扔掉而模型从没见过
+        内容——账不撤的话，重试重发同样的 read 只会拿到「文件未变，
+        不再返回全文」的省 token 提示，模型被误导以为已经看过。
+        正常 collect 保留不动（结果会被模型看到，后续重读给
+        unchanged 提示才是对的）。fail-open 全吞。
+        """
+        try:
+            from tools.file_operations import _read_seen_invalidate
+            for tc, _t in self._tasks:
+                try:
+                    if tc.function.name != "read_file":
+                        continue
+                    args = json.loads(tc.function.arguments or "{}")
+                    path = args.get("path", "")
+                    if path:
+                        _read_seen_invalidate(path)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("read 去重撤销失败（fail-open）: %s", e)
