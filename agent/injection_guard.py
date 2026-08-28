@@ -18,6 +18,7 @@ CONTROL_TOKENS = (
     "[snip_compact:",
     "[之前的对话已自动总结]",
     "[紧急上下文压缩",
+    "[对话摘要",
     "[后台唤醒]",
     "<background_tasks_running>",
     "<system-reminder>",
