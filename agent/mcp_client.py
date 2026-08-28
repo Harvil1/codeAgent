@@ -177,6 +177,33 @@ class MCPTransport(ABC):
 # stdio transport（本机子进程方式，从原 MCPClient 里拆出来的）
 # ---------------------------------------------------------------------------
 
+# 机密形状关键词：命中即不透传给 stdio server 子进程（大小写不敏感）。
+# 第三方 server 不该默认拿到 harness 进程里的钥匙；真需要 key 的
+# server 在 .mcp.json 的 env 里显式写（显式配置在擦洗之后叠加）。
+_SECRET_ENV_PATTERNS = (
+    "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY",
+)
+
+
+def _scrub_env_for_child(env: dict) -> dict:
+    """给 stdio MCP 子进程准备环境：剥掉机密形状变量和 OMNIMATE_* 自家变量。
+
+    参数：
+        env：当前进程的环境变量（通常是 os.environ）
+
+    返回：擦洗后的副本（原 dict 不动）。
+    """
+    scrubbed = {}
+    for key, value in env.items():
+        upper = key.upper()
+        if upper.startswith("OMNIMATE_"):
+            continue
+        if any(p in upper for p in _SECRET_ENV_PATTERNS):
+            continue
+        scrubbed[key] = value
+    return scrubbed
+
+
 class StdioTransport(MCPTransport):
     """stdio 传输：在本机启动一个子进程当 MCP 服务器，跟它的标准输入/输出
     管道里互发 JSON-RPC 消息（好比两个人各拿一根管子喊话）。
@@ -219,12 +246,16 @@ class StdioTransport(MCPTransport):
     def connect(self) -> None:
         """启动子进程并完成 MCP 握手。
 
-        环境变量 = 当前进程的 + 配置里额外给的（让子进程能拿到 API key 之类）。
+        环境变量 = 当前进程的（先擦掉机密形状/自家变量）+ 配置里显式
+        声明的（server 真需要 key 就在配置 env 里点名给）。
         握手失败就关掉子进程再抛错，不留半死进程。
 
         参数：无。返回：无；失败抛 RuntimeError。
         """
-        full_env = {**os.environ, **self.env}
+        # 环境擦洗：默认不给第三方 server 机密和自家变量；
+        # 配置里显式声明的 env 在擦洗后叠加（用户点名要给的才给）
+        full_env = _scrub_env_for_child(os.environ)
+        full_env.update(self.env)
         self.process = subprocess.Popen(
             self._resolve_command_argv(),
             stdin=subprocess.PIPE,
