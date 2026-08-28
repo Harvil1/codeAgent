@@ -85,6 +85,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 单个工具输出超过 5 万字符就落盘（阈值 per-tool）
         "output_offload_threshold": 50000,
         "output_offload_preview": 2000,
+        # 落盘占位的结尾预览长度：日志/测试输出关键信息常在结尾，头尾都给
+        # 模型多数场景就不用读回全文了（省一整份读回结果进上下文）；0 = 关
+        "output_offload_tail": 1000,
         "message_offload_threshold": 200000,        # 单条消息累计超过 20 万字符就落盘
         "offload_decision_freeze": True,            # 落盘决定跨轮次不变（反复变会让缓存失效）
         # ── L1 裁剪层 ──

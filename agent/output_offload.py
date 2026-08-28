@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_THRESHOLD = 50000
 DEFAULT_PREVIEW_CHARS = 2000
+DEFAULT_TAIL_CHARS = 1000
 DEFAULT_TOOL_OUTPUT_RETENTION_DAYS = 14
 
 
@@ -40,13 +41,14 @@ def maybe_offload(
     agent_home: Path,
     threshold: int = DEFAULT_THRESHOLD,
     preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    tail_chars: int = DEFAULT_TAIL_CHARS,
 ) -> str:
     """工具 handler 调的收口：超过阈值就落盘，返回值直接当工具消息用。
 
     三种结果：
     - 内容不超过阈值：原样返回，啥也不做
     - 超过阈值：整份写入 agent_home/.task_outputs/tool-results/{tool_call_id}.txt，
-      返回一段 JSON（含开头预览 + 指向完整文件的路径 full_at）
+      返回一段 JSON（含开头预览 + 结尾预览 + 指向完整文件的路径 full_at）
     - 写入失败（如磁盘满）：返回带 error_type=offload_io_error 和截断内容
       的 JSON——宁可降级也不能炸
 
@@ -55,7 +57,9 @@ def maybe_offload(
         tool_call_id: OpenAI 协议的工具调用 ID（每次唯一，兼做文件名）
         agent_home: agent 的根目录（如 ~/.OmniMate）
         threshold: 触发落盘的字符数门槛
-        preview_chars: 落盘后留在对话里的预览长度
+        preview_chars: 落盘后留在对话里的开头预览长度
+        tail_chars: 结尾预览长度（日志/测试输出关键信息常在结尾——
+                    头尾都给，模型多数场景就不用读回了；0 = 不带 tail）
 
     返回：直接可用的工具消息 content（原文或 JSON 字符串）。
     """
@@ -84,13 +88,20 @@ def maybe_offload(
             "truncated_content": content[:threshold],
         }, ensure_ascii=False)
 
-    return json.dumps({
+    payload = {
         "truncated": True,
         "orig_chars": len(content),
         "preview": content[:preview_chars],
         "full_at": str(target_path),
-        "hint": "完整结果已落盘，需要时调 read_file 读取 full_at",
-    }, ensure_ascii=False)
+        "hint": (
+            "完整结果已落盘；preview 是开头、tail 是结尾，"
+            "需要中间内容时调 read_file 读取 full_at（大文件用 offset/limit 分段）"
+        ),
+    }
+    # 结尾预览：内容短到和开头预览重叠就不带（重复送没意义）
+    if tail_chars > 0 and len(content) > preview_chars + tail_chars:
+        payload["tail"] = content[-tail_chars:]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _resolve_unique_path(offload_dir: Path, tool_call_id: str) -> Path:
@@ -149,6 +160,7 @@ def finalize_tool_output(
         agent_home=Path(agent_home),
         threshold=cfg.get("output_offload_threshold", DEFAULT_THRESHOLD),
         preview_chars=cfg.get("output_offload_preview", DEFAULT_PREVIEW_CHARS),
+        tail_chars=cfg.get("output_offload_tail", DEFAULT_TAIL_CHARS),
     )
 
 
