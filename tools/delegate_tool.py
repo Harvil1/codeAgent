@@ -333,20 +333,11 @@ def _handle_delegate_task(args: dict, **kwargs) -> str:
     if not goal:
         return json.dumps({"error": "goal 不能为空"}, ensure_ascii=False)
 
-    # 检查角色权限：coordinator（协调者）受套娃层数限制
-    # 深度优先读父代理自己的字段（每线程一份，线程安全），读不到再退回 kwargs 或按 0
-    parent_agent = kwargs.get("agent_ref")
-    if parent_agent is not None and hasattr(parent_agent, "spawn_depth"):
-        current_depth = parent_agent.spawn_depth
-    else:
-        current_depth = int(kwargs.get("spawn_depth", 0))
-    max_depth = kwargs.get("max_spawn_depth", 2)
-
-    if role == "orchestrator" and current_depth >= max_depth:
-        return json.dumps({
-            "error": f"已达最大嵌套深度 {max_depth}",
-            "current_depth": current_depth,
-        }, ensure_ascii=False)
+    # 套娃深度守卫不在这里做：入口只看得出 role，看不出子代理的套餐里
+    # 带没带 subagent——只认 role=="orchestrator" 会让 role 默认 leaf 的
+    # coordinator / 自定义 .md 派生绕过深度封顶（coordinator→coordinator→…
+    # 无限链）。守卫统一放在 _run_child 里工具集成型之后，按
+    # 「解析后的可见工具含 subagent 一族」判定（与角色名无关）。
 
     # 把 subagent_type 塞进 kwargs 传给子代理创建逻辑（用于选工具集）
     kwargs["subagent_type"] = subagent_type
@@ -1056,6 +1047,10 @@ def _run_child(
     child = None
     # 成功标志（SUBAGENT_START/STOP 钩子要用；默认 False，正常走到 try 末尾才设 True）
     _fork_success = False
+    # 内联 MCP 临时连接名单必须在这就初始化（而不是 try 体内）：try 里任何
+    # 早退 raise（深度守卫/套餐名校验等）都会走 finally 清理，finally 读到
+    # 未赋值变量会 UnboundLocalError，把真正的报错盖掉
+    _inline_mcp_connected: list = []
     # 父代理的钩子注册表（用于 SUBAGENT_START/STOP 审计事件）
     _parent_hooks = getattr(parent_agent, "hooks_registry", None) if parent_agent else None
     # === 工作目录变化钩子：切进 worktree 时通知一声（出错全吞，不挡主流程）===
@@ -1115,6 +1110,24 @@ def _run_child(
         _ts_err = _validate_toolset_names(child_toolsets)
         if _ts_err:
             raise ValueError(_ts_err)
+
+        # === 套娃深度守卫：按"可见工具含 subagent"判定，不按角色名 ===
+        # 为什么看工具不看 role：内置 coordinator / 自定义 .md 派生时 role 默认
+        # "leaf"，但套餐里带 subagent，照样能继续往下派——只认
+        # role=="orchestrator" 会让 coordinator→coordinator→… 链绕过深度封顶
+        # （审查发现的盲区）。所以守卫从 _handle_delegate_task 入口挪到这里，
+        # 在工具集成型之后统一判定：解析出的可见工具里含能派生的工具
+        # （subagent 一族），且父深度已达上限 → 拒绝（报错语义与旧守卫一致）。
+        # 宁可多拦：async 路径的 gate 2 之后会剥掉 subagent，但判定发生在剥除
+        # 之前——真到深度上限说明上面层级确实派下来了，多拦不破坏功能；
+        # "mcp" 套餐解析成空表，天然不受影响。
+        _max_depth = int(kwargs.get("max_spawn_depth", 2))
+        from toolsets import resolve_toolset
+        _spawn_family = {"subagent", "subagent_kill", "subagent_resume"}
+        if parent_depth >= _max_depth and any(
+            _spawn_family.intersection(resolve_toolset(ts)) for ts in child_toolsets
+        ):
+            raise ValueError(f"已达最大嵌套深度 {_max_depth}")
 
         # 自定义子代理的 system_prompt 覆盖（用定义里的重写一份）
         if custom_def and custom_def.system_prompt:
@@ -1207,8 +1220,8 @@ def _run_child(
 
         # === 内联 mcpServers：派生时临时连接，结束时断开（不留全局残留）===
         # （不进全局 .mcp.json 注册；连接进共享的 MCPManager，工具以
-        #   mcp__<服务器名>__<工具名> 前缀动态注册；finally 里断开）
-        _inline_mcp_connected: list = []  # 本次临时连上的服务器名
+        #   mcp__<服务器名>__<工具名> 前缀动态注册；finally 里断开。
+        #   名单变量在 try 之前已初始化，这里只往里追加）
         if custom_def and getattr(custom_def, "inline_mcp_servers", None):
             try:
                 from agent.mcp_client import get_mcp_manager
