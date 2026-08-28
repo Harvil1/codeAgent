@@ -2313,6 +2313,7 @@ class AIAgent:
             hooks_registry=self.hooks_registry,
             tools=self._last_tool_schemas,  # fork 摘要前缀复用
             authoritative_tokens=self._last_usage_anchor,  # 混合计数
+            session_store=self.session_store,  # L4 前落 [COMPACT_START] 事务标记
         )
         if not changed:
             return messages, system_prompt, False

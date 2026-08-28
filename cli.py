@@ -2041,6 +2041,23 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
         if isinstance(content, str) and content.startswith("[COMPACT_BOUNDARY]"):
             last_idx = i
             break
+
+    # 压缩事务悬挂检测：有 COMPACT_START 但其后没有更晚的边界标记
+    # → 上次压缩被中断（崩溃/断电）的证据。无需修复（保守全量载入
+    # 本就是正确行为），但必须可检测。
+    _last_start = -1
+    for i in range(len(msgs) - 1, -1, -1):
+        content = msgs[i].get("content", "")
+        if isinstance(content, str) and content.startswith("[COMPACT_START]"):
+            _last_start = i
+            break
+    if _last_start > last_idx:
+        logger.warning(
+            "检测到未完成的上下文压缩（有 COMPACT_START 无其后的 "
+            "COMPACT_BOUNDARY）——上次压缩可能被中断；本次按无边界"
+            "保守处理（全量载入）"
+        )
+
     if last_idx < 0:
         return msgs
     kept = [dict(m) for m in msgs[last_idx:]]

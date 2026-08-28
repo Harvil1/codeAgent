@@ -1204,6 +1204,22 @@ def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000
         return default
 
 
+def _persist_compact_marker(store, session_id: str, text: str) -> None:
+    """往会话库落一条压缩事务标记（fail-open：落盘失败不阻塞压缩）。
+
+    start 标记在 L4 开跑前写、成功后的边界标记（[COMPACT_BOUNDARY]，
+    由 agent 主类写）当 end 用——恢复时"有 start 无更晚 boundary"
+    即压缩被中断的证据（可检测，无需修复：无 boundary 时保守全量
+    载入本就是正确行为）。
+    """
+    if store is None or not session_id:
+        return
+    try:
+        store.append_message(session_id, "user", text)
+    except Exception as e:
+        logger.debug("压缩事务标记落盘失败（不阻塞压缩）: %s", e)
+
+
 async def compress_if_needed(
     messages: list,
     *,
@@ -1216,6 +1232,7 @@ async def compress_if_needed(
     hooks_registry=None,
     tools: Optional[list] = None,
     authoritative_tokens: Optional[tuple] = None,
+    session_store=None,
 ) -> Tuple[list, bool, bool]:
     """分层压缩总调度（编排器）。返回 (新消息, 是否有改动, 是否发生了 LLM 摘要级压缩)。
 
@@ -1241,6 +1258,8 @@ async def compress_if_needed(
         tools：当前工具 schema 列表（fork 前缀复用，传给 L4）
         authoritative_tokens：真实 token 锚点 (消息条数, 真实输入 token 数)，
           供混合计数用；None 走全量粗估
+        session_store：会话库（可选）；L4 开跑前往库里落 [COMPACT_START]
+          事务标记，成功后的 [COMPACT_BOUNDARY]（agent 主类写）当 end 用
     返回：(新消息列表, changed, compacted)。
 
     其他要点：
@@ -1463,6 +1482,10 @@ async def compress_if_needed(
     )
     if over_threshold and cooldown_ok and not tripped:
         logger.info("L4 triggered")
+        # 压缩事务 start 标记：L4 真正开跑前先落盘——进程若在压缩中途
+        # 崩溃，会话库里留下"有 start 无更晚 boundary"的悬挂证据
+        # （恢复时由 cli 的裁剪逻辑检测并告警，无需修复）
+        _persist_compact_marker(session_store, session_id, "[COMPACT_START]")
         # L4 调用前先把 transcript 落盘（force=True 强制快照，因为 L4 是有损的）
         # 快照路径传给 boundary——模型失忆后知道去哪找回被摘要段的原文
         transcript_snapshot_path: Optional[str] = None
