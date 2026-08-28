@@ -47,6 +47,8 @@ backend/
 /verify_ctxopt_live.py
 /snapshot_report.html
 /.superpowers/
+/.codegraph/
+/.claude/
 
 # 一级目录本地化：点开头的、tests/、CLAUDE.md 只留本地，不进仓库
 # 例外：.gitignore 本身要进仓库（忽略规则不进仓库 = clone 后全裸奔）
