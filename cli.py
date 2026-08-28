@@ -2043,8 +2043,8 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
             break
 
     # 压缩事务悬挂检测：有 COMPACT_START 但其后没有更晚的边界标记
-    # → 上次压缩被中断（崩溃/断电）的证据。无需修复（保守全量载入
-    # 本就是正确行为），但必须可检测。
+    # → 上次压缩被中断（崩溃/断电）的证据。无需修复（按最后有效边界
+    # 裁剪、完全无边界才全量载入，本就是保守正确行为），但必须可检测。
     _last_start = -1
     for i in range(len(msgs) - 1, -1, -1):
         content = msgs[i].get("content", "")
@@ -2052,10 +2052,12 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
             _last_start = i
             break
     if _last_start > last_idx:
+        # 两种场景共用一条告警：有更早 boundary（仍按它裁剪）或完全无
+        # boundary（全量载入），所以措辞说"按最后有效边界（无则全量）"。
         logger.warning(
             "检测到未完成的上下文压缩（有 COMPACT_START 无其后的 "
-            "COMPACT_BOUNDARY）——上次压缩可能被中断；本次按无边界"
-            "保守处理（全量载入）"
+            "COMPACT_BOUNDARY）——上次压缩可能被中断；本次按最后有效"
+            "边界保守载入（无边界则全量）"
         )
 
     if last_idx < 0:

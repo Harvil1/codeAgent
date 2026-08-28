@@ -118,9 +118,15 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     )
 
     if not changed:
+        # 三个拒绝原因都列出来：keep_recent >= 对话长度（全量）/ partial 段 < 2 /
+        # 摘要不小于被替换段（L4 收敛检查不过，见 context_pipeline._summary_shrinks）。
+        # 这是给 LLM 的自诊断信号——列不全它会拿旧解释瞎调参重试，白烧摘要调用。
         return json.dumps({
             "success": False,
-            "reason": "压缩未生效(可能 keep_recent >= 对话长度或 partial 段 < 2)",
+            "reason": (
+                "压缩未生效(可能 keep_recent >= 对话长度/partial 段 < 2/"
+                "摘要不小于被替换段)"
+            ),
         }, ensure_ascii=False)
 
     # 换上新历史：返回的第一条是系统提示，后面才是对话本体
