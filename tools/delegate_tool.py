@@ -861,6 +861,22 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     }, ensure_ascii=False)
 
 
+def _validate_toolset_names(names):
+    """校验套餐名清单：有未知名就返回错误消息（含合法值清单），全合法返回 None。
+
+    为什么在 spawn 时再校验一遍：agent .md 在扫描时校验过，但 kwargs
+    传进来的 enabled_toolsets（用户/技能注入）没有别的把关点。
+    """
+    from toolsets import TOOLSETS
+    bad = [t for t in (names or []) if t not in TOOLSETS]
+    if not bad:
+        return None
+    return (
+        f"未知工具集名: {bad}（合法值: {sorted(TOOLSETS)}）；"
+        "请检查 tools/enabled_toolsets 拼写"
+    )
+
+
 def _run_child(
     goal: str,
     context: str,
@@ -1091,6 +1107,14 @@ def _run_child(
             child_model = model
             child_perm_mode = _injected_perm_mode or "default"
             child_max_iter = kwargs.get("child_max_iterations", 50)
+
+        # fail-loud：四条赋值路径汇合后、真正用之前验一遍套餐名——
+        # 未知名静默给空工具比报错危险得多（silent dead agent）。
+        # raise 会被 _delegate_sync/_delegate_async 的调用方 try/except
+        # 捕获，作为委托错误结果返回给 LLM/用户，不会崩主循环。
+        _ts_err = _validate_toolset_names(child_toolsets)
+        if _ts_err:
+            raise ValueError(_ts_err)
 
         # 自定义子代理的 system_prompt 覆盖（用定义里的重写一份）
         if custom_def and custom_def.system_prompt:

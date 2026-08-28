@@ -7,7 +7,10 @@ LLM、都花 token，可见性必须有人为控制。位于工具体系的可�
 被 model_tools.get_tool_definitions 调用。
 """
 
+import logging
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 # 核心工具集：agent 默认装备，全部对 LLM 可见（浏览器不进 core，
@@ -144,6 +147,24 @@ TOOLSETS: Dict[str, dict] = {
         ],
         "includes": [],
     },
+    "coordinator": {
+        # 给内置 coordinator（协调者）子代理用的套餐：能派人（subagent）、
+        # 能看代码（只读三件套）、能管任务清单，但不能自己改文件/跑命令。
+        # 由来：coordinator.md 以前把具体工具名当套餐名写，静默解析成
+        # 空集（silent dead agent），工具集 fail-loud 校验上线后显式暴露——
+        # 按它原本想要的工具清单立了这个正式套餐
+        "description": "协调者（只编排不干活）：派人 + 只读调研 + 任务管理",
+        "tools": [
+            "subagent",
+            "read_file",
+            "search_files",
+            "glob",
+            "task_create",
+            "task_list",
+            "task_update",
+        ],
+        "includes": [],
+    },
 }
 
 
@@ -202,6 +223,11 @@ def resolve_toolset(toolset_name: str) -> List[str]:
     返回：工具名列表（按首次出现去重、保序）；套餐名不存在返回空列表。
     """
     if toolset_name not in TOOLSETS:
+        logger.warning(
+            "resolve_toolset: 未知工具集名 %r（合法值: %s）——按空集处理，"
+            "请检查配置/子代理定义里的拼写",
+            toolset_name, sorted(TOOLSETS),
+        )
         return []
 
     entry = TOOLSETS[toolset_name]

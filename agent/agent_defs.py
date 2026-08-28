@@ -108,6 +108,20 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
         fm, body = parse_frontmatter(content)
         if not fm.get("name"):
             return None
+        # fail-loud：tools 字段是套餐名清单，写错一个就整份定义跳过——
+        # 否则子代理会静默拿不到工具（silent dead agent 比报错危险得多）
+        from toolsets import TOOLSETS as _KNOWN_TOOLSETS
+        _bad_ts = [
+            t for t in (fm.get("tools") or [])
+            if t not in _KNOWN_TOOLSETS
+        ]
+        if _bad_ts:
+            logger.warning(
+                "子代理定义 %s 的 tools 含未知工具集名 %s（合法值: %s），"
+                "整份定义跳过",
+                skill_md.name, _bad_ts, sorted(_KNOWN_TOOLSETS),
+            )
+            return None
         return AgentDefinition(
             name=fm["name"],
             description=fm.get("description", ""),
