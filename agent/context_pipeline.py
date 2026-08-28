@@ -787,6 +787,17 @@ def _build_compact_boundary(
     )
 
 
+def _summary_shrinks(placeholder_text: str, replaced_segment: list) -> bool:
+    """收敛检查：摘要占位（含框文本）的 token 是否小于被替换段。
+
+    借鉴 dsh：压完比原来还长属于白花钱，必须算失败而不是硬塞进历史。
+    """
+    return (
+        estimate_message_tokens([{"role": "user", "content": placeholder_text}])
+        < estimate_message_tokens(replaced_segment)
+    )
+
+
 async def llm_compact(
     messages: list,
     *,
@@ -803,6 +814,7 @@ async def llm_compact(
     summary_scale_thresholds=None,
     summary_files_errors_limits=None,
     transcript_path: Optional[str] = None,
+    session_state: Optional["CompressionSessionState"] = None,
 ) -> Tuple[list, bool]:
     """L4 第 4 层：前面几层压不下去、仍超 token 阈值时，调 LLM 把旧对话写成摘要。
 
@@ -825,6 +837,8 @@ async def llm_compact(
         up_to_idx：局部压缩的结束条数；默认 -1 = 压到末尾。两者都取默认值时
                    走全量模式（keep_recent 逻辑）；局部模式下 keep_recent 被忽略
         tools：当前工具 schema 列表（fork 前缀复用要用，见 _summarize_conversation）
+        session_state：会话压缩记账簿；收敛检查不过时用它记一次失败账
+                       （失败计数 +1 + 冷却），防下一轮立刻重试白烧。可不传
     返回：(新消息列表, 是否真的压缩了)。
     """
     system, conv = _split_system(messages)
@@ -848,8 +862,9 @@ async def llm_compact(
         anchor, anchor_note = _extract_anchor_from_slice(
             conv[from_idx:effective_up_to],
         )
-        # 纯文本 pinned 消息原样保留（不进重组段被摘要掉）
-        pinned_msgs, _ = _split_pinned(conv[from_idx:effective_up_to])
+        # 纯文本 pinned 消息原样保留（不进重组段被摘要掉）；
+        # non_pinned = 真正会被摘要替换掉的那部分（收敛检查要用）
+        pinned_msgs, non_pinned = _split_pinned(conv[from_idx:effective_up_to])
 
         summary = await _summarize_conversation(
             conv,  # 传完整 conv，由 _summarize_conversation 内部按 from/up_to 切片
@@ -867,6 +882,20 @@ async def llm_compact(
         if not summary:
             return messages, False
         summary = _prepend_anchor(summary, anchor)
+
+        # 收敛检查（局部模式）：被替换的是段内非 pinned 部分
+        _placeholder_probe = (
+            f"[COMPACT_BOUNDARY]\n[对话摘要（{from_idx}-{effective_up_to}）]\n\n"
+            f"{summary}\n\n[以下是压缩段之后的对话，请继续]"
+        )
+        if not _summary_shrinks(_placeholder_probe, non_pinned):
+            logger.warning(
+                "L4 收敛检查未通过（partial %d-%d）：摘要不小于被替换段，"
+                "放弃本次替换", from_idx, effective_up_to,
+            )
+            if session_state is not None:
+                session_state.record_llm_compact_failure()
+            return messages, False
 
         placeholder = {
             "role": "user",
@@ -927,6 +956,20 @@ async def llm_compact(
     if not summary:
         return messages, False
     summary = _prepend_anchor(summary, anchor)
+
+    # 收敛检查（全量模式）：被替换的是非 pinned 的 to_summarize
+    _placeholder_probe = (
+        f"[COMPACT_BOUNDARY]\n[之前的对话已自动总结]\n\n"
+        f"{summary}\n\n[以下是最近的对话，请继续]"
+    )
+    if not _summary_shrinks(_placeholder_probe, to_summarize):
+        logger.warning(
+            "L4 收敛检查未通过：摘要不小于被替换段（%d 条），放弃本次替换",
+            len(to_summarize),
+        )
+        if session_state is not None:
+            session_state.record_llm_compact_failure()
+        return messages, False
 
     placeholder = {
         "role": "user",
@@ -993,6 +1036,14 @@ class CompressionSessionState:
 
     def record_llm_compact(self) -> None:
         self.llm_compact_count += 1
+        self.last_llm_compact_turn = self.current_turn
+
+    def record_llm_compact_failure(self) -> None:
+        """记一次 L4 软失败（如收敛检查不过）：失败计数 +1 并记冷却，
+        防止下一轮立刻重试白烧一次摘要调用。"""
+        self.llm_compact_failures += 1
+        # 冷却记账与 record_llm_compact 同款（同取 current_turn），保持
+        # 成功/失败两口径一致——失败同样进冷却期，不给「每轮重试」留缝
         self.last_llm_compact_turn = self.current_turn
 
     def cooldown_ok(self, cooldown_turns: int) -> bool:
@@ -1443,6 +1494,7 @@ async def compress_if_needed(
             summary_scale_thresholds=config.get("summary_scale_thresholds"),
             summary_files_errors_limits=config.get("summary_files_errors_limits"),
             transcript_path=transcript_snapshot_path,
+            session_state=session_state,  # 收敛检查不过时记失败账（防每轮重试白烧）
         )
         if c4:
             session_state.record_llm_compact()
@@ -1460,7 +1512,8 @@ async def compress_if_needed(
             else:
                 session_state.llm_compact_failures = 0  # 真 LLM 摘要成功则清零
         else:
-            # llm_compact 自己拒绝压缩（没过内部门槛）——不算失败
+            # llm_compact 自己拒绝压缩（没过内部门槛，或收敛检查不过——
+            # 后者的失败账已在 llm_compact 内部记过，这里不重复计）
             pass
     elif over_threshold:
         if tripped:
