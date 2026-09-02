@@ -151,7 +151,7 @@ async def handle_function_call(
     session_id: Optional[str] = None,
     memory_store=None,
     session_store=None,
-    omnimate_home=None,
+    codeagent_home=None,
     tool_call_id: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     hooks_registry=None,
@@ -181,7 +181,7 @@ async def handle_function_call(
         session_id: 当前会话 ID（hook 里区分"这是哪个会话的事"用）。
         memory_store: 记忆库对象（工具按需取用）。
         session_store: 会话库对象（工具按需取用）。
-        omnimate_home: agent 的数据根目录（默认 ~/.OmniMate）。
+        codeagent_home: agent 的数据根目录（默认 ~/.codeAgent）。
         tool_call_id: 本次工具调用的编号（对应消息历史里那条 tool 消息）。
         config: 运行时配置字典。
         hooks_registry: 钩子登记处（None = 不跑任何钩子）。
@@ -227,7 +227,7 @@ async def handle_function_call(
         session_id=session_id,
         memory_store=memory_store,
         session_store=session_store,
-        omnimate_home=omnimate_home,
+        codeagent_home=codeagent_home,
         tool_call_id=tool_call_id,
         config=config,
         bg_manager=bg_manager,

@@ -55,7 +55,7 @@ def maybe_offload(
     参数：
         content: 工具的原始输出（不是字符串就直接原样返回）
         tool_call_id: OpenAI 协议的工具调用 ID（每次唯一，兼做文件名）
-        agent_home: agent 的根目录（如 ~/.OmniMate）
+        agent_home: agent 的根目录（如 ~/.codeAgent）
         threshold: 触发落盘的字符数门槛
         preview_chars: 落盘后留在对话里的开头预览长度
         tail_chars: 结尾预览长度（日志/测试输出关键信息常在结尾——
@@ -176,7 +176,7 @@ def cleanup_old_tool_outputs(
     0 = 关闭。fail-open 全吞。
 
     参数：
-        agent_home：agent 根目录，不传用默认 ~/.OmniMate
+        agent_home：agent 根目录，不传用默认 ~/.codeAgent
         retention_days：保留天数（默认 14）
     返回：删掉的文件数；任何异常返回 0。
     """
@@ -185,8 +185,8 @@ def cleanup_old_tool_outputs(
             return 0
         if agent_home is None:
             try:
-                from constants import get_omnimate_home
-                agent_home = get_omnimate_home()
+                from constants import get_codeagent_home
+                agent_home = get_codeagent_home()
             except Exception:
                 return 0
         root = Path(agent_home) / ".task_outputs" / "tool-results"

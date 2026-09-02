@@ -13,7 +13,7 @@ worktree（隔离目录 + 独立分支，好比给主对话临时开了间独立
     调 exit 就一直在 worktree 里待着。
 
 底层复用 tools/worktree.py 的基建：
-    - 创建：git worktree add（分支叫 omnimate/<名字>/<8位短ID>，目录在
+    - 创建：git worktree add（分支叫 codeagent/<名字>/<8位短ID>，目录在
       <仓库根>/.worktrees/<名字>）；非 git 目录降级用系统临时目录
     - 清理：先聪明检测有没有改动（has_worktree_changes）再决定
       （有改动就保留并提示，干干净净才删）
@@ -220,7 +220,7 @@ def _create_session_worktree(name: str):
                                         repo_root=repo_root)
 
             short_id = uuid.uuid4().hex[:8]
-            branch = f"omnimate/{name}/{short_id}"
+            branch = f"codeagent/{name}/{short_id}"
             result = _run_git(["worktree", "add", "-b", branch, str(wt_dir)],
                               repo_root, timeout=30)
             if result.returncode != 0:
@@ -232,7 +232,7 @@ def _create_session_worktree(name: str):
             logger.warning("git worktree 创建失败，降级到临时目录: %s", e)
 
     # 非 git（或 git 建砸了降级）：系统临时目录（语义同 tools/worktree.py 的临时工作区）
-    tmp = Path(tempfile.mkdtemp(prefix=f"omnimate-wt-{name}-"))
+    tmp = Path(tempfile.mkdtemp(prefix=f"codeAgent-wt-{name}-"))
     return _SessionWorktree(tmp, None, "temp", reused=False)
 
 

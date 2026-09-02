@@ -1,4 +1,4 @@
-"""把 MCP server（外挂工具服务）的工具登记进 OmniMate 的工具注册表。
+"""把 MCP server（外挂工具服务）的工具登记进 CodeAgent 的工具注册表。
 
 MCP 是接外部工具的标准协议。程序启动时会调 register_mcp_tools()，
 把所有已连接的 MCP server 提供的工具按 mcp__<server>__<tool> 的命名
@@ -200,7 +200,7 @@ def _register_resource_tools(manager: MCPManager) -> int:
 def initialize_mcp(approval_callback=None) -> int:
     """启动时的总入口：加载配置 → 连接 server → 登记工具。
 
-    审批只针对"项目级"配置——用户级 ~/.OmniMate/.mcp.json 是用户自己手写的，
+    审批只针对"项目级"配置——用户级 ~/.codeAgent/.mcp.json 是用户自己手写的，
     天然可信；但项目里的 .mcp.json 可能是 clone 陌生仓库带进来的，所以每个
     server 第一次连接前必须先过审批。没批准、或者压根没有
     approval_callback（非交互场景）→ fail-closed 直接跳过不连。

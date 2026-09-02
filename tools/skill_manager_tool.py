@@ -83,11 +83,11 @@ def _get_skills_dir_from_context(kwargs: dict) -> Path:
     技能目录跟数据主目录走（主目录可自定义），所以每次都要现算。
 
     参数：
-    - kwargs：工具调用上下文；优先取里面的 omnimate_home（自定义数据主目录）
+    - kwargs：工具调用上下文；优先取里面的 codeagent_home（自定义数据主目录）
 
-    返回：技能目录路径（<主目录>/skills）；没传 omnimate_home 就用 constants 里的默认值。
+    返回：技能目录路径（<主目录>/skills）；没传 codeagent_home 就用 constants 里的默认值。
     """
-    home = kwargs.get("omnimate_home")
+    home = kwargs.get("codeagent_home")
     if home:
         return Path(home) / "skills"
     # 没传自定义主目录，就用全局默认的技能目录
@@ -102,7 +102,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
     - args：LLM 传的工具参数——action（要做什么）、name（技能名）、
       content（create/edit 时的全文）、old_string/new_string（patch 时的查找替换对）、
       file_path/file_content（附属文件操作）、absorbed_into（归档时声明的合并去向）
-    - kwargs：运行时上下文；这里看 omnimate_home（定位技能目录）
+    - kwargs：运行时上下文；这里看 codeagent_home（定位技能目录）
       和 is_background_review（是否后台维护工人创建的）
 
     返回：JSON 字符串，成功带 success=True + 消息，失败带 error 说明原因。

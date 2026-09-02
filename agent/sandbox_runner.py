@@ -323,7 +323,7 @@ def wrap_command(
     """把一条 shell 命令包装成"在沙箱里跑"的启动参数（Linux/macOS 用）。
 
     调用约定：writable_roots 由调用方（terminal 工具）负责收集，默认应包含
-    ~/.OmniMate 和配置里的 security.sandbox_writable_roots。cwd 不用传进
+    ~/.codeAgent 和配置里的 security.sandbox_writable_roots。cwd 不用传进
     writable_roots——本函数内部会自动把 cwd 放到可写区第一位。
 
     参数：
@@ -403,7 +403,7 @@ def _write_seatbelt_profile(
     cwd: str,
     writable_roots: List[str],
 ) -> Path:
-    """把规则内容写成一份 .sb 规则文件，存到 ~/.OmniMate/.sandbox/ 下（sandbox-exec 按文件执行，每次跑命令现写一份；文件名带随机编号，并发互不覆盖）。
+    """把规则内容写成一份 .sb 规则文件，存到 ~/.codeAgent/.sandbox/ 下（sandbox-exec 按文件执行，每次跑命令现写一份；文件名带随机编号，并发互不覆盖）。
 
     参数：
         cwd: 工作目录（会成为第一个允许写入的目录）
@@ -413,12 +413,12 @@ def _write_seatbelt_profile(
     """
     import uuid
     try:
-        from constants import get_omnimate_home
+        from constants import get_codeagent_home
     except ImportError:
-        # 测试环境兜底：常规模块导入不了时，直接用家目录下的 .OmniMate
-        get_omnimate_home = lambda: Path.home() / ".OmniMate"  # noqa: E731
+        # 测试环境兜底：常规模块导入不了时，直接用家目录下的 .codeAgent
+        get_codeagent_home = lambda: Path.home() / ".codeAgent"  # noqa: E731
 
-    sandbox_dir = get_omnimate_home() / ".sandbox"
+    sandbox_dir = get_codeagent_home() / ".sandbox"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
 
     # 写新规则文件前顺手清掉 7 天前的老文件——

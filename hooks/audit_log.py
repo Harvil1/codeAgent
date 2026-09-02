@@ -16,13 +16,13 @@
       "name": "audit-log",
       "command": ["python", "hooks/audit_log.py"],
       "timeout": 2.0,
-      "env": {"AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"}
+      "env": {"AUDIT_LOG_PATH": "~/.codeAgent/.audit.log"}
     }],
     "post_tool_use": [{
       "name": "audit-log",
       "command": ["python", "hooks/audit_log.py"],
       "timeout": 2.0,
-      "env": {"AUDIT_LOG_PATH": "~/.OmniMate/.audit.log"}
+      "env": {"AUDIT_LOG_PATH": "~/.codeAgent/.audit.log"}
     }]
   }
 }
@@ -35,11 +35,11 @@ from pathlib import Path
 
 
 def get_log_path() -> Path:
-    """日志文件写到哪：优先读环境变量 AUDIT_LOG_PATH，没设就用默认的 ~/.OmniMate/.audit.log。
+    """日志文件写到哪：优先读环境变量 AUDIT_LOG_PATH，没设就用默认的 ~/.codeAgent/.audit.log。
 
     返回：展开 ~ 后的 Path。
     """
-    raw = os.environ.get("AUDIT_LOG_PATH", "~/.OmniMate/.audit.log")
+    raw = os.environ.get("AUDIT_LOG_PATH", "~/.codeAgent/.audit.log")
     return Path(raw).expanduser()
 
 

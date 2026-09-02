@@ -1,7 +1,7 @@
 """system prompt（系统提示词，模型每次对话都收到的"开场白"）的组装车间。
 
 在项目里的位置：被 agent/__init__.py（AIAgent 主类）调用，产出发给 LLM 的
-system prompt；素材来自记忆、技能目录、项目 OMNIMATE.md 等。
+system prompt；素材来自记忆、技能目录、项目 CODEAGENT.md 等。
 
 四条关键原则（改这里之前必须懂）：
 1. 会话开始时构建一次就缓存住（_cached_system_prompt），中途不再重建
@@ -12,7 +12,7 @@ system prompt；素材来自记忆、技能目录、项目 OMNIMATE.md 等。
 
 三层结构（目的是让缓存命中率最大化）：
 - stable：跨会话都不变（身份、各种指导文案）——缓存几乎永远命中
-- context：单个会话内不变（记忆、技能索引、OMNIMATE.md）——会话内命中
+- context：单个会话内不变（记忆、技能索引、CODEAGENT.md）——会话内命中
 - volatile：每轮都可能变（todo、提醒）——不指望命中缓存
 """
 
@@ -76,9 +76,9 @@ TOOL_USAGE_GUIDANCE = (
     "用 read_file 读回(在 agent_home 下,默认安全;快照文件大,用 offset/limit 分段)\n"
     "- **关键结论钉住**:长任务里给出重要决策/架构结论的回复,内容开头加 "
     "`[pinned] ` 标记——上下文折叠/压缩时钉住的消息原样保留,不被摘要改写\n"
-    "- **写入白名单**:write_file 默认只允许 cwd 和 ~/.OmniMate;写其他位置会触发审批,"
+    "- **写入白名单**:write_file 默认只允许 cwd 和 ~/.codeAgent;写其他位置会触发审批,"
     "同意后进持久化白名单。不要绕过——用户拒绝就换个白名单内位置写\n"
-    "- **自身源码保护**:不要修改 OmniMate 自身源码"
+    "- **自身源码保护**:不要修改 CodeAgent 自身源码"
     "(开发=项目根,打包=site-packages 安装目录)。你是工具,用户用你改**他们的项目**,不是改你自己\n"
     "- **依赖安装(跟随 cwd)**:在用户当前目录用其项目环境装包:"
     "`uv pip install <pkg>`(推荐,尊重用户项目约定)或 `pip install <pkg>`;"
@@ -87,7 +87,7 @@ TOOL_USAGE_GUIDANCE = (
     "- **代码输出(跟随 cwd)**:脚本写到当前目录,输出(PPT/Excel/Word 等)写到 "
     "`<cwd>/outputs/`;用户指定别的位置就照做(白名单自动处理审批)\n"
     "- **先查技能**:任何任务前先扫技能索引,判断有无适用流程技能"
-    "(设计先行/调试/写计划等),有就先 load_skill('using-omnimate') 看总纲\n"
+    "(设计先行/调试/写计划等),有就先 load_skill('using-codeagent') 看总纲\n"
     "- **后台任务无需轮询**:bg_start / subagent(background=true) 完成时会以 "
     "<task_notification>/<delegation_completion> 通知你,主对话空闲时会自动唤醒"
     "继续处理——不要循环查 bg_status;本轮要收工时若仍有后台任务在跑"
@@ -99,7 +99,7 @@ TASK_GUIDANCE = (
     "## 任务追踪（Task System）\n"
     "3 步以上的任务必须先调 task_create 创建任务列表，每步完成调 task_complete；"
     "任务之间的依赖用 blocked_by 字段声明；多步并行用 task_list 查看 ready 任务。"
-    "Task System 跨会话持久化（~/.OmniMate/.tasks/）。"
+    "Task System 跨会话持久化（~/.codeAgent/.tasks/）。"
 )
 
 
@@ -126,7 +126,7 @@ class SystemPromptLayers:
     """装 system prompt 三层文本的容器。
 
     - stable: 跨会话不变的部分（身份、指导、工具文档）
-    - context: 单会话内不变的部分（记忆索引、技能索引、OMNIMATE.md）
+    - context: 单会话内不变的部分（记忆索引、技能索引、CODEAGENT.md）
     - volatile: 每轮可变的部分（todo、reminder、extra_instructions）
 
     为什么要分层：LLM 服务商的缓存按"消息前缀是否一致"来复用，越靠前的
@@ -159,7 +159,7 @@ def build_system_prompt_layers(
     # volatile 层的素材（运行时才有的东西，从外面传进来）
     task_state: Optional[str] = None,
     reminder: Optional[str] = None,
-    # === 自定义子代理可跳过项目 OMNIMATE.md 注入（省 token）===
+    # === 自定义子代理可跳过项目 CODEAGENT.md 注入（省 token）===
     omit_project_memory: bool = False,
     # === 输出风格节的文本（拼进 context 层；空=未启用风格）===
     output_style_text: str = "",
@@ -167,7 +167,7 @@ def build_system_prompt_layers(
     """组装出三层 system prompt——缓存按"前缀一致"复用，把不变的内容排前面、易变的排后面。
 
       - stable：跨会话不变（同版本同一台机器，几乎 100% 命中缓存）
-      - context：单会话内不变（记忆/技能/OMNIMATE.md，会话内大部分轮次命中）
+      - context：单会话内不变（记忆/技能/CODEAGENT.md，会话内大部分轮次命中）
       - volatile：每轮可变（todo / 提醒），不指望命中缓存
 
     参数：
@@ -182,7 +182,7 @@ def build_system_prompt_layers(
         include_guidance: 是否拼入各段"使用指南"文案；子代理可关掉省 token
         task_state: 当前任务列表的文本快照，进 volatile 层
         reminder: 给模型的提醒文本，进 volatile 层
-        omit_project_memory: True 时跳过项目 OMNIMATE.md 注入——给只读/
+        omit_project_memory: True 时跳过项目 CODEAGENT.md 注入——给只读/
             轻量子代理省 token 用
         output_style_text: 输出风格节文本，拼在 context 层末尾；空串表示
             未启用风格、不拼
@@ -238,8 +238,8 @@ def build_system_prompt_layers(
 
     # 用户画像文件（系统自动归纳，每 5 次反思后更新一次）
     try:
-        from constants import get_omnimate_home
-        profile_path = get_omnimate_home() / "USER_PROFILE.md"
+        from constants import get_codeagent_home
+        profile_path = get_codeagent_home() / "USER_PROFILE.md"
         if profile_path.exists():
             profile_text = profile_path.read_text(encoding="utf-8").strip()
             if profile_text:
@@ -258,7 +258,7 @@ def build_system_prompt_layers(
     except Exception as e:
         logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
 
-    # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 OMNIMATE.md。
+    # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 CODEAGENT.md。
     # cwd 用 get_workspace_cwd() 而不是 Path.cwd()——后者读的是整个进程的
     # 当前目录，多个子代理并发跑会互相踩（前者是每个任务独立的上下文变量）。
     # omit_project_memory=True 时跳过这整段（子代理省 token 用）
@@ -398,7 +398,7 @@ def _expand_imports(
     depth: int = 0,
     _visited: Optional[set] = None,
 ) -> str:
-    """展开 OMNIMATE.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）——写一行 @docs/api.md，读取时自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
+    """展开 CODEAGENT.md 里的 `@path/to/file` 引用（把引用的文件内容贴进来）——写一行 @docs/api.md，读取时自动把那个文件的内容展开到这个位置，多个文件可以拼着用。
 
     规则：
     - `@path/to/file` 相对 base_dir 解析，引用里还有引用就递归展开（最深 5 层）
@@ -409,7 +409,7 @@ def _expand_imports(
     - 同一个文件被引用多次只展开第一次（防止 A 引 B、B 引 A 无限转圈）
 
     参数：
-        content: OMNIMATE.md 原文
+        content: CODEAGENT.md 原文
         base_dir: 相对引用的基准目录（通常是被展开文件所在目录）
         depth: 当前递归深度
         _visited: 已展开过的文件集合（防环用，递归间共享）
@@ -491,7 +491,7 @@ def _expand_imports(
 
 
 def _scan_project_memory_files(cwd: Path) -> List[Path]:
-    """从当前目录一路向上扫，收集沿途所有 OMNIMATE.md（每层目录都可以有自己的说明文件，全给模型看）。
+    """从当前目录一路向上扫，收集沿途所有 CODEAGENT.md（每层目录都可以有自己的说明文件，全给模型看）。
 
     停止规则：遇到含 .git 的目录（仓库根）就停，含这一层，不再往上。
     这是对 monorepo（一个大仓多个子项目）友好的设计：在子项目里跑时，
@@ -500,7 +500,7 @@ def _scan_project_memory_files(cwd: Path) -> List[Path]:
     参数：
         cwd: 从哪个目录开始向上扫
 
-    返回：OMNIMATE.md 路径列表，顺序是**从仓库根到当前目录**——外层的
+    返回：CODEAGENT.md 路径列表，顺序是**从仓库根到当前目录**——外层的
     先注入、内层的后注入（后读的语义上覆盖先读的，跟变量作用域同理）。
     """
     found: List[Path] = []
@@ -509,9 +509,9 @@ def _scan_project_memory_files(cwd: Path) -> List[Path]:
     except Exception:
         return found
     while True:
-        omninate_md = current / "OMNIMATE.md"
-        if omninate_md.exists():
-            found.append(omninate_md)
+        codeagent_md = current / "CODEAGENT.md"
+        if codeagent_md.exists():
+            found.append(codeagent_md)
         # 有 .git 的这层就是仓库根——这层也要、但不再往上
         if (current / ".git").exists():
             break

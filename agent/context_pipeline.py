@@ -311,7 +311,7 @@ def micro_compact(
         threshold：单条工具结果超过多少字符才折叠
         preview_chars：折叠后保留的预览长度
         keep_recent：最近几条工具结果受保护
-        agent_home：OmniMate 数据目录（~/.OmniMate），落盘文件的存放根目录
+        agent_home：CodeAgent 数据目录（~/.codeAgent），落盘文件的存放根目录
     返回：(新消息列表, 是否折叠过至少一条)。
     """
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
@@ -425,7 +425,7 @@ def offload_large_tool_results(
 
     参数：
         messages：完整消息列表
-        agent_home：OmniMate 数据目录，落盘位置
+        agent_home：CodeAgent 数据目录，落盘位置
         threshold：单条工具结果的落盘阈值（字符）
         preview_chars：落盘后保留的预览长度
         message_threshold：一段连续工具结果的聚合阈值；0 表示关闭聚合检查
@@ -1251,7 +1251,7 @@ async def compress_if_needed(
         model：模型名
         config：context 配置子字典
         session_state：会话压缩记账簿
-        agent_home：OmniMate 数据目录
+        agent_home：CodeAgent 数据目录
         session_id：会话 id（日志/快照用）
         hooks_registry：hook 注册表，可选；非 None 时压缩前后触发
           PRE_COMPACT/POST_COMPACT 事件，PRE_COMPACT 有 hook 要求中止就跳过本次压缩

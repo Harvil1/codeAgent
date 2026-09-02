@@ -3,31 +3,31 @@
 集中提供各种数据文件的路径（agent home、技能目录、记忆文件、会话
 数据库等），让全项目"问一个地方"就能拿到统一路径。
 
-所有数据（API key、记忆、工具、技能、会话、任务）统一放在 ~/.OmniMate/ 下：
-  - Linux/macOS: ~/.OmniMate/
-  - Windows:     C:\\Users\\<user>\\.OmniMate\\
+所有数据（API key、记忆、工具、技能、会话、任务）统一放在 ~/.codeAgent/ 下：
+  - Linux/macOS: ~/.codeAgent/
+  - Windows:     C:\\Users\\<user>\\.codeAgent\\
 
-支持 OMNIMATE_HOME 环境变量覆盖默认位置（测试和多配置隔离用）。
+支持 CODEAGENT_HOME 环境变量覆盖默认位置（测试和多配置隔离用）。
 """
 
 import os
 from pathlib import Path
 
 
-def _default_omnimate_home() -> Path:
+def _default_codeagent_home() -> Path:
     """算出 agent home（数据总目录）的位置。
 
     优先级：
-      1. OMNIMATE_HOME 环境变量（测试/开发时用来切一个临时目录）
-      2. 都没设就用 ~/.OmniMate/
+      1. CODEAGENT_HOME 环境变量（测试/开发时用来切一个临时目录）
+      2. 都没设就用 ~/.codeAgent/
 
     返回：
         Path 对象，指向 agent home 目录。
     """
-    env_override = os.environ.get("OMNIMATE_HOME")
+    env_override = os.environ.get("CODEAGENT_HOME")
     if env_override:
         return Path(env_override).expanduser()
-    return Path.home() / ".OmniMate"
+    return Path.home() / ".codeAgent"
 
 
 def _default_logs_dir() -> Path:
@@ -36,27 +36,27 @@ def _default_logs_dir() -> Path:
     返回：
         Path 对象，指向 <agent home>/logs。
     """
-    return _default_omnimate_home() / "logs"
+    return _default_codeagent_home() / "logs"
 
 
-def get_omnimate_home() -> Path:
+def get_codeagent_home() -> Path:
     """拿到 agent home 目录（全项目数据的根目录）。
 
-    每次调用都重新读 OMNIMATE_HOME 环境变量（测试可随时切换目录）。
+    每次调用都重新读 CODEAGENT_HOME 环境变量（测试可随时切换目录）。
 
     返回：
         Path 对象，指向 agent home 目录。
     """
-    return _default_omnimate_home()
+    return _default_codeagent_home()
 
 
-def display_omnimate_home() -> str:
+def display_codeagent_home() -> str:
     """拿到适合展示给用户看的 home 路径字符串。
 
     返回：
         路径的字符串形式（用于界面显示/日志）。
     """
-    return str(get_omnimate_home())
+    return str(get_codeagent_home())
 
 
 def skills_dir() -> Path:
@@ -68,7 +68,7 @@ def skills_dir() -> Path:
     返回：
         Path 对象，指向 <agent home>/skills。
     """
-    return get_omnimate_home() / "skills"
+    return get_codeagent_home() / "skills"
 
 
 def builtin_skills_dir() -> Path:
@@ -127,18 +127,18 @@ def plugins_dir() -> Path:
     """插件目录（每个子目录是一个插件：plugin.json + skills/）。
 
     插件的结构长这样：
-        ~/.OmniMate/plugins/<name>/plugin.json   （清单：名称/版本/描述/是否启用）
-        ~/.OmniMate/plugins/<name>/skills/<skill>/SKILL.md
+        ~/.codeAgent/plugins/<name>/plugin.json   （清单：名称/版本/描述/是否启用）
+        ~/.codeAgent/plugins/<name>/skills/<skill>/SKILL.md
     程序启动时由 all_skills_dirs() 扫描已启用插件的 skills/ 子目录。
 
     返回：
         Path 对象，指向 <agent home>/plugins。
     """
-    return get_omnimate_home() / "plugins"
+    return get_codeagent_home() / "plugins"
 
 
 def logs_dir() -> Path:
-    """日志目录（统一在 ~/.OmniMate/logs 下）。
+    """日志目录（统一在 ~/.codeAgent/logs 下）。
 
     返回：
         Path 对象，指向日志目录。
@@ -152,7 +152,7 @@ def archive_dir() -> Path:
     返回：
         Path 对象，指向 <agent home>/skills/.archive。
     """
-    return get_omnimate_home() / "skills" / ".archive"
+    return get_codeagent_home() / "skills" / ".archive"
 
 
 def memory_file() -> Path:
@@ -161,7 +161,7 @@ def memory_file() -> Path:
     返回：
         Path 对象，指向 <agent home>/MEMORY.md。
     """
-    return get_omnimate_home() / "MEMORY.md"
+    return get_codeagent_home() / "MEMORY.md"
 
 
 def user_file() -> Path:
@@ -170,7 +170,7 @@ def user_file() -> Path:
     返回：
         Path 对象，指向 <agent home>/USER.md。
     """
-    return get_omnimate_home() / "USER.md"
+    return get_codeagent_home() / "USER.md"
 
 
 def config_path() -> Path:
@@ -179,7 +179,7 @@ def config_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/config.yaml。
     """
-    return get_omnimate_home() / "config.yaml"
+    return get_codeagent_home() / "config.yaml"
 
 
 def sessions_db_path() -> Path:
@@ -188,24 +188,24 @@ def sessions_db_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/sessions.db。
     """
-    return get_omnimate_home() / "sessions.db"
+    return get_codeagent_home() / "sessions.db"
 
 
 def session_dir() -> Path:
     """会话级临时数据目录（放各会话自己的 env 文件等）。
 
-    每个会话一个专属 env 文件（路径经 OMNIMATE_ENV_FILE 传给 hook）：
+    每个会话一个专属 env 文件（路径经 CODEAGENT_ENV_FILE 传给 hook）：
     SessionStart hook 追加 `export K=V` 行，terminal 执行命令时把内容
     合并进子进程的环境变量。
 
     返回：
         Path 对象，指向 <agent home>/.session。
     """
-    return get_omnimate_home() / ".session"
+    return get_codeagent_home() / ".session"
 
 
 def session_env_file(session_id: str) -> Path:
-    """某个会话专属的 env 文件路径（即 OMNIMATE_ENV_FILE 指向的文件）。
+    """某个会话专属的 env 文件路径（即 CODEAGENT_ENV_FILE 指向的文件）。
 
     参数：
         session_id：会话 ID。为空用 "default"；里面的非法字符

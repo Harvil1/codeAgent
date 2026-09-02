@@ -16,7 +16,7 @@
 
 另有三项扩展：
   - per-tool hash（每个工具单独记哈希，能指出具体是哪个工具变了）
-  - diff 文件落盘（~/.OmniMate/.cache-breaks/cache-break-*.diff）
+  - diff 文件落盘（~/.codeAgent/.cache-breaks/cache-break-*.diff）
   - TTL 时长分析（区分 5 分钟 / 1 小时缓存过期）
 
 整个模块绝不打断主流程（fail-open：任何异常只记日志不抛出）。
@@ -368,7 +368,7 @@ def _diff_tool_hashes(current: List[ToolHashEntry], prev: List[ToolHashEntry]) -
 def _write_break_diff(
     prev: PromptState, cur: PromptState, reasons: List[str],
 ) -> Optional[str]:
-    """缓存被破坏时，把前后差异写进 ~/.OmniMate/.cache-breaks/ 下的文件（比日志一行原因直观，方便事后翻查）。
+    """缓存被破坏时，把前后差异写进 ~/.codeAgent/.cache-breaks/ 下的文件（比日志一行原因直观，方便事后翻查）。
 
     参数：
         prev: 破坏前的快照
@@ -387,8 +387,8 @@ def _write_break_diff(
         if not any("system" in r or "工具" in r for r in reasons):
             return None
 
-        from constants import get_omnimate_home
-        diff_dir = get_omnimate_home() / ".cache-breaks"
+        from constants import get_codeagent_home
+        diff_dir = get_codeagent_home() / ".cache-breaks"
         diff_dir.mkdir(parents=True, exist_ok=True)
 
         _diff_counter += 1
@@ -436,7 +436,7 @@ def _enforce_diff_lru_limit() -> None:
     返回：无。删任何文件失败都静默忽略，整体绝不抛异常。
     """
     try:
-        from constants import get_omnimate_home
+        from constants import get_codeagent_home
         # 上限从配置读 max_cache_break_diff_files，默认 100
         limit = 100  # 兜底值；实际配置经 _read_diff_limit() 读
         try:
@@ -444,7 +444,7 @@ def _enforce_diff_lru_limit() -> None:
         except Exception:
             pass
 
-        diff_dir = get_omnimate_home() / ".cache-breaks"
+        diff_dir = get_codeagent_home() / ".cache-breaks"
         if not diff_dir.exists():
             return
         diff_files = list(diff_dir.glob("cache-break-*.diff"))

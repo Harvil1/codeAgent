@@ -6,9 +6,9 @@
 
 从这几个目录扫（优先级从低到高，同名的后者覆盖前者）：
   - agent/builtin_agents/（内置，随项目分发）
-  - ~/.OmniMate/agents/（用户级，自己所有项目共用）
+  - ~/.codeAgent/agents/（用户级，自己所有项目共用）
   - CLI --agents 注入（命令行动态传入）
-  - <cwd>/.omnimate/agents/（项目级，可入库跟仓库走，团队共享）
+  - <cwd>/.codeAgent/agents/（项目级，可入库跟仓库走，团队共享）
 
 frontmatter（文件顶部 --- 包住的配置段）支持的字段：
 name / description / model / tools / disallowedTools / permissionMode /
@@ -52,7 +52,7 @@ class AgentDefinition:
     inline_mcp_servers: dict = field(default_factory=dict)
     effort: Optional[str] = None                           # frontmatter "effort: max|high|medium|low"
     # === 4 个扩展字段 ===
-    omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理不加载项目 OMNIMATE.md（省 token）
+    omit_claude_md: bool = False            # frontmatter "omitClaudeMd: true" → 子代理不加载项目 CODEAGENT.md（省 token）
     initial_prompt: str = ""                # frontmatter "initialPrompt" → 垫在第一条 user 消息前面（类似 slash 命令的预处理）
     required_mcp_servers: List[str] = field(default_factory=list)  # frontmatter "requiredMcpServers" → 缺这些 server 时整个 agent 不出现
     critical_reminder: str = ""             # frontmatter "criticalReminder" → 拼进 system_prompt 末尾（放尾部是为了不动前缀、保 cache）
@@ -62,16 +62,16 @@ class AgentDefinition:
 
 
 def _user_agents_dir() -> Path:
-    """用户级子代理定义目录：~/.OmniMate/agents/。"""
-    from constants import get_omnimate_home
-    return get_omnimate_home() / "agents"
+    """用户级子代理定义目录：~/.codeAgent/agents/。"""
+    from constants import get_codeagent_home
+    return get_codeagent_home() / "agents"
 
 
 def _project_agents_dir() -> Path:
     # Path.cwd() 是进程共享的，并发子代理会互踩；get_workspace_cwd()
     # 基于 ContextVar，每个并发上下文拿到自己的工作目录。
     from agent.workspace_context import get_workspace_cwd
-    return Path(get_workspace_cwd()) / ".omnimate" / "agents"
+    return Path(get_workspace_cwd()) / ".codeAgent" / "agents"
 
 
 def _builtin_agents_dir() -> Path:
@@ -153,9 +153,9 @@ def scan_agent_defs() -> Dict[str, AgentDefinition]:
 
     同名冲突时后扫的覆盖先扫的。优先级（低 → 高）：
       1. 内置（agent/builtin_agents/，随代码分发）
-      2. 用户级（~/.OmniMate/agents/，跨项目个人配置）
+      2. 用户级（~/.codeAgent/agents/，跨项目个人配置）
       3. CLI 注入（启动命令 --agents '{json}'）
-      4. 项目级（<cwd>/.omnimate/agents/，跟仓库走，团队共享）
+      4. 项目级（<cwd>/.codeAgent/agents/，跟仓库走，团队共享）
 
     返回：
         {子代理名: AgentDefinition} 字典。

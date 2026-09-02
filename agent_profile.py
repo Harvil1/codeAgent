@@ -8,11 +8,11 @@
   - skills/（技能库）
   - logs/（日志）
 
-隔离靠 OMNIMATE_HOME 环境变量实现——把"家目录"指到不同文件夹，
+隔离靠 CODEAGENT_HOME 环境变量实现——把"家目录"指到不同文件夹，
 数据自然互不可见。本模块是最底层的地基，CLI 启动最先调它。
 
 ⚠️ apply_profile 必须在任何 import 之前调用！
-   因为 agent 家目录的取值函数（get_omnimate_home）在别的模块
+   因为 agent 家目录的取值函数（get_codeagent_home）在别的模块
    加载时可能就已经被读了，晚了就换不回来了。
 """
 
@@ -25,9 +25,9 @@ from typing import List
 def get_profiles_root() -> Path:
     """所有分身账号的存放根目录。
 
-    返回：~/.OmniMate/profiles（每个子文件夹就是一个账号）。
+    返回：~/.codeAgent/profiles（每个子文件夹就是一个账号）。
     """
-    return Path.home() / ".OmniMate" / "profiles"
+    return Path.home() / ".codeAgent" / "profiles"
 
 
 def list_profiles() -> List[str]:
@@ -42,27 +42,27 @@ def list_profiles() -> List[str]:
 
 
 def apply_profile(profile_name: str) -> None:
-    """切换到指定账号：把家目录环境变量指过去（OMNIMATE_HOME 指到该账号
+    """切换到指定账号：把家目录环境变量指过去（CODEAGENT_HOME 指到该账号
     的文件夹，之后所有读写都落在它自己的地盘里）。
 
     ⚠️ 必须在任何 import 之前调用（晚了家目录就被别人读走了）！
 
     参数：
-        profile_name: 账号名。"default" 表示用默认家目录 ~/.OmniMate。
+        profile_name: 账号名。"default" 表示用默认家目录 ~/.codeAgent。
 
     返回：无。账号不存在时抛 ValueError。
     """
     if profile_name == "default":
-        # 默认账号不需要设环境变量——不设就天然用 ~/.OmniMate；
+        # 默认账号不需要设环境变量——不设就天然用 ~/.codeAgent；
         # 反而要清掉可能残留的旧值，防止串号
-        os.environ.pop("OMNIMATE_HOME", None)
+        os.environ.pop("CODEAGENT_HOME", None)
         return
 
     profile_path = get_profiles_root() / profile_name
     if not profile_path.exists():
         raise ValueError(f"profile 不存在: {profile_name}")
 
-    os.environ["OMNIMATE_HOME"] = str(profile_path)
+    os.environ["CODEAGENT_HOME"] = str(profile_path)
 
 
 def create_profile(name: str, *, clone_from: str = None) -> Path:
@@ -92,7 +92,7 @@ def create_profile(name: str, *, clone_from: str = None) -> Path:
     if clone_from:
         # 从老账号把配置文件抄过来（只抄 config.yaml，有才抄）
         if clone_from == "default":
-            source = Path.home() / ".OmniMate"
+            source = Path.home() / ".codeAgent"
         else:
             source = root / clone_from
 
@@ -127,7 +127,7 @@ def get_current_profile() -> str:
     返回：账号名。没设环境变量就是 "default"；设了但不在 profiles
     目录下面（用户自己指的别处）就返回 "custom"。
     """
-    agent_home = os.environ.get("OMNIMATE_HOME")
+    agent_home = os.environ.get("CODEAGENT_HOME")
     if not agent_home:
         return "default"
 

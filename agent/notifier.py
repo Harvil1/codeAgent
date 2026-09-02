@@ -98,7 +98,7 @@ def notify(title: str, message: str) -> bool:
             f"$x.LoadXml('{xml}');"
             "$t = [Windows.UI.Notifications.ToastNotification]::new($x);"
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier"
-            "('OmniMate').Show($t)"
+            "('CodeAgent').Show($t)"
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],

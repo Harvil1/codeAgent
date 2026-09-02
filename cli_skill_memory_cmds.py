@@ -17,7 +17,7 @@ from pathlib import Path
 from rich.table import Table
 
 from tools.skill_usage import load_usage
-from constants import get_omnimate_home, skills_dir
+from constants import get_codeagent_home, skills_dir
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -321,9 +321,9 @@ def _show_memory(rt: RuntimeContext):
     )
     choice = console.input("> ").strip().lower()
     if choice == "m":
-        _open_in_editor(get_omnimate_home() / "MEMORY.md")
+        _open_in_editor(get_codeagent_home() / "MEMORY.md")
     elif choice == "u":
-        _open_in_editor(get_omnimate_home() / "USER.md")
+        _open_in_editor(get_codeagent_home() / "USER.md")
 
 
 def _open_in_editor(path: Path) -> None:

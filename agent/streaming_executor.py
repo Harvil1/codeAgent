@@ -151,7 +151,7 @@ class StreamingToolExecutor:
             session_id=agent.session_id,
             memory_store=agent.memory_store,
             session_store=agent.session_store,
-            omnimate_home=agent.omnimate_home,
+            codeagent_home=agent.codeAgent_home,
             tool_call_id=tc.id,
             config=agent.config,
             hooks_registry=agent.hooks_registry,

@@ -2,7 +2,7 @@
 
 这个文件是干嘛的：给 LLM 提供一套任务管理工具（建任务、改状态、标完成、列清单、
 留言、记交付物、标记卡住/解除卡住、加依赖）。底层存储在 agent/task_store.py
-（每个任务一个 JSON 文件，放在 ~/.OmniMate/.tasks/ 下），关掉会话再开，
+（每个任务一个 JSON 文件，放在 ~/.codeAgent/.tasks/ 下），关掉会话再开，
 任务还在——这就是「持久化」。任务支持 DAG 依赖（DAG = 有向无环图，说白了
 就是「任务之间的先后顺序图」：任务 B 可以声明「我要等任务 A 做完才能开始」）。
 
@@ -53,7 +53,7 @@ def _get_owned_task(args: dict, kwargs: dict):
 
     参数：
         args：LLM 传来的工具参数（从里面取 id）。
-        kwargs：系统传来的上下文（从里面取 omnimate_home 用来定位任务仓库）。
+        kwargs：系统传来的上下文（从里面取 codeagent_home 用来定位任务仓库）。
 
     返回：两种情况二选一——
         (task, None)：检查全过，task 是任务对象；
@@ -378,12 +378,12 @@ def _get_store(kwargs: dict):
     """从上下文拿任务仓库实例。
 
     参数：
-        kwargs：系统上下文。omnimate_home 是 agent 数据目录
-        （默认 ~/.OmniMate），不传就用默认。
+        kwargs：系统上下文。codeagent_home 是 agent 数据目录
+        （默认 ~/.codeAgent），不传就用默认。
 
     返回：TaskStore 实例（任务仓库，带缓存，同一个目录只会建一份）。
     """
-    home = kwargs.get("omnimate_home")
+    home = kwargs.get("codeagent_home")
     return get_task_store(home)
 
 
@@ -393,7 +393,7 @@ def _handle_task_create(args: dict, **kwargs) -> str:
     参数：
         args：LLM 传的参数——subject（标题，必填）、description（详细描述）、
         blocked_by（要等哪些任务做完才能开始，任务 ID 列表）、owner（认领人）。
-        kwargs：系统上下文（omnimate_home、hooks_registry、agent_ref、session_id）。
+        kwargs：系统上下文（codeagent_home、hooks_registry、agent_ref、session_id）。
 
     返回：JSON 字符串，带新建的任务对象；标题为空则返回错误。
     """
@@ -441,7 +441,7 @@ def _handle_task_update(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、status、owner、description、
         subject、block_kind / block_reason（标卡住时用）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，普通更新带回任务对象；标卡住带回
     block 结果（含卡住次数、是否已升级 triage）。
@@ -496,7 +496,7 @@ def _handle_task_complete(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、artifacts（可选，完成时
         一并登记的交付物文件路径列表）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（omnimate_home、hooks_registry、agent_ref、session_id）。
+        kwargs：系统上下文（codeagent_home、hooks_registry、agent_ref、session_id）。
 
     返回：JSON 字符串，带完成的任务、解锁清单，以及全清/提醒等附加信息。
     """
@@ -618,7 +618,7 @@ def _handle_task_list(args: dict, **kwargs) -> str:
 
     参数：
         args：LLM 传的参数——status（可选，只看某个状态的任务）。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，含任务列表、总数、以及 ready 字段（现在就能开工的
     任务 ID——依赖都满足了的那种，LLM 挑活直接用它）。
@@ -645,7 +645,7 @@ def _handle_task_heartbeat(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、note（可选，附带的说明文字，
         会作为一条留言存进任务）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home、team_name 署名用）。
+        kwargs：系统上下文（取 codeagent_home、team_name 署名用）。
 
     返回：JSON 字符串，带刷新后的任务对象。
     """
@@ -668,7 +668,7 @@ def _handle_task_comment(args: dict, task, **kwargs) -> str:
     参数：
         args：LLM 传的参数——id（任务 ID）、content（留言内容，必填非空）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home、team_name 署名用）。
+        kwargs：系统上下文（取 codeagent_home、team_name 署名用）。
 
     返回：JSON 字符串，带追加留言后的任务对象。
     """
@@ -694,7 +694,7 @@ def _handle_task_artifacts(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、add（要登记的文件路径列表）、
         remove（要移除的路径列表）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，带更新后的任务对象。
     """
@@ -727,7 +727,7 @@ def _handle_task_block(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、reason（为什么卡住，必填）、
         kind（可选的卡住类型标签：等任务 / 等人拍板 / 缺权限 / 偶发故障）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，带更新后的任务对象；原因或类型不合法返回错误。
     """
@@ -761,7 +761,7 @@ def _handle_task_unblock(args: dict, task, **kwargs) -> str:
         args：LLM 传的参数——id（任务 ID）、new_status（解除后落到哪个状态，
         只能是 pending 待办或 in_progress 进行中，默认 pending）。
         task：装饰器已经校验过的任务对象。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，带更新后的任务对象；任务本来就不卡或状态值非法
     则返回错误。
@@ -815,7 +815,7 @@ def _handle_task_link(args: dict, **kwargs) -> str:
 
     参数：
         args：LLM 传的参数——parent_id（被等的任务）、child_id（要等的任务）。
-        kwargs：系统上下文（取 omnimate_home）。
+        kwargs：系统上下文（取 codeagent_home）。
 
     返回：JSON 字符串，带更新后的任务对象；缺参/越权/成环各自返回
     对应的错误（error_type 会标 cycle_detected 或 invalid_args）。

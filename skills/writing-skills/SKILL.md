@@ -27,7 +27,7 @@ A **skill** is a reference guide for proven techniques, patterns, or tools. Skil
 
 **Skills are NOT:** Narratives about how you solved a problem once
 
-**In OmniMate, skills are created/edited via the `skill_manage` tool** (`action="create"` for new skills, `action="patch"` for edits). Each skill lives at `skills/<name>/SKILL.md` with `name` + `description` frontmatter. To write a skill is to author that document — then verify it against real agents.
+**In CodeAgent, skills are created/edited via the `skill_manage` tool** (`action="create"` for new skills, `action="patch"` for edits). Each skill lives at `skills/<name>/SKILL.md` with `name` + `description` frontmatter. To write a skill is to author that document — then verify it against real agents.
 
 ## TDD Mapping for Skills
 

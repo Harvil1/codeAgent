@@ -4,11 +4,11 @@
 他没出事。这里的「打卡」是更新 task.last_heartbeat_at 字段。
 
 为什么需要：工人（spawned worker）跑长任务时，调度方的看门狗
-（watchdog）靠这个字段判断「这工人还活着吗」。OmniMate 目前还没有
+（watchdog）靠这个字段判断「这工人还活着吗」。CodeAgent 目前还没有
 watchdog，但字段先维护起来，将来接上就能直接用。
 
 流程（每次工具调用结束时被 POST_TOOL_USE hook 触发）：
-  读环境变量 OMNIMATE_KANBAN_TASK（工牌）→
+  读环境变量 CODEAGENT_KANBAN_TASK（工牌）→
     没设（主 agent / 老式调用）→ 什么都不做
     已设 → 节流（每个进程至少隔 60 秒才打一次卡）→ TaskStore.heartbeat(tid)
 

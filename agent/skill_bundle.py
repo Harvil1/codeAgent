@@ -1,7 +1,7 @@
 """技能束（Skill Bundle）：把一组技能打包，一次全加载。
 
 打个比方：技能是单曲，技能束是歌单——点一次歌单，里面所有歌一起放。
-配置文件在 ~/.OmniMate/.skill-bundles.json：
+配置文件在 ~/.codeAgent/.skill-bundles.json：
     {
       "bundles": {
         "python-dev": {
@@ -31,20 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 def bundles_config_path() -> Path:
-    """返回技能束配置文件的路径（~/.OmniMate/.skill-bundles.json）。
+    """返回技能束配置文件的路径（~/.codeAgent/.skill-bundles.json）。
 
-    为什么做成函数而不是常量：agent home 可以被 OMNIMATE_HOME 环境变量
+    为什么做成函数而不是常量：agent home 可以被 CODEAGENT_HOME 环境变量
     覆盖，得每次现场算，写死会在切换 profile 时指错地方。
     """
-    from constants import get_omnimate_home
-    return get_omnimate_home() / ".skill-bundles.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / ".skill-bundles.json"
 
 
 def load_bundles_config(config_path: Optional[Path] = None) -> Dict[str, dict]:
     """读取技能束配置文件。
 
     参数：
-        config_path：配置文件路径。不传时用默认的 ~/.OmniMate/.skill-bundles.json。
+        config_path：配置文件路径。不传时用默认的 ~/.codeAgent/.skill-bundles.json。
 
     返回：{束名: {"skills": [...], "description": "..."}}；
     文件不存在或 JSON 坏了都返回空字典（fail-open，不打断调用方）。
@@ -77,7 +77,7 @@ def load_bundle(
     参数：
         bundle_name：技能束名（配置文件里 bundles 下面的键）。
         skills_dir：技能根目录，束里的技能名按 <skills_dir>/<技能名>/SKILL.md 找。
-        config_path：配置文件路径。不传时用默认的 ~/.OmniMate/.skill-bundles.json。
+        config_path：配置文件路径。不传时用默认的 ~/.codeAgent/.skill-bundles.json。
 
     返回：
         {

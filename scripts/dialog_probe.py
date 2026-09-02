@@ -5,19 +5,19 @@
 要花 token，所以只在做整体验收时用。
 
 用法（bash）：
-    # 1) 准备隔离 home（防止污染真实 ~/.OmniMate）
+    # 1) 准备隔离 home（防止污染真实 ~/.codeAgent）
     mkdir -p /tmp/omni_probe_home
-    cp ~/.OmniMate/settings.json /tmp/omni_probe_home/settings.json
+    cp ~/.codeAgent/settings.json /tmp/omni_probe_home/settings.json
     # 2) 跑单个场景
-    OMNIMATE_HOME=/tmp/omni_probe_home PROBE_CWD=/tmp/omni_playground \
+    CODEAGENT_HOME=/tmp/omni_probe_home PROBE_CWD=/tmp/omni_playground \
         uv run python scripts/dialog_probe.py chat_basic
 
 环境变量：
-    OMNIMATE_HOME  必填，且不允许等于真实 ~/.OmniMate（脚本会强制断言，
+    CODEAGENT_HOME  必填，且不允许等于真实 ~/.codeAgent（脚本会强制断言，
                     指向真实目录直接拒绝运行，防止弄脏真实数据）
     PROBE_CWD      对话工作目录（默认 /tmp/omni_playground，会自动创建）
     PROBE_APPROVAL deny（默认，非交互模式读到 EOF 就当拒绝）| approve（审批全通过）
-    PROBE_SCENARIO_LOG 对话记录目录（默认 $OMNIMATE_HOME/probe_logs）
+    PROBE_SCENARIO_LOG 对话记录目录（默认 $CODEAGENT_HOME/probe_logs）
 
 设计要点：
     - 每个场景一个独立进程，互不污染；
@@ -43,13 +43,13 @@ try:
 except (AttributeError, ValueError):
     pass
 
-HOME = Path(os.environ.get("OMNIMATE_HOME", "")).resolve()
-REAL_HOME = Path.home() / ".OmniMate"
+HOME = Path(os.environ.get("CODEAGENT_HOME", "")).resolve()
+REAL_HOME = Path.home() / ".codeAgent"
 if not HOME.exists():
-    print("FATAL: OMNIMATE_HOME 未设置或目录不存在", file=sys.stderr)
+    print("FATAL: CODEAGENT_HOME 未设置或目录不存在", file=sys.stderr)
     sys.exit(2)
 if HOME == REAL_HOME:
-    print("FATAL: OMNIMATE_HOME 指向真实 ~/.OmniMate，拒绝运行（防污染）", file=sys.stderr)
+    print("FATAL: CODEAGENT_HOME 指向真实 ~/.codeAgent，拒绝运行（防污染）", file=sys.stderr)
     sys.exit(2)
 
 CWD = Path(os.environ.get("PROBE_CWD", "/tmp/omni_playground")).resolve()
@@ -366,7 +366,7 @@ async def sc_skill_manage(ctx: Ctx):
         "创建后告诉我结果。"
     )
     found = False
-    for base in (HOME / "skills", CWD / ".omnimate" / "skills"):
+    for base in (HOME / "skills", CWD / ".codeAgent" / "skills"):
         if base.exists():
             for f in base.rglob("*.md"):
                 if "probe-greeting" in str(f) or "GREETING-OK-7788" in f.read_text(encoding="utf-8", errors="replace"):
@@ -682,7 +682,7 @@ async def sc_memory_inject(ctx: Ctx):
     """
     from agent.memory_store import MemoryStore
 
-    ms = MemoryStore(omnimate_home=str(HOME))
+    ms = MemoryStore(codeagent_home=str(HOME))
     ms.save(
         name="probe-pet",
         description="用户养了一只橘猫，名字叫 INJECT-CAT-8899",

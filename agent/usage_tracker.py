@@ -5,7 +5,7 @@
 五个数：prompt（输入）/ completion（输出）/ cache_read（缓存命中）/
 cache_creation（缓存写入）/ calls（调用次数）。
 
-存哪：每个会话一个文件，落在 ``~/.OmniMate/.usage/{session_id}.json``，
+存哪：每个会话一个文件，落在 ``~/.codeAgent/.usage/{session_id}.json``，
 用原子写（读的人永远看不到半截），任何失败都静默吞掉不影响主流程
 （记账不能把正事拖垮）。
 
@@ -39,7 +39,7 @@ class UsageTracker:
         """初始化并读回该会话已有的账页（文件不存在就空账起步）。
 
         参数：
-            home       —— OmniMate 主目录（~/.OmniMate），账本存在其下 .usage/
+            home       —— CodeAgent 主目录（~/.codeAgent），账本存在其下 .usage/
             session_id —— 会话 ID，空串时用 "default"
         """
         self._home = Path(home)

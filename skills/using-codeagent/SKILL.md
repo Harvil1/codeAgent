@@ -1,11 +1,11 @@
 ---
-name: using-omnimate
+name: using-codeagent
 description: "技能总纲。任何任务(尤其创造性工作/调试/写计划/执行计划)开始前先扫技能索引,判断有无适用流程技能。| Meta-skill: check the skill index and invoke the matching process skill before any task."
 ---
 
-# Using OmniMate Process Skills
+# Using CodeAgent Process Skills
 
-This is the entry skill for OmniMate's process-skill library (ported from the
+This is the entry skill for CodeAgent's process-skill library (ported from the
 superpowers methodology). **Invoke relevant skills BEFORE any response or
 action** — including clarifying questions, exploring the codebase, or checking
 files. If a skill turns out wrong for the situation, you don't have to use it.

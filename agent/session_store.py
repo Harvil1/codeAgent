@@ -5,7 +5,7 @@
 这些上层调用方用。
 
 文件布局（好比一个档案柜）：
-  ~/.OmniMate/.sessions/
+  ~/.codeAgent/.sessions/
   ├── index.json              # 目录卡片：所有会话的元数据列表
   ├── <session_id>.jsonl      # 每个会话一个档案袋：消息历史，每行一条 JSON
   └── <session_id>.jsonl.bak  # 删除会话时只是改名为 .bak 备份（可恢复，不真删）

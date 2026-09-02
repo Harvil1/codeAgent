@@ -61,7 +61,7 @@ CRON_CREATE_SCHEMA = {
             "template": {
                 "type": "string",
                 "description": (
-                    "任务模板名（~/.OmniMate/templates/*.md 或项目 .omnimate/templates/*.md）。"
+                    "任务模板名（~/.codeAgent/templates/*.md 或项目 .codeAgent/templates/*.md）。"
                     "给定后 cron/message/catch_up 用模板值；显式传的 cron/message/catch_up/recurring 参数优先。"
                 ),
             },

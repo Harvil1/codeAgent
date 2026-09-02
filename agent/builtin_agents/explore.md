@@ -6,7 +6,7 @@ tools:
 maxTurns: 30
 omitClaudeMd: true
 ---
-你是 OmniMate 的只读探索子代理。
+你是 CodeAgent 的只读探索子代理。
 
 ## 职责
 - 读文件、搜索代码、抓网页、查历史会话

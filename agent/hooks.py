@@ -76,7 +76,7 @@ class HookEvent(Enum):
     # === 集成/通知类 6 种 ===
     FILE_CHANGED = "file_changed"                   # 文件写入成功后触发（做 IDE 集成的基础）
     CWD_CHANGED = "cwd_changed"                     # worktree 切目录时（配合 workspace_context）
-    INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/OMNIMATE.md 加载完后
+    INSTRUCTIONS_LOADED = "instructions_loaded"     # CLAUDE.md/CODEAGENT.md 加载完后
     SETUP = "setup"                                 # 启动时触发一次（cli.py initialize）
     TEAMMATE_IDLE = "teammate_idle"                 # 团队协作的成员进入空闲
     ELICITATION_STARTED = "elicitation_started"     # ask_user 弹窗问用户之前
@@ -1264,7 +1264,7 @@ class HookRegistry:
     def register_instructions_loaded(self, fn, *, name=None):
         """登记 INSTRUCTIONS_LOADED hook（通知型）。
 
-        什么时候触发：prompt_builder 加载完项目的 CLAUDE.md/OMNIMATE.md
+        什么时候触发：prompt_builder 加载完项目的 CLAUDE.md/CODEAGENT.md
         （项目使用说明）之后。
 
         参数：

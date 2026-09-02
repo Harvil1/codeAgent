@@ -1,21 +1,21 @@
-# OmniMate Hooks 预制库
+# CodeAgent Hooks 预制库
 
 4 个开箱即用的声明式 hook 脚本。每个脚本独立、跨平台（纯 Python 标准库）。
 
 ## 安装
 
-把 `hooks/example-settings.json` 的内容合并到你的 `~/.agent/.hooks/settings.json`：
+把 `hooks/example-settings.json` 的内容合并到你的 `~/.codeAgent/.hooks/settings.json`：
 
 ```bash
 # 备份现有配置
-cp ~/.agent/.hooks/settings.json ~/.agent/.hooks/settings.json.bak
+cp ~/.codeAgent/.hooks/settings.json ~/.codeAgent/.hooks/settings.json.bak
 
 # 合并示例配置（手工编辑，把需要的 hook 段拷过去）
 # 或者直接全量替换（如果还没配过任何 hook）
-cp hooks/example-settings.json ~/.agent/.hooks/settings.json
+cp hooks/example-settings.json ~/.codeAgent/.hooks/settings.json
 ```
 
-重启 OmniMate 即生效。
+重启 CodeAgent 即生效。
 
 ## 4 个 hook
 
@@ -54,7 +54,7 @@ cp hooks/example-settings.json ~/.agent/.hooks/settings.json
 
 ## 关闭某个 hook
 
-编辑 `~/.agent/.hooks/settings.json`，删掉对应条目重启即可。
+编辑 `~/.codeAgent/.hooks/settings.json`，删掉对应条目重启即可。
 
 ## 写自己的 hook
 

@@ -287,8 +287,8 @@ def _create_git_worktree(base: Path, name: str, *,
                          hook_registry=None, session_id: str = "") -> Tuple[Path, Callable]:
     """用 git worktree 建独立工作区（内部分支：git 环境专用）。
 
-    干的事：建一个 omnimate/<名字>/<8位短ID> 的新分支 + 对应的 worktree
-    目录（放在仓库旁边的 .omnimate-worktrees/ 下，不混进项目目录），并
+    干的事：建一个 codeagent/<名字>/<8位短ID> 的新分支 + 对应的 worktree
+    目录（放在仓库旁边的 .codeAgent-worktrees/ 下，不混进项目目录），并
     返回一个配套的清理闭包。
 
     hook_registry 不为 None 时，建好/删完会触发
@@ -305,10 +305,10 @@ def _create_git_worktree(base: Path, name: str, *,
     """
     repo_root = get_repo_root(base) or base
     short_id = uuid.uuid4().hex[:8]
-    branch = f"omnimate/{name}/{short_id}"
+    branch = f"codeagent/{name}/{short_id}"
 
-    # worktree 目录放在仓库隔壁的 .omnimate-worktrees/ 下（记得 gitignore 它）
-    worktree_dir = repo_root.parent / ".omnimate-worktrees" / f"{name}-{short_id}"
+    # worktree 目录放在仓库隔壁的 .codeAgent-worktrees/ 下（记得 gitignore 它）
+    worktree_dir = repo_root.parent / ".codeAgent-worktrees" / f"{name}-{short_id}"
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # 流水账：动手建之前先记一笔
@@ -417,7 +417,7 @@ def _create_temp_workspace(name: str, *,
 
     返回：(临时目录路径, cleanup 清理闭包)。
     """
-    prefix = f"omnimate-{name}-"
+    prefix = f"codeAgent-{name}-"
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
 
     # 流水账：临时目录也记一笔（repo_root 为 None 时写不进文件，只走钩子）

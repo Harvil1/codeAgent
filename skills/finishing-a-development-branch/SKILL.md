@@ -170,7 +170,7 @@ WORKTREE_PATH=$(git rev-parse --show-toplevel)
 
 **If `GIT_DIR == GIT_COMMON`:** Normal repo, no worktree to clean up. Done.
 
-**If worktree path is under `.omnimate-worktrees/` (or `.worktrees/`):** OmniMate's `create_isolated_workspace` created this worktree — we own cleanup.
+**If worktree path is under `.codeAgent-worktrees/` (or `.worktrees/`):** CodeAgent's `create_isolated_workspace` created this worktree — we own cleanup.
 
 ```bash
 MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
@@ -214,7 +214,7 @@ git worktree prune  # Self-healing: clean up any stale registrations
 
 **Cleaning up externally-owned worktrees**
 - **Problem:** Removing a worktree an external host created causes phantom state
-- **Fix:** Only clean up worktrees under `.omnimate-worktrees/` or `.worktrees/`
+- **Fix:** Only clean up worktrees under `.codeAgent-worktrees/` or `.worktrees/`
 
 **No confirmation for discard**
 - **Problem:** Accidentally delete work

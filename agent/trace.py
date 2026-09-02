@@ -30,7 +30,7 @@ class TraceSink:
 
     用法示例（通过 hook 接入 AIAgent，平时不直接调）::
 
-        sink = TraceSink(base_dir=Path("~/.OmniMate").expanduser())
+        sink = TraceSink(base_dir=Path("~/.codeAgent").expanduser())
         sink.emit("pre_llm_call", input_tokens=100, model="deepseek-chat")
 
     写盘位置：``<base_dir>/.trace/<YYYY-MM-DD>.jsonl``

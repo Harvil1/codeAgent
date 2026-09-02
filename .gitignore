@@ -35,7 +35,7 @@ backend/
 /.playwright-mcp/
 /.impeccable/
 /.codegraph/
-/.omnimate/
+/.codeAgent/
 /dist/
 
 # Python 构建产物（python -m build 生成的 sdist/wheel）

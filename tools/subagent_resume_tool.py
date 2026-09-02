@@ -1,6 +1,6 @@
 """subagent_resume 工具：让中断的子代理（主对话派出去帮忙干活的分身）从断点继续干活。
 
-子代理的对话记录写到磁盘（~/.OmniMate/.agent-sessions/<agent_id>.jsonl）；
+子代理的对话记录写到磁盘（~/.codeAgent/.agent-sessions/<agent_id>.jsonl）；
 本工具是"取"的入口，整体流程是：
 - load_transcript 把历史消息读回来
 - 用 initial_messages 重新启动一个 AIAgent 子代理
@@ -289,7 +289,7 @@ SUBAGENT_RESUME_SCHEMA = {
     "name": "subagent_resume",
     "description": (
         "恢复一个中断的子代理继续执行。"
-        "transcript 已持久化到 ~/.OmniMate/.agent-sessions/<agent_id>.jsonl，"
+        "transcript 已持久化到 ~/.codeAgent/.agent-sessions/<agent_id>.jsonl，"
         "传入 agent_id 加载历史对话并续跑，续写记录到同一文件。\n\n"
         "**适用场景**：\n"
         "- 上次子代理任务没跑完（interrupted / 进程重启）\n"

@@ -1,10 +1,10 @@
 """两件事：跨会话的输入历史 + 大段粘贴的"引用协议"。
 
-- **输入历史**：跨会话召回旧输入。追加写 ~/.OmniMate/history.jsonl（和最近
+- **输入历史**：跨会话召回旧输入。追加写 ~/.codeAgent/history.jsonl（和最近
   一条重复就不记），倒着读；召回靠 `/history` 命令（列表 + `/history N`
   打印第 N 条原文）。纯 rich console 没有按键级行编辑，不做 ↑↓ 键绑定。
 - **粘贴引用**：大段粘贴先存盘、消息里只留占位符（要用时再展开）。
-  超过 1024 字符的大段输入存到 ~/.OmniMate/.paste/ 外面，
+  超过 1024 字符的大段输入存到 ~/.codeAgent/.paste/ 外面，
   消息里只留 `[Pasted text #N +M lines]` 占位符（会话存占位符省空间），
   发给 agent 前再展开成原文（expand_paste_references）；对应文件找不到就
   保留占位符（fail-open——外存被清理也不耽误对话）
@@ -84,7 +84,7 @@ class GlobalHistory:
         """建一个历史记录器。
 
         参数：
-            home：OmniMate 主目录（history.jsonl 和锁文件都放这里）
+            home：CodeAgent 主目录（history.jsonl 和锁文件都放这里）
         """
         self._home = Path(home)
         self._path = self._home / "history.jsonl"
@@ -192,7 +192,7 @@ def store_paste_if_large(text: str, home) -> Tuple[str, Optional[str]]:
 
     参数：
         text：用户输入的原文
-        home：OmniMate 主目录
+        home：CodeAgent 主目录
 
     返回：
         (替换后的消息文本, 外存文件路径或 None)。存储失败返回 (原文, None)——
@@ -219,7 +219,7 @@ def expand_paste_references(text: str, home) -> str:
 
     参数：
         text：可能带占位符的消息文本
-        home：OmniMate 主目录
+        home：CodeAgent 主目录
 
     返回：
         展开后的文本；占位符对应的外存文件找不到时保留占位符原样

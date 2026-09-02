@@ -4,7 +4,7 @@
 
 和 TodoWrite（内存待办清单）的区别，打个比方：
   - TodoWrite 像一张便签纸：写在内存里，关会话就没了，也没有先后依赖
-  - Task System 像一个项目看板：每个任务是一个 JSON 文件存在 ~/.OmniMate/.tasks/ 下，
+  - Task System 像一个项目看板：每个任务是一个 JSON 文件存在 ~/.codeAgent/.tasks/ 下，
     跨会话保留，任务之间还能声明"先做完 A 才能做 B"（DAG 依赖——就是一张
     "谁挡着谁"的关系网，不能有循环）
 
@@ -38,22 +38,22 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _tasks_dir(omnimate_home=None) -> Path:
-    """拿到存放任务 JSON 文件的目录（~/.OmniMate/.tasks/），没有就顺手建一个。
+def _tasks_dir(codeagent_home=None) -> Path:
+    """拿到存放任务 JSON 文件的目录（~/.codeAgent/.tasks/），没有就顺手建一个。
 
     参数：
-        omnimate_home：OmniMate 的数据根目录；不传就用默认的 ~/.OmniMate
+        codeagent_home：CodeAgent 的数据根目录；不传就用默认的 ~/.codeAgent
             （测试里常传一个临时目录来隔离）。
     返回：目录的 Path 对象（已确保存在）。
     """
-    if omnimate_home:
-        home = Path(omnimate_home)
+    if codeagent_home:
+        home = Path(codeagent_home)
     else:
         try:
-            from constants import get_omnimate_home
-            home = get_omnimate_home()
+            from constants import get_codeagent_home
+            home = get_codeagent_home()
         except Exception:
-            home = Path.home() / ".OmniMate"
+            home = Path.home() / ".codeAgent"
     d = home / ".tasks"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -65,13 +65,13 @@ class TaskStore:
     一般不直接 new，用文件底部的 get_task_store() 拿缓存实例。
     """
 
-    def __init__(self, omnimate_home=None):
+    def __init__(self, codeagent_home=None):
         """记下任务目录（建目录的活儿由 _tasks_dir 干）。
 
         参数：
-            omnimate_home：数据根目录，不传用默认 ~/.OmniMate。
+            codeagent_home：数据根目录，不传用默认 ~/.codeAgent。
         """
-        self._dir = _tasks_dir(omnimate_home)
+        self._dir = _tasks_dir(codeagent_home)
 
     def _task_file(self, task_id: str) -> Path:
         """由任务 id 拼出它的 JSON 文件路径。"""
@@ -490,16 +490,16 @@ class TaskStore:
 _task_stores: Dict[str, TaskStore] = {}
 
 
-def get_task_store(omnimate_home=None) -> TaskStore:
+def get_task_store(codeagent_home=None) -> TaskStore:
     """拿 TaskStore 实例：同一个 home 永远给同一个（省得反复重建、也防串目录）。
 
     参数：
-        omnimate_home：数据根目录，不传用默认 ~/.OmniMate（也是按这个做缓存键）。
+        codeagent_home：数据根目录，不传用默认 ~/.codeAgent（也是按这个做缓存键）。
     返回：该 home 对应的 TaskStore 实例（首次调用时创建并缓存）。
     """
-    key = str(Path(omnimate_home).resolve()) if omnimate_home else ""
+    key = str(Path(codeagent_home).resolve()) if codeagent_home else ""
     store = _task_stores.get(key)
     if store is None:
-        store = TaskStore(omnimate_home)
+        store = TaskStore(codeagent_home)
         _task_stores[key] = store
     return store

@@ -9,8 +9,8 @@ cron（定时调度）的基础知识：让程序按时间表自动干活，比�
 parse_frontmatter，不重复造轮子。
 
 扫两个目录（项目级同名覆盖用户级）：
-  - ~/.OmniMate/templates/*.md        用户级（跨项目通用）
-  - <当前项目>/.omnimate/templates/*.md  项目级
+  - ~/.codeAgent/templates/*.md        用户级（跨项目通用）
+  - <当前项目>/.codeAgent/templates/*.md  项目级
 
 卡片 frontmatter 字段：
   - cron：时间表（必需，缺了这张卡片直接不收）
@@ -36,19 +36,19 @@ def _invalidate_cache() -> None:
 
 
 def _template_dirs() -> list:
-    """列出要扫的模板目录：用户级 templates + 当前项目的 .omnimate/templates。
+    """列出要扫的模板目录：用户级 templates + 当前项目的 .codeAgent/templates。
 
     返回：目录 Path 列表（某个来源取不到就跳过，不报错）。
     """
     dirs = []
     try:
-        from constants import get_omnimate_home
-        dirs.append(get_omnimate_home() / "templates")
+        from constants import get_codeagent_home
+        dirs.append(get_codeagent_home() / "templates")
     except Exception:
         pass
     try:
         from agent.workspace_context import get_workspace_cwd
-        dirs.append(Path(get_workspace_cwd()) / ".omnimate" / "templates")
+        dirs.append(Path(get_workspace_cwd()) / ".codeAgent" / "templates")
     except Exception:
         pass
     return dirs

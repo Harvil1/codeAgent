@@ -15,7 +15,7 @@
 
 各层的价值：
 - 黑名单（闸门 1）是零成本防线，先挡住灾难性误操作；
-- 路径白名单保护用户文件和密钥（写文件只准写工作目录和 ~/.OmniMate）；
+- 路径白名单保护用户文件和密钥（写文件只准写工作目录和 ~/.codeAgent）；
 - 审批给用户最终决定权，会话内缓存避免同一个问题反复问；
 - LLM 分类（闸门 4）是可选的"慢速深审"：前三关都放过了、也不在破坏性
   模式里的命令，再让副 LLM 从语义上判一次。配置里的白名单命令直接走
@@ -115,16 +115,16 @@ def check_command_deny(command: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 自我保护：禁止修改 OmniMate 自身的依赖（uv add / pip install）
+# 自我保护：禁止修改 CodeAgent 自身的依赖（uv add / pip install）
 # ---------------------------------------------------------------------------
 
 def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional[str]:
-    """闸门 0 的一半：不许 AI 修改 OmniMate 自己的依赖。
+    """闸门 0 的一半：不许 AI 修改 CodeAgent 自己的依赖。
 
-    干什么：AI 在 OmniMate 自己的代码目录里跑 uv add / pip install 就拒绝。
+    干什么：AI 在 CodeAgent 自己的代码目录里跑 uv add / pip install 就拒绝。
 
     为什么需要：AI 改自己的依赖等于"给自己动手术"——pyproject.toml 被改坏
-    或 venv 被污染后，整个助手直接瘫痪。只保护 OmniMate 自己的目录
+    或 venv 被污染后，整个助手直接瘫痪。只保护 CodeAgent 自己的目录
     （project_root），不限制用户项目：在用户项目里装依赖是干活的正当操作，
     一律放行（用户项目也未必是 Python——前端用 npm/pnpm/yarn，Python 用
     uv/pip）。
@@ -144,7 +144,7 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
     except Exception:
         return None
 
-    # 只在 OmniMate 自己的目录里才拦
+    # 只在 CodeAgent 自己的目录里才拦
     in_self = cwd_resolved == root
     if not in_self:
         try:
@@ -156,9 +156,9 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
         return None
 
     if re.search(r"\buv\s+add\b", command, re.IGNORECASE):
-        return "在 OmniMate 自身目录内 uv add 会修改自身依赖(pyproject.toml),禁止 agent 操作"
+        return "在 CodeAgent 自身目录内 uv add 会修改自身依赖(pyproject.toml),禁止 agent 操作"
     if re.search(r"\bpip\d?\s+install\b", command, re.IGNORECASE):
-        return "在 OmniMate 自身目录内 pip install 会污染自身 venv,禁止 agent 操作"
+        return "在 CodeAgent 自身目录内 pip install 会污染自身 venv,禁止 agent 操作"
     return None
 
 
@@ -419,7 +419,7 @@ def is_protected_path(path) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 写保护路径(只禁写,不禁读——AI 可以读 OmniMate 的项目代码,但不能改)
+# 写保护路径(只禁写,不禁读——AI 可以读 CodeAgent 的项目代码,但不能改)
 # ---------------------------------------------------------------------------
 
 _WRITE_PROTECTED_PATHS: List[Tuple[Path, str]] = []
@@ -433,7 +433,7 @@ except Exception:
 def is_write_protected_path(path) -> Optional[str]:
     """检查路径是否在写保护列表(只禁写,不禁读)。
 
-    干什么:判断路径是否落在 OmniMate 自身代码目录里。
+    干什么:判断路径是否落在 CodeAgent 自身代码目录里。
 
     为什么需要:防 AI 改自己的源码(相当于自我篡改)。路径的两种
     写法(词法/realpath)都过保护表,防软链绕过。
@@ -596,9 +596,9 @@ def remove_extra_allowed_root(root) -> bool:
 
 
 def default_allowed_roots() -> List[Path]:
-    """算出默认允许写入的根目录列表:工作目录 + ~/.OmniMate + /add-dir 追加的额外白名单。
+    """算出默认允许写入的根目录列表:工作目录 + ~/.codeAgent + /add-dir 追加的额外白名单。
 
-    为什么是这三处:工作目录是用户项目的地盘,~/.OmniMate 是 AI 自己的家
+    为什么是这三处:工作目录是用户项目的地盘,~/.codeAgent 是 AI 自己的家
     (记忆/技能等数据),/add-dir 是用户显式授权的额外目录。
 
     工作目录必须用 get_workspace_cwd() 取而不是 Path.cwd()——后者是
@@ -612,8 +612,8 @@ def default_allowed_roots() -> List[Path]:
     from agent.workspace_context import get_workspace_cwd
     roots = [Path(get_workspace_cwd()).resolve()]
     try:
-        from constants import get_omnimate_home
-        roots.append(get_omnimate_home().resolve())
+        from constants import get_codeagent_home
+        roots.append(get_codeagent_home().resolve())
     except Exception:
         pass
     # /add-dir 运行时追加的额外白名单(含启动时从
@@ -641,7 +641,7 @@ def safe_path(
         path: 待检查的路径。
         write: 是否写操作(默认 False 只读)。
         allowed_roots: 允许写入的根目录列表;不传就用默认
-            (工作目录 + ~/.OmniMate + 额外白名单)。
+            (工作目录 + ~/.codeAgent + 额外白名单)。
 
     返回:PermissionResult(含允许与否、原因、给出结论的关卡)。
     """
@@ -658,7 +658,7 @@ def safe_path(
     if not write:
         return PermissionResult(True, "ok", "ok")
 
-    # 写保护路径(只禁写:OmniMate 项目自身代码目录)
+    # 写保护路径(只禁写:CodeAgent 项目自身代码目录)
     wprot = is_write_protected_path(path)
     if wprot:
         return PermissionResult(
@@ -1276,8 +1276,8 @@ class PermissionChecker:
                               路径)。返回值除了 True/False 还可以是 "always"
                               (总是允许,见 check_path)。
             whitelist_file: 持久化命令白名单的 JSON 文件路径
-                            (如 ~/.OmniMate/approved_commands.json)。
-            paths_whitelist_file: 路径白名单 JSON(如 ~/.OmniMate/approved_paths.json)
+                            (如 ~/.codeAgent/approved_commands.json)。
+            paths_whitelist_file: 路径白名单 JSON(如 ~/.codeAgent/approved_paths.json)
                                   ——用户批准过的写入路径,跨会话不再问。
             mode: 权限模式,四种:
                   - "default": 四道闸门全开(黑名单 + 破坏性审批 + 默认通过
@@ -1885,15 +1885,15 @@ class PermissionChecker:
         - 读:碰到受保护路径(~/.ssh 这些)就拒,其他随便读;
         - 写,三道关卡:
           闸门 1:受保护路径(~/.ssh / /etc / C:\\Windows 等)→ 硬拒(安全底线);
-          闸门 2:写保护路径(OmniMate 项目代码目录)→ 硬拒(防 AI 改自己);
-          闸门 3:写白名单(工作目录 / ~/.OmniMate / /add-dir 追加的目录)
+          闸门 2:写保护路径(CodeAgent 项目代码目录)→ 硬拒(防 AI 改自己);
+          闸门 3:写白名单(工作目录 / ~/.codeAgent / /add-dir 追加的目录)
                  之内放行;之外走审批通道:
                  会话缓存命中放行 → autoDeny 直接拒 → approval_callback
                  弹窗问用户(批了以后父目录进会话缓存,同目录不再问) →
                  没配 callback 就拒。
 
         闸门 3 的白名单必须统一从
-        default_allowed_roots() 取(工作目录 + ~/.OmniMate
+        default_allowed_roots() 取(工作目录 + ~/.codeAgent
         + _EXTRA_ALLOWED_ROOTS,和 safe_path 同一个来源)——write_file/
         str_replace 走的是 check_path 而不是 safe_path,白名单语义放开成
         "其他全通过"会让 /add-dir 加的额外目录对它们不生效。
@@ -1956,7 +1956,7 @@ class PermissionChecker:
         if effective_mode == "bypassPermissions":
             return PermissionResult(True, "ok", "ok")
 
-        # 白名单和 safe_path 同一个来源:工作目录 + ~/.OmniMate + 额外目录。
+        # 白名单和 safe_path 同一个来源:工作目录 + ~/.codeAgent + 额外目录。
         # 调用方显式传了 allowed_roots 就以其为准(覆盖默认)。
         if allowed_roots is None:
             allowed_roots = default_allowed_roots()

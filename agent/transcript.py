@@ -30,7 +30,7 @@ def snapshot_if_needed(
 
     参数：
         messages：要备份的完整消息列表
-        agent_home：OmniMate 主目录（~/.OmniMate），备份存在它下面的 .transcripts/
+        agent_home：CodeAgent 主目录（~/.codeAgent），备份存在它下面的 .transcripts/
         session_id：当前会话 id（写进元数据）
         force：True 才真落盘（spec 里只有 force=True 一种触发场景，False 等于关）
         enabled：总开关，False 直接返回 None

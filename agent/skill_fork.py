@@ -55,7 +55,7 @@ def run_skill_in_fork(
                 "把最终结果作为回复返回。"
             ),
             spawn_depth=getattr(agent_ref, "spawn_depth", 0) + 1,
-            omnimate_home=agent_ref.omnimate_home,
+            codeagent_home=agent_ref.codeAgent_home,
             effort_level=getattr(agent_ref, "effort_level", None),
             hooks_registry=_hooks,
         )

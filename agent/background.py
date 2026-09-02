@@ -207,7 +207,7 @@ class BackgroundManager:
             if monitor:
                 try:
                     m_dir = Path(monitor_dir) if monitor_dir else (
-                        Path.home() / ".OmniMate" / ".task_outputs" / "monitor"
+                        Path.home() / ".codeAgent" / ".task_outputs" / "monitor"
                     )
                     m_dir.mkdir(parents=True, exist_ok=True)
                     task.output_file = str(m_dir / f"{task_id}.log")

@@ -5,7 +5,7 @@
   settings.json 合并，得到程序实际用的配置。
 
 配置怎么算出来的（默认路径下）：
-  最终值 = DEFAULT_CONFIG（出厂默认）← 深合并 ← settings.json（~/.OmniMate/settings.json）
+  最终值 = DEFAULT_CONFIG（出厂默认）← 深合并 ← settings.json（~/.codeAgent/settings.json）
   - settings.json 由 agent/settings.py 负责读写；第一次启动时会自动把
     config.yaml / .env / .mcp.json 迁进 settings.json
   - 如果调用时显式传了 config_file 指向某个 yaml 文件，就走 yaml
@@ -160,7 +160,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Hook 系统：在固定事件点（如工具调用前后）自动执行用户配置的脚本
     "hooks": {
         "enabled": True,                            # 总开关；False 时所有 hook 都不执行
-        "settings_path": None,                      # None → 默认 ~/.OmniMate/.hooks/settings.json
+        "settings_path": None,                      # None → 默认 ~/.codeAgent/.hooks/settings.json
         "script_timeout_default": 10.0,            # 声明式 hook 默认超时（秒）
         "stop_hook_max_fires": 3,                  # Stop hook 每会话最多触发 3 次（防失控）
         "fail_closed_default": False,              # 声明式 hook 默认不启用 fail_closed
@@ -189,7 +189,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Cron 定时调度：到点自动执行任务
     "cron": {
         "enabled": True,                        # False 时整个定时功能关闭
-        "jobs_path": None,                      # None → 默认 ~/.OmniMate/.cron/jobs.json
+        "jobs_path": None,                      # None → 默认 ~/.codeAgent/.cron/jobs.json
         "poll_interval_seconds": 30.0,          # 后台线程每隔多少秒看一次表
         "max_age_days": 7,                      # 周期任务超过 7 天没跑就自动停用（防僵尸任务）
     },
@@ -197,7 +197,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Team 多 agent 协作：多个 agent 分工干活（像拉了个工作群）
     "team": {
         "enabled": True,                        # False 时 team_* 系列工具对模型隐藏
-        "team_dir": None,                       # None → 默认 ~/.OmniMate/.team/
+        "team_dir": None,                       # None → 默认 ~/.codeAgent/.team/
         "default_role": "worker",               # 新成员默认角色
         "spawn_timeout": 600,                   # 启动一个子 agent 的超时（秒）
         "max_members": 10,                      # 单队最多 10 个成员
@@ -221,7 +221,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "memory_char_limit": 2200,
         "user_char_limit": 1375,
         "multifile_enabled": True,       # 多文件模式开关
-        "memory_dir": None,              # 记忆目录（None → ~/.OmniMate/.memory/）
+        "memory_dir": None,              # 记忆目录（None → ~/.codeAgent/.memory/）
         "retrieval_enabled": True,       # 按需检索开关（每轮挑相关的记忆注入）
         "retrieval_max_results": 5,      # 每次最多检索几条
         "retrieval_model": None,         # 检索用哪个模型（None → 用主模型）
@@ -296,7 +296,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fork_max_parent_turns": 3,
         # fork="full"（全量继承）模式最多带多少条 AI 回复（防失控）
         "fork_full_history_max_turns": 50,
-        # 子代理对话轨迹落盘到 ~/.OmniMate/.agent-sessions/（便于 resume）
+        # 子代理对话轨迹落盘到 ~/.codeAgent/.agent-sessions/（便于 resume）
         "subagent_persistence_enabled": True,
         # 已完成子代理的记录保留 N 天，超期清理省磁盘
         "subagent_persistence_retention_days": 7,
@@ -325,7 +325,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_terminal_timeout": 600,
         # OS 沙箱：给命令执行再套一层操作系统级隔离
         "sandbox_mode": "off",           # "off" | "on"（启动时灌进 PermissionChecker）
-        "sandbox_writable_roots": [],    # 沙箱里额外允许写的目录（默认已含 cwd + ~/.OmniMate）
+        "sandbox_writable_roots": [],    # 沙箱里额外允许写的目录（默认已含 cwd + ~/.codeAgent）
         # /add-dir 命令持久化的写白名单：运行时用户加目录就追加到这里
         # 并写回；下次启动 RuntimeContext 读取生效
         "extra_allowed_roots": [],
@@ -353,7 +353,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "sessions": {
         "auto_save": True,
         "auto_title": True,
-        "db_path": None,                 # 默认 ~/.OmniMate/sessions.db
+        "db_path": None,                 # 默认 ~/.codeAgent/sessions.db
     },
 
     # 启用的工具集：core = 全部内置工具；mcp = 外部工具服务器
@@ -369,7 +369,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 功能开关（feature flags）——新功能先藏在这里灰度
     # ────────────────────────────────────────────────────────────
     # 所有 flag 默认关（用户决策：装完默认全关，但每项都要有测试覆盖）。
-    # 用户想开哪个，就在 ~/.OmniMate/settings.json 的 features 节里覆盖。
+    # 用户想开哪个，就在 ~/.codeAgent/settings.json 的 features 节里覆盖。
     # 启动时通过 _deep_merge 读一次，运行中不热加载（保护 prompt 缓存）。
     "features": {
         # Bash 命令 LLM 分类器：拿不准的命令让辅助模型判断危不危险
@@ -507,8 +507,8 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
         "password": True,
         "category": "provider",
     },
-    "OMNIMATE_HOME": {
-        "description": "agent home 目录（覆盖默认 ~/.OmniMate）",
+    "CODEAGENT_HOME": {
+        "description": "agent home 目录（覆盖默认 ~/.codeAgent）",
         "prompt": "Agent Home",
         "password": False,
         "category": "system",
@@ -520,7 +520,7 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
 # 路径辅助
 # ---------------------------------------------------------------------------
 
-# 说明：路径函数（get_omnimate_home / config_path / env_file）统一在
+# 说明：路径函数（get_codeagent_home / config_path / env_file）统一在
 # constants.py。这里留个 config_path 别名纯粹是本模块自己用着
 # 方便——外部代码请直接 import constants。
 
@@ -528,7 +528,7 @@ def config_path() -> Path:
     """拿到配置文件 config.yaml 的完整路径（实现在 constants.py，这里是本模块内部用的别名）。
 
     返回：
-        Path 对象，指向 ~/.OmniMate/config.yaml（或 OMNIMATE_HOME 覆盖后的位置）。
+        Path 对象，指向 ~/.codeAgent/config.yaml（或 CODEAGENT_HOME 覆盖后的位置）。
     """
     return _config_path()
 

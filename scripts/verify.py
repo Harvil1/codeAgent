@@ -139,7 +139,7 @@ def check_memory_tool_write(tmp):
     """
     from tools.registry import registry
     from agent.memory_store import MemoryStore
-    store = MemoryStore(omnimate_home=tmp)
+    store = MemoryStore(codeagent_home=tmp)
 
     result = asyncio.run(registry.dispatch(
         "memory",
@@ -164,7 +164,7 @@ def check_memory_persist(tmp):
     返回：PASS/FAIL 结果。
     """
     from agent.memory_store import MemoryStore
-    store = MemoryStore(omnimate_home=tmp)
+    store = MemoryStore(codeagent_home=tmp)
     store.add("memory", "持久化测试")
     # 存储是多文件模式：条目是 .memory/ 下的 .md 文件，MEMORY.md 只是索引
     memory_dir = tmp / ".memory"
@@ -183,10 +183,10 @@ def check_memory_reload(tmp):
     返回：PASS/FAIL 结果。
     """
     from agent.memory_store import MemoryStore
-    s1 = MemoryStore(omnimate_home=tmp)
+    s1 = MemoryStore(codeagent_home=tmp)
     s1.add("memory", "重启测试")
 
-    s2 = MemoryStore(omnimate_home=tmp)
+    s2 = MemoryStore(codeagent_home=tmp)
     entries = s2.list_all()
     if any("重启测试" in (e.body or "") for e in entries):
         return _ok("记忆已跨实例加载")
@@ -244,7 +244,7 @@ def check_skills_list(tmp):
     """
     from tools.registry import registry
     skills = _setup_skill(tmp)
-    result = asyncio.run(registry.dispatch("skills_list", {}, omnimate_home=tmp))
+    result = asyncio.run(registry.dispatch("skills_list", {}, codeagent_home=tmp))
     data = json.loads(result)
     names = [s["name"] for s in data["skills"]]
     if "hello" in names:
@@ -262,7 +262,7 @@ def check_skill_view(tmp):
     """
     from tools.registry import registry
     _setup_skill(tmp)
-    result = asyncio.run(registry.dispatch("skill_view", {"name": "hello"}, omnimate_home=tmp))
+    result = asyncio.run(registry.dispatch("skill_view", {"name": "hello"}, codeagent_home=tmp))
     data = json.loads(result)
     if "Hello" in data.get("content", ""):
         return _ok("查看了 hello 技能")
@@ -281,7 +281,7 @@ def check_skill_manage_create(tmp):
     asyncio.run(registry.dispatch(
         "skill_manage",
         {"action": "create", "name": "new-skill", "content": "---\nname: x\n---\nbody"},
-        omnimate_home=tmp,
+        codeagent_home=tmp,
     ))
     if (tmp / "skills" / "new-skill" / "SKILL.md").exists():
         return _ok("创建了 new-skill")
@@ -539,10 +539,10 @@ def main():
     返回：进程退出码，0 = 全部通过，1 = 有失败项。
     """
     print("=" * 60)
-    print("  OmniMate 复刻检查清单验证")
+    print("  CodeAgent 复刻检查清单验证")
     print("=" * 60)
 
-    tmp = Path(tempfile.mkdtemp(prefix="omnimate_verify_"))
+    tmp = Path(tempfile.mkdtemp(prefix="codeAgent_verify_"))
     checks = [
         ("基础对话", [
             ("agent 初始化", check_agent_initialization),

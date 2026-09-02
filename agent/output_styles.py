@@ -7,7 +7,7 @@
 
 去哪找风格文件（项目级和用户级同名时，项目级说了算）：
 - 项目级：从当前目录向上到 git 仓库根（含），沿途的
-  ``.omnimate/output-styles/*.md``（和 OMNIMATE.md 的向上收集规则一致）
+  ``.codeAgent/output-styles/*.md``（和 CODEAGENT.md 的向上收集规则一致）
 - 用户级：``<agent_home>/output-styles/*.md``（全局通用）
 
 怎么生效：注入到 system prompt 的 context 层（会话内不变，保住前缀
@@ -22,7 +22,7 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_DIR = Path(".omnimate") / "output-styles"  # 项目级目录（相对项目根）
+_PROJECT_DIR = Path(".codeAgent") / "output-styles"  # 项目级目录（相对项目根）
 _USER_DIR = "output-styles"                          # 用户级目录（相对 agent_home）
 
 
@@ -68,7 +68,7 @@ def _parse_style_file(path: Path) -> Optional[OutputStyle]:
 def _project_roots(cwd: str):
     """列出从当前目录一路向上到 git 仓库根（含）的所有目录。
 
-    和 OMNIMATE.md 的收集规则保持一致——每层目录都可能藏着
+    和 CODEAGENT.md 的收集规则保持一致——每层目录都可能藏着
     项目级风格文件，得挨个看一遍。
 
     参数：

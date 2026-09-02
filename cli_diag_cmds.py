@@ -21,7 +21,7 @@ from typing import Optional
 
 from rich.table import Table
 
-from constants import get_omnimate_home
+from constants import get_codeagent_home
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ def _handle_doctor_cli(args: str, rt) -> bool:
     1. 配置能正常加载（load_config 不抛错）；
     2. 模型服务商的 API key 环境变量已设置（读 config 的
        model.api_key_env，默认 DEEPSEEK_API_KEY）；
-    3. agent home 目录（~/.OmniMate）可写（写个临时文件再删掉试试）；
+    3. agent home 目录（~/.codeAgent）可写（写个临时文件再删掉试试）；
     4. .mcp.json 能解析成 JSON（只在文件存在时才查）；
     5. 关键依赖库装齐了没（rich / httpx / openai 逐个 import）；
     6. sessions / skills 目录可用（顺手自动创建，创建了也算通过）。
@@ -352,7 +352,7 @@ def _handle_doctor_cli(args: str, rt) -> bool:
     import importlib
 
     cfg = getattr(rt, "config", None) or {}
-    home = Path(getattr(rt, "home", None) or get_omnimate_home())
+    home = Path(getattr(rt, "home", None) or get_codeagent_home())
     results = []  # 收集 6 项结果：[(是否通过, 标题, 详情)]
 
     # 1. config 可加载

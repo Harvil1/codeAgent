@@ -3,8 +3,8 @@
 在项目里的位置：给 tools/workflow_tool.py 提供"有哪些现成工作流可跑"的目录。
 
 编排脚本是数据不是代码：放在两个固定目录里（像菜谱放菜谱架）：
-  - ~/.OmniMate/workflows/*.py        用户级（跨项目通用）
-  - <当前项目>/.omnimate/workflows/*.py  项目级（同名时覆盖用户级那份）
+  - ~/.codeAgent/workflows/*.py        用户级（跨项目通用）
+  - <当前项目>/.codeAgent/workflows/*.py  项目级（同名时覆盖用户级那份）
 
 缓存策略：mtime（修改时间）+ size（文件大小）双因子判断"变没变"。
 为什么两个一起看：Windows 上修改时间精度只有约 15 毫秒，同一窗口内改
@@ -26,19 +26,19 @@ def _invalidate_cache() -> None:
 
 
 def _script_dirs() -> list:
-    """列出要扫的目录：用户级 workflows + 当前项目的 .omnimate/workflows。
+    """列出要扫的目录：用户级 workflows + 当前项目的 .codeAgent/workflows。
 
     返回：目录 Path 列表（某个来源取不到就跳过，不报错）。
     """
     dirs = []
     try:
-        from constants import get_omnimate_home
-        dirs.append(get_omnimate_home() / "workflows")
+        from constants import get_codeagent_home
+        dirs.append(get_codeagent_home() / "workflows")
     except Exception:
         pass
     try:
         from agent.workspace_context import get_workspace_cwd
-        dirs.append(Path(get_workspace_cwd()) / ".omnimate" / "workflows")
+        dirs.append(Path(get_workspace_cwd()) / ".codeAgent" / "workflows")
     except Exception:
         pass
     return dirs

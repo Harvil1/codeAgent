@@ -32,7 +32,7 @@ from typing import Optional
 # 但线程内部对 ContextVar 的 set/reset 只影响自己这份数据（token 的作用
 # 域是线程局部的），所以不会漏到别的线程去。
 _workspace_cwd: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
-    "omnimate_workspace_cwd", default=None,
+    "codeagent_workspace_cwd", default=None,
 )
 
 

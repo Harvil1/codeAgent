@@ -1,8 +1,8 @@
 """多文件记忆存储：记忆（AI 对用户和项目沉淀下来的事实条目，跨会话保留）按主题分文件存放。
 
 存储结构：
-- ~/.OmniMate/.memory/{topic}.jsonl：一个主题一个文件，文件里每行一条记忆（JSON）
-- ~/.OmniMate/MEMORY.md：总目录/索引（自动生成，按主题分组，超 200 行或 25KB 截断）
+- ~/.codeAgent/.memory/{topic}.jsonl：一个主题一个文件，文件里每行一条记忆（JSON）
+- ~/.codeAgent/MEMORY.md：总目录/索引（自动生成，按主题分组，超 200 行或 25KB 截断）
 
 几条核心规则：
 - 写入即维护：往同一主题写同名（name 相同）的记忆是更新旧条目，不是无限堆积
@@ -129,7 +129,7 @@ def _format_frontmatter(meta: dict) -> str:
     return "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + "---\n"
 
 
-def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
+def validate_memory_dir(memory_dir, codeagent_home) -> Optional[str]:
     """memory 目录的安全校验。
 
     memory 目录的位置来自配置/环境变量，可能被指到敏感位置（比如 ~/.ssh）
@@ -139,19 +139,19 @@ def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
     1. **受保护路径拒绝**：memory_dir（解析软链后的真实路径）落在 ~/.ssh、
        /etc、C:\\Windows 这类敏感位置下——挡住"改 AGENT_HOME 环境变量或
        memory_dir 配置指向敏感位置换取写权限"的路
-    2. **软链逃逸检测**：memory_dir 解析成真实路径后必须仍在 omnimate_home
+    2. **软链逃逸检测**：memory_dir 解析成真实路径后必须仍在 codeagent_home
        的真实路径之下——挡住"home/.memory 是个指向 ~/.ssh 的软链"这类把戏
 
-    说明：OmniMate 的配置只从用户级 settings.json 读（项目配置没有注入面），
+    说明：CodeAgent 的配置只从用户级 settings.json 读（项目配置没有注入面），
     来源校验天然满足，这里只补路径内容校验。
 
     参数：
     - memory_dir：待校验的 memory 目录
-    - omnimate_home：agent 的家目录（~/.OmniMate）
+    - codeagent_home：agent 的家目录（~/.codeAgent）
     """
     try:
         memory_dir = Path(memory_dir)
-        omnimate_home = Path(omnimate_home)
+        codeagent_home = Path(codeagent_home)
     except TypeError:
         return "路径类型异常"
 
@@ -170,7 +170,7 @@ def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
 
     # 规则 2：解析后的真实路径必须还在 home 的真实路径之下
     try:
-        real_home = omnimate_home.resolve()
+        real_home = codeagent_home.resolve()
         real_mem.relative_to(real_home)
     except (ValueError, OSError, RuntimeError):
         return (
@@ -183,14 +183,14 @@ def validate_memory_dir(memory_dir, omnimate_home) -> Optional[str]:
 class MemoryStore:
     """按主题分文件的记忆存储管家：读写、缓存、索引、软删除都从这走。"""
 
-    def __init__(self, *, omnimate_home: Path, memory_dir=None):
+    def __init__(self, *, codeagent_home: Path, memory_dir=None):
         """初始化存储：校验目录安全、建目录、搬家老格式、生成索引。
 
         参数：
-        - omnimate_home：agent 家目录（~/.OmniMate）
+        - codeagent_home：agent 家目录（~/.codeAgent）
         - memory_dir：记忆目录，不传就用 home 下的 .memory/
         """
-        self._home = Path(omnimate_home)
+        self._home = Path(codeagent_home)
         self._memory_dir = Path(memory_dir) if memory_dir else self._home / ".memory"
         # 先做目录安全校验（受保护路径 + 软链逃逸）。
         # 宁可启动失败也绝不悄悄写到敏感位置（fail-closed）。
@@ -784,8 +784,8 @@ class MemoryStore:
         """创建或更新一条记忆（写入即维护：同主题同名 → 更新旧条目）。返回记忆 id。
 
         按类型路由分区：
-        - user/feedback/other → 全局区（~/.OmniMate/.memory/）
-        - project/reference → 项目区（~/.OmniMate/.memory/projects/<项目键>/）
+        - user/feedback/other → 全局区（~/.codeAgent/.memory/）
+        - project/reference → 项目区（~/.codeAgent/.memory/projects/<项目键>/）
 
         查重只查目标分区——不同分区的同名记忆算不同条目，这是分层隔离的语义，
         不能误判成重复。

@@ -37,17 +37,17 @@ class TeamMember:
 class TeamCoordinator:
     """包工头本头：登记成员、拉起进程、改状态、收尾清理。"""
 
-    def __init__(self, *, team_dir: Path, omnimate_home: Path,
+    def __init__(self, *, team_dir: Path, codeagent_home: Path,
                  config: dict):
         """开工准备：建目录、定文件位置、顺手建一个消息总线。
 
         参数：
             team_dir：团队工作目录（花名册 registry.json 和收件箱都在里面）
-            omnimate_home：agent 的家目录（~/.OmniMate），传给子进程用
+            codeagent_home：agent 的家目录（~/.codeAgent），传给子进程用
             config：全局配置 dict（从中读 team.max_members 等设置）
         """
         self._team_dir = Path(team_dir)
-        self._omnimate_home = Path(omnimate_home)
+        self._codeagent_home = Path(codeagent_home)
         self._config = config
         self._registry_path = self._team_dir / "registry.json"
         self._registry_lock = self._team_dir / "registry.lock"
@@ -125,7 +125,7 @@ class TeamCoordinator:
                 主 agent 是 0，默认 1（第一层子 agent）
             task_id：可选，绑定的任务 ID。给了就做两件事：
                 1. 启动前先到任务库 claim（认领，owner 写成成员名，持久化）
-                2. 把任务 ID 塞进子进程环境变量 OMNIMATE_KANBAN_TASK
+                2. 把任务 ID 塞进子进程环境变量 CODEAGENT_KANBAN_TASK
                    （工人只准动自己名下的任务，见 task_binding.py）
             command：可选，自定义启动命令；不传就用默认的
                 agent.team.worker 入口
@@ -142,7 +142,7 @@ class TeamCoordinator:
             "--name", name,
             "--task", task,
             "--team-dir", str(self._team_dir),
-            "--agent-home", str(self._omnimate_home),
+            "--agent-home", str(self._codeagent_home),
             "--depth", str(depth),
         ]
 
@@ -151,7 +151,7 @@ class TeamCoordinator:
         if task_id is not None:
             from agent.task_store import get_task_store
             from agent.team.task_binding import ENV_VAR
-            store = get_task_store(omnimate_home=str(self._omnimate_home))
+            store = get_task_store(codeagent_home=str(self._codeagent_home))
             claimed = store.claim(task_id, owner=name)
             if claimed is None:
                 self.update_status(name, "failed")

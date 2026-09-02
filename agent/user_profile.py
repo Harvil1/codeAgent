@@ -35,7 +35,7 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
     参数：
         memory_store：记忆库（读用户相关记忆的来源）。
         aux_llm：辅助 LLM 客户端（负责归纳总结）。
-        agent_home：agent 数据根目录（一般 ~/.OmniMate，画像存这里）。
+        agent_home：agent 数据根目录（一般 ~/.codeAgent，画像存这里）。
 
     返回：
         True = 画像已更新；False = 这次跳过了（记忆太少 / 调用失败等）。

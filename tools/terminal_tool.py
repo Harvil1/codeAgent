@@ -138,7 +138,7 @@ TERMINAL_SCHEMA = {
 
 
 def _load_session_env_overrides() -> dict:
-    """从环境变量 $OMNIMATE_ENV_FILE 指向的文件里读出"export 键=值"形式的行，打包成字典返回。
+    """从环境变量 $CODEAGENT_ENV_FILE 指向的文件里读出"export 键=值"形式的行，打包成字典返回。
 
     会话启动钩子（SessionStart hook）设置的环境变量写进这个文件"存档"。
     终端工具每次执行命令前把这份存档合并进子进程的环境变量，让钩子里配好的
@@ -148,7 +148,7 @@ def _load_session_env_overrides() -> dict:
 
     返回：{变量名: 值} 字典；文件不存在或读不了就返回空字典（不报错）。
     """
-    env_path = os.environ.get("OMNIMATE_ENV_FILE")
+    env_path = os.environ.get("CODEAGENT_ENV_FILE")
     if not env_path:
         return {}
     try:
@@ -195,7 +195,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             timeout（超时秒数）、cwd（在哪个目录跑）。
         **kwargs：运行环境上下文，由分发器注入——permission_checker
             （权限检查器）、config（配置）、tool_call_id（本次调用编号，
-            落盘时用来命名）、omnimate_home（数据目录）、sandbox_mode
+            落盘时用来命名）、codeagent_home（数据目录）、sandbox_mode
             （沙箱开关）等。
 
     返回：JSON 字符串（项目铁律：所有工具都返回 JSON；出错时是
@@ -302,13 +302,13 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                         sandbox_active = True
                         win_job_mode = True
                     else:
-                        # 收集沙箱里允许写的目录：cwd + ~/.OmniMate + 配置里额外加的
+                        # 收集沙箱里允许写的目录：cwd + ~/.codeAgent + 配置里额外加的
                         writable_roots = []
                         try:
-                            from constants import get_omnimate_home
-                            writable_roots.append(str(get_omnimate_home()))
+                            from constants import get_codeagent_home
+                            writable_roots.append(str(get_codeagent_home()))
                         except Exception:
-                            writable_roots.append(str(Path.home() / ".OmniMate"))
+                            writable_roots.append(str(Path.home() / ".codeAgent"))
                         cfg = kwargs.get("config") or {}
                         extra = ((cfg.get("security") or {}).get("sandbox_writable_roots") or [])
                         writable_roots.extend(extra)
@@ -331,7 +331,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 沙箱环境变量：把密钥类（API key、数据库密码等）洗掉，防止泄给子进程
         from agent.sandbox_env import build_safe_env
         safe_env = build_safe_env()
-        # 合并 OMNIMATE_ENV_FILE 里钩子（hook，在特定时机自动执行的小脚本）写入的环境变量
+        # 合并 CODEAGENT_ENV_FILE 里钩子（hook，在特定时机自动执行的小脚本）写入的环境变量
         safe_env.update(_load_session_env_overrides())
 
         # 检测是不是在启动 GUI 程序（start / Chrome / 浏览器等）：
@@ -404,7 +404,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 磁盘上存的也是残缺版，中间那段永久丢了；stderr 也走同一条落盘路。
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
-        omnimate_home = kwargs.get("omnimate_home")
+        codeagent_home = kwargs.get("codeagent_home")
 
         def _emit(raw: str, suffix: str = ""):
             """处理一份超长输出：优先把原文无损存盘（offload），存不了才截断兜底。
@@ -419,7 +419,7 @@ def _handle_terminal(args: dict, **kwargs) -> str:
             """
             if raw and len(raw) > MAX_OUTPUT_CHARS:
                 tc_id = f"{tool_call_id}{suffix}" if tool_call_id else None
-                final = _finalize_output(raw, tc_id, omnimate_home, config)
+                final = _finalize_output(raw, tc_id, codeagent_home, config)
                 if final != raw:
                     # 落盘成功（返回预览 + full_at 文件指针）或 IO 出错时的降级说明
                     return final, True

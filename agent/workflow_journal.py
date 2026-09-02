@@ -3,7 +3,7 @@
 在项目里的位置：由 workflow_engine 在调子代理前后写入，resume（断点恢复）
 时读取；对上服务 workflow_engine，对下只碰文件系统。
 
-每个 run（一次工作流执行）在 ~/.OmniMate/.workflows/<run_id>/ 下有一套文件：
+每个 run（一次工作流执行）在 ~/.codeAgent/.workflows/<run_id>/ 下有一套文件：
   script.py      首跑时的脚本快照——恢复时只信这份快照，防止有人改脚本后
                  借旧账本"投毒"（旧缓存是按旧脚本跑出来的）
   script.sha256  脚本的指纹（哈希），用来核对脚本有没有被动过

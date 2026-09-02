@@ -99,7 +99,7 @@ def _handle_snip(args: dict, **kwargs) -> str:
         # 剪之前必须先把对话原文存档到 transcript（force=True 强制存）：
         # 自动压缩管线（compress_if_needed）只在调 LLM 摘要前存档，本工具
         # 绕过了它，不补这步被剪掉的消息原文就找不回来（无损承诺就破了）。
-        agent_home_raw = getattr(agent, "omnimate_home", None)
+        agent_home_raw = getattr(agent, "codeagent_home", None)
         session_id = getattr(agent, "session_id", None) or ""
         transcript_enabled = ctx_cfg.get("transcript_enabled", True)
         transcript_retention = ctx_cfg.get("transcript_retention", 20)

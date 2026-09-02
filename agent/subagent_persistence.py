@@ -3,9 +3,9 @@
 子代理在主对话之外独立跑（sidechain，旁路对话），跑挂了或中断后想恢复（resume）
 就得有轨迹可查。本模块负责把轨迹和元数据写到磁盘：
 
-- ~/.OmniMate/.agent-sessions/<agent_id>.jsonl  # 轨迹正文，一行一条消息
+- ~/.codeAgent/.agent-sessions/<agent_id>.jsonl  # 轨迹正文，一行一条消息
   （口径：user 指令 + 每轮 assistant 文本）
-- ~/.OmniMate/.agent-sessions/<agent_id>.meta.json  # 元数据
+- ~/.codeAgent/.agent-sessions/<agent_id>.meta.json  # 元数据
   （agent_id / agent_type / parent_session / status / created_at / updated_at）
 
 agent_id 长这样：sub-{父会话id前8位}-{YYYYMMDD-HHMMSS}-{随机8位}
@@ -63,8 +63,8 @@ def generate_agent_id(parent_session_id: str = "") -> str:
 
 def _sessions_dir() -> Path:
     """拿到 .agent-sessions 存储目录的 Path（目录不存在就顺手创建）。"""
-    from constants import get_omnimate_home
-    d = get_omnimate_home() / ".agent-sessions"
+    from constants import get_codeagent_home
+    d = get_codeagent_home() / ".agent-sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

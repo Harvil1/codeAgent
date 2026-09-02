@@ -41,7 +41,7 @@ def _cleanup_old_runs(base) -> int:
     还在跑的 run 绝不能删。删失败了也不报错（fail-open）。
 
     参数：
-        base: 存 run 目录的根路径（~/.OmniMate/.workflows）
+        base: 存 run 目录的根路径（~/.codeAgent/.workflows）
 
     返回：
         实际删掉的目录数
@@ -157,7 +157,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
     from agent.workflow_engine import run_workflow, make_agent_runner
     from agent.workflow_journal import WorkflowJournal
     from agent.workflow_registry import load_workflow_scripts
-    from constants import get_omnimate_home
+    from constants import get_codeagent_home
 
     action = str(args.get("action", ""))
     config = kwargs.get("config") or {}
@@ -177,7 +177,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
             return json.dumps({"error": "script 或 name 必填其一",
                                "error_type": "invalid_args"}, ensure_ascii=False)
         run_id = f"wf_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        run_dir = get_omnimate_home() / ".workflows" / run_id
+        run_dir = get_codeagent_home() / ".workflows" / run_id
         journal = WorkflowJournal.create(run_dir, source)
         _cleanup_old_runs(run_dir.parent)  # 超上限时 LRU 清理旧目录
         if not bool(args.get("wait", True)):  # 后台模式立即返回
@@ -186,7 +186,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
 
     if action == "resume":
         run_id = str(args.get("run_id") or "")
-        run_dir = get_omnimate_home() / ".workflows" / run_id
+        run_dir = get_codeagent_home() / ".workflows" / run_id
         if not (run_dir / "script.py").exists():
             return json.dumps({"error": f"run 不存在: {run_id}",
                                "error_type": "invalid_run_id"}, ensure_ascii=False)
@@ -216,7 +216,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
 
     if action == "status":
         run_id = str(args.get("run_id") or "")
-        run_dir = get_omnimate_home() / ".workflows" / run_id
+        run_dir = get_codeagent_home() / ".workflows" / run_id
         if not run_dir.exists():
             return json.dumps({"error": f"run 不存在: {run_id}",
                                "error_type": "invalid_run_id"}, ensure_ascii=False)
@@ -233,7 +233,7 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         }, ensure_ascii=False)
 
     if action == "list":
-        base = get_omnimate_home() / ".workflows"
+        base = get_codeagent_home() / ".workflows"
         runs = []
         if base.exists():
             for d in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime,

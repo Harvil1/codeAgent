@@ -52,21 +52,21 @@ SKILL_VIEW_SCHEMA = {
 def _get_skills_dirs(kwargs: dict):
     """收集要去哪些目录里找技能文件，返回目录路径列表。
 
-    技能可能放在三个地方——软件自带的（内置）、用户自己的（~/.OmniMate/skills）、
+    技能可能放在三个地方——软件自带的（内置）、用户自己的（~/.codeAgent/skills）、
     插件带来的。列表顺序就是优先级：排后面的同名技能会覆盖排前面的（所以用户能改造内置技能）。
 
     参数：
-    - kwargs：工具调用时传进来的上下文。这里只关心 omnimate_home（自定义的数据目录），
+    - kwargs：工具调用时传进来的上下文。这里只关心 codeagent_home（自定义的数据目录），
       传了就用它下面的 skills 目录替换默认用户目录。
 
     返回：目录路径列表，按「内置 → 用户 → 插件」排列。
     """
-    from constants import all_skills_dirs, get_omnimate_home
+    from constants import all_skills_dirs, get_codeagent_home
     dirs = list(all_skills_dirs())
-    home = kwargs.get("omnimate_home")
+    home = kwargs.get("codeagent_home")
     if home:
         home_path = Path(home)
-        if home_path != get_omnimate_home():
+        if home_path != get_codeagent_home():
             # 自定义 home：内置目录 + 自定义用户目录 + 插件目录
             dirs = [dirs[0], home_path / "skills"] + dirs[2:]
     return dirs
@@ -205,7 +205,7 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
 
     参数：
     - args：LLM 传的工具参数，这里只看可选的 query（搜索关键词）
-    - kwargs：运行时上下文（omnimate_home 等），用来定位技能目录
+    - kwargs：运行时上下文（codeagent_home 等），用来定位技能目录
 
     返回：JSON 字符串。带 query 且有匹配时返回按相关性排序的结果；
     有 query 但没匹配时返回空列表加提示；没 query 时返回全量列表。
@@ -270,7 +270,7 @@ def _handle_skill_view(args: dict, **kwargs) -> str:
 
     参数：
     - args：LLM 传的工具参数，只看必填的 name（技能名）
-    - kwargs：运行时上下文（omnimate_home 等），用来定位技能目录
+    - kwargs：运行时上下文（codeagent_home 等），用来定位技能目录
 
     返回：JSON 字符串，含技能名、完整内容、文件路径；名字为空或技能不存在时返回 error。
     """
@@ -324,7 +324,7 @@ LOAD_SKILL_SCHEMA = {
         "区别于 skill_view：load_skill 只返回指令正文（去 frontmatter），"
         "专门给 LLM 按需读取执行。"
         "\n\n支持技能束：传 name=\"bundle:<bundle_name>\" 一次性加载多个技能"
-        "（在 ~/.OmniMate/.skill-bundles.json 配置）。"
+        "（在 ~/.codeAgent/.skill-bundles.json 配置）。"
     ),
     "parameters": {
         "type": "object",
@@ -346,7 +346,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
 
     参数：
     - args：LLM 传的工具参数，只看必填的 name（技能名，可以是 "bundle:<束名>"）
-    - kwargs：运行时上下文（omnimate_home、config、agent_ref 等）
+    - kwargs：运行时上下文（codeagent_home、config、agent_ref 等）
 
     返回：JSON 字符串，含技能正文、路径、附件；名字为空或技能不存在时返回 error。
     """

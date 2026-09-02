@@ -238,7 +238,7 @@ class AIAgent:
         memory_store=None,
         memory_manager=None,
         session_store=None,
-        omnimate_home=None,
+        codeagent_home=None,
         on_tool_call=None,
         on_response=None,
         config: dict = None,
@@ -256,7 +256,7 @@ class AIAgent:
         checkpoint_manager=None, # 文件快照/回滚管理器
         permission_mode: str = "default",  # 权限模式：default | bypassPermissions
         initial_messages: list = None,  # fork 子代理的初始消息
-        omit_project_memory: bool = False,  # 子代理跳过项目 OMNIMATE.md
+        omit_project_memory: bool = False,  # 子代理跳过项目 CODEAGENT.md
         trace_sink=None,  # 本地轨迹记录 sink
         goal_state=None,  # 目标驱动状态机
         channel_inbox=None,  # MCP 推送通知收件箱
@@ -282,7 +282,7 @@ class AIAgent:
             memory_store: 记忆仓库（MEMORY.md + USER.md 那套）
             memory_manager: 外部记忆管理器（跨 provider 同步用）
             session_store: 会话库（历史落盘）
-            omnimate_home: 数据根目录（默认 ~/.OmniMate）；None 时自动解析
+            codeagent_home: 数据根目录（默认 ~/.codeAgent）；None 时自动解析
             on_tool_call: 工具开始执行时的回调（CLI 拿它打印进度）
             on_response: 拿到最终回答时的回调
             config: 完整配置 dict（压缩阈值、hooks 开关等都从这读）
@@ -302,7 +302,7 @@ class AIAgent:
             permission_mode: 权限模式（default=每次问 / bypassPermissions=跳过审批）
             initial_messages: 初始对话历史（fork 子代理继承父代理前缀用）；
                 None = 从空历史开始
-            omit_project_memory: True 时跳过项目 OMNIMATE.md 注入（子代理可配）
+            omit_project_memory: True 时跳过项目 CODEAGENT.md 注入（子代理可配）
             trace_sink: 本地轨迹记录 sink（/trace 命令查的那个）
             goal_state: 目标驱动状态机（自动多轮推进）；None = 未启用
             channel_inbox: MCP 推送通知收件箱
@@ -352,13 +352,13 @@ class AIAgent:
         self.memory_store = memory_store
         self.memory_manager = memory_manager
         self.session_store = session_store
-        # omnimate_home=None 时要解析成默认 ~/.OmniMate，
+        # codeagent_home=None 时要解析成默认 ~/.codeAgent，
         # 否则下游拿 None 拼路径会直接 TypeError
-        if omnimate_home is not None:
-            self.omnimate_home = omnimate_home
+        if codeagent_home is not None:
+            self.codeAgent_home = codeagent_home
         else:
-            from constants import get_omnimate_home
-            self.omnimate_home = get_omnimate_home()
+            from constants import get_codeagent_home
+            self.codeAgent_home = get_codeagent_home()
         self.on_tool_call = on_tool_call
         self.on_response = on_response
 
@@ -379,7 +379,7 @@ class AIAgent:
         # 分两层缓存（stable=整个会话不变 / context=本会话不变）
         self._stable_prompt: Optional[str] = system_prompt_override
         self._context_prompt: Optional[str] = ""
-        # 自定义子代理可跳过项目 OMNIMATE.md 注入
+        # 自定义子代理可跳过项目 CODEAGENT.md 注入
         self.omit_project_memory = bool(omit_project_memory)
 
         # 对话历史（注意：不含 system prompt，system 每次单独拼在最前）
@@ -633,8 +633,8 @@ class AIAgent:
             if getattr(self, "_session_env_path", None):
                 self._session_env_path.unlink(missing_ok=True)
                 self._session_env_path = None
-            if "OMNIMATE_ENV_FILE" in os.environ:
-                del os.environ["OMNIMATE_ENV_FILE"]
+            if "CODEAGENT_ENV_FILE" in os.environ:
+                del os.environ["CODEAGENT_ENV_FILE"]
         except Exception as e:
             logger.warning("清理 session env 文件失败: %s", e)
 
@@ -650,7 +650,7 @@ class AIAgent:
                     logger.warning("关闭 %s 失败（忽略）: %s", client_attr, e)
 
     def _setup_session_env_file(self):
-        """会话启动时创建 .session/{session_id}.env 文件并设 OMNIMATE_ENV_FILE 环境变量。
+        """会话启动时创建 .session/{session_id}.env 文件并设 CODEAGENT_ENV_FILE 环境变量。
 
         SessionStart 钩子跑的时候能从环境变量读到这个路径，往文件里
         写 `export K=V` 行；之后 terminal 工具执行命令会把这些变量合并进去。
@@ -664,7 +664,7 @@ class AIAgent:
             env_path.parent.mkdir(parents=True, exist_ok=True)
             if not env_path.exists():
                 env_path.touch()
-            os.environ["OMNIMATE_ENV_FILE"] = str(env_path)
+            os.environ["CODEAGENT_ENV_FILE"] = str(env_path)
             self._session_env_path = env_path
         except Exception as e:
             logger.warning("创建 session env file 失败: %s", e)
@@ -919,12 +919,12 @@ class AIAgent:
         self._usage_tracker = tracker
 
     def _goal_state_path(self):
-        """goal 状态的落盘路径：~/.OmniMate/.goal/current.json。
+        """goal 状态的落盘路径：~/.codeAgent/.goal/current.json。
 
         参数：无。返回：pathlib.Path 路径对象。
         """
         from pathlib import Path
-        return Path(self.omnimate_home) / ".goal" / "current.json"
+        return Path(self.codeAgent_home) / ".goal" / "current.json"
 
     def _check_all_goal_tasks_done(self) -> bool:
         """goal 关联的任务是否全部完成了。
@@ -1322,7 +1322,7 @@ class AIAgent:
 
         分两层缓存 + 一层不缓存：
         - stable（稳定层）：跨会话都不变（身份、指导），几乎 100% 命中前缀缓存
-        - context（会话层）：本会话内不变（记忆/技能索引/OMNIMATE.md）
+        - context（会话层）：本会话内不变（记忆/技能索引/CODEAGENT.md）
         - volatile（易变层）：每轮都可能变（提醒类），不进缓存
 
         参数：无。返回：stable + context 拼接成的完整系统提示词字符串。
@@ -1341,7 +1341,7 @@ class AIAgent:
                 except Exception:
                     _cwd = os.getcwd()
                 _style = resolve_output_style(
-                    self.config, _cwd, self.omnimate_home,
+                    self.config, _cwd, self.codeAgent_home,
                 )
                 if _style is not None:
                     style_text = render_style_section(_style)
@@ -2070,7 +2070,7 @@ class AIAgent:
                             result_text = maybe_offload(
                                 result_text,
                                 tool_call_id=f"delegation_{delegation_id}",
-                                agent_home=self.omnimate_home,
+                                agent_home=self.codeAgent_home,
                                 threshold=2000,
                                 preview_chars=2000,
                             )
@@ -2261,7 +2261,7 @@ class AIAgent:
             from agent.scratchpad import scratchpad_dir
             sp = scratchpad_dir(
                 getattr(self, "session_id", "") or "default",
-                getattr(self, "omnimate_home", None),
+                getattr(self, "codeagent_home", None),
             )
             messages.append({
                 "role": "user",
@@ -2308,7 +2308,7 @@ class AIAgent:
             model=self.model,
             config=ctx_cfg,
             session_state=self._compress_session_state,
-            agent_home=self.omnimate_home,
+            agent_home=self.codeAgent_home,
             session_id=self.session_id,
             hooks_registry=self.hooks_registry,
             tools=self._last_tool_schemas,  # fork 摘要前缀复用
@@ -2401,7 +2401,7 @@ class AIAgent:
         # 摘要每段 200 字有损耗，这个文件下次压缩时被原样回读，零损耗
         try:
             from agent.scratchpad import ensure_scratchpad
-            sp_dir = ensure_scratchpad(self.session_id, self.omnimate_home)
+            sp_dir = ensure_scratchpad(self.session_id, self.codeAgent_home)
             if sp_dir is not None:
                 brief_parts.append(
                     "长任务建议：把关键中间结论（重要决策/发现/架构判断/已完成步骤）"
@@ -3007,7 +3007,7 @@ class AIAgent:
             from agent.skill_commands import parse_frontmatter
             md = _find_skill_md(
                 name,
-                _get_skills_dirs({"omnimate_home": str(self.omnimate_home)}),
+                _get_skills_dirs({"codeagent_home": str(self.codeAgent_home)}),
             )
             if md is None:
                 return ""
@@ -3351,7 +3351,7 @@ class AIAgent:
                 session_id=self.session_id,
                 memory_store=self.memory_store,
                 session_store=self.session_store,
-                omnimate_home=self.omnimate_home,
+                codeagent_home=self.codeAgent_home,
                 tool_call_id=tc.id,
                 config=self.config,
                 hooks_registry=self.hooks_registry,
@@ -3409,7 +3409,7 @@ class AIAgent:
             session_id=self.session_id,
             memory_store=self.memory_store,
             session_store=self.session_store,
-            omnimate_home=self.omnimate_home,
+            codeagent_home=self.codeAgent_home,
             tool_call_id=tc.id,
             config=self.config,
             hooks_registry=self.hooks_registry,
@@ -3772,7 +3772,7 @@ class AIAgent:
             )
             from agent.skill_learning.store import InstinctStore
 
-            store = InstinctStore(Path(self.omnimate_home) / ".skill-learning")
+            store = InstinctStore(Path(self.codeAgent_home) / ".skill-learning")
             calls, results = self._collect_turn_tool_trace(
                 getattr(self, "_sl_turn_start", 0))
             if sl_cfg.get("observer") == "llm":
@@ -3796,7 +3796,7 @@ class AIAgent:
                     store=store,
                     scope="global",
                 )
-            skills_dir = Path(self.omnimate_home) / "skills"
+            skills_dir = Path(self.codeAgent_home) / "skills"
             # 只演化全局区：项目约定类的直觉记录只存着，
             # 不参与自动演化——生成到全局技能目录会跨项目泄漏（破坏记忆
             # 分层项目隔离），而且约定簇的触发词恒为「项目约定」会撞名。项目约定
@@ -4052,7 +4052,7 @@ class AIAgent:
                         build_and_save_profile(
                             memory_store=store,
                             aux_llm=self.aux_llm_router,
-                            agent_home=self.omnimate_home,
+                            agent_home=self.codeAgent_home,
                         )
                 except Exception as e:
                     logger.debug("用户画像更新失败(fail-open): %s", e)

@@ -1,5 +1,5 @@
 [project]
-name = "omnimate"
+name = "codeagent"
 version = "0.1.0"
 description = "自学习 AI Agent（基于 Harvil Agent 复刻指南）"
 requires-python = ">=3.11"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-omnimate = "main:main"
+codeagent = "main:main"
 
 [tool.setuptools]
 py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_diag_cmds", "cli_session_cmds", "cli_skill_memory_cmds", "agent_profile", "curator_cli"]

@@ -2,7 +2,7 @@
 
 MCP（外部工具接入协议）的服务器除了等我们调用，也可能主动推
 notification（通知）——像快递员直接往你家门口放包裹。本模块就是那个
-"门口"：消息落成一个个小 JSON 文件，攒在 ~/.OmniMate 下。
+"门口"：消息落成一个个小 JSON 文件，攒在 ~/.codeAgent 下。
 
 在项目里的位置：agent/mcp_client.py 的 reader（读消息）线程往这里 push；
 主循环（agent/__init__.py 的 _assemble_turn_messages）每轮来取走没消费的，
@@ -33,7 +33,7 @@ class ChannelInbox:
         """建好收件箱目录（<base_dir>/.inbox/）并准备锁。
 
         参数：
-            base_dir：收件箱的父目录（一般是 omnimate home）。
+            base_dir：收件箱的父目录（一般是 codeagent home）。
         """
         self._inbox_dir = Path(base_dir) / ".inbox"
         self._inbox_dir.mkdir(parents=True, exist_ok=True)

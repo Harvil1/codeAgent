@@ -1,6 +1,6 @@
 """settings.json 配置管理——运行时可写配置的唯一正道。
 
-这个文件管 ~/.OmniMate/settings.json 的读写，里面装着：
+这个文件管 ~/.codeAgent/settings.json 的读写，里面装着：
   - llm：模型配置（用哪个服务商、哪个模型、API key）
   - mcpServers：MCP 外部工具服务器配置
   - agent/memory/curator/security/sessions/display：各种行为配置
@@ -91,8 +91,8 @@ def settings_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/settings.json。
     """
-    from constants import get_omnimate_home
-    return get_omnimate_home() / "settings.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / "settings.json"
 
 
 def approved_commands_path() -> Path:
@@ -101,8 +101,8 @@ def approved_commands_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/approved_commands.json。
     """
-    from constants import get_omnimate_home
-    return get_omnimate_home() / "approved_commands.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / "approved_commands.json"
 
 
 def approved_paths_path() -> Path:
@@ -111,8 +111,8 @@ def approved_paths_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/approved_paths.json。
     """
-    from constants import get_omnimate_home
-    return get_omnimate_home() / "approved_paths.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / "approved_paths.json"
 
 
 def mcp_config_path() -> Path:
@@ -121,8 +121,8 @@ def mcp_config_path() -> Path:
     返回：
         Path 对象，指向 <agent home>/.mcp.json。
     """
-    from constants import get_omnimate_home
-    return get_omnimate_home() / ".mcp.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / ".mcp.json"
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +367,8 @@ def migrate_from_legacy() -> bool:
         bool——True 表示三个旧文件至少有一个存在、执行了迁移；
         False 表示什么旧文件都没有（无需迁移）。
     """
-    from constants import get_omnimate_home
-    home = get_omnimate_home()
+    from constants import get_codeagent_home
+    home = get_codeagent_home()
 
     config_yaml = home / "config.yaml"
     env_file = home / ".env"

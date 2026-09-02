@@ -1,8 +1,8 @@
-"""程序总入口：整个 OmniMate 命令行工具从 `python main.py` 这里启动。
+"""程序总入口：整个 CodeAgent 命令行工具从 `python main.py` 这里启动。
 
 这个文件是"点火器"，只做四件事：
 1. 把 Windows 控制台输出切成 UTF-8（防止中文/emoji 乱码崩溃）；
-2. 提前建好 agent home 目录（默认 ~/.OmniMate）、加载 .env、初始化配置；
+2. 提前建好 agent home 目录（默认 ~/.codeAgent）、加载 .env、初始化配置；
 3. 尝试连接 MCP 外部工具（失败只警告不阻断启动）；
 4. 把剩下的活全交给 cli.main（参数解析和分发都在那边）。
 
@@ -29,10 +29,10 @@ try:
 except (AttributeError, ValueError):
     pass  # 某些环境（输出被重定向/捕获）不支持 reconfigure，切不了就算了
 
-from constants import get_omnimate_home, skills_dir, logs_dir
+from constants import get_codeagent_home, skills_dir, logs_dir
 
-# 启动前先把 agent home（~/.OmniMate）的目录骨架建好，后面代码好往里写东西
-get_omnimate_home().mkdir(parents=True, exist_ok=True)
+# 启动前先把 agent home（~/.codeAgent）的目录骨架建好，后面代码好往里写东西
+get_codeagent_home().mkdir(parents=True, exist_ok=True)
 skills_dir().mkdir(parents=True, exist_ok=True)
 logs_dir().mkdir(parents=True, exist_ok=True)
 

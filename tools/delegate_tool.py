@@ -173,7 +173,7 @@ def inline_mcp_spawn_allowed(agent_def, server_name: str, server_cfg: dict) -> b
     """spawn 子代理时，检查「项目来源」的内联 MCP 服务器有没有获得首次连接审批。
 
     子代理定义（.md 文件）里可以内嵌 MCP 外部工具服务器。来自项目目录
-    （source="project"，即从 <cwd>/.omnimate/agents/ 扫出来的）的定义算不可信
+    （source="project"，即从 <cwd>/.codeAgent/agents/ 扫出来的）的定义算不可信
     来源——必须用户批准过首次连接才允许连，否则跳过（fail-closed，出错宁可
     不放行）。用户级/CLI 注入的定义默认按 user 信任源处理，不拦。
 
@@ -233,7 +233,7 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "子代理类型：general-purpose=通用（minimal 工具集）；"
                     "custom=显式 enabled_toolsets；"
-                    "或自定义子代理名（扫描 ~/.OmniMate/agents/*.md 和 ./.omnimate/agents/*.md 的 name 字段）。"
+                    "或自定义子代理名（扫描 ~/.codeAgent/agents/*.md 和 ./.codeAgent/agents/*.md 的 name 字段）。"
                     "自定义名时按定义的 model/tools/permissionMode/isolation/maxTurns 配置子代理。"
                     "或内置名 explore（只读研究）/ plan（只出计划）。"
                 ),
@@ -1011,7 +1011,7 @@ def _run_child(
         if custom_def is None:
             raise RuntimeError(
                 f"未找到子代理定义: {stype}"
-                f"（检查 ~/.OmniMate/agents/ 和 ./.omnimate/agents/）"
+                f"（检查 ~/.codeAgent/agents/ 和 ./.codeAgent/agents/）"
             )
 
     # 可选：隔离工作区（自定义 .md 定义 isolation=worktree 也会开启）
@@ -1149,12 +1149,12 @@ def _run_child(
         # 默认继承父代理的记忆库（没传则子代理自己新建默认的）
         child_memory_store = kwargs.get("memory_store")
         if custom_def and custom_def.memory:
-            from constants import get_omnimate_home
-            agent_memory_home = get_omnimate_home() / ".agent-memory" / custom_def.name
+            from constants import get_codeagent_home
+            agent_memory_home = get_codeagent_home() / ".agent-memory" / custom_def.name
             try:
                 agent_memory_home.mkdir(parents=True, exist_ok=True)
                 from agent.memory_store import MemoryStore
-                child_memory_store = MemoryStore(omnimate_home=agent_memory_home)
+                child_memory_store = MemoryStore(codeagent_home=agent_memory_home)
                 logger.info(
                     "子代理 %s 使用独立记忆目录: %s",
                     custom_def.name, agent_memory_home,

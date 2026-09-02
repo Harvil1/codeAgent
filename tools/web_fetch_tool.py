@@ -90,7 +90,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
         import httpx
         resp = httpx.get(
             url, timeout=_TIMEOUT, follow_redirects=True,
-            headers={"User-Agent": "OmniMate/0.1",
+            headers={"User-Agent": "CodeAgent/0.1",
                      "Accept": "text/html,text/plain,application/json,*/*"},
         )
         resp.raise_for_status()

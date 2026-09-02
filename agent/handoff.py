@@ -8,8 +8,8 @@
 agent/secret_scanner。
 
 存放在哪：
-- ~/.OmniMate/.handoff/<bundle_id>.json    正常的 bundle
-- ~/.OmniMate/.handoff/.archive/<id>.json  软删除（移进来但没真删，可翻回来）
+- ~/.codeAgent/.handoff/<bundle_id>.json    正常的 bundle
+- ~/.codeAgent/.handoff/.archive/<id>.json  软删除（移进来但没真删，可翻回来）
 
 bundle 的字段格式详见 docs/superpowers/specs/2026-07-17-handoff-design.md
 """

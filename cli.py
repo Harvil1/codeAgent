@@ -49,7 +49,7 @@ from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
 from agent.wake_budget import WakeBudget
 from config import load_config
-from constants import get_omnimate_home, skills_dir, sessions_db_path, all_skills_dirs
+from constants import get_codeagent_home, skills_dir, sessions_db_path, all_skills_dirs
 from tools.skill_usage import bump_use, load_usage
 from agent.handoff import (
     HandoffStore,
@@ -127,7 +127,7 @@ def _validate_model_config(config: dict) -> None:
     if not name:
         console.print(
             "[red]配置错误：settings.json 缺少 model.name（模型名）[/red]\n"
-            f"[dim]请编辑 [bold]{get_omnimate_home() / 'settings.json'}[/bold] "
+            f"[dim]请编辑 [bold]{get_codeagent_home() / 'settings.json'}[/bold] "
             "填 models.<name>.name，例如 \"deepseek-chat\"[/dim]"
         )
         raise SystemExit(2)
@@ -149,7 +149,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
     两个实例各拿各的锁，锁就不生效了（跨实例 race）。
 
     参数：
-        memory_dir: 记忆数据目录（~/.OmniMate/.memory）
+        memory_dir: 记忆数据目录（~/.codeAgent/.memory）
         config: 配置字典（顺便通过它把 review agent 工厂传进来，见下）
         store: 主 agent 的 MemoryStore 实例（None 时第 1 阶段自己建）
     """
@@ -249,7 +249,7 @@ class RuntimeContext:
     def __init__(self):
         """只做"轻量启动"：读配置 + 建不依赖别人的组件。重的活留给 initialize()。"""
         self.config = load_config()
-        self.home = get_omnimate_home()
+        self.home = get_codeagent_home()
         # === /add-dir 持久化白名单启动加载 ===
         # 把 settings.json 里 security.extra_allowed_roots 记过的额外可写目录
         # 灌进运行时白名单。宽松失败策略（fail-open）：某一条坏了就跳过，
@@ -319,7 +319,7 @@ class RuntimeContext:
                 self.team_bus = MessageBus(team_dir=Path(team_path))
                 self.team_coordinator = TeamCoordinator(
                     team_dir=Path(team_path),
-                    omnimate_home=Path(self.home),
+                    codeagent_home=Path(self.home),
                     config=self.config,
                 )
                 # 主 agent 把自己注册成队长（仅当名册里还没有活着的 main 时才注册）
@@ -386,7 +386,7 @@ class RuntimeContext:
                     model=model_cfg.get("model", ""),
                     model_format=model_cfg.get("format", "anthropic"),
                     enabled_toolsets=[],  # 不给工具，纯文本交互
-                    omnimate_home=self.home,
+                    codeagent_home=self.home,
                     config=self.config,
                 )
             except Exception as e:
@@ -455,7 +455,7 @@ class RuntimeContext:
         # 1b. MemoryStore（记忆仓库，纯文件存储，无 SQLite 双写）
         if self.config.get("memory", {}).get("enabled", True):
             self.memory_store = MemoryStore(
-                omnimate_home=self.home,
+                codeagent_home=self.home,
             )
             # memory_manager 的 LLM 连接等 agent 建好后再注入
             # （要跟 aux_llm_router 共用同一个）
@@ -550,9 +550,9 @@ class RuntimeContext:
 
         # === Memory Curator 后台触发 ===
         try:
-            from constants import get_omnimate_home
+            from constants import get_codeagent_home
             from agent.memory_curator import should_run_now_memory
-            memory_dir = get_omnimate_home() / ".memory"
+            memory_dir = get_codeagent_home() / ".memory"
             if memory_dir.exists() and should_run_now_memory(memory_dir, config=self.config):
                 import threading
 
@@ -826,7 +826,7 @@ class RuntimeContext:
             memory_store=self.memory_store,
             memory_manager=self.memory_manager,
             session_store=self.session_store,
-            omnimate_home=self.home,
+            codeagent_home=self.home,
             on_tool_call=_make_tool_call_callback(self.config),
             config=self.config,
             hooks_registry=self.hooks_registry,  # hook 注册表
@@ -1171,7 +1171,7 @@ def _make_approval_callback(aux_provider=None):
     自动判断是命令还是路径，显示不同的提问。
 
     批准的效果范围（如实说明，别夸大）：
-    - 命令 → 同意后记入 ~/.OmniMate/approved_commands.json，
+    - 命令 → 同意后记入 ~/.codeAgent/approved_commands.json，
       跨会话不再重复询问同一条命令
     - 路径 → 三档：y=本次允许（父目录进会话缓存，同目录后续写入不再问）；
       a=总是允许（父目录持久化到 settings.json 的 security.extra_allowed_roots，
@@ -1824,7 +1824,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
                 console.print(
                     f"[green]sandbox: on[/green]\n"
                     f"[dim]机制：{sandbox_description()}。"
-                    "Linux/macOS 写文件被限制在 cwd + ~/.OmniMate + 配置的 "
+                    "Linux/macOS 写文件被限制在 cwd + ~/.codeAgent + 配置的 "
                     "sandbox_writable_roots；Windows Job Object 为进程管控"
                     "（文件防线=safe_path 白名单层）。[/dim]"
                 )
@@ -1858,7 +1858,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         snap = get_snapshot()
         if not snap:
             console.print(
-                "[yellow]无声明式 hook（~/.OmniMate/.hooks/settings.json 未配置或为空）[/yellow]"
+                "[yellow]无声明式 hook（~/.codeAgent/.hooks/settings.json 未配置或为空）[/yellow]"
             )
             return True
         console.print(
@@ -1883,13 +1883,13 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/agents":
-        # E2 新增：列出自定义子代理定义（~/.OmniMate/agents + ./.omnimate/agents）
+        # E2 新增：列出自定义子代理定义（~/.codeAgent/agents + ./.codeAgent/agents）
         from agent.agent_defs import scan_agent_defs
         defs = scan_agent_defs()
         if not defs:
             console.print(
                 "[yellow]无自定义子代理。[/yellow] "
-                "在 [cyan]~/.OmniMate/agents/[/cyan] 或 [cyan]./.omnimate/agents/[/cyan] "
+                "在 [cyan]~/.codeAgent/agents/[/cyan] 或 [cyan]./.codeAgent/agents/[/cyan] "
                 "放 .md 文件（frontmatter 含 name/description/tools/maxTurns 等）。"
             )
             return True
@@ -1985,7 +1985,7 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         # 另起 /resume_bundle 加以区分
         return _handle_resume_command(args, rt)
 
-    # === /init 生成 OMNIMATE.md ===
+    # === /init 生成 CODEAGENT.md ===
     if name == "/init":
         return _handle_init_command(rt, args)
 
@@ -2297,7 +2297,7 @@ def _show_help():
         "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass|acceptEdits]）\n"
         "[cyan]/sandbox[/cyan]    开启/关闭 OS 沙箱（/sandbox [on|off|status]，Linux 用 bwrap、macOS 用 sandbox-exec、Windows 用 Job Object）\n"
         "[cyan]/hooks[/cyan]    查看会话启动时锁定的 hook 快照（含磁盘 diff 检测）\n"
-        "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.OmniMate/agents/*.md）\n"
+        "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.codeAgent/agents/*.md）\n"
         "[cyan]/approved[/cyan]  管理审批白名单\n"
         "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
         "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
@@ -2315,7 +2315,7 @@ def _show_help():
         "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
         "[cyan]/add-dir[/cyan]   追加 safe_path 写白名单（无参数列出；运行时生效 + 持久化到 config）\n"
         "[cyan]/paste[/cyan]     保存剪贴板图片到 .paste/（Windows；之后在消息中引用路径让 AI 分析）\n"
-        "[cyan]/init[/cyan]      生成当前项目的 OMNIMATE.md（已存在不覆盖，--force 覆盖）\n"
+        "[cyan]/init[/cyan]      生成当前项目的 CODEAGENT.md（已存在不覆盖，--force 覆盖）\n"
         "[cyan]/cache-stats[/cyan]  prompt cache 命中统计与 break 根因\n"
         "[cyan]/skill-learning[/cyan]  行为学习（status|start|stop|evolve|prune）\n"
         "[cyan]/help[/cyan]      显示本帮助\n"
@@ -2330,7 +2330,7 @@ def _show_help():
 # ---------------------------------------------------------------------------
 
 def _goal_state_path(rt) -> Path:
-    """goal（目标驱动状态）的持久化文件路径：~/.OmniMate/.goal/current.json。
+    """goal（目标驱动状态）的持久化文件路径：~/.codeAgent/.goal/current.json。
 
     参数：
         rt: RuntimeContext
@@ -2552,8 +2552,8 @@ def _handle_goal_command(args: str, rt) -> bool:
 def _handle_output_style_command(args: str, rt) -> bool:
     """/output-style：列出/切换/关闭输出风格。
 
-    输出风格 = 一段预设提示词。目录：`<项目>/.omnimate/output-styles/`
-    （优先，覆盖同名）+ `~/.OmniMate/output-styles/`。切换时写
+    输出风格 = 一段预设提示词。目录：`<项目>/.codeAgent/output-styles/`
+    （优先，覆盖同名）+ `~/.codeAgent/output-styles/`。切换时写
     settings.json 顶层的 output_style 并作废缓存的 system prompt
     （下一条消息生效）。
 
@@ -2572,8 +2572,8 @@ def _handle_output_style_command(args: str, rt) -> bool:
     if not arg:
         if not styles:
             console.print(
-                "[dim]暂无输出风格。创建：~/.OmniMate/output-styles/<名>.md"
-                " 或 .omnimate/output-styles/<名>.md（正文即提示词）[/dim]"
+                "[dim]暂无输出风格。创建：~/.codeAgent/output-styles/<名>.md"
+                " 或 .codeAgent/output-styles/<名>.md（正文即提示词）[/dim]"
             )
             return True
         lines = []
@@ -2730,11 +2730,11 @@ def _handle_trace_command(args: str, rt) -> bool:
 
 
 def _handle_init_command(rt, args: str) -> bool:
-    """/init——给当前项目生成一份"项目说明书"OMNIMATE.md。
+    """/init——给当前项目生成一份"项目说明书"CODEAGENT.md。
 
     流程：收集项目信息（目录树/关键文件/类型统计，缺哪跳哪）→
     主 LLM 按四段式生成（项目本质/常用命令/架构/约定）→
-    写到 cwd/OMNIMATE.md（下次会话自动注入 system prompt，AI 进门就懂项目）。
+    写到 cwd/CODEAGENT.md（下次会话自动注入 system prompt，AI 进门就懂项目）。
 
     - /init            已存在不覆盖
     - /init --force    覆盖重新生成
@@ -2749,10 +2749,10 @@ def _handle_init_command(rt, args: str) -> bool:
 
     force = "--force" in (args or "")
     cwd = Path(get_workspace_cwd())
-    target = cwd / "OMNIMATE.md"
+    target = cwd / "CODEAGENT.md"
     if target.exists() and not force:
         console.print(
-            "[yellow]OMNIMATE.md 已存在[/yellow] "
+            "[yellow]CODEAGENT.md 已存在[/yellow] "
             "[dim]（/init --force 覆盖重新生成）[/dim]"
         )
         return True
@@ -2821,7 +2821,7 @@ def _handle_init_command(rt, args: str) -> bool:
 
     # ── 拼好提示词 → 主 LLM 按四段式生成 ──
     prompt = (
-        "根据以下项目信息生成 OMNIMATE.md（项目指导文件，给 AI 编程助手看）。"
+        "根据以下项目信息生成 CODEAGENT.md（项目指导文件，给 AI 编程助手看）。"
         "输出 Markdown，含且仅含这四节：\n"
         "## 项目本质（一句话 + 核心技术栈）\n"
         "## 常用命令（运行/测试/构建，从配置文件推断）\n"
@@ -2854,7 +2854,7 @@ def _handle_init_command(rt, args: str) -> bool:
         text = ""
 
     if not text.strip():
-        console.print("[red]OMNIMATE.md 生成失败（LLM 返回空）[/red]")
+        console.print("[red]CODEAGENT.md 生成失败（LLM 返回空）[/red]")
         return True
 
     try:
@@ -2864,7 +2864,7 @@ def _handle_init_command(rt, args: str) -> bool:
         return True
 
     console.print(
-        f"[green]✓ OMNIMATE.md 已生成[/green] "
+        f"[green]✓ CODEAGENT.md 已生成[/green] "
         f"[dim]（{target}，下次会话自动注入 system prompt）[/dim]"
     )
     return True
@@ -3202,7 +3202,7 @@ def _load_persisted_extra_roots(config: dict) -> int:
 def _handle_add_dir_cli(args: str, rt) -> bool:
     """/add-dir <目录>——把一个目录加进"AI 可写范围"白名单。
 
-    - 无参数：列出当前白名单（默认的 cwd + ~/.OmniMate，加上追加过的）
+    - 无参数：列出当前白名单（默认的 cwd + ~/.codeAgent，加上追加过的）
     - 带目录：校验目录真实存在 → 运行时立即生效（去重幂等）→
       持久化到 settings.json（下次启动自动加载）
     - 安全底线不变：受保护路径（~/.ssh 等）和项目代码写保护在

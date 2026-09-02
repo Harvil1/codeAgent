@@ -10,7 +10,7 @@
 - 网络断开、token 预算（花钱额度）超限时会自动暂停，防止失控烧钱
 - 每一轮用"用完即弃"的临时 user 消息驱动下一步，绝不动 system prompt
   （system prompt 一变，之前的缓存全作废、费用翻倍——这是项目的铁律）
-- 状态存到 ~/.OmniMate/.goal/current.json，程序崩了重启也能接上
+- 状态存到 ~/.codeAgent/.goal/current.json，程序崩了重启也能接上
 
 本文件在项目里的位置：只放"状态机 + 存档/读档"这两块底层零件；
 和主循环的集成（怎么在对话循环里推进 goal）在 agent/__init__.py 里。
@@ -176,7 +176,7 @@ class GoalState:
         把正在跑的目标搞崩。
 
         参数：
-        - path：存档文件路径（一般是 ~/.OmniMate/.goal/current.json）
+        - path：存档文件路径（一般是 ~/.codeAgent/.goal/current.json）
 
         返回：无。
         """
@@ -220,14 +220,14 @@ class GoalState:
 
 
 def goal_persist_path(agent) -> Path:
-    """算出 agent 的 goal 存档文件路径（一般是 ~/.OmniMate/.goal/current.json）。
+    """算出 agent 的 goal 存档文件路径（一般是 ~/.codeAgent/.goal/current.json）。
 
     调用方传来的 agent 对象能力不一（可能是真 AIAgent，也可能是
     测试替身），按三档优先级依次试：
 
     1. agent._goal_state_path() —— AIAgent 实例方法，最准
-    2. agent.omnimate_home —— AIAgent 字段，次选
-    3. get_omnimate_home() —— 全局默认，测试可用 OMNIMATE_HOME 环境变量覆盖
+    2. agent.codeAgent_home —— AIAgent 字段，次选
+    3. get_codeagent_home() —— 全局默认，测试可用 CODEAGENT_HOME 环境变量覆盖
 
     参数：
     - agent：AIAgent 实例或测试替身
@@ -240,11 +240,11 @@ def goal_persist_path(agent) -> Path:
             return Path(fn())
         except Exception:
             pass
-    home = getattr(agent, "omnimate_home", None)
+    home = getattr(agent, "codeagent_home", None)
     if home:
         return Path(home) / ".goal" / "current.json"
-    from constants import get_omnimate_home
-    return get_omnimate_home() / ".goal" / "current.json"
+    from constants import get_codeagent_home
+    return get_codeagent_home() / ".goal" / "current.json"
 
 
 def start_goal_agent(

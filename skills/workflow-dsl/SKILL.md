@@ -1,6 +1,6 @@
 ---
 name: workflow-dsl
-description: "workflow 工具的编排脚本 DSL 写法：agent/parallel/pipeline/phase 四个原语、args/budget 注入、结构化输出与断点续跑约定。当要写 workflow(action=\"run\", script=...) 或创建 .omnimate/workflows/*.py 时使用。"
+description: "workflow 工具的编排脚本 DSL 写法：agent/parallel/pipeline/phase 四个原语、args/budget 注入、结构化输出与断点续跑约定。当要写 workflow(action=\"run\", script=...) 或创建 .codeAgent/workflows/*.py 时使用。"
 ---
 
 # Workflow DSL（受约束 Python）

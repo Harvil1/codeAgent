@@ -167,7 +167,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
         from agent.scratchpad import read_progress_file
         ptext = read_progress_file(
             getattr(agent, "session_id", "") or "default",
-            getattr(agent, "omnimate_home", None),
+            getattr(agent, "codeagent_home", None),
         )
         if ptext:
             lines.append(
@@ -198,7 +198,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
     # 这里有现成的带状态完整清单就直接读它）
     try:
         from agent.task_store import get_task_store
-        store = get_task_store(getattr(agent, "omnimate_home", None))
+        store = get_task_store(getattr(agent, "codeagent_home", None))
         task_lines = []
         in_progress = store.list_all(status="in_progress")
         if in_progress:

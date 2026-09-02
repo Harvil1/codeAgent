@@ -1,6 +1,6 @@
 """工人的「任务门禁」：保证一个工人只能动自己名下的任务。
 
-打个比方：每个工人上岗时领一张工牌（环境变量 OMNIMATE_KANBAN_TASK，
+打个比方：每个工人上岗时领一张工牌（环境变量 CODEAGENT_KANBAN_TASK，
 写着「你是 task_001 的负责人」）。动任务前要刷工牌核对身份。
 
 为什么需要：工人（spawned worker）是被 spawn 出来的独立进程，它的
@@ -19,7 +19,7 @@ import os
 from typing import Optional
 
 
-ENV_VAR = "OMNIMATE_KANBAN_TASK"
+ENV_VAR = "CODEAGENT_KANBAN_TASK"
 
 
 class TaskOwnershipError(PermissionError):

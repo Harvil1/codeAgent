@@ -11,7 +11,7 @@ MCP 标准服务，就用同一套协议对接（tools/list 列工具 + tools/ca
 - sse：Server-Sent Events（服务器单向流式推送），httpx 的 SSE 实现，独立 transport
 - websocket：长连接双向 JSON-RPC（用 websockets 库）
 
-配置文件 ~/.OmniMate/.mcp.json 长这样：
+配置文件 ~/.codeAgent/.mcp.json 长这样：
     {
       "mcpServers": {
         "filesystem": {
@@ -166,7 +166,7 @@ class MCPTransport(ABC):
         resp = self.send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "OmniMate", "version": "0.1.0"},
+            "clientInfo": {"name": "CodeAgent", "version": "0.1.0"},
         })
         if not resp:
             raise RuntimeError("MCP initialize 无响应")
@@ -186,7 +186,7 @@ _SECRET_ENV_PATTERNS = (
 
 
 def _scrub_env_for_child(env: dict) -> dict:
-    """给 stdio MCP 子进程准备环境：剥掉机密形状变量和 OMNIMATE_* 自家变量。
+    """给 stdio MCP 子进程准备环境：剥掉机密形状变量和 CODEAGENT_* 自家变量。
 
     参数：
         env：当前进程的环境变量（通常是 os.environ）
@@ -196,7 +196,7 @@ def _scrub_env_for_child(env: dict) -> dict:
     scrubbed = {}
     for key, value in env.items():
         upper = key.upper()
-        if upper.startswith("OMNIMATE_"):
+        if upper.startswith("CODEAGENT_"):
             continue
         if any(p in upper for p in _SECRET_ENV_PATTERNS):
             continue
@@ -1406,15 +1406,15 @@ def load_mcp_config(config_path=None) -> Dict[str, dict]:
     """加载用户级 MCP 配置文件 .mcp.json。
 
     参数：
-        config_path：配置文件路径；不填默认 ~/.OmniMate/.mcp.json
+        config_path：配置文件路径；不填默认 ~/.codeAgent/.mcp.json
 
     返回：{server名: 该server的配置dict}。stdio 型含 command/args/env；
     HTTP 型含 url/headers/oauth。文件不存在或读坏了返回空 dict（不抛）。
     """
     if config_path is None:
         try:
-            from constants import get_omnimate_home
-            config_path = get_omnimate_home() / ".mcp.json"
+            from constants import get_codeagent_home
+            config_path = get_codeagent_home() / ".mcp.json"
         except Exception:
             return {}
 
@@ -1477,7 +1477,7 @@ class MCPManager:
         """按配置把所有 server 都连一遍（单个失败只记日志跳过，不拖垮整体）。
 
         参数：
-            config：{server名: 配置dict}；不填则自动去读 ~/.OmniMate/.mcp.json。
+            config：{server名: 配置dict}；不填则自动去读 ~/.codeAgent/.mcp.json。
                 配置字段按 transport 分：
                 - stdio: transport="stdio", command, args, env
                 - http:  transport="http", url, headers, oauth

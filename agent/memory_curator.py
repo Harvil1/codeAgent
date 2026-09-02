@@ -8,7 +8,7 @@
 第 2 阶段（run_memory_review）：
   调 LLM 在同类型记忆里找重复/矛盾，改写正文 + 归档。
 
-设计原则（沿用 OMNIMATE.md 的"完全可逆"）：
+设计原则（沿用 CODEAGENT.md 的"完全可逆"）：
   - 永不物理删除文件
   - archived（归档）是终点状态，条目挪到 .archive/
   - 所有改动都可回滚（.archive/ 里完整保留原文）
@@ -48,7 +48,7 @@ def apply_automatic_transitions(
       已归档的是终点状态，不再动
 
     参数：
-    - memory_dir：记忆目录（~/.OmniMate/.memory/）
+    - memory_dir：记忆目录（~/.codeAgent/.memory/）
     - now：当前时间（不传用系统时间，测试可注入）
     - store：MemoryStore 实例（不传就现建一个）
     返回：各动作的计数 dict。
@@ -65,13 +65,13 @@ def apply_automatic_transitions(
     if not memory_dir.exists():
         return counts
 
-    # 拿 memory_dir 的上一级当 omnimate_home
-    omnimate_home = memory_dir.parent
+    # 拿 memory_dir 的上一级当 codeagent_home
+    codeagent_home = memory_dir.parent
     # 优先用传进来的 store（和主 agent 共用一个实例，锁才能跨线程互斥）；
     # 现建 MemoryStore 的话和主实例不是同一把锁，
     # 并发写同一个 topic.jsonl 会丢数据
     if store is None:
-        store = MemoryStore(omnimate_home=omnimate_home)
+        store = MemoryStore(codeagent_home=codeagent_home)
 
     # 必须用标准接口 list_all() 拿条目，不要直接扫文件——
     # MemoryStore 实际写的是 .jsonl，直接读 markdown 根本扫不到东西（死代码）
@@ -148,7 +148,7 @@ def apply_automatic_transitions(
 # ---------------------------------------------------------------------------
 
 def _state_file_path(memory_dir: Path) -> Path:
-    """状态文件路径：~/.OmniMate/.memory/.curator_state.json（记上次运行时间等）。"""
+    """状态文件路径：~/.codeAgent/.memory/.curator_state.json（记上次运行时间等）。"""
     return Path(memory_dir) / ".curator_state.json"
 
 
@@ -291,7 +291,7 @@ def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
     返回：{类型名: [记忆条目, ...]}
     """
     from agent.memory_store import MemoryStore
-    store = MemoryStore(omnimate_home=Path(memory_dir).parent)
+    store = MemoryStore(codeagent_home=Path(memory_dir).parent)
     all_entries = store.list_all()
     buckets: Dict[str, List] = {}
     for entry in all_entries:
@@ -511,7 +511,7 @@ def run_memory_review(
 
     buckets = collect_review_candidates(memory_dir)
     from agent.memory_store import MemoryStore
-    store = MemoryStore(omnimate_home=memory_dir.parent)
+    store = MemoryStore(codeagent_home=memory_dir.parent)
 
     total_actions = 0
     errors = 0

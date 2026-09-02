@@ -39,14 +39,14 @@ def _cmd_memory(args):
         args  子命令及参数列表，如 ["run", "--dry-run"]；空列表默认当 status
     """
     import datetime
-    from constants import get_omnimate_home
+    from constants import get_codeagent_home
     from agent.memory_curator import (
         apply_automatic_transitions,
         load_memory_curator_state,
         save_memory_curator_state,
     )
 
-    memory_dir = get_omnimate_home() / ".memory"
+    memory_dir = get_codeagent_home() / ".memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     sub = args[0] if args else "status"
 

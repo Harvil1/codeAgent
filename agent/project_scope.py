@@ -94,7 +94,7 @@ def get_project_memory_dir(agent_home, base: Optional[str] = None) -> Path:
     """项目区目录路径（只算路径，不创建目录——要不要建由调用方决定）。
 
     参数：
-    - agent_home：agent 数据根目录（如 ~/.OmniMate）
+    - agent_home：agent 数据根目录（如 ~/.codeAgent）
     - base：基准目录（None 时同 get_project_memory_key 的规则）
 
     返回：<agent_home>/.memory/projects/<分区键> 的 Path。

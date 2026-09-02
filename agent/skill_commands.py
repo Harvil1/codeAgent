@@ -227,7 +227,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
 
     skills_dirs 不传时，除常规目录外还会自动
     并入**动态发现的嵌套技能目录**（从文件所在位置一路向上到 cwd，沿途的
-    .omnimate/skills 和 .claude/skills 都算）。
+    .codeAgent/skills 和 .claude/skills 都算）。
 
     fail-open：出任何异常都返回空列表，绝不让匹配流程炸掉主对话。
     """
@@ -259,14 +259,14 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
 # 动态技能目录发现
 # ---------------------------------------------------------------------------
 
-# 认可的嵌套技能目录名（自家 .omnimate/skills 为主；.claude/skills 是兼容既有项目结构用的）
-_NESTED_SKILL_DIR_NAMES = (".omnimate/skills", ".claude/skills")
+# 认可的嵌套技能目录名（自家 .codeAgent/skills 为主；.claude/skills 是兼容既有项目结构用的）
+_NESTED_SKILL_DIR_NAMES = (".codeAgent/skills", ".claude/skills")
 # 向上找时跳过这些目录——node_modules 里被人塞一个技能也不该被信任（防投毒）
 _SKIP_DIR_NAMES = {"node_modules", ".git", "__pycache__", ".venv", "venv"}
 
 
 def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
-    """从文件所在目录一路向上走到 cwd，把沿途的嵌套技能目录（.omnimate/skills 或 .claude/skills，算「本区域专属技能」）找出来。
+    """从文件所在目录一路向上走到 cwd，把沿途的嵌套技能目录（.codeAgent/skills 或 .claude/skills，算「本区域专属技能」）找出来。
 
     参数：
         file_path：出发的文件路径（相对路径会按 cwd 补成绝对路径）。
@@ -275,7 +275,7 @@ def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
     返回：目录 Path 列表，可能为空。顺序是深路径优先——离文件越近的排
     越前，这样同名技能「近的覆盖远的」。
     路径里穿过 node_modules 等跳过目录的不收（防投放）。
-    文件不在 cwd 内时返回空（如 ~/.OmniMate 的落盘文件不适用本机制）。
+    文件不在 cwd 内时返回空（如 ~/.codeAgent 的落盘文件不适用本机制）。
     fail-open：任何异常返回空列表。
     """
     try:
@@ -295,7 +295,7 @@ def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
         cwd_p = Path(cwd).resolve()
         f_resolved = f.resolve()
         if not f_resolved.is_relative_to(cwd_p):
-            return []  # 文件在 cwd 外（如 ~/.OmniMate 的大输出落盘文件）没有「向上到 cwd」的概念，不适用
+            return []  # 文件在 cwd 外（如 ~/.codeAgent 的大输出落盘文件）没有「向上到 cwd」的概念，不适用
         found = []
         for parent in f_resolved.parents:
             for name in _NESTED_SKILL_DIR_NAMES:

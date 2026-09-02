@@ -13,7 +13,7 @@
       从最近 5 个会话的原始轨迹里提炼跨会话的共性经验。
       和前两步互补：前两步整理"已有"的技能/记忆，这一步从原始会话里挖"新"知识。
 
-手动触发：omnimate curator run [--dry-run]
+手动触发：codeagent curator run [--dry-run]
 """
 
 import json
@@ -80,7 +80,7 @@ def get_archive_after_days() -> int:
 # ---------------------------------------------------------------------------
 
 def _state_file(skills_dir: Path) -> Path:
-    # skills_dir 的上一级就是 agent_home（~/.OmniMate），状态文件放那里
+    # skills_dir 的上一级就是 agent_home（~/.codeAgent），状态文件放那里
     return Path(skills_dir).parent / ".curator_state.json"
 
 

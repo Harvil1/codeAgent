@@ -11,7 +11,7 @@ build_safe_env 拿一份"干净"的环境变量再传进去。
 做法（借鉴 DeerFlow 项目的 env_policy 思路）——像机场安检逐个检查：
 1. 看变量名里是否带密钥关键词（KEY/SECRET/TOKEN/PASS/CREDENTIAL/DSN 等）
 2. 命中的直接从环境里删掉，子进程看不见
-3. 命令运行必需的良性变量（PATH/HOME/LANG/VIRTUAL_ENV/OMNIMATE_HOME 等）保留
+3. 命令运行必需的良性变量（PATH/HOME/LANG/VIRTUAL_ENV/CODEAGENT_HOME 等）保留
 4. 另有显式白名单 allow_keys——技能声明了 required-secrets 时，点名要的
    密钥可以放行
 """
@@ -39,7 +39,7 @@ _ALWAYS_KEEP = {
     "VIRTUAL_ENV", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONHOME",
     "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA",
     "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "OS",
-    "OMNIMATE_HOME",  # 让子进程能找到 agent home
+    "CODEAGENT_HOME",  # 让子进程能找到 agent home
 }
 # 提前算好全大写版本的白名单集合——省得 build_safe_env 每检查一个变量
 # 都现场重新建一遍集合

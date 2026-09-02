@@ -130,7 +130,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         args: LLM 按 schema 填的参数——
             path 要读的文件路径；offset 起始行（从 0 数）；
             limit 读多少行（不传 = 读到底）
-        **kwargs: 命名上下文（tool_call_id、config、omnimate_home 等，
+        **kwargs: 命名上下文（tool_call_id、config、codeagent_home 等，
             大输出落盘时用）
 
     返回：JSON 字符串——成功含 content（带行号正文）、content_hash（内容指纹）、
@@ -239,15 +239,15 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         # 特别大的输出不直接塞进上下文，而是存到盘上、返回存放位置（offload 落盘）
         tool_call_id = kwargs.get("tool_call_id")
         config = kwargs.get("config")
-        omnimate_home = kwargs.get("omnimate_home")
+        codeagent_home = kwargs.get("codeagent_home")
 
         # 防"落盘套娃"：如果正在读的文件本身就存放在 offload 目录里，
         # 就不要再为它做一次落盘了——否则会无限循环：读落盘文件 → 又落盘一个
         # 新文件 → 新文件又带一遍行号（1\t1\t1\t 这样叠罗汉）。
         _skip_offload = False
-        if omnimate_home:
+        if codeagent_home:
             try:
-                offload_dir = Path(omnimate_home) / ".task_outputs" / "tool-results"
+                offload_dir = Path(codeagent_home) / ".task_outputs" / "tool-results"
                 if path.resolve().is_relative_to(offload_dir.resolve()):
                     _skip_offload = True
             except Exception:
@@ -257,7 +257,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
             final_content = raw_content
             content_offloaded = False
         else:
-            final_content = _finalize_output(raw_content, tool_call_id, omnimate_home, config)
+            final_content = _finalize_output(raw_content, tool_call_id, codeagent_home, config)
             content_offloaded = final_content != raw_content
 
         # 记下这次读取的"签名"（下次同范围且没变就回省 token 提示）
@@ -399,7 +399,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
 
     # 写入前的路径安检（write=True 表示按"写"的严格程度来查）：
     #   - 受保护路径（~/.ssh / /etc 这些要害部位）→ 直接拒，没商量
-    #   - 在当前工作目录或 ~/.OmniMate 白名单内 → 放行
+    #   - 在当前工作目录或 ~/.codeAgent 白名单内 → 放行
     #   - 白名单之外 → 调审批回调问用户（用户同意后可加进持久白名单）
     # 优先用外面注入的检查器（cli.py 注入的带"问用户"能力）；
     # 没注入就用全局默认（没有问询能力，白名单外一律拒）。

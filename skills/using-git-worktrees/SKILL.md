@@ -1,13 +1,13 @@
 ---
 name: using-git-worktrees
-description: "开始需要与当前工作区隔离的特性开发、或执行实现计划前使用——确保存在隔离工作区(优先用 OmniMate 的 create_isolated_workspace 原生工具,不可用时降级到 git worktree)。| Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback"
+description: "开始需要与当前工作区隔离的特性开发、或执行实现计划前使用——确保存在隔离工作区(优先用 CodeAgent 的 create_isolated_workspace 原生工具,不可用时降级到 git worktree)。| Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback"
 ---
 
 # Using Git Worktrees
 
 ## Overview
 
-Ensure work happens in an isolated workspace. Prefer OmniMate's native worktree tool (`create_isolated_workspace`, from `tools/worktree.py`). Fall back to manual git worktrees only when no native tool is available.
+Ensure work happens in an isolated workspace. Prefer CodeAgent's native worktree tool (`create_isolated_workspace`, from `tools/worktree.py`). Fall back to manual git worktrees only when no native tool is available.
 
 **Core principle:** Detect existing isolation first. Then use native tools. Then fall back to git. Never fight the tooling.
 
@@ -50,7 +50,7 @@ Honor any existing declared preference without asking. If the user declines cons
 
 ### 1a. Native Worktree Tool (preferred)
 
-The user has asked for an isolated workspace (Step 0 consent). OmniMate's native mechanism is `create_isolated_workspace(name="task-x")` from `tools/worktree.py` — it returns a `(path, cleanup)` tuple where `cleanup` removes the worktree. It also powers sub-agent isolation via `subagent(isolated_workspace=True)`. Use it and skip to Step 2.
+The user has asked for an isolated workspace (Step 0 consent). CodeAgent's native mechanism is `create_isolated_workspace(name="task-x")` from `tools/worktree.py` — it returns a `(path, cleanup)` tuple where `cleanup` removes the worktree. It also powers sub-agent isolation via `subagent(isolated_workspace=True)`. Use it and skip to Step 2.
 
 Native tooling handles directory placement, branch creation, and cleanup automatically. Using `git worktree add` when you have a native tool creates phantom state your harness can't see or manage.
 
@@ -71,7 +71,7 @@ Follow this priority order. Explicit user preference always beats observed files
    ls -d .worktrees 2>/dev/null     # Preferred (hidden)
    ls -d worktrees 2>/dev/null      # Alternative
    ```
-   If found, use it. If both exist, `.worktrees` wins. (Note: OmniMate's native tool defaults to `.omnimate-worktrees/` under the repo root parent — prefer it when present.)
+   If found, use it. If both exist, `.worktrees` wins. (Note: CodeAgent's native tool defaults to `.codeAgent-worktrees/` under the repo root parent — prefer it when present.)
 
 3. **If there is no other guidance available**, default to `.worktrees/` at the project root.
 
@@ -160,7 +160,7 @@ Ready to implement <feature-name>
 
 ### Fighting the tooling
 
-- **Problem:** Using `git worktree add` when OmniMate already provides isolation (`create_isolated_workspace` / `subagent(isolated_workspace=True)`)
+- **Problem:** Using `git worktree add` when CodeAgent already provides isolation (`create_isolated_workspace` / `subagent(isolated_workspace=True)`)
 - **Fix:** Step 0 detects existing isolation. Step 1a defers to native tools.
 
 ### Skipping detection

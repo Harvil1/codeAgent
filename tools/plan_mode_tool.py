@@ -138,7 +138,7 @@ def _run_parallel_planners(subtasks: List[str], max_n: int, **kwargs) -> List[st
 # 子计划合并逻辑（PLAN_MERGE_PROMPT_TEMPLATE 提示词 + _merge_plans）
 # ============================================================================
 
-PLAN_MERGE_PROMPT_TEMPLATE = """你是 OmniMate 的计划合并器。
+PLAN_MERGE_PROMPT_TEMPLATE = """你是 CodeAgent 的计划合并器。
 
 下面是 {n} 份并行的子计划。请合并成一份最终的、连贯的实施计划。
 
