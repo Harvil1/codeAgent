@@ -3453,6 +3453,27 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         toolbar_fn=cli_input.build_toolbar(rt),
     )
 
+    # === 等待期工具事件行：AI 每调一个工具打一行暗色事件 ===
+    # 比干转圈信息量大——用户看得见「它在干嘛、干了几个」。
+    # （钩子只在 config hooks.enabled 时被 model_tools 接线触发，跟其他
+    # hooks 同命运；登记本身无副作用，失败只记日志不挡启动——fail-open）
+    rt.tool_events = []
+    _tool_hook_name = "cli_tool_event_line"
+
+    def _on_pre_tool_use(tool_name: str, args: dict, **_kw) -> None:
+        try:
+            rt.tool_events.append(tool_name)
+            console.print(f"[dim]⏺ {tool_name}（第{len(rt.tool_events)}个工具）[/dim]")
+        except Exception:
+            pass  # 纯视觉，绝不挡工具执行
+
+    try:
+        rt.agent.hooks_registry.register_pre_tool_use(
+            _on_pre_tool_use, name=_tool_hook_name,
+        )
+    except Exception as e:
+        logger.error("工具事件行钩子登记失败（等待期进度将缺失）: %s", e)
+
     def _input_reader():
         """守护线程：不停读键盘输入塞进队列（读到文件末尾/出错就收工）。
 
@@ -3572,6 +3593,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 )
             try:
                 console.print("[bold green]AI:[/bold green]")
+                rt.tool_events = []  # 新回合，工具计数从零开始
                 response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
                 # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
                 if not getattr(rt.agent, "_stream_callback", None):
@@ -3739,6 +3761,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             # run_conversation 是 async，但 run_interactive 保持同步签名
             # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
             # asyncio.run 驱动一次完整的异步对话。
+            rt.tool_events = []  # 新回合，工具计数从零开始
             response = asyncio.run(rt.agent.run_conversation(agent_input))
             # 流式模式（设了流式回调）下内容在对话过程中已经实时显示过，
             # 不重复打印。非流式模式才打印 response。
