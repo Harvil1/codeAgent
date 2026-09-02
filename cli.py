@@ -3460,7 +3460,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         """
         while not _input_stop.is_set():
             try:
-                line = console.input("[bold cyan]你:[/bold cyan] ")
+                line = cli_input.read_line(rt)
                 _input_q.put(line.strip())
             except EOFError:
                 _input_q.put(_EOF_SENTINEL)
@@ -3473,6 +3473,15 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 return
     _input_thread = _threading_mod.Thread(target=_input_reader, daemon=True)
     _input_thread.start()
+
+    # === 工具栏定时刷新：每 2 秒敲一次 invalidate，让底部条显示最新状态 ===
+    # （纯视觉；失败静默——invalidate 内部已吞异常）
+    def _toolbar_refresher():
+        while not _input_stop.is_set():
+            time.sleep(2)
+            cli_input.invalidate(getattr(rt, "prompt_session", None))
+
+    _threading_mod.Thread(target=_toolbar_refresher, daemon=True).start()
     # 把队列交给 agent（排队输入的回流通道）
     try:
         rt.agent.set_input_queue(_input_q)
