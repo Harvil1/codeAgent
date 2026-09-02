@@ -1,4 +1,4 @@
-"""复刻检查清单的验证脚本：跑 23 项小检查，确认 agent 的核心功能还活着。
+"""复刻检查清单的验证脚本：跑 24 项小检查，确认 agent 的核心功能还活着。
 
 本项目按复刻指南（11-scaffold.md）实现，这个脚本验收指南里「这些功能
 必须存在且能用」的清单——每项做一件小事（建个文件、发个工具调用），
@@ -550,6 +550,34 @@ def check_slash_registry():
     return _ok(f"{len(cmds)} 条命令全部登记，handler 可调用")
 
 
+def check_cli_completer():
+    """验证三级补全器：命令名/参数两级都能出候选，异常不外泄。"""
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.completion import CompleteEvent
+    import cli_commands as cc
+    import cli  # noqa: F401  触发自登记
+    import cli_diag_cmds, cli_session_cmds, cli_skill_memory_cmds  # noqa: F401
+    from cli_input import SlashCompleter
+
+    comp = SlashCompleter(
+        registry_tokens=[c.name for c in cc.all_commands()],
+        arg_completers=cc.arg_completer_map(),
+        dynamic_tokens_fn=lambda: [],
+    )
+    got = [c.text for c in comp.get_completions(Document("/hel"), CompleteEvent())]
+    if "/help" not in got:
+        return _fail(f"一级补全没出 /help：{got[:5]}")
+    # 二级：找任何一个带 arg_completer 的命令验证；没有就跳过该半段
+    amap = cc.arg_completer_map()
+    if amap:
+        token, fn = next(iter(amap.items()))
+        cands = [c.text for c in comp.get_completions(
+            Document(f"{token} "), CompleteEvent())]
+        if not cands and fn(f"{token} "):
+            return _fail(f"{token} 的参数补全没出候选")
+    return _ok("三级补全器两级候选正常")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -603,6 +631,9 @@ def main():
         ]),
         ("slash 注册表", [
             ("slash 注册表", check_slash_registry),
+        ]),
+        ("CLI 补全器", [
+            ("CLI 补全器", check_cli_completer),
         ]),
     ]
 
