@@ -544,7 +544,6 @@ def check_slash_registry():
     cmds = cc.all_commands()
     if len(cmds) < 37:
         return _fail(f"注册表只有 {len(cmds)} 条（基线 37），命令迁移丢了")
-    import inspect
     for c in cmds:
         if not callable(c.handler):
             return _fail(f"命令 {c.name} 的 handler 不可调用")

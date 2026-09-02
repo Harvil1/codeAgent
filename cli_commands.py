@@ -103,7 +103,7 @@ def dispatch(cmd_line: str, rt) -> Optional[bool]:
     返回：None=注册表里没这个命令（调用方走未知命令分支）；
           否则透传 handler 的返回值（True=已处理）。
     """
-    token = cmd_line.split()[0] if cmd_line.split() else ""
+    token = cmd_line.split()[0].lower() if cmd_line.split() else ""
     entry = lookup(token)
     if entry is None:
         return None
