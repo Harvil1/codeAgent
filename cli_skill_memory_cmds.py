@@ -18,6 +18,7 @@ from rich.table import Table
 
 from tools.skill_usage import load_usage
 from constants import get_codeagent_home, skills_dir
+from cli_commands import slash_command
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -390,3 +391,64 @@ def _quick_save_memory(rt: RuntimeContext, text: str) -> None:
         )
     except Exception as e:
         console.print(f"[red]保存失败: {e}[/red]")
+
+
+# ---------------------------------------------------------------------------
+# 注册命令（技能/记忆类）——装饰器在 import 时自登记进 cli_commands 注册表。
+# 注意：转调 cli.py 里定义的实现（如 _handle_paste_command）必须用函数内
+# 延迟 import——模块级 import 会循环依赖（cli.py 顶部正在 import 本模块）。
+# ---------------------------------------------------------------------------
+
+@slash_command(name="/skills", category="技能/记忆",
+               usage="/skills [rate <name> <1-5> | recommend]",
+               summary="列出技能（可打分/推荐）")
+def cmd_skills(args: str, rt) -> bool:
+    _handle_skills_command(rt, args)
+    return True
+
+
+@slash_command(name="/memory", category="技能/记忆", usage="/memory",
+               summary="查看记忆（m/u 键编辑 MEMORY.md/USER.md）")
+def cmd_memory(args: str, rt) -> bool:
+    _show_memory(rt)
+    return True
+
+
+@slash_command(name="/paste", category="技能/记忆", usage="/paste",
+               summary="保存剪贴板图片到 .paste/（Windows）")
+def cmd_paste(args: str, rt) -> bool:
+    from cli import _handle_paste_command
+    return _handle_paste_command(args, rt)
+
+
+@slash_command(name="/skill-learning", category="技能/记忆",
+               usage="/skill-learning [status|start|stop|evolve|prune]",
+               summary="行为直觉学习管线管理")
+def cmd_skill_learning(args: str, rt) -> bool:
+    return _handle_skill_learning_command(args, rt)
+
+
+@slash_command(name="/agents", category="技能/记忆", usage="/agents",
+               summary="列出自定义子代理定义")
+def cmd_agents(args: str, rt) -> bool:
+    # E2 新增：列出自定义子代理定义（~/.codeAgent/agents + ./.codeAgent/agents）
+    from agent.agent_defs import scan_agent_defs
+    defs = scan_agent_defs()
+    if not defs:
+        console.print(
+            "[yellow]无自定义子代理。[/yellow] "
+            "在 [cyan]~/.codeAgent/agents/[/cyan] 或 [cyan]./.codeAgent/agents/[/cyan] "
+            "放 .md 文件（frontmatter 含 name/description/tools/maxTurns 等）。"
+        )
+        return True
+    console.print(f"[green]共 {len(defs)} 个自定义子代理:[/green]")
+    for n, d in defs.items():
+        tools = ",".join(d.tools) if d.tools else "(默认)"
+        model_str = d.model or "继承"
+        perm_str = d.permission_mode or "default"
+        max_str = d.max_turns if d.max_turns else "默认"
+        console.print(
+            f"  [cyan]{n}[/cyan]: {d.description} "
+            f"[tools={tools}, model={model_str}, perm={perm_str}, maxTurns={max_str}]"
+        )
+    return True

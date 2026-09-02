@@ -1,4 +1,4 @@
-"""复刻检查清单的验证脚本：跑 22 项小检查，确认 agent 的核心功能还活着。
+"""复刻检查清单的验证脚本：跑 23 项小检查，确认 agent 的核心功能还活着。
 
 本项目按复刻指南（11-scaffold.md）实现，这个脚本验收指南里「这些功能
 必须存在且能用」的清单——每项做一件小事（建个文件、发个工具调用），
@@ -530,6 +530,28 @@ def check_context_compress():
 
 
 # ---------------------------------------------------------------------------
+# slash 命令注册表
+# ---------------------------------------------------------------------------
+
+def check_slash_registry():
+    """验证 slash 命令注册表：命令一条没丢、每个 handler 都可调用。"""
+    import cli_commands as cc
+    # 触发命令模块 import（自登记发生在 import 时）
+    import cli  # noqa: F401
+    import cli_diag_cmds  # noqa: F401
+    import cli_session_cmds  # noqa: F401
+    import cli_skill_memory_cmds  # noqa: F401
+    cmds = cc.all_commands()
+    if len(cmds) < 37:
+        return _fail(f"注册表只有 {len(cmds)} 条（基线 37），命令迁移丢了")
+    import inspect
+    for c in cmds:
+        if not callable(c.handler):
+            return _fail(f"命令 {c.name} 的 handler 不可调用")
+    return _ok(f"{len(cmds)} 条命令全部登记，handler 可调用")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -579,6 +601,9 @@ def main():
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
+        ]),
+        ("slash 注册表", [
+            ("slash 注册表", check_slash_registry),
         ]),
     ]
 

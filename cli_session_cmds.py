@@ -19,6 +19,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from agent.cross_project import list_recent_bundles_across_projects
+from cli_commands import slash_command
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -434,3 +435,115 @@ def _auto_resume_last(rt: RuntimeContext):
     _resume_and_cleanup_empty(rt, last["id"])
     # 恢复完把最近的消息回放出来，让用户看到接上了什么
     _show_history_messages(rt)
+
+
+# ---------------------------------------------------------------------------
+# 注册命令（会话类）——装饰器在 import 时自登记进 cli_commands 注册表。
+# 注意：转调 cli.py 里定义的实现（如 _handle_rewind_command）必须用函数内
+# 延迟 import——模块级 import 会循环依赖（cli.py 顶部正在 import 本模块）。
+# ---------------------------------------------------------------------------
+
+@slash_command(name="/new", category="会话", usage="/new",
+               summary="开始新对话")
+def cmd_new(args: str, rt) -> bool:
+    rt.new_session()
+    console.print("[green][已开始新对话][/green]")
+    return True
+
+
+@slash_command(name="/sessions", category="会话", usage="/sessions",
+               summary="列出历史会话")
+def cmd_sessions(args: str, rt) -> bool:
+    _list_sessions(rt)
+    return True
+
+
+@slash_command(name="/resume", category="会话", usage="/resume [序号]",
+               summary="恢复历史会话")
+def cmd_resume(args: str, rt) -> bool:
+    _resume_session_interactive(rt, args)
+    return True
+
+
+@slash_command(name="/search", category="会话", usage="/search <关键词>",
+               summary="搜索历史对话")
+def cmd_search(args: str, rt) -> bool:
+    if not args:
+        console.print("[yellow]用法：/search <关键词>[/yellow]")
+        return True
+    _search_sessions(rt, args)
+    return True
+
+
+@slash_command(name="/history", category="会话", usage="/history [N]",
+               summary="全局输入历史（/history N 看第 N 条原文）")
+def cmd_history(args: str, rt) -> bool:
+    # 全局输入历史（/history 列最近 20 条；/history N 打印第 N 条完整原文）
+    try:
+        from agent.input_history import GlobalHistory
+        h = GlobalHistory(rt.home)
+        if args.strip().isdigit():
+            item = h.get(int(args.strip()))
+            if item:
+                console.print(Panel.fit(item[:2000], title="输入历史（复制后可直接粘贴使用）"))
+            else:
+                console.print("[yellow]没有第 %s 条历史[/yellow]" % args.strip())
+            return True
+        items = h.recent(20)
+        if not items:
+            console.print("[dim]暂无输入历史[/dim]")
+            return True
+        lines = [
+            f"[cyan]{i}[/cyan]. {t[:80].replace(chr(10), ' ')}"
+            + ("…" if len(t) > 80 else "")
+            for i, t in enumerate(items, 1)
+        ]
+        console.print(Panel.fit("\n".join(lines), title="输入历史（/history N 看原文）"))
+    except Exception as e:
+        console.print(f"[red]历史读取失败: {e}[/red]")
+    return True
+
+
+@slash_command(name="/rewind", category="会话", usage="/rewind",
+               summary="回退到历史某个节点")
+def cmd_rewind(args: str, rt) -> bool:
+    from cli import _handle_rewind_command
+    _handle_rewind_command(rt, args)
+    return True
+
+
+@slash_command(name="/handoff", category="会话",
+               usage="/handoff [save|load|list|show|delete|export|import]",
+               summary="会话移交（保存/加载/查看/导入导出）")
+def cmd_handoff(args: str, rt) -> bool:
+    from cli import _handle_handoff_command
+    return _handle_handoff_command(args, rt)
+
+
+@slash_command(name="/resumable", category="会话", usage="/resumable [agent_id]",
+               summary="列出/恢复可续跑的子代理")
+def cmd_resumable(args: str, rt) -> bool:
+    from cli import _handle_resumable_command
+    return _handle_resumable_command(args, rt)
+
+
+@slash_command(name="/resume_bundle", category="会话", usage="/resume_bundle [id]",
+               summary="跨项目恢复 bundle（/resume 已被恢复会话占用）")
+def cmd_resume_bundle(args: str, rt) -> bool:
+    # /resume 这个名字已被"恢复会话"占用，跨项目的 bundle 恢复
+    # 另起 /resume_bundle 加以区分
+    return _handle_resume_command(args, rt)
+
+
+@slash_command(name="/inbox", category="会话", usage="/inbox",
+               summary="显示 ChannelInbox 未消费消息")
+def cmd_inbox(args: str, rt) -> bool:
+    from cli import _handle_inbox_command
+    return _handle_inbox_command(args, rt)
+
+
+@slash_command(name="/mailbox", category="会话", usage="/mailbox [send|check|clear]",
+               summary="队友邮箱（发消息/收信/清空）")
+def cmd_mailbox(args: str, rt) -> bool:
+    from cli import _handle_mailbox_command
+    return _handle_mailbox_command(args, rt)

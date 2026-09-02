@@ -61,6 +61,7 @@ from agent.handoff import (
     BundleCorruptedError,
 )
 
+from cli_commands import slash_command
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -1690,338 +1691,117 @@ def cli_plan_approval_callback(plan: str) -> tuple:
     return False, "用户拒绝（未提供原因）", False
 
 
+# ---------------------------------------------------------------------------
+# 注册命令（交互配置类）——装饰器在 import 时自登记进 cli_commands 注册表。
+# 会话/诊断/技能类命令的注册壳分别在 cli_session_cmds / cli_diag_cmds /
+# cli_skill_memory_cmds 里，这里只留交互/配置类。转调的实现函数（如
+# _switch_model）定义在本文件下方，调用时才解析名字，先后顺序无关。
+# ---------------------------------------------------------------------------
+
+@slash_command(name="/quit", category="交互配置", usage="/quit",
+               summary="退出（/exit 等效；走正常关机流程）", aliases=["/exit"])
+def cmd_quit(args: str, rt) -> bool:
+    # 故意不 raise SystemExit——那会跳过关机清理和 SESSION_END 钩子，
+    # 直接把程序掐死。改成设标志，主循环看到后 break 走正常退出。
+    rt.quit_requested = True
+    return True
+
+
+@slash_command(name="/help", category="交互配置", usage="/help",
+               summary="显示本帮助")
+def cmd_help(args: str, rt) -> bool:
+    import cli_commands as cc
+    console.print(cc.help_renderable())
+    console.print("[dim]提示：技能命令（/技能名）也会出现在 Tab 补全里[/dim]")
+    return True
+
+
+@slash_command(name="/model", category="交互配置", usage="/model [name]",
+               summary="切换模型")
+def cmd_model(args: str, rt) -> bool:
+    _switch_model(rt, args)
+    return True
+
+
+@slash_command(name="/plan", category="交互配置", usage="/plan [off]",
+               summary="进入/退出计划模式")
+def cmd_plan(args: str, rt) -> bool:
+    if args.strip() == "off":
+        if rt.agent.plan_mode:
+            rt.agent.plan_mode = False
+            console.print("[green]已强制退出计划模式。[/green]")
+        else:
+            console.print("[yellow]当前不在计划模式。[/yellow]")
+    else:
+        if not rt.agent.plan_mode:
+            rt.agent.plan_mode = True
+            console.print(
+                "[green]已进入计划模式。[/green] "
+                "Agent 只能调研，完成调研后调 exit_plan_mode 等待审批。"
+            )
+        else:
+            console.print("[yellow]已经在计划模式中。[/yellow]")
+    return True
+
+
+@slash_command(name="/goal", category="交互配置",
+               usage="/goal <obj>|status|pause|resume|clear|tasks",
+               summary="目标驱动多轮")
+def cmd_goal(args: str, rt) -> bool:
+    return _handle_goal_command(args, rt)
+
+
+@slash_command(name="/poor", category="交互配置", usage="/poor [on|off|status]",
+               summary="穷鬼模式（一键关烧钱功能）")
+def cmd_poor(args: str, rt) -> bool:
+    return _handle_poor_command(args, rt)
+
+
+@slash_command(name="/output-style", category="交互配置",
+               usage="/output-style [风格名|off]",
+               summary="列出/切换输出风格")
+def cmd_output_style(args: str, rt) -> bool:
+    return _handle_output_style_command(args, rt)
+
+
+@slash_command(name="/compact", category="交互配置", usage="/compact [--yes]",
+               summary="手动压缩上下文（L4 摘要；--yes 跳过确认）")
+def cmd_compact(args: str, rt) -> bool:
+    return _handle_compact_cli(args, rt)
+
+
+@slash_command(name="/init", category="交互配置", usage="/init [--force]",
+               summary="生成当前项目的 CODEAGENT.md")
+def cmd_init(args: str, rt) -> bool:
+    return _handle_init_command(rt, args)
+
+
+@slash_command(name="/approved", category="交互配置", usage="/approved",
+               summary="管理审批白名单（无参数列出，可删除条目）")
+def cmd_approved(args: str, rt) -> bool:
+    _manage_whitelist(rt, args)
+    return True
+
+
+@slash_command(name="/add-dir", category="交互配置", usage="/add-dir [路径]",
+               summary="追加 safe_path 写白名单（运行时生效 + 持久化）")
+def cmd_add_dir(args: str, rt) -> bool:
+    return _handle_add_dir_cli(args, rt)
+
+
 def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
-    """slash 命令总分发：认出哪个命令就转给对应的处理函数。
+    """slash 命令总分发：查注册表，查到转 handler，查不到返回 False。
 
     参数：
         cmd: 用户敲的整条命令（如 "/model opus"）
         rt: RuntimeContext
-    返回：True=这是已知命令、已处理；False=不认识（由调用方决定发模型还是报错）。
+
+    返回：bool——True 表示命令已被处理；False 表示注册表里没有
+        （调用方走未知命令/技能束/技能命令分支）。
     """
-    parts = cmd.split(None, 1)
-    name = parts[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
-
-    if name in ("/quit", "/exit"):
-        # 故意不 raise SystemExit——那会跳过关机清理和 SESSION_END 钩子，
-        # 直接把程序掐死。改成设标志，主循环看到后 break 走正常退出。
-        rt.quit_requested = True
-        return True
-
-    if name == "/help":
-        import cli_commands as cc
-        console.print(cc.help_renderable())
-        console.print("[dim]提示：技能命令（/技能名）也会出现在 Tab 补全里[/dim]")
-        return True
-
-    if name == "/new":
-        rt.new_session()
-        console.print("[green][已开始新对话][/green]")
-        return True
-
-    if name == "/skills":
-        _handle_skills_command(rt, args)
-        return True
-
-    if name == "/memory":
-        _show_memory(rt)
-        return True
-
-    if name == "/sessions":
-        _list_sessions(rt)
-        return True
-
-    if name == "/resume":
-        _resume_session_interactive(rt, args)
-        return True
-
-    if name == "/search":
-        if not args:
-            console.print("[yellow]用法：/search <关键词>[/yellow]")
-            return True
-        _search_sessions(rt, args)
-        return True
-
-    if name == "/usage":
-        _show_usage(rt)
-        return True
-
-    if name == "/stats":
-        _show_stats(rt)
-        return True
-
-    if name == "/model":
-        _switch_model(rt, args)
-        return True
-
-    if name == "/plan":
-        if args.strip() == "off":
-            if rt.agent.plan_mode:
-                rt.agent.plan_mode = False
-                console.print("[green]已强制退出计划模式。[/green]")
-            else:
-                console.print("[yellow]当前不在计划模式。[/yellow]")
-        else:
-            if not rt.agent.plan_mode:
-                rt.agent.plan_mode = True
-                console.print(
-                    "[green]已进入计划模式。[/green] "
-                    "Agent 只能调研，完成调研后调 exit_plan_mode 等待审批。"
-                )
-            else:
-                console.print("[yellow]已经在计划模式中。[/yellow]")
-        return True
-
-    if name == "/permission":
-        # /permission [default|bypass|acceptEdits]：切换权限模式
-        # 不带参数 → 显示当前模式；带参数 → 切换（要同步改两处：检查器的
-        # mode + rt.agent.permission_mode，改一处会不同步）
-        arg = args.strip().lower() if args else ""
-        from agent.permission import get_default_checker
-        checker = get_default_checker()
-        if not arg:
-            current = getattr(checker, "mode", "default")
-            console.print(f"当前权限模式: [cyan]{current}[/cyan]")
-            console.print(
-                "[dim]用法: /permission default 切回默认（带审批闸门） | "
-                "/permission bypass 切到 bypassPermissions（跳过审批，仍挡 fatal 根删除） | "
-                "/permission accept 切到 acceptEdits（自动批 cwd 内编辑/fs 命令）[/dim]"
-            )
-            return True
-        if arg in ("default", "bypass", "bypasspermissions", "acceptedits", "accept"):
-            if arg == "default":
-                new_mode = "default"
-            elif arg in ("bypass", "bypasspermissions"):
-                new_mode = "bypassPermissions"
-            else:  # acceptedits / accept
-                new_mode = "acceptEdits"
-            if checker is not None:
-                checker.mode = new_mode
-            if getattr(rt, "agent", None) is not None:
-                rt.agent.permission_mode = new_mode
-            console.print(f"[green]权限模式切换为: {new_mode}[/green]")
-        else:
-            console.print("[yellow]用法: /permission [default|bypass|acceptEdits][/yellow]")
-        return True
-
-    if name == "/sandbox":
-        # OS 沙箱开关
-        # 用法：/sandbox on | off | status（无参数 = status）
-        arg = args.strip().lower() if args else ""
-        from agent.sandbox_runner import (
-            is_available, availability_reason, sandbox_description,
-        )
-        from agent.permission import get_default_checker
-        checker = get_default_checker()
-
-        if arg in ("on", "enable"):
-            if not is_available():
-                console.print(
-                    f"[yellow]⚠️  沙箱不可用：{availability_reason()}\n"
-                    "仍会切换到 on 模式（fail-open 降级，命令照常执行）[/yellow]"
-                )
-            # 有些简化版检查器没有 set_sandbox_mode 方法，先探测防崩
-            if hasattr(checker, "set_sandbox_mode"):
-                checker.set_sandbox_mode("on")
-                console.print(
-                    f"[green]sandbox: on[/green]\n"
-                    f"[dim]机制：{sandbox_description()}。"
-                    "Linux/macOS 写文件被限制在 cwd + ~/.codeAgent + 配置的 "
-                    "sandbox_writable_roots；Windows Job Object 为进程管控"
-                    "（文件防线=safe_path 白名单层）。[/dim]"
-                )
-            else:
-                console.print(
-                    "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
-                )
-        elif arg in ("off", "disable"):
-            if hasattr(checker, "set_sandbox_mode"):
-                checker.set_sandbox_mode("off")
-                console.print("[green]sandbox: off[/green]")
-            else:
-                console.print(
-                    "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
-                )
-        else:  # status 或无参数
-            mode = getattr(checker, "sandbox_mode", "off")
-            if is_available():
-                avail = f"[green]available[/green] — {sandbox_description()}"
-            else:
-                avail = f"[red]unavailable[/red] ({availability_reason()})"
-            console.print(f"sandbox: [cyan]{mode}[/cyan]  ({avail})")
-            console.print(
-                "[dim]用法: /sandbox on 开启 | /sandbox off 关闭 | /sandbox status 查看状态[/dim]"
-            )
-        return True
-
-    if name == "/hooks":
-        # 展示会话启动那一刻锁定的 hook 快照 + 对比磁盘上的改动
-        from agent.hook_loader import get_snapshot, get_disk_version
-        snap = get_snapshot()
-        if not snap:
-            console.print(
-                "[yellow]无声明式 hook（~/.codeAgent/.hooks/settings.json 未配置或为空）[/yellow]"
-            )
-            return True
-        console.print(
-            "[bold]当前会话生效的 hook（启动时锁定，运行期改配置不立即生效 — 防篡改）：[/bold]"
-        )
-        for event, hook_list in snap.items():
-            console.print(f"  [cyan]{event}[/cyan] ({len(hook_list)} 个)")
-            for h in hook_list:
-                htype = h.get("type", "command")
-                hname = h.get("name", "?")
-                console.print(f"    - {hname} (type={htype})")
-        # 对比磁盘版本，检测会话期间配置文件是否被改过
-        disk = get_disk_version()
-        if disk != snap:
-            console.print(
-                "\n[yellow]⚠ 磁盘 settings.json 与会话快照不一致[/yellow]\n"
-                "[dim]提示：hook 配置在会话启动时锁定，运行期修改不会立即生效。"
-                "重启会话才会加载新配置（防篡改）。[/dim]"
-            )
-        else:
-            console.print("[dim]（磁盘配置与会话快照一致）[/dim]")
-        return True
-
-    if name == "/agents":
-        # E2 新增：列出自定义子代理定义（~/.codeAgent/agents + ./.codeAgent/agents）
-        from agent.agent_defs import scan_agent_defs
-        defs = scan_agent_defs()
-        if not defs:
-            console.print(
-                "[yellow]无自定义子代理。[/yellow] "
-                "在 [cyan]~/.codeAgent/agents/[/cyan] 或 [cyan]./.codeAgent/agents/[/cyan] "
-                "放 .md 文件（frontmatter 含 name/description/tools/maxTurns 等）。"
-            )
-            return True
-        console.print(f"[green]共 {len(defs)} 个自定义子代理:[/green]")
-        for n, d in defs.items():
-            tools = ",".join(d.tools) if d.tools else "(默认)"
-            model_str = d.model or "继承"
-            perm_str = d.permission_mode or "default"
-            max_str = d.max_turns if d.max_turns else "默认"
-            console.print(
-                f"  [cyan]{n}[/cyan]: {d.description} "
-                f"[tools={tools}, model={model_str}, perm={perm_str}, maxTurns={max_str}]"
-            )
-        return True
-
-    if name == "/handoff":
-        return _handle_handoff_command(args, rt)
-
-    if name == "/approved":
-        _manage_whitelist(rt, args)
-        return True
-
-    if name == "/rewind":
-        _handle_rewind_command(rt, args)
-        return True
-
-    if name == "/cache-stats":
-        try:
-            from agent.cache_monitor import get_stats
-            stats = get_stats()
-            console.print(f"[cyan]本次会话 cache 累计 break 次数：[/cyan]{stats['total_breaks']}")
-            if stats['last_break']:
-                lb = stats['last_break']
-                console.print(
-                    f"[cyan]最近 break：[/cyan]cache read {lb['from']} → {lb['to']}"
-                    f"（降 {lb['drop']} tokens）"
-                )
-                console.print(f"[cyan]根因：[/cyan]{lb['root_cause']}")
-                # 顺便告诉用户 diff 文件存哪了
-                if lb.get('diff_path'):
-                    console.print(
-                        f"[cyan]diff 文件：[/cyan]{lb['diff_path']}"
-                        f"（read_file 看详细变化）"
-                    )
-            if stats['last_cache_read'] is not None:
-                console.print(
-                    f"[cyan]最近一次 cache read：[/cyan]{stats['last_cache_read']} tokens"
-                )
-        except Exception as e:
-            console.print(f"[red]读取 cache 统计失败：[/red]{e}")
-        return True
-
-    # === goal / poor / output-style / trace / history / mailbox / inbox / resume_bundle ===
-    if name == "/goal":
-        return _handle_goal_command(args, rt)
-    if name == "/poor":
-        return _handle_poor_command(args, rt)
-    if name == "/output-style":
-        return _handle_output_style_command(args, rt)
-    if name == "/trace":
-        return _handle_trace_command(args, rt)
-    if name == "/history":
-        # 全局输入历史（/history 列最近 20 条；/history N 打印第 N 条完整原文）
-        try:
-            from agent.input_history import GlobalHistory
-            h = GlobalHistory(rt.home)
-            if args.strip().isdigit():
-                item = h.get(int(args.strip()))
-                if item:
-                    console.print(Panel.fit(item[:2000], title="输入历史（复制后可直接粘贴使用）"))
-                else:
-                    console.print("[yellow]没有第 %s 条历史[/yellow]" % args.strip())
-                return True
-            items = h.recent(20)
-            if not items:
-                console.print("[dim]暂无输入历史[/dim]")
-                return True
-            lines = [
-                f"[cyan]{i}[/cyan]. {t[:80].replace(chr(10), ' ')}"
-                + ("…" if len(t) > 80 else "")
-                for i, t in enumerate(items, 1)
-            ]
-            console.print(Panel.fit("\n".join(lines), title="输入历史（/history N 看原文）"))
-        except Exception as e:
-            console.print(f"[red]历史读取失败: {e}[/red]")
-        return True
-    if name == "/mailbox":
-        return _handle_mailbox_command(args, rt)
-    if name == "/inbox":
-        return _handle_inbox_command(args, rt)
-    if name == "/resume_bundle":
-        # /resume 这个名字已被"恢复会话"占用，跨项目的 bundle 恢复
-        # 另起 /resume_bundle 加以区分
-        return _handle_resume_command(args, rt)
-
-    # === /init 生成 CODEAGENT.md ===
-    if name == "/init":
-        return _handle_init_command(rt, args)
-
-    # === /resumable 列出/恢复可续跑的子代理 ===
-    if name == "/resumable":
-        return _handle_resumable_command(args, rt)
-
-    # === /compact 手动压缩上下文 + /context 看 token 分布 ===
-    if name == "/compact":
-        return _handle_compact_cli(args, rt)
-    if name == "/context":
-        return _handle_context_cli(args, rt)
-
-    # === /status 状态一览 + /doctor 自诊断 + /diff 本会话文件改动 ===
-    if name == "/status":
-        return _handle_status_cli(args, rt)
-    if name == "/doctor":
-        return _handle_doctor_cli(args, rt)
-    if name == "/diff":
-        return _handle_diff_cli(args, rt)
-
-    # === /add-dir 追加可写路径白名单（运行时生效 + 持久化）===
-    if name == "/add-dir":
-        return _handle_add_dir_cli(args, rt)
-
-    # === /paste 读剪贴板图片存 .paste/ 目录 ===
-    if name == "/paste":
-        return _handle_paste_command(args, rt)
-
-    # === /skill-learning 行为直觉学习链路管理 ===
-    if name == "/skill-learning":
-        return _handle_skill_learning_command(args, rt)
-
-    return False
+    import cli_commands as cc
+    result = cc.dispatch(cmd, rt)
+    return result is not False and result is not None
 
 
 def _truncate_at_last_compact_boundary(msgs: list) -> list:
@@ -2280,51 +2060,6 @@ def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
     console.print(
         f"[green]已把 checkpoint 之后的 {len(after)} 条消息压成摘要[/green]"
     )
-
-
-def _show_help():
-    """打印 /help 帮助面板（列出所有可用命令）。参数：无。"""
-    console.print(Panel(
-        "[bold]可用命令[/bold]\n\n"
-        "[cyan]/new[/cyan]       开始新对话\n"
-        "[cyan]/skills[/cyan]    列出技能（/skills rate <name> <1-5> | /skills recommend）\n"
-        "[cyan]/memory[/cyan]    查看记忆（输入 m 编辑 MEMORY.md / u 编辑 USER.md）\n"
-        "[cyan]/sessions[/cyan]  列出历史会话\n"
-        "[cyan]/resume[/cyan]    恢复历史会话（/resume [序号]）\n"
-        "[cyan]/search[/cyan]    搜索历史对话（/search <关键词>）\n"
-        "[cyan]/usage[/cyan]     显示工具用量\n"
-        "[cyan]/stats[/cyan]     会话统计（跨会话聚合）\n"
-        "[cyan]/model[/cyan]     切换模型（/model [name]）\n"
-        "[cyan]/plan[/cyan]      进入计划模式（/plan off 强制退出）\n"
-        "[cyan]/permission[/cyan]  查看或切换权限模式（/permission [default|bypass|acceptEdits]）\n"
-        "[cyan]/sandbox[/cyan]    开启/关闭 OS 沙箱（/sandbox [on|off|status]，Linux 用 bwrap、macOS 用 sandbox-exec、Windows 用 Job Object）\n"
-        "[cyan]/hooks[/cyan]    查看会话启动时锁定的 hook 快照（含磁盘 diff 检测）\n"
-        "[cyan]/agents[/cyan]   列出自定义子代理（来自 ~/.codeAgent/agents/*.md）\n"
-        "[cyan]/approved[/cyan]  管理审批白名单\n"
-        "[cyan]/rewind[/cyan]    回滚到某个 checkpoint（恢复文件 + 可选对话）\n"
-        "[cyan]/handoff[/cyan]   会话移交（save/load/list/show/delete/export/import）\n"
-        "[cyan]/goal[/cyan]      目标驱动多轮（/goal <obj>|status|pause|resume|clear|tasks）\n"
-        "[cyan]/poor[/cyan]      穷鬼模式（on|off|status，一键关烧钱功能）\n"
-        "[cyan]/trace[/cyan]     本地 trace（today|yesterday|<date>|tail [N]）\n"
-        "[cyan]/mailbox[/cyan]   队友邮箱（send|check|clear）\n"
-        "[cyan]/inbox[/cyan]     显示 ChannelInbox 未消费消息\n"
-        "[cyan]/resume_bundle[/cyan]  跨项目恢复 bundle（/resume_bundle [id]）\n"
-        "[cyan]/resumable[/cyan] 列出/恢复可续跑子代理（/resumable [agent_id]）\n"
-        "[cyan]/compact[/cyan]   手动压缩上下文（L4 摘要；--yes 跳过确认）\n"
-        "[cyan]/context[/cyan]   显示上下文 token 分布与压缩状态\n"
-        "[cyan]/status[/cyan]    状态一览（模型/goal/MCP/工具数）\n"
-        "[cyan]/doctor[/cyan]    自诊断 6 项（配置/API key/目录/依赖）\n"
-        "[cyan]/diff[/cyan]      本会话文件改动（checkpoint 追踪）\n"
-        "[cyan]/add-dir[/cyan]   追加 safe_path 写白名单（无参数列出；运行时生效 + 持久化到 config）\n"
-        "[cyan]/paste[/cyan]     保存剪贴板图片到 .paste/（Windows；之后在消息中引用路径让 AI 分析）\n"
-        "[cyan]/init[/cyan]      生成当前项目的 CODEAGENT.md（已存在不覆盖，--force 覆盖）\n"
-        "[cyan]/cache-stats[/cyan]  prompt cache 命中统计与 break 根因\n"
-        "[cyan]/skill-learning[/cyan]  行为学习（status|start|stop|evolve|prune）\n"
-        "[cyan]/help[/cyan]      显示本帮助\n"
-        "[cyan]/quit[/cyan]      退出\n\n"
-        "[dim]输入 /技能名 触发对应技能[/dim]",
-        border_style="blue",
-    ))
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from typing import Optional
 from rich.table import Table
 
 from constants import get_codeagent_home
+from cli_commands import slash_command
 from cli_ui import console
 
 logger = logging.getLogger(__name__)
@@ -576,3 +577,207 @@ def _format_tokens(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}K"
     return str(n)
+
+
+# ---------------------------------------------------------------------------
+# 注册命令（诊断类）——装饰器在 import 时自登记进 cli_commands 注册表。
+# 注意：转调 cli.py 里定义的实现（如 _handle_trace_command）必须用函数内
+# 延迟 import——模块级 import 会循环依赖（cli.py 顶部正在 import 本模块）。
+# ---------------------------------------------------------------------------
+
+@slash_command(name="/usage", category="诊断", usage="/usage",
+               summary="显示工具用量与 token 花销")
+def cmd_usage(args: str, rt) -> bool:
+    _show_usage(rt)
+    return True
+
+
+@slash_command(name="/stats", category="诊断", usage="/stats",
+               summary="跨会话汇总统计")
+def cmd_stats(args: str, rt) -> bool:
+    _show_stats(rt)
+    return True
+
+
+@slash_command(name="/cache-stats", category="诊断", usage="/cache-stats",
+               summary="prompt cache 命中统计与 break 根因")
+def cmd_cache_stats(args: str, rt) -> bool:
+    try:
+        from agent.cache_monitor import get_stats
+        stats = get_stats()
+        console.print(f"[cyan]本次会话 cache 累计 break 次数：[/cyan]{stats['total_breaks']}")
+        if stats['last_break']:
+            lb = stats['last_break']
+            console.print(
+                f"[cyan]最近 break：[/cyan]cache read {lb['from']} → {lb['to']}"
+                f"（降 {lb['drop']} tokens）"
+            )
+            console.print(f"[cyan]根因：[/cyan]{lb['root_cause']}")
+            # 顺便告诉用户 diff 文件存哪了
+            if lb.get('diff_path'):
+                console.print(
+                    f"[cyan]diff 文件：[/cyan]{lb['diff_path']}"
+                    f"（read_file 看详细变化）"
+                )
+        if stats['last_cache_read'] is not None:
+            console.print(
+                f"[cyan]最近一次 cache read：[/cyan]{stats['last_cache_read']} tokens"
+            )
+    except Exception as e:
+        console.print(f"[red]读取 cache 统计失败：[/red]{e}")
+    return True
+
+
+@slash_command(name="/doctor", category="诊断", usage="/doctor",
+               summary="环境自诊断 6 项")
+def cmd_doctor(args: str, rt) -> bool:
+    return _handle_doctor_cli(args, rt)
+
+
+@slash_command(name="/status", category="诊断", usage="/status",
+               summary="状态一览（模型/goal/MCP/工具数）")
+def cmd_status(args: str, rt) -> bool:
+    return _handle_status_cli(args, rt)
+
+
+@slash_command(name="/trace", category="诊断",
+               usage="/trace [today|yesterday|<date>|tail [N]]",
+               summary="查看本地 trace 记录")
+def cmd_trace(args: str, rt) -> bool:
+    from cli import _handle_trace_command
+    return _handle_trace_command(args, rt)
+
+
+@slash_command(name="/context", category="诊断", usage="/context",
+               summary="显示上下文 token 分布与压缩状态")
+def cmd_context(args: str, rt) -> bool:
+    return _handle_context_cli(args, rt)
+
+
+@slash_command(name="/diff", category="诊断", usage="/diff",
+               summary="本会话文件改动（checkpoint 追踪）")
+def cmd_diff(args: str, rt) -> bool:
+    from cli import _handle_diff_cli
+    return _handle_diff_cli(args, rt)
+
+
+@slash_command(name="/sandbox", category="诊断", usage="/sandbox [on|off|status]",
+               summary="开启/关闭 OS 沙箱")
+def cmd_sandbox(args: str, rt) -> bool:
+    # OS 沙箱开关
+    # 用法：/sandbox on | off | status（无参数 = status）
+    arg = args.strip().lower() if args else ""
+    from agent.sandbox_runner import (
+        is_available, availability_reason, sandbox_description,
+    )
+    from agent.permission import get_default_checker
+    checker = get_default_checker()
+
+    if arg in ("on", "enable"):
+        if not is_available():
+            console.print(
+                f"[yellow]⚠️  沙箱不可用：{availability_reason()}\n"
+                "仍会切换到 on 模式（fail-open 降级，命令照常执行）[/yellow]"
+            )
+        # 有些简化版检查器没有 set_sandbox_mode 方法，先探测防崩
+        if hasattr(checker, "set_sandbox_mode"):
+            checker.set_sandbox_mode("on")
+            console.print(
+                f"[green]sandbox: on[/green]\n"
+                f"[dim]机制：{sandbox_description()}。"
+                "Linux/macOS 写文件被限制在 cwd + ~/.codeAgent + 配置的 "
+                "sandbox_writable_roots；Windows Job Object 为进程管控"
+                "（文件防线=safe_path 白名单层）。[/dim]"
+            )
+        else:
+            console.print(
+                "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
+            )
+    elif arg in ("off", "disable"):
+        if hasattr(checker, "set_sandbox_mode"):
+            checker.set_sandbox_mode("off")
+            console.print("[green]sandbox: off[/green]")
+        else:
+            console.print(
+                "[red]无法切换 sandbox：当前 PermissionChecker 不支持 set_sandbox_mode[/red]"
+            )
+    else:  # status 或无参数
+        mode = getattr(checker, "sandbox_mode", "off")
+        if is_available():
+            avail = f"[green]available[/green] — {sandbox_description()}"
+        else:
+            avail = f"[red]unavailable[/red] ({availability_reason()})"
+        console.print(f"sandbox: [cyan]{mode}[/cyan]  ({avail})")
+        console.print(
+            "[dim]用法: /sandbox on 开启 | /sandbox off 关闭 | /sandbox status 查看状态[/dim]"
+        )
+    return True
+
+
+@slash_command(name="/permission", category="诊断",
+               usage="/permission [default|bypass|acceptEdits]",
+               summary="查看或切换权限模式")
+def cmd_permission(args: str, rt) -> bool:
+    # /permission [default|bypass|acceptEdits]：切换权限模式
+    # 不带参数 → 显示当前模式；带参数 → 切换（要同步改两处：检查器的
+    # mode + rt.agent.permission_mode，改一处会不同步）
+    arg = args.strip().lower() if args else ""
+    from agent.permission import get_default_checker
+    checker = get_default_checker()
+    if not arg:
+        current = getattr(checker, "mode", "default")
+        console.print(f"当前权限模式: [cyan]{current}[/cyan]")
+        console.print(
+            "[dim]用法: /permission default 切回默认（带审批闸门） | "
+            "/permission bypass 切到 bypassPermissions（跳过审批，仍挡 fatal 根删除） | "
+            "/permission accept 切到 acceptEdits（自动批 cwd 内编辑/fs 命令）[/dim]"
+        )
+        return True
+    if arg in ("default", "bypass", "bypasspermissions", "acceptedits", "accept"):
+        if arg == "default":
+            new_mode = "default"
+        elif arg in ("bypass", "bypasspermissions"):
+            new_mode = "bypassPermissions"
+        else:  # acceptedits / accept
+            new_mode = "acceptEdits"
+        if checker is not None:
+            checker.mode = new_mode
+        if getattr(rt, "agent", None) is not None:
+            rt.agent.permission_mode = new_mode
+        console.print(f"[green]权限模式切换为: {new_mode}[/green]")
+    else:
+        console.print("[yellow]用法: /permission [default|bypass|acceptEdits][/yellow]")
+    return True
+
+
+@slash_command(name="/hooks", category="诊断", usage="/hooks",
+               summary="查看会话启动时锁定的 hook 快照")
+def cmd_hooks(args: str, rt) -> bool:
+    # 展示会话启动那一刻锁定的 hook 快照 + 对比磁盘上的改动
+    from agent.hook_loader import get_snapshot, get_disk_version
+    snap = get_snapshot()
+    if not snap:
+        console.print(
+            "[yellow]无声明式 hook（~/.codeAgent/.hooks/settings.json 未配置或为空）[/yellow]"
+        )
+        return True
+    console.print(
+        "[bold]当前会话生效的 hook（启动时锁定，运行期改配置不立即生效 — 防篡改）：[/bold]"
+    )
+    for event, hook_list in snap.items():
+        console.print(f"  [cyan]{event}[/cyan] ({len(hook_list)} 个)")
+        for h in hook_list:
+            htype = h.get("type", "command")
+            hname = h.get("name", "?")
+            console.print(f"    - {hname} (type={htype})")
+    # 对比磁盘版本，检测会话期间配置文件是否被改过
+    disk = get_disk_version()
+    if disk != snap:
+        console.print(
+            "\n[yellow]⚠ 磁盘 settings.json 与会话快照不一致[/yellow]\n"
+            "[dim]提示：hook 配置在会话启动时锁定，运行期修改不会立即生效。"
+            "重启会话才会加载新配置（防篡改）。[/dim]"
+        )
+    else:
+        console.print("[dim]（磁盘配置与会话快照一致）[/dim]")
+    return True
