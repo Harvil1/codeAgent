@@ -123,10 +123,20 @@ def invalidate(session) -> None:
         pass
 
 
-class SlashCompleter:
+# 补全器基类：prompt_toolkit 可用就继承它的 Completer（真终端的异步补全
+# 通道调 get_completions_async——那是基类方法，裸鸭子类没有，会在打字的
+# 时候崩掉"Unhandled exception in event loop"）；pt 缺失（降级通道）就
+# 退化成裸 object，同步 get_completions 照样能用。
+try:
+    from prompt_toolkit.completion import Completer as _PtCompleter
+except Exception:  # pragma: no cover - 降级环境
+    _PtCompleter = object
+
+
+class SlashCompleter(_PtCompleter):
     """三级补全：命令名（注册表+技能+技能束同一池）→ 命令参数。
 
-    实现成 prompt_toolkit 的 Completer 协议（实现 get_completions 生成器）。
+    实现成 prompt_toolkit 的 Completer 协议（继承基类拿默认的异步包装，
     铁律：任何异常都吞掉返回空——补全挂了不能挡住打字。
     """
 
