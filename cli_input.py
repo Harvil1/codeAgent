@@ -162,3 +162,30 @@ def build_completer(rt):
         arg_completers=cc.arg_completer_map(),
         dynamic_tokens_fn=dynamic_tokens,
     )
+
+
+def build_toolbar(rt):
+    """底部工具栏：等待期常驻的上下文条。
+
+    内容：⚡模型 │ 当前目录尾段 │ ☂N个后台任务 │ 按键提示。
+    任何异常都吞——工具栏挂了不能挡输入（fail-open）。
+    """
+    def _toolbar():
+        try:
+            segs = []
+            agent = getattr(rt, "agent", None)
+            model = getattr(agent, "model", "") if agent else ""
+            if model:
+                segs.append(f"⚡{model}")
+            cwd = getattr(rt, "workspace_cwd", "") or ""
+            if cwd:
+                tail = str(cwd).replace("\\", "/").rstrip("/").split("/")[-1]
+                segs.append(f"📂{tail}")
+            bg = getattr(rt, "bg_count", None)
+            if bg:
+                segs.append(f"☂{bg}个后台任务")
+            segs.append("Enter发送 Esc↵多行")
+            return " │ ".join(segs)
+        except Exception:
+            return "CodeAgent"
+    return _toolbar

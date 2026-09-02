@@ -3267,10 +3267,65 @@ def _switch_model(rt: RuntimeContext, args: str):
 
 
 
+def _statusline_segments(rt, agent) -> list:
+    """把状态行拆成段列表（工具栏和回合末状态行共用同一份拼装）。
+
+    段的顺序：模型 │ 本会话 token 用量 │ goal 状态 │ 项目名。
+    不吞异常——兜底交给调用方（_render_statusline / 工具栏各自的 try）。
+
+    参数：
+        rt: RuntimeContext
+        agent: AIAgent 实例
+    返回：段字符串列表（可能为空）。
+    """
+    segs = []
+
+    # 2. 模型段（agent.model 是实例字段，前缀 ⚡ 只是视觉锚点）
+    model = getattr(agent, "model", "") or ""
+    if model:
+        segs.append(f"⚡{model}")
+
+    # 3. token 段：优先用实时累加的用量统计（含缓存部分）；
+    #    没有就退回 session_total_tokens 老字段（兼容 mock/旧实例）。
+    usage_stats = getattr(agent, "_llm_usage_stats", None)
+    if usage_stats and isinstance(usage_stats, dict):
+        tokens = (
+            int(usage_stats.get("total_prompt_tokens", 0) or 0)
+            + int(usage_stats.get("total_completion_tokens", 0) or 0)
+        )
+    else:
+        tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
+    segs.append(f"会话 {_format_tokens(tokens)} tok")
+
+    # 4. goal 段：进行中/暂停/完成/失败才显示；已取消的视为废弃不显示
+    goal = getattr(agent, "_goal_state", None)
+    if goal is not None:
+        gstatus = getattr(goal, "status", "") or ""
+        if gstatus == "active":
+            iter_cnt = getattr(goal, "iteration_count", 0) or 0
+            segs.append(f"goal:进行中#{iter_cnt}")
+        elif gstatus == "paused":
+            segs.append("goal:已暂停")
+        elif gstatus == "completed":
+            segs.append("goal:已完成")
+        elif gstatus == "failed":
+            segs.append("goal:失败")
+        # cancelled / 未知状态 → 不显示
+
+    # 5. 项目段：取项目分区键的最后一段（就是项目名）
+    proj_key = getattr(rt, "_statusline_project_key", "") or ""
+    if proj_key:
+        tail = proj_key.rsplit("-", 1)[-1]
+        if tail:
+            segs.append(f"项目:{tail}")
+
+    return segs
+
+
 def _render_statusline(rt, agent) -> str:
     """拼一行状态摘要，每轮回答后打在屏幕上。
 
-    段的顺序：模型 │ 本会话 token 用量 │ goal 状态 │ 项目名
+    段的拼装委托给 _statusline_segments（工具栏也用同一份）。
     返回值约定：非空字符串 → 主循环打印它；空串 → 什么都不打。
     任何异常都吞掉返回空串（状态行绝不能把主流程搞挂）。
 
@@ -3286,48 +3341,7 @@ def _render_statusline(rt, agent) -> str:
         if not sl_cfg.get("enabled", True):
             return ""
 
-        segs = []
-
-        # 2. 模型段（agent.model 是实例字段，前缀 ⚡ 只是视觉锚点）
-        model = getattr(agent, "model", "") or ""
-        if model:
-            segs.append(f"⚡{model}")
-
-        # 3. token 段：优先用实时累加的用量统计（含缓存部分）；
-        #    没有就退回 session_total_tokens 老字段（兼容 mock/旧实例）。
-        usage_stats = getattr(agent, "_llm_usage_stats", None)
-        if usage_stats and isinstance(usage_stats, dict):
-            tokens = (
-                int(usage_stats.get("total_prompt_tokens", 0) or 0)
-                + int(usage_stats.get("total_completion_tokens", 0) or 0)
-            )
-        else:
-            tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
-        segs.append(f"会话 {_format_tokens(tokens)} tok")
-
-        # 4. goal 段：进行中/暂停/完成/失败才显示；已取消的视为废弃不显示
-        goal = getattr(agent, "_goal_state", None)
-        if goal is not None:
-            gstatus = getattr(goal, "status", "") or ""
-            if gstatus == "active":
-                iter_cnt = getattr(goal, "iteration_count", 0) or 0
-                segs.append(f"goal:进行中#{iter_cnt}")
-            elif gstatus == "paused":
-                segs.append("goal:已暂停")
-            elif gstatus == "completed":
-                segs.append("goal:已完成")
-            elif gstatus == "failed":
-                segs.append("goal:失败")
-            # cancelled / 未知状态 → 不显示
-
-        # 5. 项目段：取项目分区键的最后一段（就是项目名）
-        proj_key = getattr(rt, "_statusline_project_key", "") or ""
-        if proj_key:
-            tail = proj_key.rsplit("-", 1)[-1]
-            if tail:
-                segs.append(f"项目:{tail}")
-
-        return " │ ".join(segs)
+        return " │ ".join(_statusline_segments(rt, agent))
     except Exception:
         return ""
 
@@ -3436,6 +3450,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     import cli_input
     rt.prompt_session = cli_input.build_prompt_session(
         completer=cli_input.build_completer(rt),
+        toolbar_fn=cli_input.build_toolbar(rt),
     )
 
     def _input_reader():
