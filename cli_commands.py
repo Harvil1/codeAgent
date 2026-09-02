@@ -127,3 +127,29 @@ def arg_completer_map() -> Dict[str, Callable]:
 def all_tokens() -> List[str]:
     """全部可补全 token（主名+别名，去重）——补全器一级候选的数据源。"""
     return sorted(_registry.keys())
+
+
+def help_renderable():
+    """/help 的表格（按 category 分组，一行一命令：命令(别名)/用法/说明）。
+
+    返回：rich Table（调用方负责 console.print）。注册表为空时返回提示文本。
+    """
+    from rich.table import Table
+    from rich.text import Text
+
+    cmds = all_commands()
+    if not cmds:
+        return Text("（注册表为空）", style="dim")
+    table = Table(title="全部命令（/help）", show_lines=False)
+    table.add_column("命令", style="cyan", no_wrap=True)
+    table.add_column("用法", style="dim")
+    table.add_column("说明")
+    for cat in sorted({c.category or "其他" for c in cmds}):
+        # rich 13.x 的 add_section() 不收参数（只画分隔线），类别名单独作一行标题
+        table.add_section()
+        table.add_row(Text(cat, style="bold green"))
+        for c in sorted([x for x in cmds if (x.category or "其他") == cat],
+                        key=lambda x: x.name):
+            shown = c.name + (f" ({','.join(c.aliases)})" if c.aliases else "")
+            table.add_row(shown, c.usage, c.summary)
+    return table

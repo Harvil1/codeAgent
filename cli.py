@@ -1709,7 +1709,9 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
         return True
 
     if name == "/help":
-        _show_help()
+        import cli_commands as cc
+        console.print(cc.help_renderable())
+        console.print("[dim]提示：技能命令（/技能名）也会出现在 Tab 补全里[/dim]")
         return True
 
     if name == "/new":
@@ -3892,8 +3894,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     and all(c.isalnum() or c in "_-" for c in _name)
                 )
                 if _is_cmd_like:
+                    import cli_commands as _cc
+                    _near = _cc.suggest(cmd_name)
+                    _hint = f"；你是不是想敲 {'/'.join(_near)}" if _near else ""
                     console.print(
-                        f"[yellow]未知命令 {cmd_name}（/help 查看命令列表；"
+                        f"[yellow]未知命令 {cmd_name}（/help 查看命令列表{_hint}；"
                         "要作为消息发送请调整开头写法）[/yellow]"
                     )
                     continue
