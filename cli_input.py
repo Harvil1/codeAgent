@@ -124,12 +124,21 @@ class SlashCompleter:
                         from prompt_toolkit.completion import Completion
                         yield Completion(t, start_position=-len(frag))
             else:
-                # 二级：该命令的参数补全
+                # 二级：该命令的参数补全（替换正在输入的最后一个词，
+                # 而不是光标处硬塞——/sessions re 选 resume 要变成
+                # /sessions resume，不是 /sessions reresume）
                 fn = self._arg_completers.get(parts[0])
                 if fn:
                     from prompt_toolkit.completion import Completion
+                    frag = text[len(parts[0]):].lstrip().split()[-1] if \
+                        text[len(parts[0]):].lstrip().split() else ""
                     for cand in fn(text) or []:
-                        yield Completion(str(cand))
+                        if frag and not str(cand).startswith(frag):
+                            continue  # 前缀不匹配的候选不出（对齐一级行为）
+                        yield Completion(
+                            str(cand),
+                            start_position=-len(frag) if frag else 0,
+                        )
         except Exception:
             return
 
