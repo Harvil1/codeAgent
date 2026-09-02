@@ -197,7 +197,7 @@ def build_completer(rt):
 def build_toolbar(rt):
     """底部工具栏：等待期常驻的上下文条。
 
-    内容：⚡模型 │ 当前目录尾段 │ ☂N个后台任务 │ 按键提示。
+    内容：⚡模型 │ 当前目录尾段 │ ☂N个后台任务 │ ◐正在跑的工具 │ 按键提示。
     任何异常都吞——工具栏挂了不能挡输入（fail-open）。
     """
     def _toolbar():
@@ -214,6 +214,9 @@ def build_toolbar(rt):
             bg = getattr(rt, "bg_count", None)
             if bg:
                 segs.append(f"☂{bg}个后台任务")
+            pend = getattr(rt, "event_pending", None)
+            if pend:
+                segs.append(f"◐{pend[-1]}")  # 正在跑的工具（最晚出发的）
             segs.append("Enter发送 Esc↵多行")
             return " │ ".join(segs)
         except Exception:
