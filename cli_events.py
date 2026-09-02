@@ -2,9 +2,10 @@
 
 设计一句话：**完成才打行，等待靠工具栏**。
 - PRE（工具开始）：只记时间戳 + 维护 rt.event_pending（工具栏 ◐ 段读它）；
-  子代理出发是时刻事件，PRE 就打行
-- POST（工具结束）：配对算耗时，打完成行（✓/✗ + 参数摘要 + 结果摘要）
-- FAILURE（工具抛异常）：打 ✗ 行
+  子代理出发是时刻事件，PRE 就打行；降级终端（没工具栏）补打 ◐ 出发行
+- POST（工具结束）：配对算耗时，打完成行（✓/✗ + 参数摘要 + 结果摘要）；
+  失败也走 POST（结果含 error → ✗ 行）——不另挂 FAILURE 钩子，
+  否则一次失败会打两行 ✗（model_tools 对含 error 的结果两个钩子都发）
 - 全部 try/except 吞掉——纯视觉，绝不挡工具执行（fail-open）
 """
 
@@ -114,6 +115,17 @@ def format_subagent_done(args, dt, result_str) -> str:
     return head
 
 
+def is_async_subagent_result(result_str: str) -> bool:
+    """判断 subagent 工具的返回是不是「后台异步已受理」而不是真结果。"""
+    try:
+        data = json.loads(result_str or "{}")
+    except Exception:
+        return False
+    return isinstance(data, dict) and (
+        data.get("mode") == "async" or ("delegation_id" in data and data.get("success"))
+    )
+
+
 def format_task_event(tool_name, result_str) -> str:
     """任务事件行：创建/完成两种（update 不打，太吵）。
 
@@ -169,16 +181,39 @@ class EventPairer:
         self._pending[name] += 1
 
     def pop(self, name, args):
-        q = self._starts.get(self._key(name, args))
+        key = self._key(name, args)
+        q = self._starts.get(key)
         if not q:
             return None
         dt = time.monotonic() - q.popleft()
+        if not q:
+            del self._starts[key]   # 键用完就删：参数json可能含整个文件内容，不留在内存
         self._pending[name] = max(0, self._pending.get(name, 1) - 1)
         return dt
+
+    def clear(self):
+        """全部清空（回合开始时调用，防 PRE 无 POST 配对的幻影 ◐ 残留）。"""
+        self._starts.clear()
+        self._pending.clear()
 
     def pending_names(self) -> list:
         """当前没跑完的工具名列表（按记录顺序自然去重）。"""
         return [n for n, c in self._pending.items() if c > 0]
+
+
+def reset_pending(rt) -> None:
+    """回合开始时清 ◐ 黑板（cli 主循环每回合调用一次）。
+
+    为什么需要：钩子拒绝/参数改写等路径会让 PRE 记的起点永远配不上
+    POST——不清板的话工具栏会一直挂着幻影「◐ 工具名」。
+    """
+    try:
+        rt.event_pending = []
+        pairer = getattr(rt, "_event_pairer", None)
+        if pairer is not None:
+            pairer.clear()
+    except Exception:
+        pass
 
 
 _SUBAGENT_TOOLS = {"subagent", "delegate_task"}
@@ -186,14 +221,17 @@ _TASK_TOOLS = {"task_create", "task_complete"}
 
 
 def install_event_lines(rt) -> None:
-    """把三类钩子装到 agent 上（run_interactive 装配区调用一次）。
+    """把两类钩子装到 agent 上（run_interactive 装配区调用一次）。
 
     取代老的 pre-only ⏺ 行钩子：PRE 只记时间戳/子代理出发行，
     POST 打完成行。rt.event_pending 是给工具栏 ◐ 段读的黑板。
+    不挂 FAILURE 钩子——POST 对含 error 的结果已打 ✗ 行，
+    再挂会一次失败打两行（model_tools 两个钩子都发）。
     """
     from cli_ui import console
 
     pairer = EventPairer()
+    rt._event_pairer = pairer   # 挂到 rt 上：回合开始时 reset_pending 清板用
     rt.event_pending = []
 
     def _update_pending():
@@ -210,6 +248,10 @@ def install_event_lines(rt) -> None:
             _update_pending()
             if tool_name in _SUBAGENT_TOOLS:
                 console.print(f"[dim]{format_subagent_depart(args)}[/dim]")
+            # 降级路径没有底部工具栏，等待期反馈退回老办法：出发时打一行
+            if getattr(rt, "prompt_session", None) is None \
+                    and tool_name not in _SUBAGENT_TOOLS:
+                console.print(f"[dim]◐ {tool_name}[/dim]")
         except Exception:
             pass
 
@@ -220,6 +262,10 @@ def install_event_lines(rt) -> None:
             dt = pairer.pop(tool_name, args)
             _update_pending()
             if tool_name in _SUBAGENT_TOOLS:
+                # 后台异步派发立即返回受理回执（子代理还没跑完）——
+                # 只当「已出发」处理，不当「已完成」
+                if is_async_subagent_result(result):
+                    return result
                 console.print(f"[dim]{format_subagent_done(args, dt, result)}[/dim]")
             elif tool_name in _TASK_TOOLS:
                 console.print(f"[dim]{format_task_event(tool_name, result)}[/dim]")
@@ -229,21 +275,10 @@ def install_event_lines(rt) -> None:
             pass
         return result
 
-    def _on_failure(payload):
-        """工具抛异常：✗ 行（payload 带 tool/error）。"""
-        try:
-            tool = payload.get("tool", "?")
-            err = _cut(payload.get("error", ""), 40)
-            console.print(f"[dim]⏺ {tool} ✗ {err}[/dim]")
-        except Exception:
-            pass
-
     try:
         rt.agent.hooks_registry.register_pre_tool_use(
             _on_pre, name="cli_tool_event_line")
         rt.agent.hooks_registry.register_post_tool_use(
             _on_post, name="cli_tool_event_line")
-        rt.agent.hooks_registry.register_post_tool_use_failure(
-            _on_failure, name="cli_tool_event_line")
     except Exception as e:
         logger.error("事件行钩子登记失败（进度展示将缺失）: %s", e)

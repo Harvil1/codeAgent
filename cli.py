@@ -3621,6 +3621,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     )
                 try:
                     console.print("[bold green]AI:[/bold green]")
+                    cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
                     rt.turn_active = True
                     try:
                         response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
@@ -3796,6 +3797,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # run_conversation 是 async，但 run_interactive 保持同步签名
                 # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
                 # asyncio.run 驱动一次完整的异步对话。
+                cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
                 rt.turn_active = True
                 try:
                     response = asyncio.run(rt.agent.run_conversation(agent_input))
