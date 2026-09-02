@@ -91,3 +91,65 @@ def invalidate(session) -> None:
             session.app.invalidate()
     except Exception:
         pass
+
+
+class SlashCompleter:
+    """三级补全：命令名（注册表+技能+技能束同一池）→ 命令参数。
+
+    实现成 prompt_toolkit 的 Completer 协议（实现 get_completions 生成器）。
+    铁律：任何异常都吞掉返回空——补全挂了不能挡住打字。
+    """
+
+    def __init__(self, registry_tokens, arg_completers, dynamic_tokens_fn):
+        self._registry_tokens = list(registry_tokens)   # 含别名
+        self._arg_completers = dict(arg_completers)
+        self._dynamic_tokens_fn = dynamic_tokens_fn     # () -> 技能/技能束命令名
+
+    def get_completions(self, document, complete_event):
+        try:
+            text = document.text
+            if not text.startswith("/"):
+                return
+            parts = text.split()
+            if len(parts) <= 1 and not text.endswith(" "):
+                # 一级：命令名补全（静态注册表 + 动态技能池合并）
+                tokens = set(self._registry_tokens)
+                try:
+                    tokens.update(self._dynamic_tokens_fn() or [])
+                except Exception:
+                    pass
+                frag = parts[0] if parts else ""
+                for t in sorted(tokens):
+                    if t.startswith(frag):
+                        from prompt_toolkit.completion import Completion
+                        yield Completion(t, start_position=-len(frag))
+            else:
+                # 二级：该命令的参数补全
+                fn = self._arg_completers.get(parts[0])
+                if fn:
+                    from prompt_toolkit.completion import Completion
+                    for cand in fn(text) or []:
+                        yield Completion(str(cand))
+        except Exception:
+            return
+
+
+def build_completer(rt):
+    """从注册表 + rt 的技能/技能束命令组装补全器。
+
+    动态部分用闭包按需现取（技能中途增删也能补全到最新）。
+    """
+    import cli_commands as cc
+
+    def dynamic_tokens():
+        try:
+            return list(getattr(rt, "skill_commands", {}) or {}) + \
+                   list(getattr(rt, "bundle_commands", {}) or {})
+        except Exception:
+            return []
+
+    return SlashCompleter(
+        registry_tokens=cc.all_tokens(),
+        arg_completers=cc.arg_completer_map(),
+        dynamic_tokens_fn=dynamic_tokens,
+    )

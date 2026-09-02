@@ -3432,6 +3432,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     # 处理器记录；输入线程消费中断信号时用它去重同一次按键
     _last_ctrl_c = 0.0
 
+    # === 输入层装配：prompt_toolkit 会话（失败自动降级） ===
+    import cli_input
+    rt.prompt_session = cli_input.build_prompt_session(
+        completer=cli_input.build_completer(rt),
+    )
+
     def _input_reader():
         """守护线程：不停读键盘输入塞进队列（读到文件末尾/出错就收工）。
 
