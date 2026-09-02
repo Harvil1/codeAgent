@@ -3597,7 +3597,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
                 # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
                 if not getattr(rt.agent, "_stream_callback", None):
-                    console.print(response)
+                    from rich.markdown import Markdown
+                    try:
+                        console.print(Markdown(response))
+                    except Exception:
+                        console.print(response)  # 渲染失败退回纯文本（fail-open）
                 elif response and response.startswith(
                     ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
                      "[模型只产出了思考过程", "[LLM 返回了空响应")
@@ -3768,7 +3772,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             # 但 LLM 失败/预算耗尽这类兜底文案不走流式（没有内容增量），
             # 必须主动打印——否则用户会看到"没反应就断了"。
             if not getattr(rt.agent, "_stream_callback", None):
-                console.print(response)
+                from rich.markdown import Markdown
+                try:
+                    console.print(Markdown(response))
+                except Exception:
+                    console.print(response)  # 渲染失败退回纯文本（fail-open）
             elif response and response.startswith(
                 ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
                  "[模型只产出了思考过程", "[LLM 返回了空响应")
