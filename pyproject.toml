@@ -10,6 +10,7 @@ dependencies = [
     "httpx>=0.28.1",
     "jsonschema>=4.26.0",
     "openai>=1.0.0,<2",
+    "prompt-toolkit>=3.0",
     "pyyaml==6.0.2",
     "requests>=2.34.2",
     "rich==13.9.4",
@@ -20,7 +21,7 @@ dependencies = [
 codeagent = "main:main"
 
 [tool.setuptools]
-py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_diag_cmds", "cli_session_cmds", "cli_skill_memory_cmds", "agent_profile", "curator_cli", "cli_commands"]
+py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_diag_cmds", "cli_session_cmds", "cli_skill_memory_cmds", "agent_profile", "curator_cli", "cli_commands", "cli_input"]
 
 [tool.setuptools.packages.find]
 include = ["agent*", "tools*", "plugins*", "scripts*", "skills*"]
