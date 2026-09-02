@@ -1280,6 +1280,14 @@ def _make_ask_user_bridge():
             border_style="cyan",
         ))
 
+        def _echo(answers):
+            """选完回显一行，让「我选了什么」看得见（紧凑事件行风格）。"""
+            try:
+                if answers:
+                    console.print(f"[dim]❓ 已选：{'、'.join(answers)}[/dim]")
+            except Exception:
+                pass
+
         if multi:
             # 多选：逗号分隔，数字段选选项、文字段算自定义答案（混着用也行）
             raw = console.input(
@@ -1294,6 +1302,7 @@ def _make_ask_user_bridge():
                     answers.append(options[int(part) - 1]["label"])
                 elif not part.isdigit():
                     answers.append(part)
+            _echo(answers)
             return answers
 
         # 单选：数字选选项；选「其他」的序号或直接输入文字都算自定义答案
@@ -1301,11 +1310,15 @@ def _make_ask_user_bridge():
         if raw.isdigit():
             idx = int(raw)
             if 1 <= idx <= n:
+                _echo([options[idx - 1]["label"]])
                 return [options[idx - 1]["label"]]
             if idx == n + 1:
                 custom = console.input("[bold]请输入你的答案 > [/bold] ").strip()
+                _echo([custom] if custom else [])
                 return [custom] if custom else []
+            _echo([])
             return []
+        _echo([raw] if raw else [])
         return [raw] if raw else []
     return bridge
 
