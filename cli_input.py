@@ -17,22 +17,28 @@ logger = logging.getLogger(__name__)
 _PROMPT_TEXT = "你: "
 
 
-def _build_key_bindings():
-    """两组快捷键（大白话：输入框的行为规则）。
+def _build_key_bindings(interrupt_fn=None):
+    """三组行为规则（大白话：输入框怎么响应特殊键）。
 
-    - Ctrl+C：框里有字 → 清行（防误触丢半行字）；空框 → 退出程序
-      （抛 KeyboardInterrupt，与老语义「等输入时 Ctrl+C=退出」一致）
+    - Ctrl+C：框里有字 → 清行（防误触丢半行字）；回合进行中 → 中断当前
+      回合（输入线程保持活着继续读）；空闲空框 → 退出程序（老语义不变）
     - Esc 回车：提交多行内容（单行直接回车提交，互不干扰）
+
+    为什么回合中中断要靠键位回调：prompt_toolkit 的原始模式会吃掉系统
+    Ctrl+C 信号，主线程的老 except KeyboardInterrupt 通道收不到——只能
+    在键位处理里主动调 agent.interrupt()。
     """
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
 
     @kb.add("c-c")
-    def _clear_or_exit(event):
+    def _clear_or_interrupt_or_exit(event):
         buffer = event.app.current_buffer
         if buffer.text:
             buffer.reset()
+        elif interrupt_fn is not None and interrupt_fn():
+            pass  # 回合进行中：中断回合；提示符保持，输入线程活着
         else:
             event.app.exit(exception=KeyboardInterrupt)
 
@@ -43,12 +49,36 @@ def _build_key_bindings():
     return kb
 
 
-def build_prompt_session(completer=None, toolbar_fn=None):
+def build_interrupt_fn(is_active_fn, do_interrupt_fn):
+    """造 Ctrl+C 的「回合中中断」判断器。
+
+    参数：
+        is_active_fn：() -> bool，当前是否有 AI 回合在跑
+        do_interrupt_fn：() -> None，真正执行中断（agent.interrupt + 取消子代理）
+
+    返回：() -> bool——True 表示「回合在跑，已触发中断」（键位保持提示符）；
+        False 表示「空闲」（键位走退出通道）。任何异常都按 False 处理
+        （fail-open：中断通道出问题不能挡住退出语义）。
+    """
+    def _interrupt():
+        try:
+            if not is_active_fn():
+                return False
+            do_interrupt_fn()
+            return True
+        except Exception:
+            return False
+    return _interrupt
+
+
+def build_prompt_session(completer=None, toolbar_fn=None, interrupt_fn=None):
     """造全局 PromptSession；环境不支持时返回 None（降级通道）。
 
     参数：
         completer: prompt_toolkit Completer（Task 5 接入，先留参数位）
         toolbar_fn: 底部工具栏刷新函数（Task 6 接入）
+        interrupt_fn: Ctrl+C 回合中中断判断器（() -> bool；None=老语义
+            只有清行/退出两档）
 
     返回：PromptSession 实例；None 表示环境不可用，调用方退回 console.input。
     """
@@ -60,7 +90,7 @@ def build_prompt_session(completer=None, toolbar_fn=None):
         history_path = get_codeagent_home() / ".input_history"
         return PromptSession(
             history=FileHistory(str(history_path)),
-            key_bindings=_build_key_bindings(),
+            key_bindings=_build_key_bindings(interrupt_fn),
             completer=completer,
             bottom_toolbar=toolbar_fn,
             complete_while_typing=True,

@@ -1746,13 +1746,17 @@ def cmd_plan(args: str, rt) -> bool:
 
 @slash_command(name="/goal", category="交互配置",
                usage="/goal <obj>|status|pause|resume|clear|tasks",
-               summary="目标驱动多轮")
+               summary="目标驱动多轮",
+               arg_completer=lambda text: [
+                   "status", "pause", "resume", "continue", "clear", "tasks",
+               ])
 def cmd_goal(args: str, rt) -> bool:
     return _handle_goal_command(args, rt)
 
 
 @slash_command(name="/poor", category="交互配置", usage="/poor [on|off|status]",
-               summary="穷鬼模式（一键关烧钱功能）")
+               summary="穷鬼模式（一键关烧钱功能）",
+               arg_completer=lambda text: ["on", "off", "status"])
 def cmd_poor(args: str, rt) -> bool:
     return _handle_poor_command(args, rt)
 
@@ -3267,11 +3271,12 @@ def _switch_model(rt: RuntimeContext, args: str):
 
 
 
-def _statusline_segments(rt, agent) -> list:
-    """把状态行拆成段列表（工具栏和回合末状态行共用同一份拼装）。
+def _statusline_segments(rt, agent) -> list[str]:
+    """回合末状态行的段拼装（底部工具栏是独立轻量拼装，见
+    cli_input.build_toolbar，不走这里）。
 
     段的顺序：模型 │ 本会话 token 用量 │ goal 状态 │ 项目名。
-    不吞异常——兜底交给调用方（_render_statusline / 工具栏各自的 try）。
+    不吞异常——兜底交给调用方（_render_statusline 的 try）。
 
     参数：
         rt: RuntimeContext
@@ -3325,7 +3330,7 @@ def _statusline_segments(rt, agent) -> list:
 def _render_statusline(rt, agent) -> str:
     """拼一行状态摘要，每轮回答后打在屏幕上。
 
-    段的拼装委托给 _statusline_segments（工具栏也用同一份）。
+    段的拼装委托给 _statusline_segments。
     返回值约定：非空字符串 → 主循环打印它；空串 → 什么都不打。
     任何异常都吞掉返回空串（状态行绝不能把主流程搞挂）。
 
@@ -3448,9 +3453,27 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
     # === 输入层装配：prompt_toolkit 会话（失败自动降级） ===
     import cli_input
+
+    # === Ctrl+C 回合中中断：pt 原始模式吃掉系统信号，靠 c-c 键位回调补通道 ===
+    rt.turn_active = False
+
+    def _do_turn_interrupt():
+        rt.agent.interrupt()
+        try:
+            from tools.delegate_tool import cancel_all_subagents
+            cancel_all_subagents("用户中断（Ctrl+C）")
+        except Exception:
+            pass
+
+    _interrupt_fn = cli_input.build_interrupt_fn(
+        lambda: getattr(rt, "turn_active", False),
+        _do_turn_interrupt,
+    )
+
     rt.prompt_session = cli_input.build_prompt_session(
         completer=cli_input.build_completer(rt),
         toolbar_fn=cli_input.build_toolbar(rt),
+        interrupt_fn=_interrupt_fn,
     )
 
     # === 等待期工具事件行：AI 每调一个工具打一行暗色事件 ===
@@ -3490,7 +3513,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # 保持老语义：等输入时按 Ctrl+C = 退出程序
                 _input_q.put(_INTERRUPT_SENTINEL)
                 return
-            except Exception:
+            except Exception as e:
+                logger.error("输入线程异常退出: %s", e)
                 return
     _input_thread = _threading_mod.Thread(target=_input_reader, daemon=True)
     _input_thread.start()
@@ -3551,51 +3575,244 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             pass
 
     # 主循环：读输入 → 处理 → 调 agent → 显示，循环往复
-    while True:
-        # 优先消费模型运行期间排队的 slash 命令（agent 的排队
-        # 机制会把它们分流到 _queued_cli_commands；对话一结束就在这里
-        # 按正常命令执行掉）
-        _deferred = getattr(rt.agent, "_queued_cli_commands", None)
-        if _deferred:
-            user_input = _deferred.pop(0)
-        else:
-            user_input = _input_q.get()
-        if user_input is _EOF_SENTINEL:
-            console.print("\n再见！")
-            break
-        if user_input is _INTERRUPT_SENTINEL:
-            # 同一次 Ctrl+C 可能同时被输入线程（本信号）和
-            # 主线程（回合内中断，已记 _last_ctrl_c）两边消费——窗口内到达的
-            # 信号是重复消费，吞掉不退出；空闲等输入时的 Ctrl+C 保持退出语义
-            if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
+    from contextlib import ExitStack
+    with ExitStack() as _patch_es:
+        # pt 会话活着才需要 patch_stdout（把主线程打印排队到提示符重绘之后，
+        # 防止输出和输入框/工具栏互相撕烂）；降级路径（session=None）不折腾
+        if getattr(rt, "prompt_session", None) is not None:
+            try:
+                from prompt_toolkit.patch_stdout import patch_stdout
+                _patch_es.enter_context(patch_stdout())
+            except Exception as _pe:
+                logger.warning("patch_stdout 不可用（输出可能与输入框偶发交错）: %s", _pe)
+        while True:
+            # 优先消费模型运行期间排队的 slash 命令（agent 的排队
+            # 机制会把它们分流到 _queued_cli_commands；对话一结束就在这里
+            # 按正常命令执行掉）
+            _deferred = getattr(rt.agent, "_queued_cli_commands", None)
+            if _deferred:
+                user_input = _deferred.pop(0)
+            else:
+                user_input = _input_q.get()
+            if user_input is _EOF_SENTINEL:
                 console.print("\n再见！")
                 break
-            continue
+            if user_input is _INTERRUPT_SENTINEL:
+                # 同一次 Ctrl+C 可能同时被输入线程（本信号）和
+                # 主线程（回合内中断，已记 _last_ctrl_c）两边消费——窗口内到达的
+                # 信号是重复消费，吞掉不退出；空闲等输入时的 Ctrl+C 保持退出语义
+                if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
+                    console.print("\n再见！")
+                    break
+                continue
 
-        # idle wake（后台唤醒）：后台任务/异步子代理完成时塞进来的哨兵。
-        # 预检没货（通知已被正在跑的回合消费掉了）就静默跳过——防哨兵
-        # 风暴空烧 LLM。这不是用户输入：跳过粘贴转存/输入历史/slash/
-        # 技能等所有用户输入分支，直接走对话执行。
-        if user_input is _BG_WAKE_SENTINEL:
-            if not rt.agent.has_pending_wake_payload():
+            # idle wake（后台唤醒）：后台任务/异步子代理完成时塞进来的哨兵。
+            # 预检没货（通知已被正在跑的回合消费掉了）就静默跳过——防哨兵
+            # 风暴空烧 LLM。这不是用户输入：跳过粘贴转存/输入历史/slash/
+            # 技能等所有用户输入分支，直接走对话执行。
+            if user_input is _BG_WAKE_SENTINEL:
+                if not rt.agent.has_pending_wake_payload():
+                    continue
+                if not _wake_budget.consume():
+                    console.print(
+                        "[dim][连续自动唤醒已达上限，后台通知暂存，"
+                        "等用户下次输入时一并处理][/dim]"
+                    )
+                    continue
+                console.print("[dim][后台任务完成，自动继续][/dim]")
+                # 唤醒消息按普通 user 消息入会话库（审计可见、恢复后上下文连贯）
+                if rt.session_store and rt.session_id:
+                    rt.session_store.append_message(
+                        rt.session_id, "user", _BG_WAKE_MESSAGE,
+                    )
+                try:
+                    console.print("[bold green]AI:[/bold green]")
+                    rt.tool_events = []  # 新回合，工具计数从零开始
+                    rt.turn_active = True
+                    try:
+                        response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
+                    finally:
+                        rt.turn_active = False
+                    # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
+                    if not getattr(rt.agent, "_stream_callback", None):
+                        from rich.markdown import Markdown
+                        try:
+                            console.print(Markdown(response))
+                        except Exception:
+                            console.print(response)  # 渲染失败退回纯文本（fail-open）
+                    elif response and response.startswith(
+                        ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+                         "[模型只产出了思考过程", "[LLM 返回了空响应")
+                    ):
+                        console.print(f"[yellow]{response}[/yellow]")
+                    if rt.session_store and rt.session_id:
+                        rt.session_store.append_message(
+                            rt.session_id, "assistant", response,
+                        )
+                    try:
+                        _sl = _render_statusline(rt, rt.agent)
+                        if _sl:
+                            console.print(f"[dim]{_sl}[/dim]")
+                    except Exception as _e:
+                        logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+                except KeyboardInterrupt:
+                    rt.agent.interrupt()
+                    try:
+                        from tools.delegate_tool import cancel_all_subagents
+                        cancel_all_subagents("用户中断（后台唤醒轮）")
+                    except Exception:
+                        pass
+                    _last_ctrl_c = time.monotonic()  # 给中断信号去重当锚点
+                    console.print("[yellow]\n[已中断][/yellow]")
+                except Exception as e:
+                    console.print(f"[red]错误: {e}[/red]")
+                    logger.exception("agent 运行错误（后台唤醒轮）")
                 continue
-            if not _wake_budget.consume():
-                console.print(
-                    "[dim][连续自动唤醒已达上限，后台通知暂存，"
-                    "等用户下次输入时一并处理][/dim]"
-                )
+
+            if not user_input:
                 continue
-            console.print("[dim][后台任务完成，自动继续][/dim]")
-            # 唤醒消息按普通 user 消息入会话库（审计可见、恢复后上下文连贯）
-            if rt.session_store and rt.session_id:
-                rt.session_store.append_message(
-                    rt.session_id, "user", _BG_WAKE_MESSAGE,
-                )
+
+            # 用户真实输入：唤醒预算回血（自动唤醒不许自回血，只有真人说话算数）
+            _wake_budget.reset()
+
+            # 大段粘贴内容转存外部文件 + 留占位符（会话库里只存
+            # 占位符省空间，发送时再展开）
+            from agent.input_history import store_paste_if_large
+            user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
+
+            # 记入全局输入历史（跨会话可召回，宽松失败）。
+            # 必须先转外存再记历史——历史里存的是占位符而不是大原文
+            #（顺序反了的话 history.jsonl 会存进未替换的大原文，越滚越大）
             try:
+                from agent.input_history import GlobalHistory
+                GlobalHistory(rt.home).append(user_input)
+            except Exception:
+                pass
+
+            # 0. `#` 开头 = 快捷写记忆
+            if user_input.startswith("#"):
+                text = user_input[1:].strip()
+                if text:
+                    _quick_save_memory(rt, text)
+                else:
+                    console.print("[yellow]用法：# <记忆内容>（如 # 项目用 pytest）[/yellow]")
+                continue
+
+            # 1. 处理 slash 命令（/ 开头的指令）
+            if user_input.startswith("/"):
+                # 先看是不是技能束/技能命令（命令名统一按 split()[0]
+                # 解析，与下面技能束/技能触发用同一套规则）
+                cmd_name = user_input.split()[0]
+                if cmd_name in rt.bundle_commands:
+                    pass  # 是技能束 → 跳过分发，走下面的技能束触发逻辑
+                elif cmd_name in rt.skill_commands:
+                    pass  # 是技能 → 跳过分发，走下面的技能触发逻辑
+                elif _handle_command(user_input, rt):
+                    if rt.quit_requested:
+                        break  # /quit 请求：跳出循环走正常关机（rt.shutdown()）
+                    continue
+                else:
+                    # 不认识的 slash 命令——形如命令名（/word）时报错
+                    # 不发给模型（否则 /sesion 这类敲错的命令会整条静默
+                    # 发给 LLM）。路径形态（如 "/etc/passwd 是什么"）不拦，
+                    # 正常当消息发送。
+                    _name = cmd_name[1:]
+                    _is_cmd_like = (
+                        _name
+                        and _name[0].isalpha()
+                        and all(c.isalnum() or c in "_-" for c in _name)
+                    )
+                    if _is_cmd_like:
+                        import cli_commands as _cc
+                        _near = _cc.suggest(cmd_name.lower())
+                        _hint = f"；你是不是想敲 {' 或 '.join(_near)}" if _near else ""
+                        console.print(
+                            f"[yellow]未知命令 {cmd_name}（/help 查看命令列表{_hint}；"
+                            "要作为消息发送请调整开头写法）[/yellow]"
+                        )
+                        continue
+
+            # 2. 检查是否触发技能束（命令名解析规则与步骤 1 相同）
+            cmd_name = user_input.split()[0]
+            if cmd_name in rt.bundle_commands:
+                bundle_info = rt.bundle_commands[cmd_name]
+                rest_msg = user_input[len(cmd_name):].strip()
+                user_input = execute_bundle(
+                    bundle_info["name"],
+                    rest_msg or "(执行此技能束中的所有技能)",
+                    skills_dir(),
+                )
+                console.print(f"[dim][已触发技能束: {bundle_info['name']}（{len(bundle_info['skills'])} 个技能）][/dim]")
+            # 3. 检查是否触发技能
+            elif cmd_name in rt.skill_commands:
+                skill_info = rt.skill_commands[cmd_name]
+                rest_msg = user_input[len(cmd_name):].strip()
+                # 声明了 context:fork 的技能放到隔离子代理里跑
+                if skill_info.get("context") == "fork" and getattr(rt, "agent", None) is not None:
+                    from pathlib import Path as _P
+                    from agent.skill_commands import parse_frontmatter as _pf
+                    from agent.skill_fork import run_skill_in_fork
+                    _raw = _P(skill_info["skill_md_path"]).read_text(encoding="utf-8")
+                    _, _body_only = _pf(_raw)
+                    _fork_result = run_skill_in_fork(
+                        skill_name=skill_info["name"],
+                        skill_body=_body_only,
+                        user_query=rest_msg or "(执行此技能)",
+                        agent_ref=rt.agent,
+                    )
+                    user_input = (
+                        f"[技能 {skill_info['name']} 在隔离子代理执行完毕]\n\n"
+                        f"{_fork_result}"
+                    )
+                else:
+                    user_input = execute_skill(
+                        skill_info["skill_md_path"],
+                        rest_msg or "(执行此技能)",
+                    )
+                # 记一次技能使用（用于统计和推荐）
+                bump_use(skills_dir(), skill_info["name"])
+                console.print(f"[dim][已触发技能: {skill_info['name']}][/dim]")
+
+            # 3. 保存用户消息到 session
+            if rt.session_store and rt.session_id:
+                rt.session_store.append_message(rt.session_id, "user", user_input)
+
+                # 第一条消息后自动给会话起标题（方便 /sessions 列表辨认）
+                session_info = rt.session_store.get_session(rt.session_id)
+                maybe_set_title(
+                    rt.session_store, rt.session_id,
+                    user_input,
+                    session_info.get("title") if session_info else None,
+                )
+
+            # 4. 调用 agent（把消息交给 AI，拿回答）
+            try:
+                # 发给 agent 前展开粘贴引用（会话库里存的是占位符）
+                from agent.input_history import expand_paste_references
+                agent_input = expand_paste_references(user_input, rt.home)
+                # Checkpoint：每条用户消息发出前拍快照（/rewind 可回滚）
+                if rt.checkpoint_mgr:
+                    try:
+                        rt.checkpoint_mgr.create_snapshot(
+                            conversation=list(rt.agent.conversation_history),
+                        )
+                    except Exception as e:
+                        logger.warning("checkpoint 快照失败: %s", e)
+                # 先打 "AI:" 前缀，流式输出会接在这个前缀后面显示
                 console.print("[bold green]AI:[/bold green]")
+                # run_conversation 是 async，但 run_interactive 保持同步签名
+                # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
+                # asyncio.run 驱动一次完整的异步对话。
                 rt.tool_events = []  # 新回合，工具计数从零开始
-                response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
-                # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
+                rt.turn_active = True
+                try:
+                    response = asyncio.run(rt.agent.run_conversation(agent_input))
+                finally:
+                    rt.turn_active = False
+                # 流式模式（设了流式回调）下内容在对话过程中已经实时显示过，
+                # 不重复打印。非流式模式才打印 response。
+                # 但 LLM 失败/预算耗尽这类兜底文案不走流式（没有内容增量），
+                # 必须主动打印——否则用户会看到"没反应就断了"。
                 if not getattr(rt.agent, "_stream_callback", None):
                     from rich.markdown import Markdown
                     try:
@@ -3606,11 +3823,19 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
                      "[模型只产出了思考过程", "[LLM 返回了空响应")
                 ):
+                    # 流式模式下的兜底消息（空响应/纯思考/预算耗尽/LLM 失败）
+                    # 不经过流式回调，必须主动打印——不然用户看到"AI:"后面一片空白
                     console.print(f"[yellow]{response}[/yellow]")
+
+                # 5. 保存助手响应到 session
                 if rt.session_store and rt.session_id:
                     rt.session_store.append_message(
                         rt.session_id, "assistant", response,
                     )
+
+                # 每轮回答完打印状态行（模型/token/goal/项目）
+                # 放在回答完整输出之后、不接 Live 动态刷新（Windows 上跟 input()
+                # 有冲突）；中断/异常路径都不打（用户主动断开就别再追加信息了）。
                 try:
                     _sl = _render_statusline(rt, rt.agent)
                     if _sl:
@@ -3619,201 +3844,18 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
             except KeyboardInterrupt:
                 rt.agent.interrupt()
+                # 批量/异步子代理跑在线程池里收不到 Ctrl+C 信号，
+                # 必须在这里显式按下它们的取消旗，否则进程退出被吊死
                 try:
                     from tools.delegate_tool import cancel_all_subagents
-                    cancel_all_subagents("用户中断（后台唤醒轮）")
+                    cancel_all_subagents("用户中断")
                 except Exception:
                     pass
-                _last_ctrl_c = time.monotonic()  # 给中断信号去重当锚点
+                _last_ctrl_c = time.monotonic()  # 记下时间戳，给信号去重当锚点
                 console.print("[yellow]\n[已中断][/yellow]")
             except Exception as e:
                 console.print(f"[red]错误: {e}[/red]")
-                logger.exception("agent 运行错误（后台唤醒轮）")
-            continue
-
-        if not user_input:
-            continue
-
-        # 用户真实输入：唤醒预算回血（自动唤醒不许自回血，只有真人说话算数）
-        _wake_budget.reset()
-
-        # 大段粘贴内容转存外部文件 + 留占位符（会话库里只存
-        # 占位符省空间，发送时再展开）
-        from agent.input_history import store_paste_if_large
-        user_input, _pasted_to = store_paste_if_large(user_input, rt.home)
-
-        # 记入全局输入历史（跨会话可召回，宽松失败）。
-        # 必须先转外存再记历史——历史里存的是占位符而不是大原文
-        #（顺序反了的话 history.jsonl 会存进未替换的大原文，越滚越大）
-        try:
-            from agent.input_history import GlobalHistory
-            GlobalHistory(rt.home).append(user_input)
-        except Exception:
-            pass
-
-        # 0. `#` 开头 = 快捷写记忆
-        if user_input.startswith("#"):
-            text = user_input[1:].strip()
-            if text:
-                _quick_save_memory(rt, text)
-            else:
-                console.print("[yellow]用法：# <记忆内容>（如 # 项目用 pytest）[/yellow]")
-            continue
-
-        # 1. 处理 slash 命令（/ 开头的指令）
-        if user_input.startswith("/"):
-            # 先看是不是技能束/技能命令（命令名统一按 split()[0]
-            # 解析，与下面技能束/技能触发用同一套规则）
-            cmd_name = user_input.split()[0]
-            if cmd_name in rt.bundle_commands:
-                pass  # 是技能束 → 跳过分发，走下面的技能束触发逻辑
-            elif cmd_name in rt.skill_commands:
-                pass  # 是技能 → 跳过分发，走下面的技能触发逻辑
-            elif _handle_command(user_input, rt):
-                if rt.quit_requested:
-                    break  # /quit 请求：跳出循环走正常关机（rt.shutdown()）
-                continue
-            else:
-                # 不认识的 slash 命令——形如命令名（/word）时报错
-                # 不发给模型（否则 /sesion 这类敲错的命令会整条静默
-                # 发给 LLM）。路径形态（如 "/etc/passwd 是什么"）不拦，
-                # 正常当消息发送。
-                _name = cmd_name[1:]
-                _is_cmd_like = (
-                    _name
-                    and _name[0].isalpha()
-                    and all(c.isalnum() or c in "_-" for c in _name)
-                )
-                if _is_cmd_like:
-                    import cli_commands as _cc
-                    _near = _cc.suggest(cmd_name)
-                    _hint = f"；你是不是想敲 {'/'.join(_near)}" if _near else ""
-                    console.print(
-                        f"[yellow]未知命令 {cmd_name}（/help 查看命令列表{_hint}；"
-                        "要作为消息发送请调整开头写法）[/yellow]"
-                    )
-                    continue
-
-        # 2. 检查是否触发技能束（命令名解析规则与步骤 1 相同）
-        cmd_name = user_input.split()[0]
-        if cmd_name in rt.bundle_commands:
-            bundle_info = rt.bundle_commands[cmd_name]
-            rest_msg = user_input[len(cmd_name):].strip()
-            user_input = execute_bundle(
-                bundle_info["name"],
-                rest_msg or "(执行此技能束中的所有技能)",
-                skills_dir(),
-            )
-            console.print(f"[dim][已触发技能束: {bundle_info['name']}（{len(bundle_info['skills'])} 个技能）][/dim]")
-        # 3. 检查是否触发技能
-        elif cmd_name in rt.skill_commands:
-            skill_info = rt.skill_commands[cmd_name]
-            rest_msg = user_input[len(cmd_name):].strip()
-            # 声明了 context:fork 的技能放到隔离子代理里跑
-            if skill_info.get("context") == "fork" and getattr(rt, "agent", None) is not None:
-                from pathlib import Path as _P
-                from agent.skill_commands import parse_frontmatter as _pf
-                from agent.skill_fork import run_skill_in_fork
-                _raw = _P(skill_info["skill_md_path"]).read_text(encoding="utf-8")
-                _, _body_only = _pf(_raw)
-                _fork_result = run_skill_in_fork(
-                    skill_name=skill_info["name"],
-                    skill_body=_body_only,
-                    user_query=rest_msg or "(执行此技能)",
-                    agent_ref=rt.agent,
-                )
-                user_input = (
-                    f"[技能 {skill_info['name']} 在隔离子代理执行完毕]\n\n"
-                    f"{_fork_result}"
-                )
-            else:
-                user_input = execute_skill(
-                    skill_info["skill_md_path"],
-                    rest_msg or "(执行此技能)",
-                )
-            # 记一次技能使用（用于统计和推荐）
-            bump_use(skills_dir(), skill_info["name"])
-            console.print(f"[dim][已触发技能: {skill_info['name']}][/dim]")
-
-        # 3. 保存用户消息到 session
-        if rt.session_store and rt.session_id:
-            rt.session_store.append_message(rt.session_id, "user", user_input)
-
-            # 第一条消息后自动给会话起标题（方便 /sessions 列表辨认）
-            session_info = rt.session_store.get_session(rt.session_id)
-            maybe_set_title(
-                rt.session_store, rt.session_id,
-                user_input,
-                session_info.get("title") if session_info else None,
-            )
-
-        # 4. 调用 agent（把消息交给 AI，拿回答）
-        try:
-            # 发给 agent 前展开粘贴引用（会话库里存的是占位符）
-            from agent.input_history import expand_paste_references
-            agent_input = expand_paste_references(user_input, rt.home)
-            # Checkpoint：每条用户消息发出前拍快照（/rewind 可回滚）
-            if rt.checkpoint_mgr:
-                try:
-                    rt.checkpoint_mgr.create_snapshot(
-                        conversation=list(rt.agent.conversation_history),
-                    )
-                except Exception as e:
-                    logger.warning("checkpoint 快照失败: %s", e)
-            # 先打 "AI:" 前缀，流式输出会接在这个前缀后面显示
-            console.print("[bold green]AI:[/bold green]")
-            # run_conversation 是 async，但 run_interactive 保持同步签名
-            # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
-            # asyncio.run 驱动一次完整的异步对话。
-            rt.tool_events = []  # 新回合，工具计数从零开始
-            response = asyncio.run(rt.agent.run_conversation(agent_input))
-            # 流式模式（设了流式回调）下内容在对话过程中已经实时显示过，
-            # 不重复打印。非流式模式才打印 response。
-            # 但 LLM 失败/预算耗尽这类兜底文案不走流式（没有内容增量），
-            # 必须主动打印——否则用户会看到"没反应就断了"。
-            if not getattr(rt.agent, "_stream_callback", None):
-                from rich.markdown import Markdown
-                try:
-                    console.print(Markdown(response))
-                except Exception:
-                    console.print(response)  # 渲染失败退回纯文本（fail-open）
-            elif response and response.startswith(
-                ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
-                 "[模型只产出了思考过程", "[LLM 返回了空响应")
-            ):
-                # 流式模式下的兜底消息（空响应/纯思考/预算耗尽/LLM 失败）
-                # 不经过流式回调，必须主动打印——不然用户看到"AI:"后面一片空白
-                console.print(f"[yellow]{response}[/yellow]")
-
-            # 5. 保存助手响应到 session
-            if rt.session_store and rt.session_id:
-                rt.session_store.append_message(
-                    rt.session_id, "assistant", response,
-                )
-
-            # 每轮回答完打印状态行（模型/token/goal/项目）
-            # 放在回答完整输出之后、不接 Live 动态刷新（Windows 上跟 input()
-            # 有冲突）；中断/异常路径都不打（用户主动断开就别再追加信息了）。
-            try:
-                _sl = _render_statusline(rt, rt.agent)
-                if _sl:
-                    console.print(f"[dim]{_sl}[/dim]")
-            except Exception as _e:
-                logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
-        except KeyboardInterrupt:
-            rt.agent.interrupt()
-            # 批量/异步子代理跑在线程池里收不到 Ctrl+C 信号，
-            # 必须在这里显式按下它们的取消旗，否则进程退出被吊死
-            try:
-                from tools.delegate_tool import cancel_all_subagents
-                cancel_all_subagents("用户中断")
-            except Exception:
-                pass
-            _last_ctrl_c = time.monotonic()  # 记下时间戳，给信号去重当锚点
-            console.print("[yellow]\n[已中断][/yellow]")
-        except Exception as e:
-            console.print(f"[red]错误: {e}[/red]")
-            logger.exception("agent 运行错误")
+                logger.exception("agent 运行错误")
 
     # === 退出前清理后台任务 ===
     # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）

@@ -559,18 +559,21 @@ def check_cli_completer():
     import cli_diag_cmds, cli_session_cmds, cli_skill_memory_cmds  # noqa: F401
     from cli_input import SlashCompleter
 
+    # amap 只算一次，构造补全器和二级检查共用同一份数据
+    amap = cc.arg_completer_map()
     comp = SlashCompleter(
-        registry_tokens=[c.name for c in cc.all_commands()],
-        arg_completers=cc.arg_completer_map(),
+        registry_tokens=cc.all_tokens(),
+        arg_completers=amap,
         dynamic_tokens_fn=lambda: [],
     )
     got = [c.text for c in comp.get_completions(Document("/hel"), CompleteEvent())]
     if "/help" not in got:
         return _fail(f"一级补全没出 /help：{got[:5]}")
-    # 二级：找任何一个带 arg_completer 的命令验证；没有就跳过该半段
-    amap = cc.arg_completer_map()
-    if amap:
-        token, fn = next(iter(amap.items()))
+    if not amap:
+        return _ok("一级补全正常；二级未实测（暂无命令登记参数补全器）")
+    # 二级：逐个验证登记了参数补全器的命令（候选能出才算过——
+    # 补全器返回了候选却一个都没渲染出来就是真 bug）
+    for token, fn in amap.items():
         cands = [c.text for c in comp.get_completions(
             Document(f"{token} "), CompleteEvent())]
         if not cands and fn(f"{token} "):
