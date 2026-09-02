@@ -69,7 +69,6 @@ logger = logging.getLogger(__name__)
 
 from cli_session_cmds import (  # noqa: F401（回导入：测试/内部引用兼容）
     _list_sessions,
-    _maybe_prompt_resume,
     _resume_and_cleanup_empty,
     _resume_session_interactive,
     _search_sessions,
@@ -3431,11 +3430,10 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         logger.exception("初始化失败")
         return
 
-    # 启动时恢复历史会话
+    # 启动时恢复历史会话：只有 -c/--continue 才恢复最近一个；
+    # 不带参数就静默开新会话（不再询问、不展示历史清单）
     if resume_last:
         _auto_resume_last(rt)
-    else:
-        _maybe_prompt_resume(rt)
 
     # 输入线程 + 队列——模型干活时用户敲的字先排队，不打断当前
     # 回答；等工具批结束后由 agent 的排队输入回流机制以"临时消息"消化
@@ -3476,26 +3474,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         interrupt_fn=_interrupt_fn,
     )
 
-    # === 等待期工具事件行：AI 每调一个工具打一行暗色事件 ===
-    # 比干转圈信息量大——用户看得见「它在干嘛、干了几个」。
-    # （钩子只在 config hooks.enabled 时被 model_tools 接线触发，跟其他
-    # hooks 同命运；登记本身无副作用，失败只记日志不挡启动——fail-open）
-    rt.tool_events = []
-    _tool_hook_name = "cli_tool_event_line"
-
-    def _on_pre_tool_use(tool_name: str, args: dict, **_kw) -> None:
-        try:
-            rt.tool_events.append(tool_name)
-            console.print(f"[dim]⏺ {tool_name}（第{len(rt.tool_events)}个工具）[/dim]")
-        except Exception:
-            pass  # 纯视觉，绝不挡工具执行
-
-    try:
-        rt.agent.hooks_registry.register_pre_tool_use(
-            _on_pre_tool_use, name=_tool_hook_name,
-        )
-    except Exception as e:
-        logger.error("工具事件行钩子登记失败（等待期进度将缺失）: %s", e)
+    # === 事件行渲染器：工具/子代理/任务 全走这里（完成行 + 工具栏黑板） ===
+    import cli_events
+    cli_events.install_event_lines(rt)
 
     def _input_reader():
         """守护线程：不停读键盘输入塞进队列（读到文件末尾/出错就收工）。
@@ -3627,7 +3608,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     )
                 try:
                     console.print("[bold green]AI:[/bold green]")
-                    rt.tool_events = []  # 新回合，工具计数从零开始
                     rt.turn_active = True
                     try:
                         response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
@@ -3803,7 +3783,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # run_conversation 是 async，但 run_interactive 保持同步签名
                 # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
                 # asyncio.run 驱动一次完整的异步对话。
-                rt.tool_events = []  # 新回合，工具计数从零开始
                 rt.turn_active = True
                 try:
                     response = asyncio.run(rt.agent.run_conversation(agent_input))

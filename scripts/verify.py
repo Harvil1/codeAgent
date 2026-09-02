@@ -581,6 +581,24 @@ def check_cli_completer():
     return _ok("三级补全器两级候选正常")
 
 
+def check_event_lines():
+    """验证事件行渲染器：函数输出正确 + 启动询问已删干净。"""
+    import cli_events as ce
+    line = ce.format_tool_line("terminal", {"command": "pytest -q"}, 4.06,
+                               '{"output": "21 passed"}')
+    for frag in ("terminal", "pytest -q", "✓", "4.1s", "21 passed"):
+        if frag not in line:
+            return _fail(f"工具行缺 {frag!r}：{line}")
+    p = ce.EventPairer()
+    p.record("x", {})
+    if p.pop("x", {}) is None or p.pop("x", {}) is not None:
+        return _fail("配对队列进出异常")
+    import cli_session_cmds
+    if hasattr(cli_session_cmds, "_maybe_prompt_resume"):
+        return _fail("启动询问函数 _maybe_prompt_resume 还在")
+    return _ok("事件行渲染器 + 启动回归正常")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -637,6 +655,9 @@ def main():
         ]),
         ("CLI 补全器", [
             ("CLI 补全器", check_cli_completer),
+        ]),
+        ("CLI 事件行", [
+            ("CLI 事件行", check_event_lines),
         ]),
     ]
 

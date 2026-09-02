@@ -146,51 +146,6 @@ def _list_sessions(rt: RuntimeContext):
         )
 
     console.print(table)
-def _maybe_prompt_resume(rt: RuntimeContext):
-    """启动时问问用户："发现历史会话，要恢复哪个吗？"
-
-    参数：
-        rt：RuntimeContext（取 session_store 和当前 session_id）
-
-    返回：
-        无。用户选了就恢复那个会话；选 n / 直接回车 / 输入异常则保持
-        刚创建的新会话不变。
-    """
-    if not rt.session_store:
-        return
-
-    sessions = rt.session_store.list_sessions(limit=5)
-    # 排除刚创建的那个空 session，只列真有消息的历史
-    history = [
-        s for s in sessions
-        if s["id"] != rt.session_id and (s.get("message_count") or 0) > 0
-    ]
-    if not history:
-        return
-
-    console.print("\n[cyan]发现历史会话：[/cyan]")
-    for i, s in enumerate(history):
-        title = s.get("title") or "(无标题)"
-        cnt = s.get("message_count", 0)
-        t = (s.get("updated_at") or "")[:19]
-        console.print(f"  [{i}] {title}（{cnt} 条，{t}）")
-    console.print("  [n] 开始新对话（默认）")
-
-    try:
-        choice = console.input("[bold]恢复哪个？[/bold] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        choice = ""
-
-    if choice == "n" or not choice:
-        return  # 什么都不做 = 保持刚创建的新 session
-
-    if choice.isdigit():
-        idx = int(choice)
-        if 0 <= idx < len(history):
-            # 恢复选中的会话，并把刚创建的空 session 删掉
-            _resume_and_cleanup_empty(rt, history[idx]["id"])
-        else:
-            console.print(f"[yellow]序号超出范围，已开始新对话[/yellow]")
 def _resume_and_cleanup_empty(rt: RuntimeContext, target_session_id: str) -> None:
     """恢复到指定会话，并顺手删掉刚创建的那个空会话（不删会污染会话列表）。
 
