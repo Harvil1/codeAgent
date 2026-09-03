@@ -668,7 +668,8 @@ def check_enter_routing():
 
 
 def check_cli_layout():
-    """验证能构建出 Application（不依赖真终端）+ 退出请求不炸。"""
+    """验证能构建出 Application（无头模式）+ 退出请求不炸。"""
+    import os
     from types import SimpleNamespace as _NS
     from cli_layout import build_application, request_app_exit
 
@@ -676,7 +677,13 @@ def check_cli_layout():
         agent=_NS(model="test-model"), workspace_cwd="D:/x",
         bg_count=0, event_pending=[], turn_active=False,
     )
-    app = build_application(rt, input_queue=None, eof_sentinel=None)
+    # 无头开关：verify 在管道里跑，拿不到真终端输出；不开这个开关
+    # build_application 会（正确地）返回 None 走降级
+    os.environ["CODEAGENT_LAYOUT_HEADLESS"] = "1"
+    try:
+        app = build_application(rt, input_queue=None, eof_sentinel=None)
+    finally:
+        os.environ.pop("CODEAGENT_LAYOUT_HEADLESS", None)
     if app is None:
         return _fail("build_application 返回 None")
     if app.full_screen:
