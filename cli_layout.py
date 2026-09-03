@@ -497,6 +497,23 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             from prompt_toolkit.output import DummyOutput
             output = DummyOutput()
 
+        # ---- Windows legacy 控制台开 VT 解释（rich 彩色的救命开关）----
+        # 大白话：rich 的彩色输出经 patch_stdout 是「原始 ANSI 字节直写」，
+        # legacy 控制台不认 VT 就满屏 ?[1;2m 乱码（我们自己的框线颜色走
+        # pt 解析路径，不受此影响）。幂等、失败忽略——现代终端本来就开着。
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import byref
+                k32 = ctypes.windll.kernel32
+                h = k32.GetStdHandle(-11)   # STD_OUTPUT_HANDLE
+                mode = ctypes.c_uint32()
+                if h and k32.GetConsoleMode(h, byref(mode)):
+                    k32.SetConsoleMode(
+                        h, mode.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            except Exception:
+                pass
+
         # ---- 状态黑板（spinner 线程写，渲染闭包读）----
         state = {"turn_started": None, "was_active": False, "frame": 0}
 
@@ -639,3 +656,25 @@ def request_app_exit(app) -> None:
         app.loop.call_soon_threadsafe(app.exit)
     except Exception:
         pass
+
+
+def install_input_bridge(app) -> None:
+    """注册跨线程输入桥：工作线程的提问 → pt 的 run_in_terminal 通道。
+
+    大白话：stdin 被 pt 独占后，工作线程（审批/确认）里的 input() 读
+    不到字。桥把提问函数调度到 UI 线程执行——pt 会先收起界面、把终端
+    还给经典输入，用户答完再恢复界面。app 为 None 时注销桥（直读）。
+    """
+    import asyncio
+    import cli_ui
+
+    if app is None:
+        cli_ui.set_input_bridge(None)
+        return
+
+    def _bridge(func):
+        future = asyncio.run_coroutine_threadsafe(
+            app.run_in_terminal_async(func), app.loop)
+        return future.result()
+
+    cli_ui.set_input_bridge(_bridge)

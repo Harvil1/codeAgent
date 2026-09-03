@@ -3465,6 +3465,10 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         rt.shutdown()
         return
 
+    # 跨线程输入桥：审批/确认类提问（工作线程）经 pt 的 run_in_terminal
+    # 执行——否则 stdin 被 pt 独占，提问挂着永远没人能答
+    cli_layout.install_input_bridge(_app)
+
     # === 事件行渲染器：工具/子代理/任务 全走这里（完成行 + 工具栏黑板） ===
     import cli_events
     cli_events.install_event_lines(rt)
@@ -3810,18 +3814,30 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         _input_stop.set()
         _input_q.put(_EOF_SENTINEL)
         _worker_thread.join(timeout=2.0)
+        if _worker_thread.is_alive():
+            # worker 没在宽限期内收工（回合卡死/子代理不退）：
+            # 收尾段随时可能被用户再按 Ctrl+C 打断、daemon 线程残留
+            # 还会撞 atexit 崩栈——这里强退是唯一干净的出路
+            console.print("[dim][后台任务仍在收尾，强制退出…][/dim]")
+            import os as _os_mod
+            _os_mod._exit(0)
 
     console.print("\n再见！")
 
     # === 退出前清理后台任务 ===
-    # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）
+    # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）。
+    # 收尾段必须防打断：用户狂按 Ctrl+C / 子代理死活不退时，这里任何
+    # 裸异常都会变成满屏 traceback（收尾失败 ≠ 崩溃）
     try:
         from tools.delegate_tool import cancel_all_subagents
         if cancel_all_subagents("退出清理") > 0:
             console.print("[dim]正在停止后台子代理…[/dim]")
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         pass
-    rt.shutdown()
+    try:
+        rt.shutdown()
+    except (Exception, KeyboardInterrupt) as e:
+        logger.warning("收尾清理异常（忽略）: %s", e)
 
 
 # ---------------------------------------------------------------------------

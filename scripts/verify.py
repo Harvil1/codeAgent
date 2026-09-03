@@ -593,6 +593,11 @@ def check_event_lines():
                               '{"error": "exit 1"}')
     if "✗" not in bad or "exit 1" not in bad:
         return _fail(f"失败行缺 ✗/错误摘要：{bad}")
+    # 摘要字段名对齐工具 schema（read_file 用 path 不是 file_path）
+    rl = ce.format_tool_line("read_file", {"path": "src/app.py"}, 0.05,
+                             '{"content": "x"}')
+    if "src/app.py" not in rl:
+        return _fail(f"read_file 行缺路径摘要（字段名对不上 schema？）：{rl}")
     # inline diff：红删绿增行 + 截断提示
     dlines = ce.build_edit_diff("a\nb\nc\n", "a\nX\nc\nd\n")
     kinds = [k for k, _ in dlines]

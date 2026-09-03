@@ -122,6 +122,7 @@ class StreamBoxRenderer:
         self._deferred = ""             # 思考框没关前押后的正文
         self._table_buf = []            # 表格侧缓冲
         self._in_table = False
+        self._last_progress = ("", 0.0)  # 心跳去重：(消息, 上次打印时刻)
 
     # ------------------------------------------------------------------
     # 事件入口（cli 的流式回调把事件原样递进来）
@@ -279,9 +280,19 @@ class StreamBoxRenderer:
         self._print(f"{_DIM}{prefix} ⟳ 准备调用 {name}…{_RST}")
 
     def on_progress(self, message: str, elapsed: int) -> None:
-        """子代理运行中的进度心跳（框保持开着，冲半行防撕行）。"""
+        """子代理运行中的进度心跳（框保持开着，冲半行防撕行）。
+
+        去重：多个并行子代理的心跳常常是同一句「任务仍在执行...」，
+        同一消息 45 秒内只打一次——不然一屏全是复读机。
+        """
         if not message:
             return
+        import time as _time
+        now = _time.monotonic()
+        last_msg, last_ts = self._last_progress
+        if message == last_msg and (now - last_ts) < 45:
+            return
+        self._last_progress = (message, now)
         self._flush_partial_line()
         self._print(f"{_DIM}⟳ 子代理[{elapsed}s] {message}{_RST}")
 

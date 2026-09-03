@@ -17,10 +17,11 @@ from collections import defaultdict, deque
 logger = logging.getLogger(__name__)
 
 # 参数摘要表：工具名 → 从 args 里挑哪个字段当"这行在干嘛"的摘要
+# （字段名必须跟工具 schema 一致：read/write/str_replace 都是 path）
 _ARG_FIELDS = {
-    "read_file": "file_path",
-    "write_file": "file_path",
-    "str_replace": "file_path",
+    "read_file": "path",
+    "write_file": "path",
+    "str_replace": "path",
     "terminal": "command",
     "search_files": "pattern",
     "glob": "pattern",
