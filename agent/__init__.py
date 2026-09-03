@@ -1128,6 +1128,19 @@ class AIAgent:
                 # DeepSeek 思考内容提取（后续带工具调用的请求要回传）
                 if delta.get("reasoning_content"):
                     reasoning_content = delta["reasoning_content"]
+                    # 思考流也通知回调（CLI 画暗色思考框用）。加法式：
+                    # 没回调/回调不认识该类型时零行为变化。
+                    if self._stream_callback is not None:
+                        try:
+                            self._stream_callback({
+                                "type": "reasoning",
+                                "delta": delta["reasoning_content"],
+                            })
+                        except Exception as cb_err:
+                            logger.warning(
+                                "stream_callback(reasoning) 异常（忽略）: %s",
+                                cb_err,
+                            )
                 if delta.get("thinking_signature"):
                     thinking_signature = delta["thinking_signature"]
         except Exception as stream_err:

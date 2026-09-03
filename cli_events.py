@@ -27,6 +27,32 @@ _ARG_FIELDS = {
     "web_fetch": "url",
 }
 
+# 工具行样式表：工具名 → (emoji, 动词)。格式：┊ emoji 动词 摘要 耗时
+# （跟 hermes 的 get_cute_tool_message 学的——一行扫出「谁在干什么」）
+_TOOL_STYLES = {
+    "terminal": ("💻", "$"),
+    "read_file": ("📖", "read"),
+    "write_file": ("✍️", "write"),
+    "str_replace": ("🔧", "patch"),
+    "search_files": ("🔎", "grep"),
+    "glob": ("🔎", "find"),
+    "web_fetch": ("📄", "fetch"),
+    "memory": ("🧠", "memory"),
+    "subagent": ("🔀", "delegate"),
+    "delegate_task": ("🔀", "delegate"),
+    "task_create": ("📋", "plan"),
+    "task_complete": ("📋", "plan"),
+}
+
+
+def _tool_prefix() -> str:
+    """工具行前缀（皮肤可换，默认 ┊）。"""
+    try:
+        import cli_skin
+        return cli_skin.get_active_skin().tool_prefix or "┊"
+    except Exception:
+        return "┊"
+
 
 def _cut(s: str, n: int) -> str:
     """字符串截断：超长加省略号（事件行一行的信息量守恒）。"""
@@ -78,33 +104,39 @@ def result_preview(result_str: str):
 
 
 def format_tool_line(tool_name, args, dt, result_str) -> str:
-    """通用工具完成行：⏺ 名字 摘要 ✓/✗ 耗时（结果摘要）。"""
+    """通用工具完成行：┊ emoji 动词 摘要 耗时 ✓/✗（结果摘要）。
+
+    跟 hermes 的工具行学的一行扫读格式；失败时 ✗ + 错误前缀。
+    """
     ok, preview = result_preview(result_str)
     mark = "✓" if ok else "✗"
-    parts = [f"⏺ {tool_name}"]
+    emoji, verb = _TOOL_STYLES.get(tool_name, ("⚡", tool_name[:9]))
+    prefix = _tool_prefix()
     s = summarize_args(tool_name, args)
-    if s:
-        parts.append(s)
-    head = " ".join(parts)
     dur = format_duration(dt)
-    tail = f"{mark} {dur}".strip()
-    if preview:
-        return f"{head} {tail}（{preview}）"
-    return f"{head} {tail}"
+    head = f"{prefix} {emoji} {verb:<9}"
+    if s:
+        head += f" {s}"
+    tail = f" {dur} {mark}".strip()
+    line = f"{head}  {tail}" if dur else head
+    if not ok and preview:
+        return f"{line} {preview}"
+    return line
 
 
 def format_subagent_depart(args) -> str:
-    """子代理出发行：⦿ 子代理 X 出发：任务摘要。"""
+    """子代理出发行：┊ 🔀 delegate 子代理 X 出发：任务摘要。"""
     name = (args or {}).get("subagent_type") or "general-purpose"
     task = _cut((args or {}).get("prompt") or "", 40)
-    return f"⦿ 子代理 {name} 出发：{task}" if task else f"⦿ 子代理 {name} 出发"
+    head = f"{_tool_prefix()} 🔀 delegate 子代理 {name} 出发"
+    return f"{head}：{task}" if task else head
 
 
 def format_subagent_done(args, dt, result_str) -> str:
-    """子代理完成行：⦿ 子代理 X 完成（耗时）：结果摘要。"""
+    """子代理完成行：┊ 🔀 delegate 子代理 X 完成（耗时）：结果摘要。"""
     name = (args or {}).get("subagent_type") or "general-purpose"
     dur = format_duration(dt)
-    head = f"⦿ 子代理 {name} 完成"
+    head = f"{_tool_prefix()} 🔀 delegate 子代理 {name} 完成"
     if dur:
         head += f"（{dur}）"
     ok, preview = result_preview(result_str)

@@ -1380,43 +1380,22 @@ def _on_tool_call(name: str, args: dict):
 
 
 def _make_cli_stream_callback():
-    """造 CLI 的流式输出回调（04）：模型每吐一段字就立刻打到屏幕上。
+    """造 CLI 的流式输出回调：回答画进圆角框、思考画暗色框（hermes 同款）。
 
-    打字机效果——第一个字出现 < 500 毫秒，不用等全部生成完。
-    工具调用开始时打一行简短提示。
-    流结束时不打印（换行收尾留给主流程）。
+    大白话：模型吐字 → StreamBoxRenderer 接进 ╭─╮ 框逐行摆好；
+    切去调工具先关框再打准备行；done 事件关框清板。框的配色跟
+    当前皮肤走。回调本身只做转发——渲染状态机在 cli_stream 里，
+    可以脱离终端单测。
 
     参数：无。返回：回调函数 cb(event)。
     """
-    import sys
+    from cli_stream import StreamBoxRenderer
+
+    renderer = StreamBoxRenderer()
 
     def cb(event: dict) -> None:
-        """流事件处理器：content 打字 / tool_call_start 换行提示 / progress 心跳。
-
-        参数：
-            event: {"type": "content"|"tool_call_start"|"progress"|..., ...}
-        """
-        etype = event.get("type")
-        if etype == "content":
-            delta = event.get("delta") or ""
-            if delta:
-                sys.stdout.write(delta)
-                sys.stdout.flush()
-        elif etype == "tool_call_start":
-            # 正在流式打字时若切去调工具，先换行收尾再打提示
-            print()  # noqa: T201
-            name = event.get("name", "?")
-            console.print(f"[dim]{_ts()} ⟳ 准备调用 {name}...[/dim]")
-        elif etype == "progress":
-            # 子代理运行中的周期性进度——告诉用户"还在干活，不是卡死了"
-            msg = (event.get("message") or "").strip()
-            elapsed = int(event.get("elapsed_seconds") or 0)
-            if msg:
-                print()  # noqa: T201
-                console.print(
-                    f"[dim]{_ts()} ⟳ 子代理[{elapsed}s] {msg}[/dim]"
-                )
-        # "done" 事件不打任何东西：收尾换行留给主流程
+        """流事件转发（渲染器内部吞一切异常，绝不反咬流）。"""
+        renderer.on_event(event)
     return cb
 
 
@@ -3574,7 +3553,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                         rt.session_id, "user", _BG_WAKE_MESSAGE,
                     )
                 try:
-                    console.print("[bold green]AI:[/bold green]")
                     cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
                     rt.turn_active = True
                     try:
@@ -3745,8 +3723,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                         )
                     except Exception as e:
                         logger.warning("checkpoint 快照失败: %s", e)
-                # 先打 "AI:" 前缀，流式输出会接在这个前缀后面显示
-                console.print("[bold green]AI:[/bold green]")
+                # 流式模式：回答框头（╭─ ⚕ CodeAgent ─╮）就是回合起始标记，
+                # 不再打 "AI:" 前缀；纯工具轮/兜底文案有事件行和黄字兜底
                 # run_conversation 是 async，但 run_interactive 保持同步签名
                 # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
                 # asyncio.run 驱动一次完整的异步对话。

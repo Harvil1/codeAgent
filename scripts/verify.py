@@ -582,13 +582,17 @@ def check_cli_completer():
 
 
 def check_event_lines():
-    """验证事件行渲染器：函数输出正确 + 启动询问已删干净。"""
+    """验证事件行渲染器：hermes 风格工具行 + 失败标记 + 启动询问已删。"""
     import cli_events as ce
     line = ce.format_tool_line("terminal", {"command": "pytest -q"}, 4.06,
                                '{"output": "21 passed"}')
-    for frag in ("terminal", "pytest -q", "✓", "4.1s", "21 passed"):
+    for frag in ("┊", "💻", "pytest -q", "✓", "4.1s"):
         if frag not in line:
             return _fail(f"工具行缺 {frag!r}：{line}")
+    bad = ce.format_tool_line("terminal", {"command": "boom"}, 0.2,
+                              '{"error": "exit 1"}')
+    if "✗" not in bad or "exit 1" not in bad:
+        return _fail(f"失败行缺 ✗/错误摘要：{bad}")
     p = ce.EventPairer()
     p.record("x", {})
     if p.pop("x", {}) is None or p.pop("x", {}) is not None:
@@ -597,6 +601,48 @@ def check_event_lines():
     if hasattr(cli_session_cmds, "_maybe_prompt_resume"):
         return _fail("启动询问函数 _maybe_prompt_resume 还在")
     return _ok("事件行渲染器 + 启动回归正常")
+
+
+def check_stream_box():
+    """验证流式回答框：框头/框尾、思考框押后、CJK 表格重排。"""
+    from cli_stream import StreamBoxRenderer
+
+    got = []
+    r = StreamBoxRenderer(print_fn=got.append, width_fn=lambda: 60)
+
+    # 思考流 → 正文（押后）：思考框必须排在回答框前面
+    r.on_event({"type": "reasoning", "delta": "先想一想\n"})
+    r.on_event({"type": "content", "delta": "| 名字 | 数量 |\n|---|---|\n"})
+    r.on_event({"type": "content",
+                "delta": "| 苹果 | 1 |\n| 香蕉香蕉 | 22 |\n\n"})
+    r.on_event({"type": "content", "delta": "回答结束"})
+    r.on_event({"type": "done"})
+    # 剥掉 ANSI 色码再断言（默认皮肤给正文上真彩色）
+    import re
+    text = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(got))
+
+    if "┌─思考" not in text:
+        return _fail(f"思考框头缺失：{text[:120]!r}")
+    if text.index("思考") > text.index("╭─"):
+        return _fail("思考框必须排在回答框前面")
+    if "╭─" not in text or "╰" not in text:
+        return _fail(f"回答框头/尾缺失：{text[:120]!r}")
+    if "回答结束" not in text:
+        return _fail("done 后正文丢失")
+    # CJK 表格重排：表头行和数据行的竖线位置必须一致（占宽对齐）
+    lines = [ln for ln in text.split("\n") if ln.startswith("    |")]
+    if len(lines) < 4:
+        return _fail(f"表格行数不对：{lines}")
+    pipe_pos = {ln.index("|", 4) for ln in (lines[0], lines[2])}
+    if len(pipe_pos) != 1:
+        return _fail(f"CJK 列没对齐：{lines}")
+    # 表格半行兜底：done 冲掉一切残留
+    r2 = StreamBoxRenderer(print_fn=lambda s: None, width_fn=lambda: 60)
+    r2.on_event({"type": "content", "delta": "半行"})
+    r2.on_event({"type": "done"})
+    if r2._buf != "":
+        return _fail("done 后半行缓冲没清")
+    return _ok("框头/尾 + 思考押后 + CJK 表格对齐正常")
 
 
 # ---------------------------------------------------------------------------
@@ -840,6 +886,9 @@ def main():
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),
             ("键盘别名", check_pt_extras),
+        ]),
+        ("CLI 流式框", [
+            ("流式回答框", check_stream_box),
         ]),
     ]
 
