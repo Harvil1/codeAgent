@@ -30,6 +30,25 @@ try:
 except (AttributeError, ValueError):
     pass  # 某些环境（输出被重定向/捕获）不支持 reconfigure，切不了就算了
 
+# Windows 代码页硬化（跟 hermes 的 stdio.py 学的）：光重配 Python 流还不够，
+# 控制台本身的输入/输出代码页也要切成 UTF-8（65001）——否则子进程和
+# 某些底层 API 仍按 GBK 解释字节，中文/emoji 会坏。幂等，失败忽略。
+def _harden_windows_codepage():
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.SetConsoleCP(65001)
+        k32.SetConsoleOutputCP(65001)
+        # 给子进程递 UTF-8 环境（子 Python 不再跟系统 GBK 走）
+        import os
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+        os.environ.setdefault("PYTHONUTF8", "1")
+    except Exception:
+        pass
+
+
+_harden_windows_codepage()
+
 # 终端自举（新界面是唯一界面，没有降级通道）：Windows 下确认进程有真
 # 控制台——cmd / Windows Terminal / PowerShell 天然有；git-bash（mintty）
 # 没有就自动用 winpty 把自己重新拉起来（Git for Windows 自带）；连

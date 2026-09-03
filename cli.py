@@ -86,6 +86,7 @@ from cli_skill_memory_cmds import (  # noqa: F401（回导入：测试/内部引
     _handle_skill_learning_command,
     _open_in_editor,
 )
+import cli_skin  # noqa: F401（import 即登记 /skin 命令 + 激活皮肤引擎）
 from cli_diag_cmds import (  # noqa: F401（回导入：测试/内部引用兼容）
     _status_row,
     _handle_status_cli,
@@ -3458,6 +3459,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         lambda: getattr(rt, "turn_active", False),
         _do_turn_interrupt,
     )
+
+    # 皮肤激活：settings.json 的 display.skin（失败回退 default，不挡启动）
+    try:
+        cli_skin.init_skin_from_config(rt.config)
+    except Exception:
+        pass
 
     # === 常驻操作台装配：cli_layout 的 Application（唯一界面，没有降级） ===
     _app = cli_layout.build_application(

@@ -692,6 +692,86 @@ def check_cli_layout():
     return _ok("Application 构建 + 安全退出请求正常")
 
 
+def check_skin_engine():
+    """验证皮肤引擎：四套内置、YAML overlay、热切换、样式覆盖。"""
+    import tempfile
+    from pathlib import Path
+    import cli_skin
+
+    skins = cli_skin.list_skins()
+    names = {s["name"] for s in skins}
+    for expect in ("default", "mono", "slate", "daylight"):
+        if expect not in names:
+            return _fail(f"内置皮肤缺 {expect}: {sorted(names)}")
+
+    # YAML overlay：只覆盖一节，其余继承 default
+    with tempfile.TemporaryDirectory() as td:
+        skin_dir = cli_skin._skins_dir()
+        fake = Path(td) / "verify_skin.yaml"
+        fake.write_text(
+            "name: verify_skin\ndescription: 临时验证\n"
+            "colors:\n  prompt: \"#123456\"\nbranding:\n  prompt_symbol: \"»\"\n",
+            encoding="utf-8",
+        )
+        # 借用户皮肤目录放一下（放不进去就跳过 overlay 段，保底不挂）
+        overlay_tested = False
+        try:
+            skin_dir.mkdir(parents=True, exist_ok=True)
+            target = skin_dir / "_verify_skin.yaml"
+            target.write_text(fake.read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                skin = cli_skin.load_skin("verify_skin")
+                overlay_tested = (
+                    skin.get_color("prompt") == "#123456"
+                    and skin.get_branding("prompt_symbol") == "»"
+                    # 未覆盖的键继承 default
+                    and skin.tool_prefix == "┊"
+                )
+            finally:
+                target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if not overlay_tested:
+            return _fail("YAML overlay 覆盖/继承不对")
+
+    # 热切换 + 样式覆盖
+    old = cli_skin.get_active_skin_name()
+    try:
+        cli_skin.set_active_skin("mono")
+        mono_style = cli_skin.get_pt_style_overrides()
+        if "prompt" in mono_style:
+            return _fail("mono 不该有 prompt 颜色覆盖")
+        cli_skin.set_active_skin("default")
+        if not cli_skin.get_pt_style_overrides().get("prompt", "").startswith("fg:#00aa88"):
+            return _fail("default 的 prompt 颜色覆盖丢失")
+        if cli_skin.hex_to_truecolor_ansi("#FFD700") != "\033[38;2;255;215;0m":
+            return _fail("真彩 ANSI 换算错误")
+        if cli_skin.hex_to_truecolor_ansi("") != "":
+            return _fail("空颜色必须返回空 ANSI")
+    finally:
+        cli_skin.set_active_skin(old)
+    return _ok("四套内置 + overlay + 热切换正常")
+
+
+def check_pt_extras():
+    """验证键盘协议别名：安装器生效、ANSI_SEQUENCES 表真的改了。"""
+    import cli_pt_extras
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.keys import Keys
+
+    n = cli_pt_extras.install_all()
+    if n < 0:
+        return _fail("安装器返回了负数")
+    alt_enter = (Keys.Escape, Keys.ControlM)
+    for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~"):
+        if ANSI_SEQUENCES.get(seq) != alt_enter:
+            return _fail(f"{seq!r} 没映射到 Alt+Enter")
+    for seq in ("\x1b[I", "\x1b[O"):
+        if ANSI_SEQUENCES.get(seq) != Keys.Ignore:
+            return _fail(f"{seq!r} 没映射到 Ignore")
+    return _ok("Shift/Ctrl+Enter 别名 + 焦点噪声忽略生效")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -756,6 +836,10 @@ def main():
             ("状态栏三档", check_status_bar_tiers),
             ("提交路由", check_enter_routing),
             ("布局构建", check_cli_layout),
+        ]),
+        ("CLI 皮肤/输入", [
+            ("皮肤引擎", check_skin_engine),
+            ("键盘别名", check_pt_extras),
         ]),
     ]
 

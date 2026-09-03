@@ -18,6 +18,14 @@ import math
 import os
 import time
 
+# 键盘协议增强（Shift/Ctrl+Enter 别名、焦点噪声序列忽略）——import 即装，
+# 失败静默（pt 缺失环境到不了这里，装不上也不挡界面）
+try:
+    import cli_pt_extras
+    cli_pt_extras.install_all()
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # spinner 动画帧（盲文点阵转圈，一圈 10 帧）
@@ -33,6 +41,18 @@ def _fmt_elapsed(seconds) -> str:
     if not seconds or seconds < 0:
         return ""
     return f"{int(seconds)}s"
+
+
+def _spinner_frames() -> list:
+    """动画帧：皮肤声明了就用皮肤的，否则盲文帧（皮肤可换帧不换代码）。"""
+    try:
+        import cli_skin
+        frames = cli_skin.get_active_skin().spinner_frames
+        if frames:
+            return list(frames)
+    except Exception:
+        pass
+    return SPINNER_FRAMES
 
 
 def status_bar_segments(rt, width: int, elapsed_s=None) -> list:
@@ -96,7 +116,8 @@ def spinner_text(frame: int, rt, turn_started_at, now: float) -> str:
         elapsed = (now - turn_started_at) if turn_started_at else 0.0
         t = _fmt_elapsed(elapsed)
         pend = getattr(rt, "event_pending", None)
-        mark = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
+        frames = _spinner_frames()
+        mark = frames[frame % len(frames)]
         if pend:
             return f"{mark} {pend[-1]} {t}".strip()
         return f"{mark} 思考中… {t}".strip()
@@ -498,12 +519,15 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         # ---- 输入区：多行 TextArea（历史/补全/灰字提示全挂上）----
         history = (FileHistory(str(history_path))
                    if history_path else InMemoryHistory())
+        # 提示符（❯ / > …）和配色跟当前皮肤走
+        import cli_skin
+        prompt_symbol = cli_skin.get_active_prompt_symbol("❯")
         input_area = TextArea(
             height=lambda: Dimension(
                 min=1, max=8,
                 preferred=_estimate_input_height(input_area.text, _term_width()),
             ),
-            prompt=[("class:prompt", "❯ ")],
+            prompt=[("class:prompt", f"{prompt_symbol} ")],
             multiline=True,
             wrap_lines=True,
             history=history,
@@ -513,7 +537,7 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         # 灰字提示贴在渲染层（不动真文本）
         try:
             input_area.control.input_processors.append(
-                _GrayHint("发送消息，/help 查命令；Alt+↵ 换行")
+                _GrayHint("发送消息，/help 查命令；Alt/Shift/Ctrl+↵ 换行")
             )
         except Exception:
             pass   # 提示贴不上就裸奔，不挡输入
@@ -531,16 +555,18 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             height=1, wrap_lines=False, style="class:status-bar",
         )
 
+        _style_base = {
+            "prompt": "bold fg:#00aa88",
+            "status-bar": "reverse",
+            "separator": "fg:#555555",
+            "placeholder": "fg:#777777",
+        }
+        _style_base.update(cli_skin.get_pt_style_overrides())
         app = Application(
             layout=Layout(HSplit([spinner_row, input_area, separator, status_bar])),
             key_bindings=_build_key_bindings(input_queue, eof_sentinel, interrupt_fn),
             output=output,
-            style=Style.from_dict({
-                "prompt": "bold fg:#00aa88",
-                "status-bar": "reverse",
-                "separator": "fg:#555555",
-                "placeholder": "fg:#777777",
-            }),
+            style=Style.from_dict(_style_base),
             full_screen=False,
             mouse_support=False,
             erase_when_done=True,   # 退出时擦掉操作台，不冻进滚动历史
@@ -592,7 +618,7 @@ def start_spinner_thread(rt, app, stop_event):
                     elif not active:
                         state["turn_started"] = None              # 归零
                     state["was_active"] = active
-                    state["frame"] = (state["frame"] + 1) % len(SPINNER_FRAMES)
+                    state["frame"] = (state["frame"] + 1) % len(_spinner_frames())
                 invalidate_throttled(app)
             except Exception:
                 pass   # 动画线程挂了不许连累任何人
