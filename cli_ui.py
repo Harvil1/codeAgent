@@ -5,39 +5,86 @@
 这样测试里替换掉 `cli.console.print` 时，所有命令处理函数的输出都会被
 "截获"，测试才好断言。
 
-BridgeConsole：带「跨线程输入桥」的 Console。新界面里 stdin 被
-prompt_toolkit 独占（raw 模式读按键），工作线程（agent 回合、子代理）
-里再调 console.input 会永远读不到——审批提问挂着没人能答。桥把这种
-提问搬进 pt 的 run_in_terminal 通道：暂停界面渲染 → 把终端还给经典
-输入 → 用户答完 → 收回界面（hermes 的 sudo/secret 同款机制）。
+BridgeConsole（hermes 的 ChatConsole 同款思路）——两座桥：
+
+1. print 桥：rich 的彩色输出是「原始 ANSI 字节」（\\x1b[2m 这种），
+   经 patch_stdout 直写到 legacy 控制台，控制台不认 VT 就满屏
+   ?[1;2m 乱码。桥先让 rich 渲染进内存串，再走 prompt_toolkit 的
+   print_formatted_text(ANSI(...)) 打印——pt 自己解析 ANSI、按输出
+  驱动上色，跟终端开没开 VT 无关（流式框的颜色从来不乱，就是因为
+   走这条路；cprint 在工作线程直调这条路也实测无恙）。
+2. input 桥：stdin 被 pt 独占（raw 模式读按键），工作线程（审批/
+   确认）里 console.input 永远读不到字。桥把提问搬进 pt 的
+   run_in_terminal 通道：暂停界面渲染 → 终端还给经典输入 →
+   用户答完 → 恢复界面。
 """
 
 import logging
+import re
 import threading
+from io import StringIO
 
 from rich.console import Console
 
 logger = logging.getLogger("cli")
 
-# 输入桥：cli_layout 装配时注册（工作线程 → pt 终端通道）；None=直读
+# OSC-8 超链接序列：Win32 控制台画不了，漏过去就是一坨乱码——剥掉
+_OSC8_RE = re.compile(r"\x1b\]8;[^\x1b]*\x1b\\")
+
+# input 桥（cli_layout 装配时注册；None=直读）
 _input_bridge = None
 
 
 def set_input_bridge(fn) -> None:
-    """注册/注销输入桥（fn: Callable[[Callable], Any]——把函数搬进
+    """注册/注销 input 桥（fn: Callable[[Callable], Any]——把函数搬进
     pt 管理的终端里执行并回传返回值）。"""
     global _input_bridge
     _input_bridge = fn
 
 
-class BridgeConsole(Console):
-    """共享 Console：input() 遇上「工作线程 + 桥已注册」时改道 pt 通道。
+def _emit_ansi(text: str) -> None:
+    """ANSI 文本 → pt 解析通道打印（print_formatted_text）。
 
-    print 不做任何改道——patch_stdout 兜底打印安全，彩色 ANSI 直写的
-    乱码问题由 cli_layout 启动时开控制台 VT 解释解决（那才是根因）。
-    桥本身出异常就退回直读：桥挂了说明界面出了大事，宁可这个提问
-    失败，不能让整个输入层崩掉。
+    任何线程都能调（内部自动落到正确上下文）；失败退回裸 print
+    （打印挂了不能断业务）。
     """
+    try:
+        from prompt_toolkit import print_formatted_text
+        from prompt_toolkit.formatted_text import ANSI
+        print_formatted_text(ANSI(text), end="")
+    except Exception:
+        try:
+            print(text, end="")
+        except Exception:
+            pass
+
+
+class BridgeConsole(Console):
+    """共享 Console：print 走 pt 解析通道，input 走 run_in_terminal。
+
+    print 细节：先用「内存里的真彩 Console」把参数渲染成 ANSI 文本
+    （markup/表格/样式与原 print 完全兼容），剥掉 OSC-8 后经 pt 打印。
+    调用方显式传了 file= 的照旧直写（人家就是要写到别处去）。
+    """
+
+    def print(self, *args, **kwargs):
+        if kwargs.get("file") is not None:
+            return Console.print(self, *args, **kwargs)
+        try:
+            import shutil
+            width = shutil.get_terminal_size((80, 24)).columns
+            sio = StringIO()
+            inner = Console(
+                file=sio, force_terminal=True, color_system="truecolor",
+                width=width, legacy_windows=False,
+            )
+            inner.print(*args, **kwargs)
+            text = _OSC8_RE.sub("", sio.getvalue())
+        except Exception:
+            # 渲染桥出问题：退回原生直写（老行为——乱码也比丢输出强）
+            return Console.print(self, *args, **kwargs)
+        _emit_ansi(text)
+        return None
 
     def input(self, prompt="", **kwargs):
         if _input_bridge is not None and \

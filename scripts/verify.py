@@ -831,6 +831,39 @@ def check_pt_extras():
     return _ok("Shift/Ctrl+Enter 别名 + 焦点噪声忽略生效")
 
 
+def check_console_bridge():
+    """验证共享 Console 两座桥：print 走 pt 通道、input 桥跨线程回传。"""
+    import threading as _th
+    import cli_ui
+
+    # print 桥：rich 渲染产物（含 ANSI 色码）进 _emit_ansi，不直写 stdout
+    got = []
+    orig = cli_ui._emit_ansi
+    cli_ui._emit_ansi = got.append
+    try:
+        cli_ui.console.print("[red]你好[/red]")
+    finally:
+        cli_ui._emit_ansi = orig
+    if len(got) != 1 or "\x1b[" not in got[0] or "你好" not in got[0]:
+        return _fail(f"print 桥产物异常：{got!r}")
+
+    # input 桥：工作线程的提问经桥执行并回传（假桥不真读 stdin）
+    result = {}
+    cli_ui.set_input_bridge(lambda f: "answered")
+    try:
+        t = _th.Thread(
+            target=lambda: result.setdefault("v", cli_ui.console.input("问：")),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=5)
+    finally:
+        cli_ui.set_input_bridge(None)
+    if result.get("v") != "answered":
+        return _fail(f"input 桥回传异常：{result}")
+    return _ok("print 走 pt 通道 + input 桥正常")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -899,6 +932,7 @@ def main():
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),
             ("键盘别名", check_pt_extras),
+            ("Console 桥", check_console_bridge),
         ]),
         ("CLI 流式框", [
             ("流式回答框", check_stream_box),
