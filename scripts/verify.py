@@ -593,6 +593,14 @@ def check_event_lines():
                               '{"error": "exit 1"}')
     if "✗" not in bad or "exit 1" not in bad:
         return _fail(f"失败行缺 ✗/错误摘要：{bad}")
+    # inline diff：红删绿增行 + 截断提示
+    dlines = ce.build_edit_diff("a\nb\nc\n", "a\nX\nc\nd\n")
+    kinds = [k for k, _ in dlines]
+    if "-" not in kinds or "+" not in kinds:
+        return _fail(f"diff 缺删/增行：{dlines}")
+    dcap = ce.build_edit_diff("", "\n".join(f"line{i}" for i in range(100)))
+    if not any(k == "…" for k, _ in dcap):
+        return _fail("diff 超长没有截断提示")
     p = ce.EventPairer()
     p.record("x", {})
     if p.pop("x", {}) is None or p.pop("x", {}) is not None:

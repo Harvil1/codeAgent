@@ -244,12 +244,66 @@ def reset_pending(rt) -> None:
         pairer = getattr(rt, "_event_pairer", None)
         if pairer is not None:
             pairer.clear()
+        # 写前快照一并清（钩子拒绝等路径会让 PRE 存的快照配不上 POST）
+        snaps = getattr(rt, "_write_snapshots", None)
+        if isinstance(snaps, dict):
+            snaps.clear()
     except Exception:
         pass
 
 
 _SUBAGENT_TOOLS = {"subagent", "delegate_task"}
 _TASK_TOOLS = {"task_create", "task_complete"}
+# 写类工具：完成行后面追加 inline diff（红删绿增，跟 hermes 学的）
+_WRITE_TOOLS = {"write_file", "str_replace"}
+# 快照/对比的文件大小上限（超过就不画 diff——几十万行的 diff 没人看）
+_DIFF_SNAPSHOT_MAX_BYTES = 200_000
+_DIFF_MAX_LINES = 30
+
+
+def build_edit_diff(old_text, new_text, max_lines=_DIFF_MAX_LINES):
+    """两段文本 → inline diff 行列表（difflib.unified_diff 的紧凑版）。
+
+    返回：(kind, line) 元组列表，kind ∈ {"-", "+", "@", " "}；
+    超过 max_lines 截断并补一行「还有更多」提示。纯函数可单测。
+    """
+    import difflib
+    diff = difflib.unified_diff(
+        (old_text or "").splitlines(), (new_text or "").splitlines(),
+        lineterm="", n=1,   # n=1：上下文只要 1 行，视觉紧凑
+    )
+    out = []
+    for ln in diff:
+        if ln.startswith("---") or ln.startswith("+++"):
+            continue   # ---/+++ 文件头行是噪声，不要
+        kind = ln[:1] if ln[:1] in ("-", "+", "@") else " "
+        out.append((kind, ln))
+        if len(out) >= max_lines:
+            hidden = sum(1 for _ in diff)   # 吃掉剩余迭代器算总数
+            if hidden:
+                out.append(("…", f"… 还有 {hidden} 行差异未展示"))
+            break
+    return out
+
+
+def _snapshot_write_target(args):
+    """写类工具的目标路径（write_file/str_replace 的参数名统一取一遍）。"""
+    args = args or {}
+    return str(args.get("path") or args.get("file_path") or "").strip()
+
+
+def _print_edit_diff(lines) -> None:
+    """把 diff 行画到屏幕：红删绿增、@@ 暗青，缩进 4 格对齐事件行。
+
+    用 rich 的 Text 对象（不解析 markup）——文件内容里带 [ ] 方括号
+    不会被误当成富文本标签。
+    """
+    from rich.text import Text
+    styles = {"-": "red", "+": "green", "@": "cyan dim", " ": "", "…": "dim"}
+    for kind, text in lines:
+        style = styles.get(kind, "")
+        console.print(Text(f"    {text}", style=style) if style
+                      else Text(f"    {text}"))
 
 
 def install_event_lines(rt) -> None:
@@ -265,6 +319,11 @@ def install_event_lines(rt) -> None:
     pairer = EventPairer()
     rt._event_pairer = pairer   # 挂到 rt 上：回合开始时 reset_pending 清板用
     rt.event_pending = []
+    # 写类工具的「写前快照」：(名, 参数json) → 旧文件内容。
+    # PRE 存、POST 取——纯 UI 层读文件，不给核心工具加一个字的负担。
+    # 挂到 rt 上：回合开始时 reset_pending 一并清（防 PRE 无 POST 的残留）
+    _write_snapshots = {}
+    rt._write_snapshots = _write_snapshots
 
     def _update_pending():
         try:
@@ -272,21 +331,61 @@ def install_event_lines(rt) -> None:
         except Exception:
             pass
 
+    def _snapshot_old(tool_name, args):
+        """PRE 时把要写的文件现状拍下来（读不到/太大就放弃 diff）。"""
+        try:
+            path = _snapshot_write_target(args)
+            if not path:
+                return
+            from pathlib import Path
+            p = Path(path)
+            if not p.is_file() or p.stat().st_size > _DIFF_SNAPSHOT_MAX_BYTES:
+                return
+            _write_snapshots[EventPairer._key(tool_name, args)] = \
+                p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    def _emit_edit_diff(tool_name, args, result):
+        """POST 时对比新旧内容画 diff（失败/没快照就静默跳过）。"""
+        try:
+            ok, _ = result_preview(result)
+            if not ok:
+                return   # 写都失败了，没有 diff 可画
+            key = EventPairer._key(tool_name, args)
+            old = _write_snapshots.pop(key, None)
+            if old is None:
+                return
+            from pathlib import Path
+            path = _snapshot_write_target(args)
+            p = Path(path) if path else None
+            if p is None or not p.is_file():
+                return
+            new = p.read_text(encoding="utf-8", errors="replace")
+            lines = build_edit_diff(old, new)
+            if lines:
+                _print_edit_diff(lines)
+        except Exception:
+            pass
+
     def _on_pre(tool_name, args, **_kw):
-        """记起点 + 子代理出发行。异常全吞（fail-open）。"""
+        """记起点 + 子代理出发行 + 写类工具旧内容快照。异常全吞。"""
         try:
             args = args or {}
             pairer.record(tool_name, args)
             _update_pending()
             if tool_name in _SUBAGENT_TOOLS:
                 console.print(f"[dim]{format_subagent_depart(args)}[/dim]")
+            elif tool_name in _WRITE_TOOLS:
+                _snapshot_old(tool_name, args)
             # 普通工具的等待期反馈归 spinner 行/状态栏 ◐ 段（cli_layout），
             # 这里不再补打 ◇ 出发行
         except Exception:
             pass
 
     def _on_post(tool_name, args, result, **_kw):
-        """打完成行。POST 钩子是流水线——最后必须原样 return result。"""
+        """打完成行 + 写类工具 inline diff。POST 是流水线——最后原样
+        return result。"""
         try:
             args = args or {}
             dt = pairer.pop(tool_name, args)
@@ -301,6 +400,8 @@ def install_event_lines(rt) -> None:
                 console.print(f"[dim]{format_task_event(tool_name, result)}[/dim]")
             else:
                 console.print(f"[dim]{format_tool_line(tool_name, args, dt, result)}[/dim]")
+                if tool_name in _WRITE_TOOLS:
+                    _emit_edit_diff(tool_name, args, result)
         except Exception:
             pass
         return result
