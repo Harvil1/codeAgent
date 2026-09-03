@@ -600,6 +600,92 @@ def check_event_lines():
 
 
 # ---------------------------------------------------------------------------
+# CLI 骨架（块①：常驻 Application 操作台）
+# ---------------------------------------------------------------------------
+
+def _gbk_safe(s: str) -> str:
+    """把状态栏文案里的 emoji（⚡📂☂ 等 GBK 编不了的）替换成问号——
+    verify 直跑时 stdout 是 GBK 控制台，详情里带 emoji 会炸 print。"""
+    return s.encode("gbk", "replace").decode("gbk")
+
+
+def check_status_bar_tiers():
+    """验证状态栏三档宽度：该出现的段出现、不该出现的段不出现。"""
+    from types import SimpleNamespace as _NS
+    from cli_layout import status_bar_segments
+
+    rt = _NS(
+        agent=_NS(model="test-model"),
+        workspace_cwd="D:/x/codeAgent",
+        bg_count=2,
+        event_pending=["terminal"],
+        turn_active=True,
+    )
+    # 窄屏 <52：模型 + 计时；目录/后台/工具/按键提示都不出现
+    segs = status_bar_segments(rt, width=40, elapsed_s=12.0)
+    joined = " │ ".join(segs)
+    if "test-model" not in joined or "12s" not in joined:
+        return _fail(f"窄屏缺模型/计时: {_gbk_safe(joined)}")
+    if "codeAgent" in joined or "后台" in joined or "terminal" in joined:
+        return _fail(f"窄屏不该有目录/后台/工具段: {_gbk_safe(joined)}")
+    # 中屏 <76：目录/后台/工具出现，按键提示还没有
+    segs = status_bar_segments(rt, width=60, elapsed_s=12.0)
+    joined = " │ ".join(segs)
+    for frag in ("test-model", "codeAgent", "后台", "terminal", "12s"):
+        if frag not in joined:
+            return _fail(f"中屏缺 {frag!r}: {_gbk_safe(joined)}")
+    if "Enter" in joined:
+        return _fail(f"中屏不该有按键提示: {_gbk_safe(joined)}")
+    # 宽屏 >=76：按键提示出现
+    segs = status_bar_segments(rt, width=100, elapsed_s=12.0)
+    joined = " │ ".join(segs)
+    if "Enter" not in joined:
+        return _fail(f"宽屏缺按键提示: {_gbk_safe(joined)}")
+    return _ok("三档宽度内容正确")
+
+
+def check_enter_routing():
+    """验证提交小函数：入队成功、输入框清空、空输入不入队。"""
+    import queue as _q
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.history import InMemoryHistory
+    from cli_layout import submit_input
+
+    buf = Buffer(history=InMemoryHistory())
+    buf.text = "hello /world"
+    q = _q.Queue()
+    submit_input(buf, q)
+    if q.empty() or q.get_nowait() != "hello /world":
+        return _fail("提交后队列里没有原文")
+    if buf.text != "":
+        return _fail(f"提交后输入框没清空: {buf.text!r}")
+    # 空白输入不入队（老语义：空行直接 continue，不烧一轮）
+    buf.text = "   "
+    submit_input(buf, q)
+    if not q.empty():
+        return _fail("空白输入不该入队")
+    return _ok("提交路由正确")
+
+
+def check_cli_layout():
+    """验证能构建出 Application（不依赖真终端）+ 退出请求不炸。"""
+    from types import SimpleNamespace as _NS
+    from cli_layout import build_application, request_app_exit
+
+    rt = _NS(
+        agent=_NS(model="test-model"), workspace_cwd="D:/x",
+        bg_count=0, event_pending=[], turn_active=False,
+    )
+    app = build_application(rt, input_queue=None, eof_sentinel=None)
+    if app is None:
+        return _fail("build_application 返回 None")
+    if app.full_screen:
+        return _fail("必须是非全屏模式（full_screen=False）")
+    request_app_exit(app)   # app 没在跑也不许炸（内部全吞）
+    return _ok("Application 构建 + 安全退出请求正常")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -658,6 +744,11 @@ def main():
         ]),
         ("CLI 事件行", [
             ("CLI 事件行", check_event_lines),
+        ]),
+        ("CLI 骨架", [
+            ("状态栏三档", check_status_bar_tiers),
+            ("提交路由", check_enter_routing),
+            ("布局构建", check_cli_layout),
         ]),
     ]
 
