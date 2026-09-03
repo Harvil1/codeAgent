@@ -395,20 +395,39 @@ class _GrayHint:
         return Transformation(transform_input.fragments)
 
 
-def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn):
+def is_double_press(state: dict, now: float, window: float = 2.0) -> bool:
+    """判断这次按键是不是「窗口期内的第二击」（纯函数，可单测）。
+
+    大白话：第一次按下时只记时间不打架；2 秒内又按下一次才算双击
+    （返回 True 并清零计时）；超时的第二击当作新一轮的第一击。
+
+    参数：
+        state: {"t": 上次按下时刻} 字典（调用方持有，函数原地更新）
+        now: 当前时刻（time.monotonic 值）
+        window: 双击窗口秒数，默认 2.0
+    返回：True=这是窗口内的第二击。
+    """
+    last = state.get("t", 0.0)
+    hit = (now - last) < window
+    state["t"] = 0.0 if hit else now
+    return hit
+
+
+def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=None):
     """键位路由表（大白话：操作台怎么响应特殊键）。
 
     - Enter：补全菜单开着就先收菜单（pt 惯例：第一下选中、第二下提交）；
       没开菜单就提交——submit_input 入队 + 清框
     - Alt+↵ / (Windows) Ctrl+↵：输入框里插换行（多行编辑）
-    - Ctrl+C：三档同老语义——有字清行 / 回合中调 interrupt_fn /
-      空闲空框塞 EOF 哨兵（统一退出通道）
+    - Ctrl+C：有字清行 / 回合中第一击中断本轮（提示再按强退）、
+      2 秒内第二击强制退出一切 / 空闲空框塞 EOF 哨兵（统一退出通道）
     - Ctrl+D：空框塞 EOF 哨兵；有字删光标前一个字符（readline 惯例）
     """
     import sys
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
+    _cc_state = {"t": 0.0}   # Ctrl+C 双击检测器的心跳本
 
     @kb.add("enter")
     def _submit(event):
@@ -434,9 +453,21 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn):
         b = event.app.current_buffer
         if b.text:
             b.reset()
-        elif interrupt_fn is not None and interrupt_fn():
-            pass   # 回合进行中：中断回合；操作台保持，继续听输入
-        elif eof_sentinel is not None and input_queue is not None:
+            return
+        if interrupt_fn is not None and interrupt_fn():
+            # 回合进行中：第一击中断本轮；2 秒内第二击强制退出一切
+            #（子代理/后台任务/所有线程——交给 cli.py 的 force_exit_fn）
+            if is_double_press(_cc_state, time.monotonic()) \
+                    and force_exit_fn is not None:
+                force_exit_fn()
+            else:
+                from cli_ui import console
+                console.print(
+                    "[yellow]⚡ 已请求中断本轮；"
+                    "再按一次 Ctrl+C 强制退出所有任务[/yellow]"
+                )
+            return
+        if eof_sentinel is not None and input_queue is not None:
             input_queue.put(eof_sentinel)   # 空闲空框：走统一退出通道
 
     @kb.add("c-d")
@@ -453,7 +484,7 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn):
 
 def build_application(rt, *, completer=None, interrupt_fn=None,
                       input_queue=None, eof_sentinel=None,
-                      history_path=None):
+                      force_exit_fn=None, history_path=None):
     """组装常驻操作台；环境不支持（如 stdout 被重定向）返回 None。
 
     老降级界面已删：返回 None 对调用方是致命错误（打印原因后退出）。
@@ -581,7 +612,8 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         _style_base.update(cli_skin.get_pt_style_overrides())
         app = Application(
             layout=Layout(HSplit([spinner_row, input_area, separator, status_bar])),
-            key_bindings=_build_key_bindings(input_queue, eof_sentinel, interrupt_fn),
+            key_bindings=_build_key_bindings(
+                input_queue, eof_sentinel, interrupt_fn, force_exit_fn),
             output=output,
             style=Style.from_dict(_style_base),
             full_screen=False,

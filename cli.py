@@ -3439,6 +3439,27 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         _do_turn_interrupt,
     )
 
+    def _force_exit():
+        """Ctrl+C 双击：关闭所有进程和线程，立刻走人（不走优雅收尾）。
+
+        顺序有讲究：先按中断+取消旗（让子代理/后台任务自己断）→
+        EOF 请工作线程离场 → app.exit() 收界面。app.run() 返回后终端
+        恢复正常模式，主线程的 join(2s) 兜底才会用 os._exit——那时
+        终端已不在 raw 模式，强杀不会把用户的终端搞坏。
+        """
+        try:
+            console.print("[red]⚡ 强制退出——正在取消所有子代理和后台任务…[/red]")
+        except Exception:
+            pass
+        _do_turn_interrupt()            # agent.interrupt + 全部取消旗
+        _input_q.put(_EOF_SENTINEL)     # 请工作线程离场
+        _the_app = getattr(rt, "prompt_session", None)
+        if _the_app is not None:
+            try:
+                _the_app.exit()         # UI 收摊（终端恢复交给 app.run 返回）
+            except Exception:
+                pass
+
     # 皮肤激活：settings.json 的 display.skin（失败回退 default，不挡启动）
     try:
         cli_skin.init_skin_from_config(rt.config)
@@ -3452,6 +3473,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         interrupt_fn=_interrupt_fn,
         input_queue=_input_q,
         eof_sentinel=_EOF_SENTINEL,
+        force_exit_fn=_force_exit,
         history_path=get_codeagent_home() / ".input_history",
     )
     rt.prompt_session = _app

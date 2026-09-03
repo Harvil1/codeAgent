@@ -864,6 +864,22 @@ def check_console_bridge():
     return _ok("print 走 pt 通道 + input 桥正常")
 
 
+def check_cc_double_press():
+    """验证 Ctrl+C 双击检测：窗口内第二击命中、超时重新计、命中后清零。"""
+    from cli_layout import is_double_press
+
+    st = {}
+    if is_double_press(st, 100.0):
+        return _fail("第一击不该命中")
+    if not is_double_press(st, 101.5):       # 1.5s 后 → 双击
+        return _fail("窗口内第二击没命中")
+    if is_double_press(st, 102.0):           # 命中后清零 → 这算新第一击
+        return _fail("命中后没清零（连击误判）")
+    if is_double_press(st, 110.0):           # 超窗口 → 新第一击
+        return _fail("超时第二击误判为双击")
+    return _ok("双击窗口/清零/超时判定正确")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -933,6 +949,7 @@ def main():
             ("皮肤引擎", check_skin_engine),
             ("键盘别名", check_pt_extras),
             ("Console 桥", check_console_bridge),
+            ("Ctrl+C 双击", check_cc_double_press),
         ]),
         ("CLI 流式框", [
             ("流式回答框", check_stream_box),
