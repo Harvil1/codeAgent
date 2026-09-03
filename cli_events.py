@@ -1,8 +1,8 @@
 """事件行渲染器——把工具/子代理/任务/提问的动作打成一行行紧凑事件。
 
 设计一句话：**完成才打行，等待靠工具栏**。
-- PRE（工具开始）：只记时间戳 + 维护 rt.event_pending（工具栏 ◐ 段读它）；
-  子代理出发是时刻事件，PRE 就打行；降级终端（没工具栏）补打 ◐ 出发行
+- PRE（工具开始）：只记时间戳 + 维护 rt.event_pending（状态栏 ◐ 段/spinner
+  行读它）；子代理出发是时刻事件，PRE 就打行
 - POST（工具结束）：配对算耗时，打完成行（✓/✗ + 参数摘要 + 结果摘要）；
   失败也走 POST（结果含 error → ✗ 行）——不另挂 FAILURE 钩子，
   否则一次失败会打两行 ✗（model_tools 对含 error 的结果两个钩子都发）
@@ -248,10 +248,8 @@ def install_event_lines(rt) -> None:
             _update_pending()
             if tool_name in _SUBAGENT_TOOLS:
                 console.print(f"[dim]{format_subagent_depart(args)}[/dim]")
-            # 降级路径没有底部工具栏，等待期反馈退回老办法：出发时打一行
-            if getattr(rt, "prompt_session", None) is None \
-                    and tool_name not in _SUBAGENT_TOOLS:
-                console.print(f"[dim]◐ {tool_name}[/dim]")
+            # 普通工具的等待期反馈归 spinner 行/状态栏 ◐ 段（cli_layout），
+            # 这里不再补打 ◇ 出发行
         except Exception:
             pass
 

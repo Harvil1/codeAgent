@@ -126,6 +126,203 @@ def submit_input(buffer, input_queue) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 补全器 + 中断判断器（原 cli_input.py 迁入——老降级界面已删，
+# 这两个零件是新旧界面共用的中立件，归到界面总仓 cli_layout）
+# ---------------------------------------------------------------------------
+
+def build_interrupt_fn(is_active_fn, do_interrupt_fn):
+    """造 Ctrl+C 的「回合中中断」判断器。
+
+    参数：
+        is_active_fn：() -> bool，当前是否有 AI 回合在跑
+        do_interrupt_fn：() -> None，真正执行中断（agent.interrupt + 取消子代理）
+
+    返回：() -> bool——True 表示「回合在跑，已触发中断」（键位保持提示符）；
+        False 表示「空闲」（键位走退出通道）。任何异常都按 False 处理
+        （fail-open：中断通道出问题不能挡住退出语义）。
+    """
+    def _interrupt():
+        try:
+            if not is_active_fn():
+                return False
+            do_interrupt_fn()
+            return True
+        except Exception:
+            return False
+    return _interrupt
+
+
+# 补全器基类：prompt_toolkit 可用就继承它的 Completer（真终端的异步补全
+# 通道调 get_completions_async——那是基类方法，裸鸭子类没有，会在打字
+# 的时候崩掉"Unhandled exception in event loop"）。
+try:
+    from prompt_toolkit.completion import Completer as _PtCompleter
+except Exception:  # pragma: no cover - 理论上到不了这（pt 是硬依赖）
+    _PtCompleter = object
+
+
+class SlashCompleter(_PtCompleter):
+    """三级补全：命令名（注册表+技能+技能束同一池）→ 命令参数。
+
+    实现成 prompt_toolkit 的 Completer 协议（继承基类拿默认的异步包装，
+    铁律：任何异常都吞掉返回空——补全挂了不能挡住打字。
+    """
+
+    def __init__(self, registry_tokens, arg_completers, dynamic_tokens_fn):
+        self._registry_tokens = list(registry_tokens)   # 含别名
+        self._arg_completers = dict(arg_completers)
+        self._dynamic_tokens_fn = dynamic_tokens_fn     # () -> 技能/技能束命令名
+
+    def get_completions(self, document, complete_event):
+        try:
+            text = document.text
+            if not text.startswith("/"):
+                return
+            parts = text.split()
+            if len(parts) <= 1 and not text.endswith(" "):
+                # 一级：命令名补全（静态注册表 + 动态技能池合并）
+                tokens = set(self._registry_tokens)
+                try:
+                    tokens.update(self._dynamic_tokens_fn() or [])
+                except Exception:
+                    pass
+                frag = parts[0] if parts else ""
+                for t in sorted(tokens):
+                    if t.startswith(frag):
+                        from prompt_toolkit.completion import Completion
+                        yield Completion(t, start_position=-len(frag))
+            else:
+                # 二级：该命令的参数补全（替换正在输入的最后一个词，
+                # 而不是光标处硬塞——/sessions re 选 resume 要变成
+                # /sessions resume，不是 /sessions reresume）
+                fn = self._arg_completers.get(parts[0])
+                if fn:
+                    from prompt_toolkit.completion import Completion
+                    frag = text[len(parts[0]):].lstrip().split()[-1] if \
+                        text[len(parts[0]):].lstrip().split() else ""
+                    for cand in fn(text) or []:
+                        if frag and not str(cand).startswith(frag):
+                            continue  # 前缀不匹配的候选不出（对齐一级行为）
+                        yield Completion(
+                            str(cand),
+                            start_position=-len(frag) if frag else 0,
+                        )
+        except Exception:
+            return
+
+
+def build_completer(rt):
+    """从注册表 + rt 的技能/技能束命令组装补全器。
+
+    动态部分用闭包按需现取（技能中途增删也能补全到最新）。
+    """
+    import cli_commands as cc
+
+    def dynamic_tokens():
+        try:
+            return list(getattr(rt, "skill_commands", {}) or {}) + \
+                   list(getattr(rt, "bundle_commands", {}) or {})
+        except Exception:
+            return []
+
+    return SlashCompleter(
+        registry_tokens=cc.all_tokens(),
+        arg_completers=cc.arg_completer_map(),
+        dynamic_tokens_fn=dynamic_tokens,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 终端自举：确保进程有真控制台（git-bash 用 winpty 中转）
+# ---------------------------------------------------------------------------
+
+def _stdio_is_console() -> bool:
+    """stdout 和 stdin 是不是都是控制台句柄（pt 画界面/读按键的硬条件）。
+
+    大白话：光「进程挂着控制台」不算数——ConPTY/重定向环境下进程可能
+    有控制台对象但 stdio 是管道，pt 照样画不了。必须 stdout/stdin
+    两个都是真控制台才放行。
+    """
+    try:
+        import ctypes
+        from ctypes import byref
+        k32 = ctypes.windll.kernel32
+        for std_handle in (-11, -10):   # STD_OUTPUT_HANDLE / STD_INPUT_HANDLE
+            h = k32.GetStdHandle(std_handle)
+            mode = ctypes.c_uint32()
+            if not h or not k32.GetConsoleMode(h, byref(mode)):
+                return False
+        return True
+    except Exception:
+        return True   # 探测失败按「可用」处理（别误杀正常环境）
+
+
+def ensure_interactive_terminal() -> None:
+    """Windows 终端自举：stdio 是控制台直接过；mintty 用 winpty 自救；
+    其余（管道/CI）明说退出。
+
+    大白话：新界面（Application 操作台）在 Windows 上靠控制台 API 画图
+    和读按键。四种终端里 cmd / Windows Terminal / PowerShell 的 stdio
+    天然是控制台；git-bash 的 mintty 给的是管道——进程连控制台对象都没
+    有，得靠 winpty（Git for Windows 自带）造一个隐藏控制台当中转站，
+    把进程重新拉起来。有控制台对象但 stdio 被重定向（CI/管道喂脚本），
+    救不了也不该救——明说并退出，老降级界面已经删了，不装哑巴。
+
+    防循环护栏：winpty 重启前设 CODEAGENT_WINPTY_REEXEC 环境变量，
+    重启后的子进程带上它——万一 winpty 没给出控制台，也不再重试，
+    直接走报错退出（不然就无限重启套娃了）。
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if os.name != "nt":
+        return                      # POSIX 家族本就有 pty，不折腾
+    if _stdio_is_console():
+        return
+
+    # stdio 不是控制台。区分两种情况：
+    # a) 连控制台对象都没有（mintty）→ winpty 能救
+    # b) 有控制台对象但 stdio 被重定向 → 救不了，直接报错
+    try:
+        import ctypes
+        has_console_window = ctypes.windll.kernel32.GetConsoleWindow() != 0
+    except Exception:
+        has_console_window = True
+
+    if not has_console_window and not os.environ.get("CODEAGENT_WINPTY_REEXEC"):
+        winpty = shutil.which("winpty")
+        if winpty:
+            # Popen 用列表传参（自动处理带空格的路径，如
+            # C:\\Program Files\\Git\\usr\\bin\\winpty.exe）；
+            # os.execv 在 Windows 上不带队引号，路径带空格就炸
+            child_env = dict(os.environ)
+            child_env["CODEAGENT_WINPTY_REEXEC"] = "1"
+            try:
+                proc = subprocess.Popen(
+                    [winpty, sys.executable,
+                     os.path.abspath(sys.argv[0])] + list(sys.argv[1:]),
+                    env=child_env,
+                )
+                sys.exit(proc.wait())
+            except Exception as e:
+                print(f"winpty 重新拉起失败: {e}", file=sys.stderr)
+        else:
+            print(
+                "当前在 git-bash（mintty）里但没有找到 winpty——"
+                "Git for Windows 自带它，请检查 PATH。",
+                file=sys.stderr,
+            )
+    print(
+        "CodeAgent 需要交互式终端：请用 cmd / Windows Terminal / "
+        "PowerShell，或在 git-bash 里确保 winpty 可用后重试"
+        "（stdio 不能被重定向）。",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # 组装层：布局 + 键位 + 样式
 # ---------------------------------------------------------------------------
 
@@ -236,12 +433,16 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn):
 def build_application(rt, *, completer=None, interrupt_fn=None,
                       input_queue=None, eof_sentinel=None,
                       history_path=None):
-    """组装常驻操作台；环境不支持时返回 None（调用方降级 console.input）。
+    """组装常驻操作台；环境不支持（如 stdout 被重定向）返回 None。
+
+    老降级界面已删：返回 None 对调用方是致命错误（打印原因后退出）。
+    verify 的无头构建（CODEAGENT_LAYOUT_HEADLESS=1）例外——它只检查
+    布局拼装，不真跑。
 
     参数：
         rt: RuntimeContext（状态栏/spinner 读它的现有黑板）
-        completer: SlashCompleter（cli_input.build_completer 产物）
-        interrupt_fn: Ctrl+C 回合中中断判断器（cli_input.build_interrupt_fn 产物）
+        completer: SlashCompleter（cli_layout.build_completer 产物）
+        interrupt_fn: Ctrl+C 回合中中断判断器（cli_layout.build_interrupt_fn 产物）
         input_queue: 老主循环的 _input_q（Enter 提交塞这里）
         eof_sentinel: 退出哨兵对象（Ctrl+C/Ctrl+D 空闲空框时塞队列）
         history_path: 输入历史文件 Path（None 用内存历史，测试方便）
@@ -260,18 +461,17 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import TextArea
 
-        # ---- 终端输出：先试真的，拿不到（管道/mintty 等）就降级 ----
-        # 大白话：先看这个终端能不能画界面；画不了就返回 None 让调用方
-        # 走 console.input 老路。只有 verify 显式声明「无头构建」时才
-        # 用假输出把布局拼出来检查（真终端拿不到输出还给假输出的话，
-        # 界面会静默变成隐形的——比降级糟糕得多）。
+        # ---- 终端输出：先试真的，拿不到（stdout 被重定向等）就失败 ----
+        # 大白话：先看这个终端能不能画界面；画不了就返回 None，由调用方
+        # 打印原因后退出（老降级界面已删）。只有 verify 显式声明「无头
+        # 构建」时才用假输出把布局拼出来检查（真终端拿不到输出还给假
+        # 输出的话，界面会静默变成隐形的——比报错退出糟糕得多）。
         try:
             from prompt_toolkit.output import create_output
             output = create_output()
         except Exception as _oe:
             if os.environ.get("CODEAGENT_LAYOUT_HEADLESS") != "1":
-                logger.error(
-                    "终端输出不可用，界面降级为 console.input: %s", _oe)
+                logger.error("终端输出不可用，界面起不来: %s", _oe)
                 return None
             from prompt_toolkit.output import DummyOutput
             output = DummyOutput()

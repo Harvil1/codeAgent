@@ -557,7 +557,7 @@ def check_cli_completer():
     import cli_commands as cc
     import cli  # noqa: F401  触发自登记
     import cli_diag_cmds, cli_session_cmds, cli_skill_memory_cmds  # noqa: F401
-    from cli_input import SlashCompleter
+    from cli_layout import SlashCompleter
 
     # amap 只算一次，构造补全器和二级检查共用同一份数据
     amap = cc.arg_completer_map()

@@ -1,10 +1,11 @@
 """程序总入口：整个 CodeAgent 命令行工具从 `python main.py` 这里启动。
 
-这个文件是"点火器"，只做四件事：
+这个文件是"点火器"，只做五件事：
 1. 把 Windows 控制台输出切成 UTF-8（防止中文/emoji 乱码崩溃）；
-2. 提前建好 agent home 目录（默认 ~/.codeAgent）、加载 .env、初始化配置；
-3. 尝试连接 MCP 外部工具（失败只警告不阻断启动）；
-4. 把剩下的活全交给 cli.main（参数解析和分发都在那边）。
+2. 终端自举：确保有真控制台（git-bash 自动用 winpty 重启，无终端报错退出）；
+3. 提前建好 agent home 目录（默认 ~/.codeAgent）、加载 .env、初始化配置；
+4. 尝试连接 MCP 外部工具（失败只警告不阻断启动）；
+5. 把剩下的活全交给 cli.main（参数解析和分发都在那边）。
 
 用法：
     python main.py                 # 交互模式（启动时提示恢复历史）
@@ -28,6 +29,14 @@ try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, ValueError):
     pass  # 某些环境（输出被重定向/捕获）不支持 reconfigure，切不了就算了
+
+# 终端自举（新界面是唯一界面，没有降级通道）：Windows 下确认进程有真
+# 控制台——cmd / Windows Terminal / PowerShell 天然有；git-bash（mintty）
+# 没有就自动用 winpty 把自己重新拉起来（Git for Windows 自带）；连
+# 终端都没有（管道喂脚本/CI）就明说并退出。放在 MCP 初始化之前——
+# winpty 重启的场合别白跑一遍 MCP。
+from cli_layout import ensure_interactive_terminal
+ensure_interactive_terminal()
 
 from constants import get_codeagent_home, skills_dir, logs_dir
 
