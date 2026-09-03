@@ -3285,7 +3285,7 @@ def _switch_model(rt: RuntimeContext, args: str):
 
 def _statusline_segments(rt, agent) -> list[str]:
     """回合末状态行的段拼装（底部工具栏是独立轻量拼装，见
-    cli_input.build_toolbar，不走这里）。
+    cli_layout.status_bar_segments，不走这里）。
 
     段的顺序：模型 │ 本会话 token 用量 │ goal 状态 │ 项目名。
     不吞异常——兜底交给调用方（_render_statusline 的 try）。
@@ -3462,8 +3462,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     # 处理器记录；输入线程消费中断信号时用它去重同一次按键
     _last_ctrl_c = 0.0
 
-    # === 输入层装配：prompt_toolkit 会话（失败自动降级） ===
+    # === 输入层装配：常驻操作台（cli_layout）；失败自动降级老通道 ===
     import cli_input
+    import cli_layout
 
     # === Ctrl+C 回合中中断：pt 原始模式吃掉系统信号，靠 c-c 键位回调补通道 ===
     rt.turn_active = False
@@ -3481,11 +3482,19 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         _do_turn_interrupt,
     )
 
-    rt.prompt_session = cli_input.build_prompt_session(
+    # === 常驻操作台装配：cli_layout 的 Application（失败/管道自动降级） ===
+    _app = cli_layout.build_application(
+        rt,
         completer=cli_input.build_completer(rt),
-        toolbar_fn=cli_input.build_toolbar(rt),
         interrupt_fn=_interrupt_fn,
+        input_queue=_input_q,
+        eof_sentinel=_EOF_SENTINEL,
+        history_path=get_codeagent_home() / ".input_history",
     )
+    # 属性名沿用 prompt_session：cli_events 用「它是否为 None」判断
+    # 真终端活着与否（降级通道要补打 ◐ 出发行）。装的是 Application，
+    # 但那个判断只看 None/非 None，不挑类型。
+    rt.prompt_session = _app
 
     # === 事件行渲染器：工具/子代理/任务 全走这里（完成行 + 工具栏黑板） ===
     import cli_events
@@ -3510,17 +3519,14 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             except Exception as e:
                 logger.error("输入线程异常退出: %s", e)
                 return
-    _input_thread = _threading_mod.Thread(target=_input_reader, daemon=True)
-    _input_thread.start()
 
-    # === 工具栏定时刷新：每 2 秒敲一次 invalidate，让底部条显示最新状态 ===
-    # （纯视觉；失败静默——invalidate 内部已吞异常）
-    def _toolbar_refresher():
-        while not _input_stop.is_set():
-            time.sleep(2)
-            cli_input.invalidate(getattr(rt, "prompt_session", None))
-
-    _threading_mod.Thread(target=_toolbar_refresher, daemon=True).start()
+    if _app is not None:
+        # 真终端模式：spinner 线程接管底部条的节奏（0.1s 一拍：翻帧/计时/重绘）
+        cli_layout.start_spinner_thread(rt, _app, _input_stop)
+    else:
+        # 降级模式：老输入线程读行喂队列（代码原样，一行不改）
+        _input_thread = _threading_mod.Thread(target=_input_reader, daemon=True)
+        _input_thread.start()
     # 把队列交给 agent（排队输入的回流通道）
     try:
         rt.agent.set_input_queue(_input_q)
@@ -3568,17 +3574,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         except Exception:
             pass
 
-    # 主循环：读输入 → 处理 → 调 agent → 显示，循环往复
-    from contextlib import ExitStack
-    with ExitStack() as _patch_es:
-        # pt 会话活着才需要 patch_stdout（把主线程打印排队到提示符重绘之后，
-        # 防止输出和输入框/工具栏互相撕烂）；降级路径（session=None）不折腾
-        if getattr(rt, "prompt_session", None) is not None:
-            try:
-                from prompt_toolkit.patch_stdout import patch_stdout
-                _patch_es.enter_context(patch_stdout())
-            except Exception as _pe:
-                logger.warning("patch_stdout 不可用（输出可能与输入框偶发交错）: %s", _pe)
+    # 老主循环（一行没改，只是搬了个家）：读输入 → 处理 → 调 agent → 显示，
+    # 循环往复。app 模式跑在工作线程（cli-worker），降级模式跑在主线程。
+    def _worker_loop():
         while True:
             # 优先消费模型运行期间排队的 slash 命令（agent 的排队
             # 机制会把它们分流到 _queued_cli_commands；对话一结束就在这里
@@ -3589,15 +3587,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             else:
                 user_input = _input_q.get()
             if user_input is _EOF_SENTINEL:
-                console.print("\n再见！")
-                break
+                break   # 再见与收尾由启动段统一处理（app 模式在 UI 退出后打）
             if user_input is _INTERRUPT_SENTINEL:
                 # 同一次 Ctrl+C 可能同时被输入线程（本信号）和
                 # 主线程（回合内中断，已记 _last_ctrl_c）两边消费——窗口内到达的
                 # 信号是重复消费，吞掉不退出；空闲等输入时的 Ctrl+C 保持退出语义
                 if _should_exit_on_interrupt_sentinel(_last_ctrl_c, time.monotonic()):
-                    console.print("\n再见！")
-                    break
+                    break   # 同上：收尾统一在启动段
                 continue
 
             # idle wake（后台唤醒）：后台任务/异步子代理完成时塞进来的哨兵。
@@ -3850,6 +3846,43 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             except Exception as e:
                 console.print(f"[red]错误: {e}[/red]")
                 logger.exception("agent 运行错误")
+
+        # 无论从哪条路退出（EOF / 中断退出 / /quit），都请 UI 收摊；
+        # 降级模式 _app 是 None，request_app_exit 静默返回
+        cli_layout.request_app_exit(_app)
+
+    if _app is not None:
+        # 真终端模式：主线程跑 UI（app.run 阻塞），工作线程跑老主循环；
+        # patch_stdout 改包 app.run()——工作线程的 console.print 会被
+        # 代理到 UI 线程、排在操作台上方（跟 hermes 同款）
+        _worker_thread = _threading_mod.Thread(
+            target=_worker_loop, daemon=True, name="cli-worker")
+        _worker_thread.start()
+        try:
+            from prompt_toolkit.patch_stdout import patch_stdout
+            _patch_ctx = patch_stdout()
+        except Exception as _pe:
+            logger.warning("patch_stdout 不可用（输出可能与输入框偶发交错）: %s", _pe)
+            _patch_ctx = None
+        try:
+            if _patch_ctx is not None:
+                with _patch_ctx:
+                    _app.run()
+            else:
+                _app.run()
+        except (EOFError, KeyboardInterrupt, BrokenPipeError) as _ee:
+            logger.info("界面退出: %s", _ee)
+        finally:
+            # 工作线程收到 EOF → request_app_exit → app.run 返回；
+            # 这里反向兜底：UI 先退了（异常），也让工作线程尽快收工
+            _input_stop.set()
+            _input_q.put(_EOF_SENTINEL)
+            _worker_thread.join(timeout=2.0)
+    else:
+        # 降级模式：老结构——主线程直接跑老主循环（无 pt 可 patch）
+        _worker_loop()
+
+    console.print("\n再见！")
 
     # === 退出前清理后台任务 ===
     # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）

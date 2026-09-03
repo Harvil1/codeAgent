@@ -1,11 +1,13 @@
-"""输入层——prompt_toolkit 会话工厂 + 快捷键 + 降级通道。
+"""输入层——降级通道 + 补全器 + 中断判断器。
 
-分工：这个文件只管「怎么读一行（或多行）输入」；读到的内容怎么处理
-（队列、哨兵、slash 分发）全在 cli.run_interactive，一根线不动。
+分工：真终端界面在 cli_layout.py（常驻 Application 操作台）；这个文件
+只留三样东西——
+1. 降级通道 read_line（pt 不可用/终端画不了界面时，console.input 读行）；
+2. SlashCompleter 三级补全器（cli_layout 的 TextArea 和降级通道共用）；
+3. build_interrupt_fn（Ctrl+C 回合中中断判断器，两边共用）。
 
-降级通道：prompt_toolkit 不可用或会话创建失败时返回 None，调用方
-（cli 的输入线程）自动退回 console.input——功能不丢，只是没了
-历史/补全这些糖。
+读到的内容怎么处理（队列、哨兵、slash 分发）全在 cli.run_interactive，
+一根线不动。
 """
 
 import logging
@@ -15,38 +17,6 @@ from cli_ui import console
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEXT = "你: "
-
-
-def _build_key_bindings(interrupt_fn=None):
-    """三组行为规则（大白话：输入框怎么响应特殊键）。
-
-    - Ctrl+C：框里有字 → 清行（防误触丢半行字）；回合进行中 → 中断当前
-      回合（输入线程保持活着继续读）；空闲空框 → 退出程序（老语义不变）
-    - Esc 回车：提交多行内容（单行直接回车提交，互不干扰）
-
-    为什么回合中中断要靠键位回调：prompt_toolkit 的原始模式会吃掉系统
-    Ctrl+C 信号，主线程的老 except KeyboardInterrupt 通道收不到——只能
-    在键位处理里主动调 agent.interrupt()。
-    """
-    from prompt_toolkit.key_binding import KeyBindings
-
-    kb = KeyBindings()
-
-    @kb.add("c-c")
-    def _clear_or_interrupt_or_exit(event):
-        buffer = event.app.current_buffer
-        if buffer.text:
-            buffer.reset()
-        elif interrupt_fn is not None and interrupt_fn():
-            pass  # 回合进行中：中断回合；提示符保持，输入线程活着
-        else:
-            event.app.exit(exception=KeyboardInterrupt)
-
-    @kb.add("escape", "enter")
-    def _submit(event):
-        event.app.current_buffer.validate_and_handle()
-
-    return kb
 
 
 def build_interrupt_fn(is_active_fn, do_interrupt_fn):
@@ -71,41 +41,12 @@ def build_interrupt_fn(is_active_fn, do_interrupt_fn):
     return _interrupt
 
 
-def build_prompt_session(completer=None, toolbar_fn=None, interrupt_fn=None):
-    """造全局 PromptSession；环境不支持时返回 None（降级通道）。
-
-    参数：
-        completer: prompt_toolkit Completer（Task 5 接入，先留参数位）
-        toolbar_fn: 底部工具栏刷新函数（Task 6 接入）
-        interrupt_fn: Ctrl+C 回合中中断判断器（() -> bool；None=老语义
-            只有清行/退出两档）
-
-    返回：PromptSession 实例；None 表示环境不可用，调用方退回 console.input。
-    """
-    try:
-        from constants import get_codeagent_home
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory
-
-        history_path = get_codeagent_home() / ".input_history"
-        return PromptSession(
-            history=FileHistory(str(history_path)),
-            key_bindings=_build_key_bindings(interrupt_fn),
-            completer=completer,
-            bottom_toolbar=toolbar_fn,
-            complete_while_typing=True,
-            mouse_support=False,
-        )
-    except Exception as e:
-        logger.error("PromptSession 创建失败，输入层降级为 console.input: %s", e)
-        return None
-
-
 def read_line(rt):
-    """输入线程专用：阻塞读一行（或多行）输入。
+    """降级通道专用：阻塞读一行（或多行）输入。
 
-    session 可用走 prompt_toolkit（历史/补全/粘贴全套）；不可用退回
-    原来的 console.input（提示文案保持「你: 」一致）。
+    真终端界面在 cli_layout（rt.prompt_session 装的是 Application）；
+    走到这里说明操作台没建起来（返回 None），退回 console.input
+    （提示文案保持「你: 」一致，功能不丢，只是没了历史/补全这些糖）。
     """
     session = getattr(rt, "prompt_session", None)
     if session is None:
@@ -113,19 +54,9 @@ def read_line(rt):
     return session.prompt(_PROMPT_TEXT)
 
 
-def invalidate(session) -> None:
-    """后台线程刷新底部工具栏用的安全阀门——任何异常都吞掉
-    （刷新失败顶多工具栏不更新，绝不能连累输入线程）。"""
-    try:
-        if session is not None:
-            session.app.invalidate()
-    except Exception:
-        pass
-
-
 # 补全器基类：prompt_toolkit 可用就继承它的 Completer（真终端的异步补全
-# 通道调 get_completions_async——那是基类方法，裸鸭子类没有，会在打字的
-# 时候崩掉"Unhandled exception in event loop"）；pt 缺失（降级通道）就
+# 通道调 get_completions_async——那是基类方法，裸鸭子类没有，会在打字
+# 的时候崩掉"Unhandled exception in event loop"）；pt 缺失（降级通道）就
 # 退化成裸 object，同步 get_completions 照样能用。
 try:
     from prompt_toolkit.completion import Completer as _PtCompleter
@@ -202,33 +133,3 @@ def build_completer(rt):
         arg_completers=cc.arg_completer_map(),
         dynamic_tokens_fn=dynamic_tokens,
     )
-
-
-def build_toolbar(rt):
-    """底部工具栏：等待期常驻的上下文条。
-
-    内容：⚡模型 │ 当前目录尾段 │ ☂N个后台任务 │ ◐正在跑的工具 │ 按键提示。
-    任何异常都吞——工具栏挂了不能挡输入（fail-open）。
-    """
-    def _toolbar():
-        try:
-            segs = []
-            agent = getattr(rt, "agent", None)
-            model = getattr(agent, "model", "") if agent else ""
-            if model:
-                segs.append(f"⚡{model}")
-            cwd = getattr(rt, "workspace_cwd", "") or ""
-            if cwd:
-                tail = str(cwd).replace("\\", "/").rstrip("/").split("/")[-1]
-                segs.append(f"📂{tail}")
-            bg = getattr(rt, "bg_count", None)
-            if bg:
-                segs.append(f"☂{bg}个后台任务")
-            pend = getattr(rt, "event_pending", None)
-            if pend:
-                segs.append(f"◐{pend[-1]}")  # 正在跑的工具（最晚出发的）
-            segs.append("Enter发送 Esc↵多行")
-            return " │ ".join(segs)
-        except Exception:
-            return "CodeAgent"
-    return _toolbar
