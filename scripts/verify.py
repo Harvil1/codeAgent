@@ -934,9 +934,9 @@ def check_pre_send_guard():
 
 
 def check_loop_host():
-    """验证事件循环宿主五件套：run_async 阻塞等结果且跑在宿主循环上、
+    """验证事件循环宿主六件套：run_async 阻塞等结果且跑在宿主循环上、
     异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
-    submit 豁免不被栅栏误杀。"""
+    submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀。"""
     import asyncio
     from agent.loop_host import loop_host, cancel_current_turn
 
@@ -997,9 +997,42 @@ def check_loop_host():
     bgfut.result(timeout=5)
     if bg_alive.get("cancelled"):
         return _fail("submit 的后台任务被回合栅栏误杀")
+
+    # C-1 竞态用例（确定性复现）：回合挂起等事件期间排两个回调——
+    # ①唤醒回调（让回合的最后一步入队）②submit 的建任务回调（后台
+    # task 创建、首步排在回合收尾之后）。栅栏落下时后台 task「已创建
+    # 未启动」：注册进 _bg_tasks 要等首步跑，此刻还没轮到——没有
+    # pending 豁免集时它会被栅栏静默取消（协程体一行不跑、WARNING
+    # 都不打）。两个回调都从回合协程内发起，入队顺序在循环线程上
+    # 百分百确定（唤醒先、submit 后，否则首步会先于回合收尾执行）。
+    c1_fate = {}
+    c1_holder = []
+    async def _c1_bg():
+        try:
+            await asyncio.sleep(0.2)
+            c1_fate["r"] = "done"
+        except asyncio.CancelledError:
+            c1_fate["r"] = "cancelled"
+    async def _c1_turn():
+        ev = asyncio.Event()
+        loop_host.call_soon_threadsafe(ev.set)  # ① 唤醒回调先入队
+        c1_holder.append(loop_host.submit(_c1_bg(), name="verify-c1"))  # ② 建任务回调紧随
+        await ev.wait()  # 回合挂起；唤醒后的下一步就是收尾（栅栏落下）
+        return "ok3"
+    if loop_host.run_turn(_c1_turn()) != "ok3":
+        return _fail("C-1 用例回合结果不对")
+    try:
+        c1_holder[0].result(timeout=5)
+    except BaseException:
+        pass  # 未修复时后台任务出生即被栅栏取消，future 以 CancelledError 收场
+    if c1_fate.get("r") == "cancelled":
+        return _fail("C-1 竞态复现：已创建未启动的后台任务被栅栏误杀")
+    if c1_fate.get("r") != "done":
+        return _fail(f"C-1 竞态复现：后台任务没跑完（出生即被栅栏取消）: {c1_fate}")
+
     # cancel_current_turn 空转不炸（没有回合在跑）
     cancel_current_turn()
-    return _ok("loop_host 语义五件套正常")
+    return _ok("loop_host 语义六件套正常")
 
 
 def check_session_append_perf(tmp):

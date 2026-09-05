@@ -14,6 +14,11 @@
 - 外部线程发出去就不管：``loop_host.submit(coro, name=...)``
 - 跑一个「回合」：``loop_host.run_turn(coro)``——结束时清场（回合栅栏）
 
+硬约束（回合并发契约）：同一时刻只允许一个回合在跑（run_turn 不得
+并发——两个回合的栅栏会把对方回合的新生 task 当遗留互删）；回合进行
+期间，其他线程经 run_async 提交、且活到回合结束仍未完成的协程，会被
+回合栅栏当成回合遗留清理掉——跨回合的长活儿必须走 submit（进豁免名单）。
+
 回合栅栏（为什么要有）：asyncio.run 关循环会把回合内没跑完的 task 全部
 取消（免费清场）；常驻舞台不会自己清场——run_turn 在回合结束时显式取消
 「本回合新冒出来且没完成、又不在后台豁免名单」的 task，保住旧语义。
@@ -24,7 +29,7 @@ import contextvars
 import logging
 import threading
 from concurrent.futures import Future as ConcurrentFuture
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,17 @@ class AgentLoopHost:
         # submit 注册的后台任务集合（回合栅栏豁免名单）。只在宿主循环
         # 线程内增删（_wrapped 协程体里），无锁安全
         self._bg_tasks: set = set()
+        # pending 豁免集（C-1 注册时机竞态兜底）：submit 在提交前把协程
+        # 对象同步登记到这里。为什么需要：_bg_tasks 要等 _wrapped 首步
+        # 真正跑起来才注册，而「task 已创建、首步还没跑」的窗口里（task
+        # 创建排在回合栅栏落下之前、首步排在之后），回合栅栏的
+        # all_tasks() 会看到这个既不在 _bg_tasks 里的新 task，把它当
+        # 回合遗留误杀——协程体一行不跑、WARNING 都不打，后台任务
+        # 静默消失。栅栏按协程对象在这里豁免兜底（见 _fenced_turn）。
+        # set 增删是 GIL 原子的，跨线程调用够安全。
+        self._pending_bg_coros: set = set()
+        # 回合是否在跑（并发契约警示用；调用方线程读写在容忍窗口内）
+        self._turn_active = False
         # 当前在跑的回合 future（force_exit 主动取消用；无回合时为 None）
         self._current_turn_fut: Optional[ConcurrentFuture] = None
 
@@ -75,8 +91,8 @@ class AgentLoopHost:
                 if pending:
                     self._loop.run_until_complete(
                         asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("loop_host 停机排空异常: %s", e)
             self._loop.close()
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -95,10 +111,12 @@ class AgentLoopHost:
     # ------------------------------------------------------------------
     # 对外接口
     # ------------------------------------------------------------------
-    def run_async(self, coro: Awaitable, *, timeout: Optional[float] = None) -> Any:
+    def run_async(self, coro: Coroutine, *, timeout: Optional[float] = None) -> Any:
         """外部线程：把协程交给宿主循环跑，阻塞等结果，异常原样穿透。
 
         等价于 asyncio.run(coro)，但协程跑在常驻循环上（连接池绑定稳定）。
+        timeout 只限制「等结果」的时长；超时会顺手取消协程（wait_for 语义），
+        不然调用方都超时走了，协程还赖在常驻循环上白跑到天荒地老。
         ⚠️ 不得在宿主循环线程内调用（自己等自己 = 死锁）。
         """
         loop = self._ensure_started()
@@ -110,8 +128,13 @@ class AgentLoopHost:
             # 协作式中断）：取消协程让中断传进去，再重抛给调用方
             fut.cancel()
             raise
+        except TimeoutError:
+            # 等超时了=调用方不等了：取消协程别让它白跑（wait_for 语义）；
+            # 若协程其实刚好已完成，cancel 是无害空操作
+            fut.cancel()
+            raise
 
-    def submit(self, coro: Awaitable, *, name: str = "bg") -> ConcurrentFuture:
+    def submit(self, coro: Coroutine, *, name: str = "bg") -> ConcurrentFuture:
         """外部线程：发出去就不管的后台任务（fire-and-forget）。
 
         任务注册进豁免名单（回合栅栏不取消）；异常打 WARNING（fail-open
@@ -129,10 +152,20 @@ class AgentLoopHost:
                 logger.warning("loop_host 后台任务 %s 失败（fail-open）: %s", name, e)
             finally:
                 self._bg_tasks.discard(me)
+                # 首步已跑、_bg_tasks 已接管豁免职责：协程对象从 pending
+                # 豁免集退场（正常/异常/取消收尾都会走到这里）
+                self._pending_bg_coros.discard(asyncio.current_task().get_coro())
 
-        return asyncio.run_coroutine_threadsafe(ctx.run(_wrapped), loop)
+        wrapped = ctx.run(_wrapped)
+        # 注册时机竞态（C-1）：必须在提交前同步登记 pending 豁免集——
+        # run_coroutine_threadsafe 的回调创建 task 后、task 首步运行前，
+        # 回合栅栏的 all_tasks() 会看到这个「已创建未启动」的 task，此时
+        # 它还没把自己加进 _bg_tasks，会被当回合遗留误杀。栅栏按协程
+        # 对象豁免兜底（见 _fenced_turn），首步跑起来后再由 _bg_tasks 接管。
+        self._pending_bg_coros.add(wrapped)
+        return asyncio.run_coroutine_threadsafe(wrapped, loop)
 
-    def run_turn(self, coro: Awaitable) -> Any:
+    def run_turn(self, coro: Coroutine) -> Any:
         """跑一个「回合」：正常执行 + 结束时清场（回合栅栏）。
 
         asyncio.run 关循环会把回合内遗留 task 全部取消——常驻循环后这层
@@ -140,6 +173,12 @@ class AgentLoopHost:
         记在 _current_turn_fut 上，强退路径可用 cancel_current_turn() 主动取消。
         """
         loop = self._ensure_started()
+        if self._turn_active:
+            # 并发契约（模块 docstring 硬约束）：两个回合的栅栏会把对方
+            # 回合的新生 task 当遗留互删，行为未定义——fail-open 但要
+            # 大声，只警示不拦截，后到者继续执行
+            logger.warning("run_turn 并发调用（契约禁止，后到者继续执行）")
+        self._turn_active = True
         fut = asyncio.run_coroutine_threadsafe(self._fenced_turn(coro), loop)
         self._current_turn_fut = fut
         try:
@@ -148,6 +187,7 @@ class AgentLoopHost:
             fut.cancel()
             raise
         finally:
+            self._turn_active = False
             self._current_turn_fut = None
 
     async def _fenced_turn(self, coro: Awaitable) -> Any:
@@ -157,9 +197,12 @@ class AgentLoopHost:
             return await coro
         finally:
             me = asyncio.current_task()
+            # C-1 兜底：submit 的后台任务「已创建未启动」时不在 _bg_tasks
+            # （注册要等首步），按 pending 豁免集里的协程对象放行
             leftover = [
                 t for t in asyncio.all_tasks()
                 if t is not me and t not in before and t not in self._bg_tasks
+                and t.get_coro() not in self._pending_bg_coros
             ]
             for t in leftover:
                 t.cancel()
