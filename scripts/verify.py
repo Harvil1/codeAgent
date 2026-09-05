@@ -714,6 +714,29 @@ def check_dispatch_output_cap(tmp):
     return _ok(f"统一封顶生效（{data['orig_chars']} 字符落盘）")
 
 
+def check_delegate_offload(tmp):
+    """验证子代理结果先落盘再摘要：父代理想看细节时有 full_at 可读回。"""
+    from tools.delegate_tool import _offload_child_result, _attach_full_result_pointer
+    result = "子代理跑了很久的调研结果" + "Y" * 3000
+    kwargs = {
+        "tool_call_id": "verify_delegate_call_1",
+        "codeagent_home": tmp,
+        "task_id": "t-9",
+    }
+    off = _offload_child_result(result, kwargs)
+    if not off:
+        return _fail("没有产出 offload 占位")
+    data = json.loads(off)
+    if not data.get("full_at") or data.get("orig_chars") != len(result):
+        return _fail(f"占位字段不对: {str(data)[:150]!r}")
+    if not Path(data["full_at"]).exists():
+        return _fail(f"原文没落盘: {data['full_at']}")
+    final = _attach_full_result_pointer("[摘要] 调研完成，结论X", off)
+    if "full_at" not in final or data["full_at"] not in final:
+        return _fail(f"摘要没带上找回指针: {final[-120:]!r}")
+    return _ok("子代理结果落盘+指针正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1191,6 +1214,7 @@ def main():
             ("摘要输入保真", check_summary_input_fidelity),
             ("token 估算与阈值", check_token_estimation_and_threshold),
             ("dispatch 统一封顶", lambda: check_dispatch_output_cap(tmp)),
+            ("子代理结果落盘", lambda: check_delegate_offload(tmp)),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

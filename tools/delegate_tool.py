@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from tools.registry import registry
 
@@ -1497,8 +1497,11 @@ def _run_child(
 
         # summary_only：结果太长就用 LLM 压成摘要，省父代理的上下文空间
         # summary_len：摘要长度（默认 300；长任务/深度调研可调大，见 schema 说明）
+        # 原文先落盘再摘要：摘要是有损压缩，落盘后父代理想看细节时
+        # 有 full_at 指针可读回（旧版摘要后原文即蒸发）
         summary_only = kwargs.get("summary_only", True)
         if summary_only and len(result) > 500:
+            offloaded_json = _offload_child_result(result, kwargs)
             try:
                 summary_len = int(kwargs.get("summary_len", 300))
             except (TypeError, ValueError):
@@ -1507,6 +1510,8 @@ def _run_child(
             result = _summarize_child_result(
                 result, child.llm_client, child.model, max_chars=summary_len,
             )
+            if offloaded_json:
+                result = _attach_full_result_pointer(result, offloaded_json)
 
         # 走到这里说明成功了，把成功标志立起来（finally 里靠它触发结束事件）
         _fork_success = True
@@ -1636,6 +1641,55 @@ def _review_handoff(result: str, parent_agent) -> str:
     except Exception as e:
         logger.debug("交接复审 aux 调用失败（放行原文）: %s", e)
     return result
+
+
+def _offload_child_result(result: str, kwargs: dict) -> Optional[str]:
+    """把子代理的原始结果落盘，返回 offload 占位 JSON（失败返回 None）。
+
+    摘要是有损压缩——父代理想看细节（精确 diff/路径/命令输出）时得能
+    读回原文，对齐 maybe_offload 的「预览+指针」模式。走摘要就强制落盘
+    （threshold=0），几百字的小结果也留底，指针成本可忽略。
+
+    参数：
+      - result：子代理的原始结果文本
+      - kwargs：delegate handler 收到的上下文（取 tool_call_id/
+        codeagent_home/task_id）
+    返回：offload 占位 JSON 字符串；没传 home 或落盘失败返回 None。
+    """
+    try:
+        home = kwargs.get("codeagent_home")
+        if not home:
+            return None
+        from agent.output_offload import maybe_offload
+        tcid = str(
+            kwargs.get("tool_call_id")
+            or f"delegate_{kwargs.get('task_id') or 'result'}",
+        )
+        off = maybe_offload(
+            result, tool_call_id=tcid, agent_home=Path(home), threshold=0,
+        )
+        if isinstance(off, str) and '"full_at"' in off:
+            return off
+    except Exception as e:
+        logger.warning("子代理结果落盘失败（fail-open 不摘要原文）: %s", e)
+    return None
+
+
+def _attach_full_result_pointer(summary: str, offloaded_json: str) -> str:
+    """摘要尾部附「完整结果已落盘」的找回指针（占位解析失败就原样返回）。"""
+    try:
+        data = json.loads(offloaded_json)
+        full_at = data.get("full_at", "")
+        n = data.get("orig_chars", 0)
+        if full_at:
+            return (
+                f"{summary}\n\n"
+                f"[完整结果 {n} 字符已落盘] full_at: {full_at}"
+                "（需要细节时用 read_file 读回）"
+            )
+    except Exception:
+        pass
+    return summary
 
 
 def _summarize_child_result(
