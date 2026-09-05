@@ -69,7 +69,7 @@ TOOL_USAGE_GUIDANCE = (
     "- 文件操作必须指定 encoding='utf-8';不要假设工具可用(check_fn 可能隐藏)\n"
     "- **临时文件清理**:write_file 建的临时脚本/中间文件,执行完立即用 terminal 删除\n"
     "- **上下文占位消息识别**:看到 [snip_compact] / micro_compacted / "
-    "[紧急上下文压缩] / [compact_boundary] 占位消息且需更早上下文时,"
+    "[紧急上下文压缩] / [COMPACT_BOUNDARY] 占位消息且需更早上下文时,"
     "按占位消息里的快照路径"
     "(压缩快照在 .transcripts/ 目录,latest.txt 指向最新一份;"
     "大输出在 .task_outputs/tool-results/ 下)"
