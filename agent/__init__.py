@@ -2366,22 +2366,6 @@ class AIAgent:
         except Exception:
             pass
 
-        # 压缩边界：压缩摘要的占位消息也写进会话库，恢复时
-        # 模型知道「这之前的旧消息已被总结过」（避免困惑/重复总结）。
-        # 占位前加 [COMPACT_BOUNDARY] 标记行——恢复会话时按最后一个
-        # 边界裁掉压缩前的旧消息（会话库只增不删，不裁的话恢复会把全部旧
-        # 历史载进来撑爆上下文）；旧会话没这个标记就保守全量载入。
-        if self.conversation_history:
-            first_msg = self.conversation_history[0]
-            if first_msg.get("role") == "user":
-                first_content = first_msg.get("content", "")
-                if first_content.startswith(
-                    ("[之前的对话已自动总结]", "[紧急上下文压缩")
-                ):
-                    self._persist_session_message(
-                        "user", f"[COMPACT_BOUNDARY]\n{first_content}",
-                    )
-
         # 压缩后重新对齐：注入一条「刚醒来」简报
         brief_parts = [
             "你刚经历了上下文压缩，历史已被总结。"
@@ -2668,6 +2652,17 @@ class AIAgent:
                         m for m in _drop_leading_system(messages)
                         if not m.get("_ephemeral")
                     ]
+                    # 边界占位落库（与 L4 同款）：恢复时能按
+                    # [COMPACT_BOUNDARY] 裁掉紧急压缩前的旧历史
+                    try:
+                        from agent.context_pipeline import (
+                            take_last_compact_placeholder,
+                        )
+                        _ph = take_last_compact_placeholder()
+                        if _ph:
+                            self._persist_session_message("user", _ph)
+                    except Exception as _e:
+                        logger.warning("reactive 边界落库失败（fail-open）: %s", _e)
                     self.invalidate_system_prompt()
                     logger.warning("reactive_compact 后重试本轮")
                     return self._REACTIVE_RETRY

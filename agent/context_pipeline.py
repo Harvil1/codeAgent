@@ -1546,6 +1546,13 @@ async def compress_if_needed(
         )
         if c4:
             session_state.record_llm_compact()
+            # 压缩成功：把摘要占位（含 [COMPACT_BOUNDARY] 标记）落进会话库——
+            # 恢复时按最后的边界裁掉压缩前旧历史，否则重启全量载入会再次
+            # 撑爆上下文。（旧实现靠 agent 主类事后扫历史首条持久化，
+            # 前缀对不上从未生效，现在直接在成功现场落库）
+            _ph = take_last_compact_placeholder()
+            if _ph:
+                _persist_compact_marker(session_store, session_id, _ph)
             # 降级产出（LLM 摘要失败 → 用规则总结凑合）算一次触发质量失败——
             # 降级压缩能用但有损，连续降级就该停止触发。
             # _summarize_conversation 永不抛异常（内部自己兜底），失败信号走

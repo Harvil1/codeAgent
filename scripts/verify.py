@@ -514,6 +514,56 @@ def check_compact_boundary_marker():
     return _ok("边界占位前缀统一 + 暂存机制正常")
 
 
+def check_compact_boundary_persist(tmp):
+    """验证边界占位能落进会话库、恢复裁剪能按它工作（E2E 无 LLM 版）。
+
+    用 reactive_compact 造出占位 → 走持久化函数落进假会话库 →
+    按 cli 的恢复裁剪逻辑载入——验证「压缩→落库→恢复裁剪」全链。
+    """
+    from agent.context_pipeline import (
+        reactive_compact, take_last_compact_placeholder,
+        _persist_compact_marker,
+    )
+    from cli import _truncate_at_last_compact_boundary
+
+    # 假会话库：只记录调用（不真写盘）
+    recorded = []
+    fake_store = SimpleNamespace(
+        append_message=lambda sid, role, content, **kw: recorded.append(
+            (sid, role, content)),
+    )
+    fake_state = SimpleNamespace(reactive_last_at=0.0, reactive_count=0)
+    msgs = [{"role": "system", "content": "s"}] + [
+        {"role": "user", "content": f"m{i}"} for i in range(20)
+    ]
+    new_msgs, changed = reactive_compact(msgs, session_state=fake_state)
+    if not changed:
+        return _fail("reactive_compact 未触发")
+    placeholder_content = take_last_compact_placeholder()
+    if not placeholder_content:
+        return _fail("占位暂存被提前消费了")
+    _persist_compact_marker(fake_store, "s1", placeholder_content)
+    if len(recorded) != 1 or recorded[0][0] != "s1":
+        return _fail(f"落库记录不对: {recorded}")
+
+    # 恢复裁剪：库里 = 旧消息 + START + 边界占位 + 尾部新消息
+    db_msgs = (
+        [{"role": "user", "content": "旧消息1"}, {"role": "assistant", "content": "旧答1"}]
+        + [{"role": "user", "content": "[COMPACT_START] L4 开跑"}]
+        + [{"role": "user", "content": recorded[0][2]}]
+        + [{"role": "user", "content": "压缩后的新消息"}]
+    )
+    loaded = _truncate_at_last_compact_boundary(db_msgs)
+    contents = [m["content"] for m in loaded]
+    if "旧消息1" in contents:
+        return _fail("边界之前的旧消息没被裁掉")
+    if "压缩后的新消息" not in contents:
+        return _fail("边界之后的新消息丢了")
+    if any(c.startswith("[COMPACT_BOUNDARY]") for c in contents):
+        return _fail("边界标记行应被剥掉（摘要正文保留）")
+    return _ok("压缩→落库→恢复裁剪全链正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -987,6 +1037,7 @@ def main():
             ("subagent 同步", lambda: check_delegate_sync(tmp)),
             ("批量委托并行", lambda: check_delegate_batch(tmp)),
             ("压缩边界占位", check_compact_boundary_marker),
+            ("边界落库与恢复裁剪", lambda: check_compact_boundary_persist(tmp)),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
