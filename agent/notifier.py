@@ -78,6 +78,10 @@ def notify(title: str, message: str) -> bool:
     if now - _last_notify.get(title, 0.0) < _THROTTLE_SECONDS:
         return False
     _last_notify[title] = now
+    # 节流表容量兜底：标题按 task_id 变化，长期运行会无限涨；
+    # 超过 64 条整体清空（节流窗口只有 30 秒，清空代价可忽略）
+    if len(_last_notify) > 64:
+        _last_notify.clear()
     # 三道闸门都过了，真正去弹
     try:
         # 先把标题/正文里的 XML 特殊字符转义（toast 是 XML 格式）——

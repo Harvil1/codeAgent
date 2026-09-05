@@ -1834,15 +1834,25 @@ class AIAgent:
                 # 不同，30 秒同标题节流就不会互相吞掉（批量完成时每个都能
                 # 通知到）。失败也放行，不影响主循环。
                 try:
+                    import asyncio as _aio_notify
                     from agent.notifier import notify as _bg_notify
                     for n in bg_notifications:
                         status = n.get("status")
                         if status in ("completed", "failed"):
                             _tid = str(n.get("task_id") or "?")
-                            _bg_notify(
-                                f"后台任务:{_tid[:8]}",  # id 不足 8 位时切片即全量
-                                f"{_tid} {status}",
-                            )
+                            # toast 要 spawn PowerShell 子进程（可达数百 ms），
+                            # 在事件循环线程里同步等会把流式输出/并发工具全
+                            # 冻住——丢线程池 fire-and-forget（不等待、不挡路）。
+                            # 没有运行中的事件循环（同步测试上下文）就降级直调。
+                            try:
+                                _loop = _aio_notify.get_running_loop()
+                                _loop.create_task(_aio_notify.to_thread(
+                                    _bg_notify,
+                                    f"后台任务:{_tid[:8]}",  # id 不足 8 位时切片即全量
+                                    f"{_tid} {status}",
+                                ))
+                            except RuntimeError:
+                                _bg_notify(f"后台任务:{_tid[:8]}", f"{_tid} {status}")
                 except Exception as notify_err:
                     logger.debug("bg notify fail-open: %s", notify_err)
             except Exception as e:
