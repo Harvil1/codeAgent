@@ -843,6 +843,39 @@ def check_pre_send_guard():
     return _ok("发送前预检判定正常")
 
 
+def check_session_append_perf(tmp):
+    """验证 append 不再 O(n²)：连写 200 条 turn_index 连续正确、文件行数
+    吻合、index 卡片去抖后最终一致。"""
+    from agent.session_store import SessionStore
+    store = SessionStore(tmp / "perf_sessions")
+    sid = store.create_session(title="perf", model="t")
+    # 交替 user/assistant 各 100 条：user 各开新轮
+    for i in range(100):
+        store.append_message(sid, "user", f"问{i}")
+        store.append_message(sid, "assistant", f"答{i}")
+    msgs = store._read_session_msgs(sid)
+    if len(msgs) != 200:
+        return _fail(f"行数不符: {len(msgs)}")
+    turns = [m.get("turn_index") for m in msgs]
+    # 第 1 条 user 是第 1 轮；第 i 对 user 是第 i 轮，同轮 assistant 沿用
+    if turns[0] != 1 or turns[1] != 1 or turns[198] != 100 or turns[199] != 100:
+        return _fail(f"turn_index 序列不对: {turns[:4]}...{turns[-4:]}")
+    # 去抖：磁盘卡片允许落后，但 flush 后必须追平
+    store.flush_index()
+    import json as _j
+    disk = _j.loads((tmp / "perf_sessions" / "index.json").read_text(encoding="utf-8"))
+    entry = next(s for s in disk["sessions"] if s["id"] == sid)
+    if entry.get("message_count") != 200:
+        return _fail(f"flush 后磁盘卡片计数不追平: {entry.get('message_count')}")
+    # 二次实例（模拟重启）从磁盘引导 turn_index：接着写 user 应开 101 轮
+    store2 = SessionStore(tmp / "perf_sessions")
+    tid = store2.append_message(sid, "user", "重启后再问")
+    m2 = store2._read_session_msgs(sid)[-1]
+    if m2.get("turn_index") != 101:
+        return _fail(f"重启引导 turn_index 不对: {m2.get('turn_index')}")
+    return _ok("append 线性化 + 卡片去抖 + 重启引导全正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1344,6 +1377,7 @@ def main():
             ("记忆检索兜底", check_memory_retrieval_fallback),
             ("记忆注入兜底接线", check_memory_injection_wiring),
             ("发送前窗口预检", check_pre_send_guard),
+            ("session append 线性化", lambda: check_session_append_perf(tmp)),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

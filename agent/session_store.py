@@ -21,10 +21,12 @@
 调用方不依赖具体存储实现。
 """
 
+import atexit
 import json
 import logging
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +52,13 @@ def is_trigram_available() -> bool:
 def _contains_cjk(s: str) -> bool:
     """兼容老接口：判断字符串里有没有中日韩字符（原供分词用，现在留着防 import 报错）。"""
     return any('\u4e00' <= ch <= '\u9fff' for ch in s)
+
+
+# 目录卡片（index.json）去抖写盘阈值：累积 N 条或距上次写盘 T 秒才真正落盘。
+# 卡片只是目录册（消息正文在 .jsonl 里永不丢），落后几条可接受；
+# 每条消息都原子重写整个 index.json 在长会话里是 IO 热点。
+_INDEX_FLUSH_COUNT = 50
+_INDEX_FLUSH_SECONDS = 2.0
 
 
 class SessionStore:
@@ -89,6 +98,16 @@ class SessionStore:
         # 同一时间窗内 append 前后 mtime 可能一样，单看 mtime 会误判
         # "文件没变"而漏读新消息。
         self._msgs_cache: dict = {}
+        # 轮次号内存表：session_id -> max(turn_index)。旧版每条 append 都
+        # 全量重读会话文件算 max(turn_index)（N 条消息 O(N²) 读盘），现在
+        # 首见会话读一次文件引导、之后纯内存加法。
+        self._turn_state: dict = {}
+        # 目录卡片去抖记账：还有几条卡片更新没写盘 / 上次写盘的 monotonic 时间
+        self._index_dirty_count = 0
+        self._index_last_flush = 0.0
+        # 进程退出前把没落盘的卡片更新补写进去（注册了实例方法引用，
+        # store 是进程级单例，不存在提前回收问题）
+        atexit.register(self.flush_index)
         # 如果发现老的 SQLite 库就自动迁移
         self._maybe_migrate_sqlite()
 
@@ -178,18 +197,24 @@ class SessionStore:
         return msgs
 
     def _compute_turn_index(self, session_id: str, role: str) -> int:
-        """（内部）算新消息的轮次编号：每来一条 user 消息就开一个新轮次（一问多答算一轮，方便 UI 展示和按轮检索）。
+        """（内部）算新消息的轮次编号：每来一条 user 消息就开一个新轮次（一问多答算一轮）。
+
+        旧版每次 append 都全量读+解析整个会话文件算 max(turn_index)——
+        N 条消息就是 O(N²) 次读盘，长会话每条消息都把事件循环卡一下。
+        现在内存递增：首见会话读一次文件引导（fork/重启后自动对齐），
+        之后纯内存查表。append 成功后调用方把返回值回写进内存表。
 
         参数：
             session_id：会话 ID
-            role：新消息的角色（"user"/"assistant"/"tool" 等）
+            role：新消息的角色（"user" 开新轮，其他角色沿用当前轮）
 
         返回：int 轮次号（空会话的第一条 user 消息是第 1 轮）。
         """
-        msgs = self._read_session_msgs(session_id)
-        if not msgs:
-            return 1 if role == "user" else 0
-        max_turn = max((m.get("turn_index", 0) for m in msgs), default=0)
+        max_turn = self._turn_state.get(session_id)
+        if max_turn is None:
+            msgs = self._read_session_msgs(session_id)
+            max_turn = max((m.get("turn_index", 0) for m in msgs), default=0)
+            self._turn_state[session_id] = max_turn
         return max_turn + 1 if role == "user" else max_turn
 
     # ------------------------------------------------------------------
@@ -376,15 +401,42 @@ class SessionStore:
             # 同一窗口内连续 append 时 mtime 可能没变，缓存会误判"文件
             # 没变"而漏掉刚写的消息（回归用例 test_fork_session_does_not_mutate_source 盯着）
             self._msgs_cache.pop(session_id, None)
-            # 同步刷新目录卡片（更新时间 + 消息计数）
+            # 新轮次号回写内存表（下一条消息纯内存查表，不再读盘）
+            self._turn_state[session_id] = turn_index
+            # 同步刷新目录卡片（内存）——磁盘写盘去抖：每条消息都原子重写
+            # 整个 index.json 是 IO 热点（大小 O(历史会话总数)），改为
+            # 累积 ≥_INDEX_FLUSH_COUNT 条或距上次 ≥_INDEX_FLUSH_SECONDS 秒
+            # 才真正落盘。卡片只是目录册，落后几条可接受；消息正文在
+            # .jsonl 里永不丢；进程退出由 atexit 注册的 flush_index 兜底。
             index = self._load_index()
             for entry in index:
                 if entry["id"] == session_id:
                     entry["updated_at"] = now
                     entry["message_count"] = entry.get("message_count", 0) + 1
                     break
-            self._save_index()
+            self._index_dirty_count += 1
+            _now_mono = time.monotonic()
+            if (self._index_dirty_count >= _INDEX_FLUSH_COUNT
+                    or _now_mono - self._index_last_flush >= _INDEX_FLUSH_SECONDS):
+                self._save_index()
+                self._index_dirty_count = 0
+                self._index_last_flush = _now_mono
         return msg_id
+
+    def flush_index(self) -> None:
+        """把内存里还没落盘的目录卡片更新写进 index.json（去抖的显式收尾口）。
+
+        批量写完、测试断言前、进程退出前调用；不调也只是磁盘卡片落后
+        几条（消息正文不受影响）。幂等：没有脏数据时是空操作。
+
+        参数：无
+        返回：无。
+        """
+        with self._lock:
+            if self._index_dirty_count > 0:
+                self._save_index()
+                self._index_dirty_count = 0
+                self._index_last_flush = time.monotonic()
 
     def get_messages(
         self,
