@@ -3366,11 +3366,14 @@ def _execute_turn(rt, agent_input: str) -> None:
         agent_input：本轮输入（已展开粘贴引用）
     返回：无。response 通过流式回调或兜底打印呈现。
     """
+    from agent.loop_host import loop_host
     cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
     _turn_t0 = time.monotonic()
     rt.turn_active = True
     try:
-        response = asyncio.run(rt.agent.run_conversation(agent_input))
+        # 常驻循环宿主跑回合（替代 asyncio.run 现建现拆）：回合结束时
+        # run_turn 的栅栏会取消本回合遗留 task，语义与旧关循环清场对齐
+        response = loop_host.run_turn(rt.agent.run_conversation(agent_input))
     finally:
         rt.turn_active = False
     # 显示：非流式打 Markdown；流式模式下兜底文案（中断/失败/空响应等
@@ -3511,6 +3514,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         except Exception:
             pass
         _do_turn_interrupt()            # agent.interrupt + 全部取消旗
+        # 常驻循环后回合挂在宿主循环上——强退前主动取消，别让它在
+        # os._exit 兜底窗口里继续烧 LLM（双击强退语义保持）
+        try:
+            from agent.loop_host import cancel_current_turn
+            cancel_current_turn()
+        except Exception:
+            pass  # 兜底还有 os._exit
         _input_q.put(_EOF_SENTINEL)     # 请工作线程离场
         _the_app = getattr(rt, "prompt_session", None)
         if _the_app is not None:
@@ -3795,8 +3805,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # 流式模式：回答框头（╭─ ⚕ CodeAgent ─╮）就是回合起始标记，
                 # 不再打 "AI:" 前缀；纯工具轮/兜底文案有事件行和黄字兜底
                 # run_conversation 是 async，但 run_interactive 保持同步签名
-                # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
-                # asyncio.run 驱动一次完整的异步对话（见 _execute_turn）。
+                # （run_skill_in_fork 等下游依赖同步上下文），所以每轮由
+                # _execute_turn 经常驻循环宿主（loop_host.run_turn）同步
+                # 驱动一次完整的异步对话。
                 _execute_turn(rt, agent_input)
             except KeyboardInterrupt:
                 rt.agent.interrupt()
@@ -3875,13 +3886,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 # main.py 只负责 stdout 编码 + MCP 初始化 + 调 cli.main，职责干净。
 #
 # 为什么不在 cli.main 外面再套一层 asyncio.run：
-#   run_interactive 保持同步签名，内部用 asyncio.run 驱动异步的
-#   run_conversation（避免破坏 run_skill_in_fork 等下游同步调用链）。
-#   如果 cli.main 再套一层 asyncio.run，会和内部的 asyncio.run
-#   嵌套报错："asyncio.run() cannot be called from a running event loop"
-#   （事件循环已在跑时不能再开新的）。所以 asyncio.run 只出现在
-#   run_interactive 内部（紧贴异步调用点），cli.main 本身只是个
-#   同步分发器。
+#   run_interactive 保持同步签名，内部经 loop_host.run_turn（常驻
+#   循环宿主）同步驱动异步的 run_conversation（避免破坏
+#   run_skill_in_fork 等下游同步调用链）。如果 cli.main 再套一层
+#   asyncio.run，回合的 fut.result() 阻塞等结果会把外层事件循环
+#   线程吊死。所以异步驱动只出现在 run_interactive 内部（紧贴异步
+#   调用点），cli.main 本身只是个同步分发器。
 
 def main(argv: list = None) -> None:
     """CLI 主入口（main.py 只负责调用它）。
