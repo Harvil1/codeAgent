@@ -131,6 +131,7 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
             _notify_completion(run_id, args, kwargs,
                                json.dumps({"ok": False, "error": str(e)}))
 
+    # 注意：_bg 现在跑在常驻宿主循环上——其内部严禁同步调 loop_host.run_async（自等自死锁），要等异步结果用 run_async 的调用方必须先回到普通线程
     _spawn_detached(_bg(), f"workflow-{run_id}")
     return json.dumps({
         "ok": True,

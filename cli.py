@@ -932,13 +932,19 @@ class RuntimeContext:
                     # 缺哪个组件，run_curator_review 内部自己跳过并记日志。
                     _agent = getattr(self, "agent", None)
                     _aux = getattr(_agent, "aux_llm_router", None)
-                    if _aux is not None and _aux.is_aux_configured:
+                    # 标记 _llm 是不是本函数现造的 fallback client：
+                    # 只有现造的才需要（也才允许）跑完就关——aux router
+                    # 是全局共享的常驻组件，关了别人就没法用了
+                    _is_fallback = not (
+                        _aux is not None and _aux.is_aux_configured
+                    )
+                    if not _is_fallback:
                         _llm = _aux
                     else:
                         # 没配辅助模型就按主模型参数现造一个持久 client：
                         # curator 的 LLM 调用都经 loop_host.run_async 跑在
                         # 常驻宿主循环上（连接池绑得稳），一次构造、整轮
-                        # 复用即可，不再需要旧的「每次请求现造现关」补丁
+                        # 复用即可
                         from agent.llm_client import create_llm_client
                         _mc = (self.config or {}).get("model", {}) or {}
                         _llm = create_llm_client({
@@ -948,12 +954,30 @@ class RuntimeContext:
                             "api_key": RuntimeContext._derive_api_key(_mc),
                             "auth_token": _mc.get("auth_token") or "",
                         })
-                    run_curator_review(
-                        skills_dir(),
-                        session_store=self.session_store,
-                        memory_store=self.memory_store,
-                        llm=_llm,
-                    )
+                    try:
+                        run_curator_review(
+                            skills_dir(),
+                            session_store=self.session_store,
+                            memory_store=self.memory_store,
+                            llm=_llm,
+                        )
+                    finally:
+                        # 用完就关：这个 fallback client 是本函数现造的（无
+                        # aux router 时才有），跑完审查留在宿主循环上占着
+                        # 连接池——旧 ThreadedLLMClient 是每调用即关，退役
+                        # 后这里补上（fail-open：关失败只记日志，不影响主流程）
+                        if _is_fallback:
+                            try:
+                                from agent.loop_host import loop_host
+                                from agent.llm_client import aclose_llm_client
+                                loop_host.run_async(
+                                    aclose_llm_client(_llm)
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "curator fallback client 关闭失败"
+                                    "（fail-open）: %s", e
+                                )
             except Exception as e:
                 logger.debug("curator 触发失败: %s", e)
 
