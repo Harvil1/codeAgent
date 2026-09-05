@@ -1082,6 +1082,36 @@ def _effective_llm_compact_threshold(config: dict, model: Optional[str]) -> int:
     return min(raw, int(window * 0.9))
 
 
+def needs_pre_send_compaction(
+    messages: list,
+    anchor: Optional[tuple],
+    model: Optional[str],
+    *,
+    ratio: float = 0.9,
+) -> bool:
+    """发送前预检：混合估算超过推断窗口的 ratio 比例，就该再压一次。
+
+    循环顶部的压缩之后、真正发送之前，还会追加记忆注入等增量；恢复后
+    第一轮没有真实锚点时估算偏差也最大。这道预检是「PTL 报错后 reactive
+    只留 5 条」灾难通道之前的最后防线——宁可多跑一次优雅压缩。
+    任何异常都返回 False（fail-open：预检自己绝不能挡住发送）。
+
+    参数：
+        messages：即将发送的完整消息列表
+        anchor：最近一次 usage 锚点（条数, token 数）
+        model：模型名（推断窗口用）
+        ratio：触发比例（默认窗口的 90%）
+    返回：True = 发送前应再跑一次 force 压缩。
+    """
+    try:
+        from agent.context_compressor import _get_model_max_tokens
+        window = _get_model_max_tokens(model)
+        est = estimate_tokens_hybrid(messages, anchor)
+        return est > window * ratio
+    except Exception:
+        return False
+
+
 def estimate_tokens_hybrid(
     messages: list,
     anchor: Optional[tuple] = None,
@@ -1278,6 +1308,7 @@ async def compress_if_needed(
     tools: Optional[list] = None,
     authoritative_tokens: Optional[tuple] = None,
     session_store=None,
+    force: bool = False,
 ) -> Tuple[list, bool, bool]:
     """分层压缩总调度（编排器）。返回 (新消息, 是否有改动, 是否发生了 LLM 摘要级压缩)。
 
@@ -1305,6 +1336,8 @@ async def compress_if_needed(
           供混合计数用；None 走全量粗估
         session_store：会话库（可选）；L4 开跑前往库里落 [COMPACT_START]
           事务标记，成功后的 [COMPACT_BOUNDARY]（agent 主类写）当 end 用
+        force：True = 发送前预检的强制压缩——L4 触发绕过冷却期
+              （上下文已经顶到窗口了，等冷却就是等 PTL），但熔断照守
     返回：(新消息列表, changed, compacted)。
 
     其他要点：
@@ -1523,7 +1556,7 @@ async def compress_if_needed(
         session_state.llm_compact_failures,
         " (TRIPPED)" if tripped else "",
     )
-    if over_threshold and cooldown_ok and not tripped:
+    if over_threshold and (force or cooldown_ok) and not tripped:
         logger.info("L4 triggered")
         # 压缩事务 start 标记：L4 真正开跑前先落盘——进程若在压缩中途
         # 崩溃，会话库里留下"有 start 无更晚 boundary"的悬挂证据

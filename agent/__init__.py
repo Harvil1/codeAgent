@@ -1536,8 +1536,8 @@ class AIAgent:
             messages = self._assemble_turn_messages(system_prompt, injected)
 
             # 上下文压缩（快到 token 上限时触发，可能会重建系统提示词）
-            messages, system_prompt, _ = await self._run_context_compression(
-                messages, system_prompt,
+            messages, system_prompt, compacted_this_turn = (
+                await self._run_context_compression(messages, system_prompt)
             )
 
             # 剥掉内部字段（_timestamp 之类的记账标记）——必须放在压缩之后、
@@ -1565,6 +1565,29 @@ class AIAgent:
                 messages = _fix_tool_call_pairs(messages)
             except Exception as pair_err:
                 logger.warning("发送前配对修复失败（忽略）: %s", pair_err)
+
+            # === 发送前窗口预检（最后防线） ===
+            # 循环顶部压缩之后又追加了记忆注入等增量；估算失准（尤其恢复后
+            # 第一轮没有锚点）时，这里拦住「直接顶到 PTL → reactive 只留
+            # 5 条」的灾难通道：超窗口 90% 且本回合还没压过，就再跑一次
+            # 优雅压缩管线（force 绕过冷却但守熔断）。还超就照发——
+            # PTL 救火机制保持最终兜底。预检自身异常绝不挡发送。
+            try:
+                from agent.context_pipeline import needs_pre_send_compaction
+                if (not compacted_this_turn
+                        and needs_pre_send_compaction(
+                            messages, self._last_usage_anchor, self.model)):
+                    logger.warning(
+                        "发送前预检：估算超窗口 90%%，先跑一次 force 压缩再发",
+                    )
+                    messages, system_prompt, compacted_this_turn = (
+                        await self._run_context_compression(
+                            messages, system_prompt, force=True,
+                        )
+                    )
+                    messages = strip_internal_fields(messages)
+            except Exception as guard_err:
+                logger.warning("发送前预检失败（fail-open 照发）: %s", guard_err)
 
             # 调 LLM（含 max_tokens 升级 + 输入超长时的紧急压缩）
             # 本方法是异步的
@@ -2301,7 +2324,9 @@ class AIAgent:
         except Exception as e:
             logger.debug("progress reminder 注入失败（fail-open）: %s", e)
 
-    async def _run_context_compression(self, messages: list, system_prompt: str) -> tuple:
+    async def _run_context_compression(
+        self, messages: list, system_prompt: str, *, force: bool = False,
+    ) -> tuple:
         """快到 token 上限时压缩上下文（整体已异步化）。
 
         上下文太大不但贵还会超限报错，得分层瘦身。
@@ -2335,6 +2360,7 @@ class AIAgent:
             tools=self._last_tool_schemas,  # fork 摘要前缀复用
             authoritative_tokens=self._last_usage_anchor,  # 混合计数
             session_store=self.session_store,  # L4 前落 [COMPACT_START] 事务标记
+            force=force,  # 发送前预检的强制压缩：绕冷却但守熔断
         )
         if not changed:
             return messages, system_prompt, False

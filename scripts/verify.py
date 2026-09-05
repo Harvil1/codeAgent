@@ -825,6 +825,24 @@ def check_memory_injection_wiring():
     return _ok(f"兜底接线+遥测正常（requests={after['requests']}）")
 
 
+def check_pre_send_guard():
+    """验证发送前预检判定：混合估算超窗口 90% 才要求再压一次。"""
+    from agent.context_pipeline import needs_pre_send_compaction
+    big = [{"role": "user", "content": "汉" * 200000}]  # ≈20 万 token
+    if not needs_pre_send_compaction(big, None, "deepseek-chat"):
+        return _fail("64k 窗口 + 20 万 token 应触发预检")
+    small = [{"role": "user", "content": "你好"}]
+    if needs_pre_send_compaction(small, None, "deepseek-chat"):
+        return _fail("小上下文不该触发预检")
+    # 1M 窗口下 20 万 token 不触发
+    if needs_pre_send_compaction(big, None, "claude-x[1m]"):
+        return _fail("1M 窗口 + 20 万 token 不该触发")
+    # 坏锚点不炸（fail-open 全量估算）
+    if not needs_pre_send_compaction(big, ("x", "y"), "deepseek-chat"):
+        return _fail("坏锚点应回退全量估算并触发")
+    return _ok("发送前预检判定正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1305,6 +1323,7 @@ def main():
             ("子代理结果落盘", lambda: check_delegate_offload(tmp)),
             ("记忆检索兜底", check_memory_retrieval_fallback),
             ("记忆注入兜底接线", check_memory_injection_wiring),
+            ("发送前窗口预检", check_pre_send_guard),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
