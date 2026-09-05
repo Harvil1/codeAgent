@@ -319,15 +319,14 @@ class ToolRegistry:
                 "error_type": "unknown_tool",
             }, ensure_ascii=False)
 
-        # permissions.deny 的第二道防线——
-        # 第一道"眼不见为净"（get_tool_definitions 不把被拒工具发给 LLM）还不够：
-        # 手动构造的 tool_call、schema 缓存没来得及刷新的情况，都会绕过第一道，
-        # 所以真正执行前（dispatch 这里）还要再拒一次。
-        # 保留 fail-open（配置坏了就全拒会把整个 agent 搞成砖），
-        # 但必须大声报 ERROR——静默吞掉的话，规则加载失败时这道防线就无声消失了。
+        # permissions.deny 的第二道防线（第一道"眼不见为净"可被手动 tool_call/
+        # 缓存未刷新绕过）。规则加载一次传参复用，不再每次调用都 stat settings.json。
+        # 保留 fail-open，但必须大声报 ERROR——静默吞掉防线就无声消失了。
         try:
-            from agent.tool_permissions import is_tool_denied
-            if is_tool_denied(name):
+            from agent.tool_permissions import (
+                is_tool_denied, load_tool_permission_rules,
+            )
+            if is_tool_denied(name, rules=load_tool_permission_rules()):
                 return json.dumps({
                     "error": f"工具 {name} 被 settings.json permissions.deny 规则拒绝",
                     "error_type": "permission_denied",

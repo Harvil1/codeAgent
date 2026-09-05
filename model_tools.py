@@ -106,15 +106,18 @@ def get_tool_definitions(
             dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
             tool_names = [n for n in tool_names if n not in dis_scope]
 
-    # settings.json 里 permissions.deny 配的禁用规则，
-    # 要在 LLM 看到之前就把工具整类拿掉（支持精确名 / mcp__server__* 通配 /
-    # mcp__server 整个服务器）。
-    # 这里选择"坏了也放行"（fail-open）——如果配置
-    # 文件损坏就直接全拒，agent 会整个被砖死；但出错时若静默吞掉不打日志，
-    # 这道安全防线等于无声消失，所以必须显式打 ERROR。
+    # settings.json 里 permissions.deny 配的禁用规则，要在 LLM 看到之前就把
+    # 工具整类拿掉（支持精确名 / mcp__server__* 通配 / mcp__server 整服务器）。
+    # rules 只在这里加载一次再传给 is_tool_denied——旧版逐工具各自调
+    # is_tool_denied(n)，每次都要 exists+stat 一遍 settings.json，40+ 个
+    # 工具就是 40+ 次系统调用/轮（Windows 上 stat 不便宜）。
+    # 仍选 fail-open（配置坏了就全拒会把 agent 砖死），但必须大声报 ERROR。
     try:
-        from agent.tool_permissions import is_tool_denied
-        tool_names = [n for n in tool_names if not is_tool_denied(n)]
+        from agent.tool_permissions import (
+            is_tool_denied, load_tool_permission_rules,
+        )
+        _rules = load_tool_permission_rules()
+        tool_names = [n for n in tool_names if not is_tool_denied(n, rules=_rules)]
     except Exception as e:
         logger.error("deny 规则加载失败，工具可见性过滤本调用失效（fail-open）: %s", e)
 

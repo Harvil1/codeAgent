@@ -80,6 +80,30 @@ def check_tool_definitions():
     return _ok(f"暴露 {len(names)} 个工具")
 
 
+def check_rules_param_equiv(tmp):
+    """验证 rules= 传参与无参调用判定一致（stat 风暴修复的前提）。"""
+    import os
+    os.environ["CODEAGENT_HOME"] = str(tmp / "rules_home")
+    try:
+        (tmp / "rules_home").mkdir(parents=True, exist_ok=True)
+        (tmp / "rules_home" / "settings.json").write_text(
+            '{"permissions": {"deny": ["terminal"]}}', encoding="utf-8")
+        from agent import tool_permissions as tp
+        tp.reset_rules_cache()
+        rules = tp.load_tool_permission_rules()
+        for name in ("terminal", "read_file"):
+            with_param = tp.is_tool_denied(name, rules=rules)
+            without_param = tp.is_tool_denied(name)
+            if with_param != without_param:
+                return _fail(f"{name}: 传参={with_param} 无参={without_param} 不一致")
+        if not tp.is_tool_denied("terminal", rules=rules):
+            return _fail("deny 规则没生效")
+        return _ok("rules 传参与无参判定一致")
+    finally:
+        os.environ.pop("CODEAGENT_HOME", None)
+        tp.reset_rules_cache()
+
+
 def check_terminal_tool():
     """验证 terminal 工具真的能执行一条命令（跑 echo 看输出）。
 
@@ -1352,6 +1376,7 @@ def main():
         ("基础对话", [
             ("agent 初始化", check_agent_initialization),
             ("工具定义加载", check_tool_definitions),
+            ("rules 传参等价", lambda: check_rules_param_equiv(tmp)),
             ("terminal 工具", check_terminal_tool),
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
             ("中断机制", check_interrupt),
