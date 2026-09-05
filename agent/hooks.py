@@ -38,12 +38,22 @@ declarative（写配置，由子进程脚本/HTTP/MCP 工具/LLM 等执行）。
 只有 PreToolUse 可以配成 fail_closed（出错当作拒绝执行）。
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# 共享 hook 线程池：并行跑声明式 hook（要 spawn 子进程、慢）用。
+# 旧版每次工具调用都 with ThreadPoolExecutor(...) 现建现拆（一次最多
+# 4 线程），高频工具调用下建拆开销白扔——进程级共享一个池。
+# 线程按需惰性创建（构造不拉线程）；进程退出由 ThreadPoolExecutor 自带
+# 的 atexit 联动 join 收尾，不会吊死进程。
+_HOOK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="hook-pool",
+)
 
 
 class HookEvent(Enum):
@@ -471,12 +481,9 @@ class HookRegistry:
         if len(decl) == 1:
             outcomes.append(_run_one(decl[0], args))
         elif decl:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(
-                max_workers=min(4, len(decl)),
-                thread_name_prefix="pre-tool-hook",
-            ) as ex:
-                outcomes.extend(ex.map(lambda h: _run_one(h, args), decl))
+            # 共享池并行跑声明式 hook（判决都基于原始参数；同时改参数属
+            # 罕见场景，按注册顺序叠加合并——语义与旧版逐次建池完全一致）
+            outcomes.extend(_HOOK_EXECUTOR.map(lambda h: _run_one(h, args), decl))
 
         denies = []   # [(hook_name, reason)]
         asks = []     # [(hook_name, reason)]
