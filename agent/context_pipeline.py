@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 
 from agent.context_compressor import (
     _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
-    reset_compact_circuit_breaker, extract_summary_anchor,
+    reset_compact_circuit_breaker, extract_summary_anchor, _get_model_max_tokens,
 )
 from agent.transcript import snapshot_if_needed
 
@@ -1062,6 +1062,26 @@ class CompressionSessionState:
 MAX_CONSECUTIVE_L4_FAILURES = 3
 
 
+def _effective_llm_compact_threshold(config: dict, model: Optional[str]) -> int:
+    """L4 阈值生效值：min(配置值（1M 模型抬到 70 万）, 推断窗口 × 0.9)。
+
+    旧默认 10 万对 64k 窗口的 DeepSeek 形同虚设——优雅压缩永远晚于真实
+    上限，长会话只能靠 PTL 报错后的紧急截断（只留 5 条）兜底。配置里
+    显式写的值继续尊重，但封顶不超过窗口 90%（给输出和增长预估留量）。
+
+    参数：
+        config：context 配置字典
+        model：模型名
+    返回：生效的 token 阈值。
+    """
+    from agent.context_compressor import _get_model_max_tokens
+    window = _get_model_max_tokens(model)
+    raw = config.get("llm_compact_token_threshold", 100000)
+    if model and "[1m]" in str(model):
+        raw = max(raw, 700000)
+    return min(raw, int(window * 0.9))
+
+
 def estimate_tokens_hybrid(
     messages: list,
     anchor: Optional[tuple] = None,
@@ -1444,12 +1464,11 @@ async def compress_if_needed(
         cc_cfg = get_feature_config(config, "context_collapse")
         cc_threshold = cc_cfg.get("threshold_ratio", 0.8)
         # context_window：优先用 config 里显式写的值；没写就按模型名推断
+        # （deepseek → 64k、1m → 1M——旧版一律 128k，对 64k 模型同样虚高）
         context_window = config.get("context_collapse_context_window")
         if not context_window:
-            if model and "[1m]" in str(model):
-                context_window = 1_000_000
-            else:
-                context_window = 128_000  # DeepSeek/OpenAI 常见值
+            from agent.context_compressor import _get_model_max_tokens
+            context_window = _get_model_max_tokens(model)
         # 折叠前先把 transcript 快照一份（L3.5 虽是无损的，但保持原文可读回是好习惯）
         # 注意：L3.5 不像 L4 那样有损，这里不强制 force
         messages, c35 = apply_context_collapse(
@@ -1476,13 +1495,12 @@ async def compress_if_needed(
     # 混合计数（有锚点用 真实值+增量粗估，否则全量粗估）
     est_tokens = estimate_tokens_hybrid(messages, authoritative_tokens)
 
-    # 方向 1：自适应压缩阈值（1M 大窗口模型放宽到 70 万）
+    # 方向 1：自适应压缩阈值（1M 大窗口模型放宽到 70 万，同时封顶不超过
+    # 推断窗口的 90%——细则见 _effective_llm_compact_threshold）
     # 1M 窗口留 30% 给输出（30 万）、70% 给输入（70 万）
     # 压不压完全由 token 决定（接近窗口才压），不按消息条数——
     # 按条数压（如「消息数 > 100 就压」）会让长会话被反复压缩、agent 反复失忆。
-    token_threshold = config.get("llm_compact_token_threshold", 100000)
-    if model and "[1m]" in str(model):
-        token_threshold = max(token_threshold, 700000)
+    token_threshold = _effective_llm_compact_threshold(config, model)
 
     # 单轮增长预估：预估 token + 增量 >= 阈值就提前触发。
     # 一轮大工具结果进来会直接把下一轮顶过线，等真到线再压就会

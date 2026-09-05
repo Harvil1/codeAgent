@@ -600,31 +600,47 @@ def _fix_tool_call_pairs(messages: list) -> list:
     return fixed
 
 
-def estimate_message_tokens(messages: list) -> int:
-    """按字符数粗估 token（经验公式：字符数 ÷ 3，中英文混合大体够用）。
+def _estimate_text_tokens(text: str) -> int:
+    """单段文本的 CJK 感知 token 估算（len 和 encode 都是 C 级速度）。
 
-    不追求精确，只求快——压缩阈值的判定用它。
+    大白话：utf-8 里一个汉字占 3 个字节、一个 ASCII 字符占 1 个字节，
+    「字节数 − 字符数」再除以 2 就是汉字个数（每个汉字多占 2 字节）。
+    汉字按保守上界 1 token/字计（旧公式统一 ÷3 对纯中文低估约一半，
+    低估 → 压得太晚 → 撞上限紧急截断丢信息），ASCII 维持 4 字符 1 token。
+
+    参数：
+        text：待估文本
+    返回：估算 token 数。
+    """
+    if not text:
+        return 0
+    chars = len(text)
+    extra_bytes = len(text.encode("utf-8", errors="ignore")) - chars
+    cjk = max(0, extra_bytes // 2)
+    return cjk + (chars - cjk) // 4
+
+
+def estimate_message_tokens(messages: list) -> int:
+    """按字符构成粗估 token（CJK 感知版，见 _estimate_text_tokens）。
+
+    不追求精确，只求方向正确——压缩阈值的判定用它。
 
     参数：
         messages：消息列表
     返回：估算的 token 总数。
     """
-    total_chars = 0
+    total_tokens = 0
     for msg in messages:
         content = msg.get("content", "") or ""
-        # 高频路径优化：content 多为字符串，直接 len() 避免 str() 转换开销
-        if isinstance(content, str):
-            total_chars += len(content)
-        else:
-            # 列表/其他结构（多模态消息）降级处理
-            total_chars += len(str(content))
+        if not isinstance(content, str):
+            content = str(content)
+        total_tokens += _estimate_text_tokens(content)
         for tc in msg.get("tool_calls", []) or []:
             args = tc.get("function", {}).get("arguments", "")
-            if isinstance(args, str):
-                total_chars += len(args)
-            else:
-                total_chars += len(str(args))
-    return total_chars // 3
+            if not isinstance(args, str):
+                args = str(args)
+            total_tokens += _estimate_text_tokens(args)
+    return total_tokens
 
 
 # ---------------------------------------------------------------------------

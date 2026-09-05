@@ -712,9 +712,9 @@ class AIAgent:
         """记一笔 LLM 调用的 token 用量账（/usage 命令、缓存命中分析都要有账可查）。
 
         sent_message_count 不为 None 时，顺手记一个「权威锚点」
-        ``_last_usage_anchor = (消息条数, 输入 token 数)``——输入 token 取
-        prompt + 缓存读 + 缓存创建之和（OpenAI 语义下 prompt 本来就含缓存
-        读，所以会偏高——宁可提前压缩也不超限的保守方向）。压缩阈值判定
+        ``_last_usage_anchor = (消息条数, 输入 token 数)``——输入 token 的
+        口径按 usage 字段名判语义（DeepSeek 命名 → prompt_tokens 已含缓存
+        直接用；Anthropic 命名 → 三项相加；详见下方注释）。压缩阈值判定
         拿它做「权威值 + 新消息粗估」的混合计数，比全程粗估准。
 
         参数：
@@ -746,12 +746,20 @@ class AIAgent:
             )
             self._llm_usage_stats["total_cache_read_tokens"] += cache_read
             self._llm_usage_stats["total_cache_creation_tokens"] += cache_creation
-            # 记权威锚点（压缩阈值混合计数用）
+            # 记权威锚点（压缩阈值混合计数用）。
+            # 口径按 usage 字段名判语义——不同服务商的 prompt_tokens 含义不同：
+            # - DeepSeek 命名（prompt_cache_hit_tokens）：prompt_tokens 本身
+            #   已含缓存命中+未命中，直接用它（旧版三项相加 = 双倍，5 万真实
+            #   token 会谎报成 10 万，过早触发有损压缩）
+            # - Anthropic 命名（cache_read_input_tokens）：prompt_tokens 不含
+            #   缓存部分，三项相加才是真实输入
+            # - OpenAI 官方（两者皆无）：prompt_tokens 即全量
             if sent_message_count:
-                self._last_usage_anchor = (
-                    sent_message_count,
-                    prompt_t + cache_read + cache_creation,
-                )
+                if hasattr(usage, "prompt_cache_hit_tokens"):
+                    anchor_tokens = prompt_t
+                else:
+                    anchor_tokens = prompt_t + cache_read + cache_creation
+                self._last_usage_anchor = (sent_message_count, anchor_tokens)
             # 按模型分四项累计（有 tracker 才记；失败不炸）
             if getattr(self, "_usage_tracker", None) is not None:
                 try:

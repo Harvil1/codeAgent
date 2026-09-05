@@ -617,6 +617,57 @@ def check_summary_input_fidelity():
     return _ok("摘要输入原料保真")
 
 
+def check_token_estimation_and_threshold():
+    """验证 CJK 感知估算、窗口对齐阈值、锚点口径三件套。
+
+    旧版 chars÷3 对纯中文低估约一半（压得太晚→顶线 PTL→紧急截断丢信息）；
+    L4 默认阈值 10 万对 64k 窗口的 DeepSeek 形同虚设。
+    """
+    from agent.context_compressor import estimate_message_tokens
+    # 1) 纯中文 200 字：旧公式给 66，实际 120~300——新公式应 >=150（不再低估）
+    cn = estimate_message_tokens([{"role": "user", "content": "汉" * 200}])
+    if cn < 150:
+        return _fail(f"中文仍低估: {cn}")
+    # 2) 纯 ASCII 400 字：应约 100（÷4），不能暴涨
+    en = estimate_message_tokens([{"role": "user", "content": "a" * 400}])
+    if not (80 <= en <= 140):
+        return _fail(f"ASCII 估算异常: {en}")
+    # 3) 工具调用参数也计费
+    with_args = estimate_message_tokens([{
+        "role": "assistant", "content": "",
+        "tool_calls": [{"function": {"arguments": "b" * 400}}],
+    }])
+    if with_args < 80:
+        return _fail(f"tool_calls 参数没计进: {with_args}")
+    # 4) 阈值对齐窗口：DeepSeek(64k) 封顶 0.9 窗口
+    #    （_get_model_max_tokens 对 deepseek 返回 65536，0.9 倍 = 58982）
+    from agent.context_pipeline import _effective_llm_compact_threshold
+    ds = _effective_llm_compact_threshold({}, "deepseek-chat")
+    if ds != 58982:
+        return _fail(f"DeepSeek 阈值应为 58982（65536×0.9）: {ds}")
+    big = _effective_llm_compact_threshold({}, "claude-x[1m]")
+    if big != 700000:
+        return _fail(f"1M 模型阈值应为 700000（保现行行为）: {big}")
+    claude = _effective_llm_compact_threshold({}, "claude-3-5-sonnet")
+    if claude != 100000:
+        return _fail(f"200k 窗口模型维持配置默认 100000: {claude}")
+    # 5) 锚点口径：DeepSeek 命名（prompt_tokens 已含缓存命中/未命中）不双计
+    from agent import AIAgent
+    agent = AIAgent(api_key="fake", model="t", enabled_toolsets=[])
+    usage = SimpleNamespace(
+        prompt_tokens=8000,
+        prompt_cache_hit_tokens=5000,
+        prompt_cache_miss_tokens=3000,
+        completion_tokens=10,
+    )
+    resp = SimpleNamespace(usage=usage, model="deepseek-chat")
+    agent._record_llm_usage(resp, sent_message_count=10)
+    anchor = agent._last_usage_anchor
+    if not anchor or anchor[1] != 8000:
+        return _fail(f"DeepSeek 锚点应取 prompt_tokens=8000（旧版会双计成 16000）: {anchor}")
+    return _ok("CJK 估算 + 窗口对齐 + 锚点口径正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1092,6 +1143,7 @@ def main():
             ("压缩边界占位", check_compact_boundary_marker),
             ("边界落库与恢复裁剪", lambda: check_compact_boundary_persist(tmp)),
             ("摘要输入保真", check_summary_input_fidelity),
+            ("token 估算与阈值", check_token_estimation_and_threshold),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
