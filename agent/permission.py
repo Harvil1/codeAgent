@@ -26,7 +26,6 @@
   里的自然语言规则（如"不允许动 docker"），会拼进分类提示词里，优先级
   最高、逐条对照。
 """
-import asyncio
 import json
 import logging
 import os
@@ -889,8 +888,9 @@ def is_readonly_command(command: str) -> bool:
 # LLM 调用失败就放行(记 log warning,别把用户卡死)。
 #
 # 注:aux_llm_router.chat_completions 是 async 的;
-# 而 PermissionChecker.check 是同步函数 → 用 asyncio.run 桥接
-# (progress.py / reflection.py 里也有同款写法)。
+# 而 PermissionChecker.check 是同步函数 → 交给进程级常驻循环宿主
+# loop_host.run_async 桥接(协程跑在常驻循环上,aux client
+# 绑定稳定不漂移,不再每条命令现搭一个临时循环)。
 
 # 分类用的提示词模板(三向):要求 LLM 输出严格的 JSON,方便解析。
 # {nl_rules} 由 _check_llm_classifier 读 settings.json 的
@@ -1788,7 +1788,7 @@ class PermissionChecker:
         if _matches_whitelist(command, whitelist):
             return PermissionResult(True, "白名单快速通道", "whitelist")
 
-        # 4) 调副 LLM 分类(async 接口 → 用 asyncio.run 桥接到同步)
+        # 4) 调副 LLM 分类(async 接口 → 交常驻循环宿主桥接到同步)
         try:
             aux_llm = self._aux_llm_provider()
         except Exception as e:
@@ -1807,14 +1807,16 @@ class PermissionChecker:
         except Exception:
             aux_llm.nl_rules_cache = []
 
+        # 惰性导入:进程级常驻循环宿主(延迟导入防模块互相 import 死锁)
+        from agent.loop_host import loop_host
+
         try:
-            verdict = asyncio.run(_classify_bash_command(command, aux_llm))
+            # 分类器从 to_thread worker（同步工具线程）调用——不在宿主
+            # 循环线程里，run_async 阻塞等结果安全（保住 check() 同步契约）
+            verdict = loop_host.run_async(_classify_bash_command(command, aux_llm))
         except RuntimeError as e:
-            # 在 async 上下文里(已经有事件循环
-            # 在跑)直接调 check,asyncio.run 会抛 RuntimeError——直接
-            # fail-open 跳过分类会让安全层在那条执行路径上无声消失。
-            # 所以降级到独立工作线程里跑事件循环(阻塞等结果,
-            # 保住 check() 的同步契约);还不行才 fail-open。
+            # 防御保留：万一真在事件循环线程里被调（不该发生），转独立
+            # 线程阻塞等——宿主循环线程内 .result() 等自己 = 死锁
             logger.warning(
                 "bash_llm_classifier: 事件循环线程直调，转工作线程执行: %s", e,
             )
@@ -1822,7 +1824,7 @@ class PermissionChecker:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=1) as _ex:
                     verdict = _ex.submit(
-                        asyncio.run,
+                        loop_host.run_async,
                         _classify_bash_command(command, aux_llm),
                     ).result()
             except Exception as e2:
