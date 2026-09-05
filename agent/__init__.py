@@ -1555,15 +1555,20 @@ class AIAgent:
             # 等记忆检索预取的结果（并行窗口覆盖收消息/组装/压缩/剥字段
             # 全程；结果直接追加到本轮 messages——天然是临时消息，不进正式历史）
             messages = await self._consume_memory_prefetch(messages)
-            # strip 之后才追加的尾部（记忆预取消息，_ephemeral 天然完好）——
-            # 快照要在配对修复之前取：修复可能增删头部消息改变列表长度，
-            # 之后按下标切就不准了。strip 只换 dict 不变长度，这里对齐成立。
-            post_strip_appendix = messages[len(pre_strip):]
 
             # 刷新工具集（计划模式切换）+ 失败重试警告 + PRE_LLM_CALL 钩子
             tool_schemas = await self._prepare_toolset_and_injections(messages)
             # 记下最新工具清单，轮边界的 fork 摘要靠它保持前缀一致
             self._last_tool_schemas = tool_schemas
+
+            # strip 之后才追加的尾部（记忆预取 + 重试警告/钩子追加的提醒，
+            # _ephemeral 天然完好）——快照必须取在上面两步**之后**：它们只会
+            # 往尾部原地追加，取早了这些追加就落在快照外，force 预检触发时
+            # 被 force_in 替换掉、当轮静默丢失。同时要在配对修复之前取：
+            # 修复可能增删头部消息改变列表长度，之后按下标切就不准了。
+            # strip 只换 dict 不变长度、上面几步只追加尾部，
+            # len(pre_strip) 对齐依然成立。
+            post_strip_appendix = messages[len(pre_strip):]
 
             # 防孤儿兜底：发送前修复工具调用配对。「孤儿」= 有工具结果却找不到
             # 对应的工具调用（压缩边界/流式断连/工具异常都可能造出）——Anthropic
@@ -1593,8 +1598,8 @@ class AIAgent:
                     # 已被剥掉，压缩内部「同步回正式历史」的过滤器会把本轮
                     # 临时注入（task_notification 等）当正式消息焊进历史。
                     # 拼法：头段用 strip 前快照（flag 完好）+ 尾段用 strip 后
-                    # 追加的记忆消息（flag 也完好）。配对修复若动过头部，
-                    # 压缩管线收尾自己会再修一遍配对，无碍。
+                    # 追加的临时消息（记忆预取/重试警告/钩子提醒，flag 也完好）。
+                    # 配对修复若动过头部，压缩管线收尾自己会再修一遍配对，无碍。
                     force_in = pre_strip + post_strip_appendix
                     messages, system_prompt, compacted_this_turn = (
                         await self._run_context_compression(

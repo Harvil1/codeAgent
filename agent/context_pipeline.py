@@ -835,7 +835,9 @@ async def llm_compact(
         from_idx：局部压缩起始条数——只压这一段，
                   段外原文保留；默认 0
         up_to_idx：局部压缩的结束条数；默认 -1 = 压到末尾。两者都取默认值时
-                   走全量模式（keep_recent 逻辑）；局部模式下 keep_recent 被忽略
+                   走全量模式（keep_recent 逻辑）；局部模式下 keep_recent 被忽略。
+                   注意：局部（partial）模式成功后不写边界占位暂存——恢复裁剪
+                   按「边界前全裁」语义会误裁 head 保留段，宁可不落库
         tools：当前工具 schema 列表（fork 前缀复用要用，见 _summarize_conversation）
         session_state：会话压缩记账簿；收敛检查不过时用它记一次失败账
                        （失败计数 +1 + 冷却），防下一轮立刻重试白烧。可不传
@@ -926,8 +928,10 @@ async def llm_compact(
             notify_compaction()
         except Exception as e:
             logger.debug("notify_compaction fail-open: %s", e)
-        global _last_compact_placeholder
-        _last_compact_placeholder = placeholder["content"]
+        # partial 故意不写 _last_compact_placeholder（不落库边界占位）：恢复端
+        # _truncate_at_last_compact_boundary 按「最后边界之前全裁」工作，落了
+        # 会把 partial 明确保留的 head 段裁掉——与边界文本「保留段范围：
+        # head+tail」自相矛盾。宁可不落：重启全量重载旧历史，保留段一条不丢。
         return new_messages, True
 
     # 全量模式（原逻辑，保持向后兼容）
@@ -1003,8 +1007,10 @@ async def llm_compact(
         notify_compaction()
     except Exception as e:
         logger.debug("notify_compaction fail-open: %s", e)
-    # global 声明已在上面 partial 分支的写入点做过（同函数只许声明一次，
-    # 且必须早于任何赋值），这里直接赋值即可
+    # 全量模式才写边界占位暂存（partial 分支在上面故意跳过——恢复裁剪
+    # 会误裁 head 保留段）。global 声明只在全量分支用，partial 分支已不
+    # 触碰该名字，放这里不会 SyntaxError。
+    global _last_compact_placeholder
     _last_compact_placeholder = placeholder["content"]
     return new_messages, True
 
@@ -1264,8 +1270,10 @@ def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000
         return default
 
 
-# 最近一次压缩产出的边界占位内容（llm_compact / reactive_compact 成功时
-# 写入，调用方用 take_last_compact_placeholder() 取去持久化）。
+# 最近一次压缩产出的边界占位内容（llm_compact 全量分支 / reactive_compact
+# 成功时写入，调用方用 take_last_compact_placeholder() 取去持久化）。
+# llm_compact 的 partial 分支故意不写：恢复裁剪按「边界前全裁」语义会
+# 误裁 head 保留段，宁可不落、重启全量重载也不丢保留段。
 # 压缩在主循环里串行执行、无并发竞争——与 context_compressor 的
 # _last_summary_degraded 同款模块级约定。
 _last_compact_placeholder: Optional[str] = None
