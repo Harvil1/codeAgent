@@ -1812,15 +1812,27 @@ class PermissionChecker:
         from agent.loop_host import loop_host
 
         # 预判式防御：先看自己在不在某个运行中的事件循环线程里——
-        # 在（含宿主循环线程：run_async 会 .result() 等自己=静默死锁），
-        # 就转 1-worker 线程池阻塞等（保住 check() 的同步契约）；
-        # 不在（同步工具线程的常态），直接 run_async 快路径。
+        # 在的话分两种：是宿主循环线程，走最前面的 fail-open（自己等自己
+        # 无解，宁可跳过分类也绝不死锁）；是其他循环线程，才转 1-worker
+        # 线程池阻塞等（保住 check() 的同步契约）；不在（同步工具线程的
+        # 常态），直接 run_async 快路径。
         try:
             _running_loop = asyncio.get_running_loop()
         except RuntimeError:
             _running_loop = None
         try:
             if _running_loop is not None:
+                # 宿主循环线程是唯一无解的场景：worker 里的 run_async 等宿主
+                # 循环跑协程、宿主循环线程又在 join 等 worker——结构性死锁。
+                # 同步契约下无阻塞解；当前调用方（to_thread worker）不会落到
+                # 这里。真落进来就大声 fail-open 跳过分类，绝不死锁。
+                from agent.loop_host import loop_host as _lh
+                if _lh.loop is not None and _running_loop is _lh.loop:
+                    logger.error(
+                        "bash_llm_classifier: 在宿主循环线程被同步调用"
+                        "（契约禁止——fail-open 跳过分类，绝不死锁）",
+                    )
+                    return None
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=1) as _ex:
                     verdict = _ex.submit(
