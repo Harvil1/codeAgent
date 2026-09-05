@@ -26,6 +26,7 @@
   里的自然语言规则（如"不允许动 docker"），会拼进分类提示词里，优先级
   最高、逐条对照。
 """
+import asyncio
 import json
 import logging
 import os
@@ -1810,28 +1811,26 @@ class PermissionChecker:
         # 惰性导入:进程级常驻循环宿主(延迟导入防模块互相 import 死锁)
         from agent.loop_host import loop_host
 
+        # 预判式防御：先看自己在不在某个运行中的事件循环线程里——
+        # 在（含宿主循环线程：run_async 会 .result() 等自己=静默死锁），
+        # 就转 1-worker 线程池阻塞等（保住 check() 的同步契约）；
+        # 不在（同步工具线程的常态），直接 run_async 快路径。
         try:
-            # 分类器从 to_thread worker（同步工具线程）调用——不在宿主
-            # 循环线程里，run_async 阻塞等结果安全（保住 check() 同步契约）
-            verdict = loop_host.run_async(_classify_bash_command(command, aux_llm))
-        except RuntimeError as e:
-            # 防御保留：万一真在事件循环线程里被调（不该发生），转独立
-            # 线程阻塞等——宿主循环线程内 .result() 等自己 = 死锁
-            logger.warning(
-                "bash_llm_classifier: 事件循环线程直调，转工作线程执行: %s", e,
-            )
-            try:
+            _running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _running_loop = None
+        try:
+            if _running_loop is not None:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=1) as _ex:
                     verdict = _ex.submit(
                         loop_host.run_async,
                         _classify_bash_command(command, aux_llm),
                     ).result()
-            except Exception as e2:
-                logger.warning(
-                    "bash_llm_classifier: 线程降级仍失败（fail-open）: %s", e2,
+            else:
+                verdict = loop_host.run_async(
+                    _classify_bash_command(command, aux_llm),
                 )
-                return None
         except Exception as e:
             logger.warning("bash_llm_classifier: 分类调用异常（fail-open）: %s", e)
             return None
