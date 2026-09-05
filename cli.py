@@ -212,33 +212,6 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
 # 运行时初始化
 # ---------------------------------------------------------------------------
 
-def _thread_llm_client(config: dict):
-    """给"后台线程"专用的 LLM 连接对象：每次调用独立建连，跨事件循环安全。
-
-    主 LLM client 绑定在主线程的事件循环上，后台线程（如 curator）借用它
-    会在别的循环里调异步代码而出错，所以用 ThreadedLLMClient——每次请求
-    单独建连接，跟哪个循环都不绑定。
-
-    注意：这里是主 client 构造的"镜像"。改 RuntimeContext 里主 client
-    的构造逻辑时，这里要同步改，否则两边的模型配置会对不上。
-
-    参数：
-        config: 配置字典（从 model 段取连接参数）
-    """
-    from agent.llm_client import ThreadedLLMClient
-    mc = (config or {}).get("model", {}) or {}
-    # api_key 推导逻辑与主 client 完全同源（见 RuntimeContext._derive_api_key），
-    # 保证线程拿到的凭证跟主连接一致
-    api_key = RuntimeContext._derive_api_key(mc)
-    return ThreadedLLMClient({
-        "format": mc.get("format", "openai"),
-        "base_url": mc.get("base_url"),
-        "model": mc.get("name"),
-        "api_key": api_key,
-        "auth_token": mc.get("auth_token") or "",
-    })
-
-
 class RuntimeContext:
     """把 agent 运行时要用的所有零件装到一个筐里，随身携带。
 
@@ -731,11 +704,13 @@ class RuntimeContext:
         if endpoints_cfg or (aux_cfg and isinstance(aux_cfg, dict) and aux_cfg.get("model")):
             try:
                 from agent.aux_llm import AuxLLMRouter, LLMEndpoint
-                # router 的降级兜底也可能从线程里调
-                # （分类器/curator）——用每次独立连接的 client，
-                # 别建绑定主循环的临时连接池
-                from agent.llm_client import ThreadedLLMClient
-                main_client = ThreadedLLMClient({
+                # router 的降级兜底也会从后台线程（分类器/curator/进度
+                # 播报）里调——这些消费线程都已走 loop_host.run_async，
+                # 实际跑在同一个常驻宿主循环上，所以兜底直接用持久
+                # client（一次构造、连接池绑宿主循环），不再需要旧的
+                # 「每次请求现造现关」补丁
+                from agent.llm_client import create_llm_client
+                main_client = create_llm_client({
                     "format": model_cfg.get("format", "openai"),
                     "base_url": model_cfg.get("base_url"),
                     "api_key": api_key,
@@ -766,7 +741,8 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
                 aux_llm_router = None
-                # ThreadedLLMClient 没有常驻连接池可泄漏，不用 close
+                # 刚造的持久 client 还没发过请求（连接池要到第一次调用
+                # 才真正分配连接），直接丢弃不泄漏，不用 close
                 main_client = None
 
         # === 流式输出回调 ===
@@ -907,8 +883,8 @@ class RuntimeContext:
     def _derive_api_key(model_cfg: dict) -> str:
         """推导 API 密钥：配置文件里的值优先，为空时按厂商/网址猜环境变量兜底。
 
-        跟 _create_agent 的主推导链是同一套逻辑（供 _thread_llm_client 复用，
-        保证线程里建的连接拿到的凭证跟主连接完全一致）。
+        跟 _create_agent 的主推导链是同一套逻辑（curator 兜底 client 等
+        「镜像构造」复用它，保证拿到的凭证跟主连接完全一致）。
 
         参数：
             model_cfg: model 段的配置字典
@@ -959,9 +935,19 @@ class RuntimeContext:
                     if _aux is not None and _aux.is_aux_configured:
                         _llm = _aux
                     else:
-                        # 线程里绝不借用绑定主循环的主连接
-                        #——用 ThreadedLLMClient 每次独立建连
-                        _llm = _thread_llm_client(self.config)
+                        # 没配辅助模型就按主模型参数现造一个持久 client：
+                        # curator 的 LLM 调用都经 loop_host.run_async 跑在
+                        # 常驻宿主循环上（连接池绑得稳），一次构造、整轮
+                        # 复用即可，不再需要旧的「每次请求现造现关」补丁
+                        from agent.llm_client import create_llm_client
+                        _mc = (self.config or {}).get("model", {}) or {}
+                        _llm = create_llm_client({
+                            "format": _mc.get("format", "openai"),
+                            "base_url": _mc.get("base_url"),
+                            "model": _mc.get("name"),
+                            "api_key": RuntimeContext._derive_api_key(_mc),
+                            "auth_token": _mc.get("auth_token") or "",
+                        })
                     run_curator_review(
                         skills_dir(),
                         session_store=self.session_store,

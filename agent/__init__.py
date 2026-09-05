@@ -44,33 +44,23 @@ logger = logging.getLogger(__name__)
 
 
 def _spawn_detached(coro, name: str):
-    """把一个后台协程扔到独立 daemon 线程 + 独立事件循环里跑，真正「发出去就不管」。
+    """把后台协程交给常驻事件循环宿主（loop_host）跑——发出去就不管。
 
-    CLI 每处理一条用户消息就新建一个事件循环、处理完就销毁——如果用
-    create_task 派后台任务，主循环一返回 asyncio.run 会把还没跑完的任务
-    全部取消（任务刚挂起就被杀且不报错，「自动记忆提取 / 批间摘要」这类
-    后台功能会静默失效）。daemon 线程（随进程退出的后台线程）自带独立
-    事件循环，主循环销毁不影响它。
-    contextvars（线程内共享的上下文变量，比如当前工作目录）从调用方复制
-    一份带过去，线程里也能读到。
+    旧实现是「独立 daemon 线程 + 独立事件循环」：因为当时每回合
+    asyncio.run 会把关联任务全部取消，后台任务只能另立门户（线程数
+    随任务涨）。现在回合跑在常驻宿主循环上，后台任务直接 submit 上去
+    （注册进回合栅栏的豁免名单，不会被回合结束误杀）；contextvars
+    由 submit 内部复制带上。
 
     参数：
         coro: 要在后台跑的协程（async 函数调用后产生的对象）
-        name: 线程名（日志里好认）
+        name: 任务名（日志里好认）
 
-    返回：threading.Thread 对象。调用方留着引用可以防它被回收，也能 join 等它。
+    返回：concurrent.futures.Future。调用方留着引用可以防它被回收；
+    loop_host 侧也有豁免名单持有任务，不需要 join。
     """
-    ctx = contextvars.copy_context()
-
-    def _runner():
-        try:
-            ctx.run(asyncio.run, coro)
-        except Exception as e:  # fail-open：后台任务异常不影响主对话
-            logger.debug("%s 后台任务失败（fail-open）: %s", name, e)
-
-    t = threading.Thread(target=_runner, daemon=True, name=name)
-    t.start()
-    return t
+    from agent.loop_host import loop_host
+    return loop_host.submit(coro, name=name)
 
 
 # ============================================================================
@@ -3041,9 +3031,9 @@ class AIAgent:
         只有主代理做（子代理有独立记忆目录，不走这条链）。
         互斥：本轮模型自己调过记忆写入工具 → 跳过并推进游标
         （已经写过了，别抢着重复写）。
-        发出去就不管：用 _spawn_detached 跑提取（辅助模型单轮；daemon 线程
-        + 自有事件循环——躲开「每轮销毁事件循环会杀掉 create_task」的
-        坑）；任务引用保活；出错放行。
+        发出去就不管：用 _spawn_detached 跑提取（辅助模型单轮；submit 到
+        常驻宿主循环、进回合栅栏豁免名单——不会被回合收尾误杀）；
+        任务引用保活；出错放行。
 
         参数：无。返回：无。
         """
@@ -3349,8 +3339,8 @@ class AIAgent:
             if not items:
                 return
             # 上一批的任务还没跑完 → 直接覆盖（新摘要取代旧的，符合「看最新」语义）
-            # 用 _spawn_detached 跑：普通任务会在每轮事件循环销毁时被杀
-            # ——daemon 线程把生命周期解耦出来
+            # 用 _spawn_detached 跑：submit 到常驻宿主循环（进回合栅栏
+            # 豁免名单），不会被回合收尾当遗留清掉
             self._tool_summary_task = _spawn_detached(
                 self._generate_tool_batch_summary(items), "tool-batch-summary",
             )

@@ -886,33 +886,3 @@ async def aclose_llm_client(client) -> None:
                 await result
     except Exception:
         pass
-
-
-class ThreadedLLMClient(LLMClient):
-    """给「后台线程」专用的 LLM client。
-
-    问题出在哪：HTTP 连接池（httpx）在第一次使用时会跟当时的「事件循环」
-    （可以理解为异步调度中心）绑定死。后台守护线程（curator 维护工/
-    进度播报/定时器）里每次 asyncio.run 都新建一个循环——拿主循环的
-    client 去用会报 "Event loop is closed"（旧循环已关），还可能把
-    主对话的连接池也带坏。
-
-    解决思路土但稳：每次调用都在**当前循环里**现场造一个新 client，
-    用完立刻关。代价是每次多一次 TCP 握手（后台任务调用不频繁，可以
-    忽略）；换来彻底的循环无关安全——在主循环里这么调也一样没问题。
-    因为没有常驻连接池，reset_client 直接用基类的空实现。
-
-    参数（__init__）：
-        model_config：模型配置字典（会拷贝一份存起来）
-    """
-
-    def __init__(self, model_config: Dict[str, Any]):
-        self._model_config = dict(model_config or {})
-
-    async def chat_completions(self, messages, *, tools=None, **kwargs):
-        # 每次都现场造 client、用完就扔，见类说明
-        client = create_llm_client(self._model_config)
-        try:
-            return await client.chat_completions(messages, tools=tools, **kwargs)
-        finally:
-            await aclose_llm_client(client)
