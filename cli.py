@@ -88,6 +88,7 @@ from cli_skill_memory_cmds import (  # noqa: F401（回导入：测试/内部引
     _open_in_editor,
 )
 import cli_skin  # noqa: F401（import 即登记 /skin 命令 + 激活皮肤引擎）
+import cli_events  # 模块级 _execute_turn 要用（顶层只 import 标准库，无循环风险）
 from cli_diag_cmds import (  # noqa: F401（回导入：测试/内部引用兼容）
     _status_row,
     _handle_status_cli,
@@ -3352,6 +3353,54 @@ def _render_statusline(rt, agent, elapsed_s=None) -> str:
         return ""
 
 
+def _execute_turn(rt, agent_input: str) -> None:
+    """跑一个完整回合的公共部分：调 agent、显示回答、落会话库、打收尾行。
+
+    普通回合和后台唤醒回合原本是两段几乎逐行相同的代码（已经出现细微
+    漂移），修 bug 极易漏一边——抽成一个函数。只抽快乐路径：中断/
+    异常处理器留在调用方（两边的取消文案和日志标签不同），保证语义
+    与原两段逐行等价。
+
+    参数：
+        rt：RuntimeContext（拿 agent/session_store/session_id）
+        agent_input：本轮输入（已展开粘贴引用）
+    返回：无。response 通过流式回调或兜底打印呈现。
+    """
+    cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
+    _turn_t0 = time.monotonic()
+    rt.turn_active = True
+    try:
+        response = asyncio.run(rt.agent.run_conversation(agent_input))
+    finally:
+        rt.turn_active = False
+    # 显示：非流式打 Markdown；流式模式下兜底文案（中断/失败/空响应等
+    # 不走流式回调）必须主动打印，否则用户看到"AI:"后面一片空白
+    if not getattr(rt.agent, "_stream_callback", None):
+        from rich.markdown import Markdown
+        try:
+            console.print(Markdown(response))
+        except Exception:
+            console.print(response)  # 渲染失败退回纯文本（fail-open）
+    elif response and response.startswith(
+        ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+         "[模型只产出了思考过程", "[LLM 返回了空响应")
+    ):
+        console.print(f"[yellow]{response}[/yellow]")
+    if rt.session_store and rt.session_id:
+        rt.session_store.append_message(
+            rt.session_id, "assistant", response,
+        )
+    # 每轮回答完打印 ✻ 收尾行（用时/token/goal）。中断/异常路径不打
+    # （用户主动断开就别再追加信息了）——所以本函数由调用方的
+    # try/except 包着，异常根本走不到这里。
+    try:
+        _sl = _render_statusline(rt, rt.agent, time.monotonic() - _turn_t0)
+        if _sl:
+            console.print(f"[dim]{_sl}[/dim]")
+    except Exception as _e:
+        logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+
+
 def _is_path_item(item: str) -> bool:
     """判断审批回调收到的是"路径"还是"命令"。
 
@@ -3594,36 +3643,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                         rt.session_id, "user", _BG_WAKE_MESSAGE,
                     )
                 try:
-                    cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
-                    _turn_t0 = time.monotonic()
-                    rt.turn_active = True
-                    try:
-                        response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
-                    finally:
-                        rt.turn_active = False
-                    # 显示逻辑与普通消息分支一致（流式已实时显示，兜底文案补打）
-                    if not getattr(rt.agent, "_stream_callback", None):
-                        from rich.markdown import Markdown
-                        try:
-                            console.print(Markdown(response))
-                        except Exception:
-                            console.print(response)  # 渲染失败退回纯文本（fail-open）
-                    elif response and response.startswith(
-                        ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
-                         "[模型只产出了思考过程", "[LLM 返回了空响应")
-                    ):
-                        console.print(f"[yellow]{response}[/yellow]")
-                    if rt.session_store and rt.session_id:
-                        rt.session_store.append_message(
-                            rt.session_id, "assistant", response,
-                        )
-                    try:
-                        _sl = _render_statusline(
-                            rt, rt.agent, time.monotonic() - _turn_t0)
-                        if _sl:
-                            console.print(f"[dim]{_sl}[/dim]")
-                    except Exception as _e:
-                        logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+                    _execute_turn(rt, _BG_WAKE_MESSAGE)
                 except KeyboardInterrupt:
                     rt.agent.interrupt()
                     try:
@@ -3776,47 +3796,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # 不再打 "AI:" 前缀；纯工具轮/兜底文案有事件行和黄字兜底
                 # run_conversation 是 async，但 run_interactive 保持同步签名
                 # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
-                # asyncio.run 驱动一次完整的异步对话。
-                cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
-                _turn_t0 = time.monotonic()
-                rt.turn_active = True
-                try:
-                    response = asyncio.run(rt.agent.run_conversation(agent_input))
-                finally:
-                    rt.turn_active = False
-                # 流式模式（设了流式回调）下内容在对话过程中已经实时显示过，
-                # 不重复打印。非流式模式才打印 response。
-                # 但 LLM 失败/预算耗尽这类兜底文案不走流式（没有内容增量），
-                # 必须主动打印——否则用户会看到"没反应就断了"。
-                if not getattr(rt.agent, "_stream_callback", None):
-                    from rich.markdown import Markdown
-                    try:
-                        console.print(Markdown(response))
-                    except Exception:
-                        console.print(response)  # 渲染失败退回纯文本（fail-open）
-                elif response and response.startswith(
-                    ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
-                     "[模型只产出了思考过程", "[LLM 返回了空响应")
-                ):
-                    # 流式模式下的兜底消息（空响应/纯思考/预算耗尽/LLM 失败）
-                    # 不经过流式回调，必须主动打印——不然用户看到"AI:"后面一片空白
-                    console.print(f"[yellow]{response}[/yellow]")
-
-                # 5. 保存助手响应到 session
-                if rt.session_store and rt.session_id:
-                    rt.session_store.append_message(
-                        rt.session_id, "assistant", response,
-                    )
-
-                # 每轮回答完打印 ✻ 收尾行（用时/token/goal，claude code 同款）。
-                # 中断/异常路径都不打（用户主动断开就别再追加信息了）。
-                try:
-                    _sl = _render_statusline(
-                        rt, rt.agent, time.monotonic() - _turn_t0)
-                    if _sl:
-                        console.print(f"[dim]{_sl}[/dim]")
-                except Exception as _e:
-                    logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+                # asyncio.run 驱动一次完整的异步对话（见 _execute_turn）。
+                _execute_turn(rt, agent_input)
             except KeyboardInterrupt:
                 rt.agent.interrupt()
                 # 批量/异步子代理跑在线程池里收不到 Ctrl+C 信号，
