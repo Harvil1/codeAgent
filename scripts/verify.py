@@ -934,9 +934,10 @@ def check_pre_send_guard():
 
 
 def check_loop_host():
-    """验证事件循环宿主六件套：run_async 阻塞等结果且跑在宿主循环上、
+    """验证事件循环宿主七件套：run_async 阻塞等结果且跑在宿主循环上、
     异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
-    submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀。"""
+    submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀、
+    run_async(exempt_from_fence=True) 跨回合长活不被栅栏误杀。"""
     import asyncio
     from agent.loop_host import loop_host, cancel_current_turn
 
@@ -1032,7 +1033,42 @@ def check_loop_host():
 
     # cancel_current_turn 空转不炸（没有回合在跑）
     cancel_current_turn()
-    return _ok("loop_host 语义六件套正常")
+
+    # 豁免回归：exempt_from_fence 的 run_async 长活不被回合栅栏杀——
+    # 后台线程发起、活过一次回合栅栏（0.25s 长活 vs 0.08s 短回合），
+    # 修好前它会被栅栏当回合遗留取消（CancelledError 还是 BaseException，
+    # 会穿透调用方全部 except Exception fail-open 防线）。
+    # 时序确定性：runner 线程先等 _turn3 开门再提交——开门发生在栅栏
+    # before 快照之后（同一同步段内），长活铁定「生于回合期间」，既不在
+    # before 也不在 _bg_tasks，只靠 pending 豁免集活命（不握手的话线程
+    # 可能抢在快照前提交，测试退化为无条件通过、测不到栅栏）
+    ex_fate = {}
+    async def _ex_long():
+        try:
+            await asyncio.sleep(0.25)
+            ex_fate["r"] = "done"
+        except asyncio.CancelledError:
+            ex_fate["r"] = "cancelled"
+    import threading as _th2
+    _box = {}
+    _gate = _th2.Event()
+    def _runner():
+        _gate.wait(timeout=5)  # 等回合真正开跑（快照已拍）再提交
+        _box["r"] = loop_host.run_async(_ex_long(), exempt_from_fence=True)
+    _t2 = _th2.Thread(target=_runner, daemon=True)
+    _t2.start()
+    async def _turn3():
+        _gate.set()  # 开门：runner 此刻提交的长活必然生于快照之后
+        await asyncio.sleep(0.08)
+        return "ok4"
+    if loop_host.run_turn(_turn3()) != "ok4":
+        return _fail("exempt 用例回合结果不对")
+    _t2.join(timeout=5)
+    if ex_fate.get("r") == "cancelled":
+        return _fail("exempt 的 run_async 被回合栅栏误杀")
+    if ex_fate.get("r") != "done" or _box.get("r") is not None:
+        return _fail(f"exempt 长活未跑完: {ex_fate} {_box}")
+    return _ok("loop_host 语义七件套正常（含 exempt 豁免）")
 
 
 def check_session_append_perf(tmp):

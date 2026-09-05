@@ -64,7 +64,7 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
         from agent.loop_host import loop_host
         response = loop_host.run_async(aux_llm.chat_completions(
             [{"role": "user", "content": prompt}],
-        ))
+        ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         profile = (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("用户画像归纳失败(fail-open): %s", e)

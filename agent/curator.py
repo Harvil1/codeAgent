@@ -367,7 +367,7 @@ def run_curator_review(
                 # 线程），AIAgent.chat 是 async 的 → 交给进程级常驻循环宿主
                 # 同步等结果（等价旧的 asyncio.run，client 绑定常驻循环不漂移）
                 from agent.loop_host import loop_host
-                raw_output = loop_host.run_async(review_agent.chat(prompt))
+                raw_output = loop_host.run_async(review_agent.chat(prompt), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
 
                 # 解析 LLM 输出里的结构化块
                 consolidation_result = _parse_consolidation_output(raw_output)
@@ -526,7 +526,7 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
         # 上下文里跑（不在宿主循环线程）→ 交给进程级常驻循环宿主同步等结果
         # （等价旧的 asyncio.run，client 绑定常驻循环不漂移）
         from agent.loop_host import loop_host
-        resp = loop_host.run_async(llm.chat_completions([{"role": "user", "content": prompt}]))
+        resp = loop_host.run_async(llm.chat_completions([{"role": "user", "content": prompt}]), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         content = resp.choices[0].message.content or ""
         import json as _json
         import re as _re

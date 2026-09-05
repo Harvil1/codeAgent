@@ -694,7 +694,7 @@ def _start_progress_ticker(
                         resp = loop_host.run_async(aux.chat_completions([
                             {"role": "user", "content":
                              f"把以下子代理状态摘要成 1-2 句中文进度：\n{text}"},
-                        ]))
+                        ]), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
                         summarized = resp.choices[0].message.content or ""
                         if summarized.strip():
                             text = summarized.strip()
@@ -1635,7 +1635,7 @@ def _review_handoff(result: str, parent_agent) -> str:
         from agent.loop_host import loop_host
         resp = loop_host.run_async(aux.chat_completions(
             [{"role": "user", "content": prompt}],
-        ))
+        ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         import json as _json
         text = resp.choices[0].message.content or ""
         parsed = _json.loads(text.strip().strip("`"))
@@ -1734,7 +1734,7 @@ def _summarize_child_result(
             client,  # child.llm_client（LLM 客户端实例）
             [{"role": "user", "content": prompt}],
             background=True,  # 摘要属于后台活：遇 529 过载直接放弃不重试
-        ))
+        ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         summary = response.choices[0].message.content
         return f"[摘要] {summary}\n\n[完整结果 {len(result)} 字符已省略]"
     except Exception as e:

@@ -218,7 +218,7 @@ def _merge_plans(sub_plans: List[str], llm_client, model: str) -> str:
         response = loop_host.run_async(call_with_retry(
             llm_client,
             [{"role": "user", "content": prompt}],
-        ))
+        ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         return response.choices[0].message.content
     except Exception as e:
         # fail-open：LLM 合并失败就退化成拼接（至少保住内容，不阻塞流程）

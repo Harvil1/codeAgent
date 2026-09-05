@@ -17,7 +17,8 @@
 硬约束（回合并发契约）：同一时刻只允许一个回合在跑（run_turn 不得
 并发——两个回合的栅栏会把对方回合的新生 task 当遗留互删）；回合进行
 期间，其他线程经 run_async 提交、且活到回合结束仍未完成的协程，会被
-回合栅栏当成回合遗留清理掉——跨回合的长活儿必须走 submit（进豁免名单）。
+回合栅栏当成回合遗留清理掉——跨回合的长活儿必须走 submit 或
+run_async(exempt_from_fence=True)（两者都进豁免名单）。
 
 回合栅栏（为什么要有）：asyncio.run 关循环会把回合内没跑完的 task 全部
 取消（免费清场）；常驻舞台不会自己清场——run_turn 在回合结束时显式取消
@@ -111,15 +112,33 @@ class AgentLoopHost:
     # ------------------------------------------------------------------
     # 对外接口
     # ------------------------------------------------------------------
-    def run_async(self, coro: Coroutine, *, timeout: Optional[float] = None) -> Any:
+    def run_async(self, coro: Coroutine, *, timeout: Optional[float] = None,
+                  exempt_from_fence: bool = False) -> Any:
         """外部线程：把协程交给宿主循环跑，阻塞等结果，异常原样穿透。
 
         等价于 asyncio.run(coro)，但协程跑在常驻循环上（连接池绑定稳定）。
         timeout 只限制「等结果」的时长；超时会顺手取消协程（wait_for 语义），
         不然调用方都超时走了，协程还赖在常驻循环上白跑到天荒地老。
         ⚠️ 不得在宿主循环线程内调用（自己等自己 = 死锁）。
+        exempt_from_fence：True = 该协程注册进回合栅栏豁免名单（出生即
+        登记，机制同 submit）——给「跨回合/回合期间的后台线程长活」用
+        （curator 审查、进度播报这类）。回合栅栏只清回合自己的遗留，
+        不该碰这些活。默认 False（回合内的短调用无需豁免）。
         """
         loop = self._ensure_started()
+        if exempt_from_fence:
+            # 出生即豁免（机制同 submit 的 pending 集）：提交前同步登记，
+            # 栅栏按协程对象放行；finally 退场（正常/异常/取消收尾都走）
+            self._pending_bg_coros.add(coro)
+            try:
+                return self._submit_and_wait(coro, loop, timeout)
+            finally:
+                self._pending_bg_coros.discard(coro)
+        return self._submit_and_wait(coro, loop, timeout)
+
+    def _submit_and_wait(self, coro: Coroutine, loop: asyncio.AbstractEventLoop,
+                         timeout: Optional[float]) -> Any:
+        """提交协程到宿主循环并阻塞等结果；中断/超时顺手取消协程再重抛。"""
         fut = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return fut.result(timeout=timeout)

@@ -194,7 +194,7 @@ def run_reflection(
         response = loop_host.run_async(llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
             **kwargs,
-        ))
+        ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         content = response.choices[0].message.content or ""
     except Exception as e:
         logger.warning("反思 LLM 调用失败（fail-open）: %s", e)

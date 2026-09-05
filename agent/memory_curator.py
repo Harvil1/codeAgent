@@ -553,7 +553,7 @@ def run_memory_review(
                 # 常驻循环宿主同步等结果（等价旧的 asyncio.run，client
                 # 绑定常驻循环不漂移）
                 from agent.loop_host import loop_host
-                raw_output = loop_host.run_async(review_agent.chat(prompt))
+                raw_output = loop_host.run_async(review_agent.chat(prompt), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
             except Exception as e:
                 logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
                 errors += 1

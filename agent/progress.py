@@ -148,7 +148,7 @@ class ProgressReporter:
             from agent.loop_host import loop_host
             resp = loop_host.run_async(self.aux_llm_router.chat_completions(
                 [{"role": "user", "content": prompt}],
-            ))
+            ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
             choice = resp.choices[0]
             text = getattr(choice.message, "content", None)
             if text and text.strip():
