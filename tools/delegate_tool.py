@@ -686,8 +686,12 @@ def _start_progress_ticker(
                 text = "\n".join(lines)
                 if aux is not None:
                     try:
-                        import asyncio
-                        resp = asyncio.run(aux.chat_completions([
+                        # aux.chat_completions 是 async 的，而本函数跑在 ticker
+                        # 守护线程里（不在宿主循环线程）——交给进程级常驻循环
+                        # 宿主同步等结果（等价旧的 asyncio.run，aux 缓存 client
+                        # 绑定常驻循环不再每次换新循环漂移）
+                        from agent.loop_host import loop_host
+                        resp = loop_host.run_async(aux.chat_completions([
                             {"role": "user", "content":
                              f"把以下子代理状态摘要成 1-2 句中文进度：\n{text}"},
                         ]))
@@ -1602,7 +1606,8 @@ def _review_handoff(result: str, parent_agent) -> str:
 
     放权模式下子代理产出直接进父代理上下文，这一步让辅助 LLM 当安检员。
     判安全、辅助模型不可用或出错，都原样返回（fail-open，不拦路）。接口是
-    同步的（_run_child 在线程里跑、没有事件循环，内部用 asyncio.run 搭桥）。
+    同步的（_run_child 在线程里跑、不在宿主循环线程，内部交给进程级常驻
+    循环宿主桥接 async 调用）。
 
     参数：
       - result：子代理的产出文本
@@ -1610,7 +1615,6 @@ def _review_handoff(result: str, parent_agent) -> str:
 
     返回：可能带 `[⚠ 交接复审警告]` 前缀的产出文本。
     """
-    import asyncio
     aux = getattr(parent_agent, "aux_llm_router", None)
     if aux is None or not result or not result.strip():
         return result
@@ -1628,7 +1632,8 @@ def _review_handoff(result: str, parent_agent) -> str:
         '输出严格 JSON：{"dangerous": true/false, "warning": "<=40 字中文说明，仅 dangerous 时非空>"}'
     )
     try:
-        resp = asyncio.run(aux.chat_completions(
+        from agent.loop_host import loop_host
+        resp = loop_host.run_async(aux.chat_completions(
             [{"role": "user", "content": prompt}],
         ))
         import json as _json
@@ -1709,8 +1714,8 @@ def _summarize_child_result(
     返回：`[摘要] ...` 格式的压缩文本；失败时返回原文。
 
     接口说明：call_with_retry 是 async，本函数仍保持
-    同步接口（调用方 _run_child 在独立线程里跑、没有事件循环），内部用
-    asyncio.run() 驱动那个 async 函数。
+    同步接口（调用方 _run_child 在独立线程里跑、不在宿主循环线程），
+    内部交给进程级常驻循环宿主同步等结果（等价旧的 asyncio.run）。
     """
     # 输入材料随目标长度放宽（要写更长摘要就得多给原文），封顶 30000
     input_limit = min(30000, max(8000, max_chars * 10))
@@ -1723,9 +1728,9 @@ def _summarize_child_result(
         f"子代理结果：\n{result[:input_limit]}"
     )
     try:
-        import asyncio
         from agent.llm_retry import call_with_retry
-        response = asyncio.run(call_with_retry(
+        from agent.loop_host import loop_host
+        response = loop_host.run_async(call_with_retry(
             client,  # child.llm_client（LLM 客户端实例）
             [{"role": "user", "content": prompt}],
             background=True,  # 摘要属于后台活：遇 529 过载直接放弃不重试

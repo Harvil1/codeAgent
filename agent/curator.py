@@ -363,10 +363,11 @@ def run_curator_review(
                     enabled_toolsets=["core"],  # core 工具集里有技能管理工具
                     is_background_review=True,
                 )
-                # 本函数是 sync 的（可能在后台线程或 CLI 里被同步调用），
-                # AIAgent.chat 是 async 的 → 用 asyncio.run 驱动
-                import asyncio
-                raw_output = asyncio.run(review_agent.chat(prompt))
+                # 本函数是 sync 的（在 curator 后台线程里跑，不在宿主循环
+                # 线程），AIAgent.chat 是 async 的 → 交给进程级常驻循环宿主
+                # 同步等结果（等价旧的 asyncio.run，client 绑定常驻循环不漂移）
+                from agent.loop_host import loop_host
+                raw_output = loop_host.run_async(review_agent.chat(prompt))
 
                 # 解析 LLM 输出里的结构化块
                 consolidation_result = _parse_consolidation_output(raw_output)
@@ -503,7 +504,7 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
     - session_store：会话库（取最近会话和消息）
     - memory_store：记忆库（结果存这里）
     - llm：LLM 句柄，要有 chat_completions（LLMClient / AuxLLMRouter 都行；
-        现场都是 async 接口，这里用 asyncio.run 驱动——和 reflection 同模式）
+        现场都是 async 接口，这里交给常驻循环宿主驱动——和 reflection 同模式）
     返回：成功沉淀的条数。
     """
     try:
@@ -521,10 +522,11 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
             n=len(parts), max_items=5,
             trajectories="\n\n".join(parts)[:60000],
         )
-        # chat_completions 是 async 的，
-        # 而 curator 在后台线程 / CLI 的同步上下文里跑 → 用 asyncio.run 驱动
-        import asyncio
-        resp = asyncio.run(llm.chat_completions([{"role": "user", "content": prompt}]))
+        # chat_completions 是 async 的，而 curator 在后台线程 / CLI 的同步
+        # 上下文里跑（不在宿主循环线程）→ 交给进程级常驻循环宿主同步等结果
+        # （等价旧的 asyncio.run，client 绑定常驻循环不漂移）
+        from agent.loop_host import loop_host
+        resp = loop_host.run_async(llm.chat_completions([{"role": "user", "content": prompt}]))
         content = resp.choices[0].message.content or ""
         import json as _json
         import re as _re

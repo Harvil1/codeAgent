@@ -15,7 +15,6 @@
 在项目里的位置：属于工具层（tools/），模块顶层有 registry.register，
 会被 discover_builtin_tools() 的 AST 扫描自动发现并注册。
 """
-import asyncio
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -211,7 +210,12 @@ def _merge_plans(sub_plans: List[str], llm_client, model: str) -> str:
 
     try:
         from agent.llm_retry import call_with_retry
-        response = asyncio.run(call_with_retry(
+        # call_with_retry 是 async，而本函数经 sync 工具 handler 跑在
+        # to_thread 工作线程里（不在宿主循环线程）——交给进程级常驻循环
+        # 宿主同步等结果（等价旧的 asyncio.run，但这里用的是父 agent 的
+        # 主 client：迁移后绑宿主循环，跨循环使用清零）
+        from agent.loop_host import loop_host
+        response = loop_host.run_async(call_with_retry(
             llm_client,
             [{"role": "user", "content": prompt}],
         ))

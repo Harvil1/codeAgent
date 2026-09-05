@@ -548,9 +548,12 @@ def run_memory_review(
 
             # 每批单独 try/except——一批失败不连累其他批
             try:
-                # 本函数是 sync 的，AIAgent.chat 是 async 的，用 asyncio.run 驱动
-                import asyncio
-                raw_output = asyncio.run(review_agent.chat(prompt))
+                # 本函数是 sync 的，AIAgent.chat 是 async 的——本函数在
+                # curator 后台线程里跑（不在宿主循环线程），交给进程级
+                # 常驻循环宿主同步等结果（等价旧的 asyncio.run，client
+                # 绑定常驻循环不漂移）
+                from agent.loop_host import loop_host
+                raw_output = loop_host.run_async(review_agent.chat(prompt))
             except Exception as e:
                 logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
                 errors += 1

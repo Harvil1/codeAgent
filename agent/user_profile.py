@@ -57,11 +57,12 @@ def build_and_save_profile(memory_store, aux_llm, agent_home) -> bool:
     prompt = PROFILE_PROMPT.format(memories=memories[:5000])
 
     try:
-        # aux_llm.chat_completions 是 async 异步版，
-        # 而本函数是被 _bg() 后台线程调用的（线程里没有事件循环），
-        # 所以必须用 asyncio.run 临时起一个事件循环来驱动它。
-        import asyncio
-        response = asyncio.run(aux_llm.chat_completions(
+        # aux_llm.chat_completions 是 async 的，而本函数是被 _bg() 后台线程
+        # 调用的（不在宿主循环线程）——交给进程级常驻循环宿主同步等结果
+        # （等价旧的 asyncio.run，但 aux 缓存 client 绑定常驻循环不再
+        # 每次换新循环漂移）。
+        from agent.loop_host import loop_host
+        response = loop_host.run_async(aux_llm.chat_completions(
             [{"role": "user", "content": prompt}],
         ))
         profile = (response.choices[0].message.content or "").strip()

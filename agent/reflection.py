@@ -186,11 +186,12 @@ def run_reflection(
         kwargs = {}
         if model:
             kwargs["model"] = model
-        # llm_client.chat_completions 是 async 的，
-        # 而本函数经 apply_reflection 在 _bg() 守护线程里跑（没有事件循环），
-        # 必须用 asyncio.run 驱动。
-        import asyncio
-        response = asyncio.run(llm_client.chat_completions(
+        # llm_client.chat_completions 是 async 的，而本函数经 apply_reflection
+        # 在 _bg() 守护线程里跑（不在宿主循环线程）——交给进程级常驻循环宿主
+        # 同步等结果（等价旧的 asyncio.run 现建现拆，但 client 绑定常驻循环
+        # 不漂移：aux 缺席时借用的主 client 跨循环使用随之清零）。
+        from agent.loop_host import loop_host
+        response = loop_host.run_async(llm_client.chat_completions(
             [{"role": "user", "content": prompt}],
             **kwargs,
         ))
