@@ -1222,14 +1222,33 @@ def check_compress_profile():
 
 
 def check_low_threshold_offload_equivalence(tmp):
-    """低 offload 阈值下 L2/L2.5 守卫仍放行现场重算（第四期终审建议）。
+    """低 offload 阈值下 L2/L2.5/L2.6 守卫仍放行现场重算（R4T6 守卫回归门）。
 
     背景：压缩管线的各层触发判定吃 profile 统计量（省扫描），但强制
     落盘对短消息（内容 ≤ 预览长度）是「全文 + JSON 包装」替换、净变长
-    ~200 字符/条——低 offload 阈值配置下 profile 会低估现场总量，守卫
-    若不放行现场重算，L2.5/L2.6 的段和/总和判定就会漏触发（等价破坏）。
-    本检查用低阈值造出这种「每条都净变长」的会话，断言 L2/L2.5 落盘
-    确实发生（changed=True 且出现 full_at 落盘占位），作为永久回归门。
+    ~270 字符/条——低 offload 阈值配置下 profile 会低估现场总量。
+    本门防的是「profile 早退门跳过本应触发的现场重算」（R4T6 修复的
+    守卫回归）：L2.6 的守卫臂（or c0 or c_freeze or c2 or c_per_msg）
+    必须在前层动过消息时放行现场重算，否则 L2 折叠后现场总量超预算
+    无人管（等价破坏）。
+
+    为什么预算是 80000（2026-09 实测数字）：40 条 1900 字符工具结果，
+    profile 总量 76001+slack(16×82=1312)≈77.3k；L2 折 37 条（留最近
+    3 条保护圈）后现场总量 ~84.5k。80000 正好卡在 profile 低估与现场
+    真值之间——
+      守卫在场：c2=True 放行现场重算 → L2.6 补折 3 条保护圈，占位 40
+        处、现场总量 86630 ≤ 80000×1.1（折短消息净变长，压不回 80000
+        整，×1.1 富余盖住 40 条落盘 JSON 包装的开销）；
+      守卫被删：只剩 profile 臂，77.3k < 80k 不触发 → 只折 L2 的 37
+        条、现场总量 85.8k 超预算无人管 → 占位 37 < 38 断言 FAIL。
+    删守卫会 FAIL 已本地实测（临时摘掉守卫臂跑同场景：占位 40 → 37）。
+    注意总量断言单独并不带电（守卫被删时 85.8k 也在 1.1 内）——本门
+    的电来自占位计数那条臂，两个条件同时断言缺一不可。
+
+    参数：
+        tmp  临时目录 Path（落盘文件写在 tmp/.task_outputs/ 下）
+
+    返回：PASS/FAIL 结果。
     """
     from agent.context_pipeline import (
         compress_if_needed, CompressionSessionState, reset_offload_decisions,
@@ -1241,8 +1260,8 @@ def check_low_threshold_offload_equivalence(tmp):
     reset_offload_decisions()
 
     # 40 条 1900 字符工具结果：低阈值（1000）下 L2 会把它们折成
-    # 「全文+包装」（净变长），L2.5/L2.6 门必须放行现场重算而不是
-    # 被 profile 统计跳过
+    # 「全文+包装」（净变长），L2.6 的守卫臂必须放行现场重算而不是
+    # 被 profile 统计跳过（llm_client=None 时 L4 不触发，验的是无损层）
     msgs = [{"role": "system", "content": "s"}]
     msgs.append({"role": "user", "content": "go", "_timestamp": _t.time()})
     for i in range(40):
@@ -1252,22 +1271,41 @@ def check_low_threshold_offload_equivalence(tmp):
                      "_timestamp": _t.time()})
         msgs.append({"role": "tool", "content": "X" * 1900,
                      "tool_call_id": f"c{i}", "_timestamp": _t.time()})
+    budget = 80000
     new_msgs, changed, _ = asyncio.run(compress_if_needed(
         msgs, llm_client=None, model="deepseek-chat",
         config={"output_offload_threshold": 1000,
-                "tool_result_total_budget": 20000},
+                "tool_result_total_budget": budget},
         session_state=CompressionSessionState(),
         agent_home=tmp, session_id="verify-low-th",
     ))
-    # 断言：确实发生了落盘（changed=True 且出现 full_at 落盘占位；
-    # llm_client=None 时 L4 不会触发，这里验的是 L2/L2.5 无损层）
-    body = "".join(str(m.get("content", "")) for m in new_msgs)
-    if changed and '"full_at"' not in body:
+    # 断言 (a)：必须变化。落盘发生了但 changed=False 是记账 bug（调用方
+    # 靠 changed 把新消息同步回对话历史，False 等于白折）——旧版
+    # 「not changed 且占位在场也算过」的宽松象限已删
+    if not changed:
+        return _fail("无损层折叠了却不报 changed（记账 bug，新历史不会被同步回对话）")
+    tool_msgs = [m for m in new_msgs if m.get("role") == "tool"]
+    n_placeholders = sum(
+        str(m.get("content", "")).count('"full_at"') for m in tool_msgs)
+    tool_total = sum(len(str(m.get("content", ""))) for m in tool_msgs)
+    if n_placeholders == 0:
         return _fail("changed 但没有落盘占位，行为异常")
-    if not changed and '"full_at"' not in body:
-        return _fail("低阈值下守卫没放行现场重算（等价破坏回归）")
-    n_placeholders = body.count('"full_at"')
-    return _ok(f"低阈值 offload 等价门通过（落盘占位 {n_placeholders} 处）")
+    # 断言 (b)：占位条数。实测 40（L2 折 37 + L2.6 补折 3 条保护圈）；
+    # >= 38 是对守卫敏感的形状——守卫被删时 L2.6 不触发、只剩 37 处
+    if n_placeholders < 38:
+        return _fail(
+            f"落盘占位仅 {n_placeholders} 处（应 40：L2 折 37 + L2.6 补折"
+            " 3 条保护圈）——守卫回归：profile 早退门跳过了本应触发的现场重算")
+    # 断言 (c)：现场总量压回预算×1.1 内（实测 86630）。与 (b) 同时成立
+    # 才算过门——这条单独不带电（守卫被删时 85.8k 也过），撑住的是
+    # 「现场重算真把总量管住了」的语义
+    if tool_total > budget * 1.1:
+        return _fail(
+            f"现场总量 {tool_total} 超预算×1.1（{int(budget * 1.1)}）无人管")
+    return _ok(
+        f"占位 {n_placeholders} 处、现场总量 {tool_total} ≤ {int(budget * 1.1)}"
+        "（守卫敏感形状过门）"
+    )
 
 
 # ---------------------------------------------------------------------------
