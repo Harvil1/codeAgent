@@ -737,6 +737,48 @@ def check_delegate_offload(tmp):
     return _ok("子代理结果落盘+指针正常")
 
 
+def check_memory_retrieval_fallback():
+    """验证记忆检索兜底：关键词匹配 + ID 纠错（aux LLM 单点时的保底）。"""
+    from agent.memory_retriever import keyword_fallback_ids, correct_memory_id
+    index_text = (
+        "## 项目记忆\n"
+        "- [project] codeagent 压缩策略 (proj#abc123): L4 分层压缩\n"
+        "- [user] 用户偏好中文回复 (user#def456): 保姆语言\n"
+        "- [reference] gitee 仓库地址 (ref#xyz789): https://gitee.com/x\n"
+    )
+    ids = keyword_fallback_ids("压缩策略 怎么配置", index_text, max_results=2)
+    if "proj#abc123" not in ids:
+        return _fail(f"关键词兜底没命中: {ids}")
+    ids2 = keyword_fallback_ids(
+        "压缩策略", index_text, exclude_ids={"proj#abc123"},
+    )
+    if "proj#abc123" in ids2:
+        return _fail("exclude_ids 没生效")
+    # ID 纠错：LLM 抄掉尾部两位也能救回
+    fixed = correct_memory_id("proj#abc1", index_text)
+    if fixed != "proj#abc123":
+        return _fail(f"前缀纠错失败: {fixed}")
+    fixed2 = correct_memory_id("PROJ#ABC123", index_text)
+    if fixed2 != "proj#abc123":
+        return _fail(f"大小写归一纠错失败: {fixed2}")
+    if correct_memory_id("totally#nope", index_text) is not None:
+        return _fail("救不回的 ID 应返回 None")
+    # 真实索引行是 markdown 链接（.memory/{topic}.jsonl#{uid}，见
+    # memory_store._entry_link），兜底必须抠出裸 {topic}#{uid}——
+    # retrieve_relevant 的返回值和 MemoryStore.get() 认的都是裸 ID
+    real_index = (
+        "- [project] codeagent 压缩策略 (.memory/project.jsonl#abc123): L4 分层压缩 [age: 3d]\n"
+        "- [reference] gitee 地址 (.memory/projects/x/reference.jsonl#xyz789): url [age: 5d]\n"
+    )
+    rids = keyword_fallback_ids("压缩策略", real_index)
+    if rids[:1] != ["project#abc123"]:
+        return _fail(f"真实链接格式没抠出裸 ID: {rids}")
+    fixed3 = correct_memory_id("reference#xyz78", real_index)
+    if fixed3 != "reference#xyz789":
+        return _fail(f"真实链接格式前缀纠错失败: {fixed3}")
+    return _ok("关键词兜底 + ID 纠错正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1215,6 +1257,7 @@ def main():
             ("token 估算与阈值", check_token_estimation_and_threshold),
             ("dispatch 统一封顶", lambda: check_dispatch_output_cap(tmp)),
             ("子代理结果落盘", lambda: check_delegate_offload(tmp)),
+            ("记忆检索兜底", check_memory_retrieval_fallback),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

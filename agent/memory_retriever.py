@@ -213,3 +213,117 @@ async def retrieve_relevant(
     if exclude_ids:
         picked = [x for x in picked if x not in exclude_ids]
     return picked[:max_results]
+
+
+# 索引行里记忆 ID 的形状：括号包着的 {topic}#{短id}（如 (proj#abc123)）。
+# 注意真实索引（memory_store._entry_link 生成）括号里是 markdown 链接路径
+# （.memory/{topic}.jsonl#{短id} 或 .memory/projects/{键}/{topic}.jsonl#{短id}），
+# 所以抠出来后还要过一道 _normalize_index_id 裁成裸 ID。
+_ID_IN_LINE = re.compile(r"\(([^()\s#]+#[^()\s]+)\)")
+
+
+def _normalize_index_id(inner: str) -> str:
+    """把括号里抠出来的东西裁成裸记忆 ID（{topic}#{短id}）。
+
+    大白话：索引行括号里可能装两种货——裸 ID（proj#abc123）或带路径的
+    markdown 链接（.memory/projects/键/project.jsonl#abc123）。下游
+    （retrieve_relevant 的返回值、MemoryStore.get、exclude_ids 去重）
+    认的全是裸 ID，所以这里统一裁剪：
+
+    - 先砍掉路径前缀：取最后一个 / 之后的部分
+    - 再把 .jsonl# 换成 #：project.jsonl#abc123 → project#abc123
+
+    本来就是裸 ID 的原样返回（两步都不命中）。
+    """
+    tail = inner.rpartition("/")[-1]
+    return tail.replace(".jsonl#", "#", 1)
+
+
+def _iter_index_ids(index_text: str) -> List[str]:
+    """从索引文本里抠出全部记忆 ID（保持出现顺序，已裁成裸 ID）。"""
+    return [
+        _normalize_index_id(m.group(1))
+        for m in _ID_IN_LINE.finditer(index_text or "")
+    ]
+
+
+def _query_tokens(query: str) -> List[str]:
+    """把检索 query 拆成小写词（按空白/常见标点切，丢单字噪声）。"""
+    return [
+        t.lower() for t in re.split(
+            r"[\s,.;:!?，。；：！？/\\|()（）\[\]【】]+", query or "")
+        if len(t) >= 2
+    ]
+
+
+def keyword_fallback_ids(
+    query: str,
+    index_text: str,
+    *,
+    max_results: int = 5,
+    exclude_ids=None,
+) -> List[str]:
+    """确定性兜底检索：aux LLM 挑选失败/为空时，用关键词包含匹配顶上。
+
+    大白话：LLM 检索是「让秘书翻目录挑条目」，秘书请假（调用失败）或
+    空手而归时，这里用最笨但永远可用的办法——把 query 拆词，看哪些
+    索引行包含这些词，按命中词数排序取前 N。零依赖、零 LLM。
+
+    参数：
+    - query：当前检索依据
+    - index_text：记忆索引全文（调用方手里就有）
+    - max_results：最多返回几条
+    - exclude_ids：已注入过的记忆 ID（跳过，跨轮去重）
+
+    返回：记忆 ID 列表（可能为空）。
+    """
+    tokens = _query_tokens(query)
+    if not tokens or not index_text:
+        return []
+    exclude = set(exclude_ids or [])
+    scored = []
+    for line in index_text.splitlines():
+        m = _ID_IN_LINE.search(line)
+        if not m:
+            continue
+        mid = _normalize_index_id(m.group(1))
+        if mid in exclude:
+            continue
+        low = line.lower()
+        hits = sum(1 for t in tokens if t in low)
+        if hits > 0:
+            scored.append((hits, mid))
+    scored.sort(key=lambda pair: -pair[0])
+    return [mid for _hits, mid in scored[:max_results]]
+
+
+def correct_memory_id(bad_id: str, index_text: str) -> Optional[str]:
+    """ID 纠错：LLM 抄错 ID（大小写/截尾）时按归一化和前缀匹配救回。
+
+    记忆 ID 长得像 proj#abc123，LLM 抄错一个字符 get() 就落空——
+    旧版直接静默丢条。这里从索引里把真 ID 找回来：
+    1. 大小写归一后完全相等 → 直接换回真 ID
+    2. 归一后一方是另一方前缀（且被截方 >= 6 字符）且候选唯一 → 换回
+
+    参数：
+    - bad_id：LLM 抄出来的（可能残缺的）ID
+    - index_text：记忆索引全文
+
+    返回：真实 ID；救不回返回 None。
+    """
+    if not bad_id:
+        return None
+    real_ids = _iter_index_ids(index_text)
+    norm = lambda s: s.strip().lower()
+    for rid in real_ids:
+        if norm(rid) == norm(bad_id):
+            return rid
+    nb = norm(bad_id)
+    if len(nb) >= 6:
+        cands = [
+            rid for rid in real_ids
+            if norm(rid).startswith(nb) or nb.startswith(norm(rid))
+        ]
+        if len(cands) == 1:
+            return cands[0]
+    return None
