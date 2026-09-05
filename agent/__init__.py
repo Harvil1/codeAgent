@@ -1586,6 +1586,10 @@ class AIAgent:
             # 5 条」的灾难通道：超窗口 90% 且本回合还没压过，就再跑一次
             # 优雅压缩管线（force 绕过冷却但守熔断）。还超就照发——
             # PTL 救火机制保持最终兜底。预检自身异常绝不挡发送。
+            # _force_out：force 压缩的「未剥输出」暂存——若这回合真跑了
+            # force，下面调 LLM 时 reactive 的 flag 完好输入要用它（消息集
+            # 就是最新真身）；None = 这回合没跑 force。
+            _force_out = None
             try:
                 from agent.context_pipeline import needs_pre_send_compaction
                 if (not compacted_this_turn
@@ -1606,14 +1610,22 @@ class AIAgent:
                             force_in, system_prompt, force=True,
                         )
                     )
+                    _force_out = messages
                     messages = strip_internal_fields(messages)
             except Exception as guard_err:
                 logger.warning("发送前预检失败（fail-open 照发）: %s", guard_err)
 
             # 调 LLM（含 max_tokens 升级 + 输入超长时的紧急压缩）
             # 本方法是异步的
+            # reactive 紧急压缩要 flag 完好版输入（理由见函数 docstring）；
+            # force 预检这回合跑过的话，用它的未剥输出（消息集就是最新真身）
+            _flagged = (
+                _force_out if _force_out is not None
+                else pre_strip + post_strip_appendix
+            )
             response = await self._call_llm_with_escalation(
                 messages, tool_schemas, system_prompt,
+                flagged_messages=_flagged,
             )
             if response is self._REACTIVE_RETRY:
                 # 紧急压缩后的重试是「恢复」不是「新一轮」——
@@ -2545,6 +2557,7 @@ class AIAgent:
 
     async def _call_llm_with_escalation(
         self, messages: list, tool_schemas: list, system_prompt: str,
+        flagged_messages: Optional[list] = None,
     ):
         """调 LLM，并处理两类「意外抢救」：max_tokens 升级重试 + 输入超长的紧急压缩。
 
@@ -2557,6 +2570,9 @@ class AIAgent:
             messages: 要发的消息列表
             tool_schemas: 工具 schema 列表（可为 None）
             system_prompt: 当前系统提示词
+            flagged_messages: _ephemeral 未剥的消息版本（reactive 紧急压缩的
+                重建历史要用它——strip 后的消息 flag 已剥，滤临时注入会失守；
+                None 时退回 messages）
 
         另：调用前后会做缓存监控快照（fail-open，绝不影响主流程）。
         """
@@ -2700,8 +2716,13 @@ class AIAgent:
                 self._last_llm_error_kind = "prompt_too_long"
                 from agent.context_pipeline import reactive_compact
                 ctx_cfg = self.config.get("context", {})
+                # 输入用 flag 完好版：reactive 重建历史时有 _ephemeral 可滤，
+                # 本轮临时注入不会被焊进 conversation_history（与 force 预检同款修法）
+                _reactive_src = (
+                    flagged_messages if flagged_messages is not None else messages
+                )
                 messages, changed = reactive_compact(
-                    messages,
+                    _reactive_src,
                     session_state=self._compress_session_state,
                     keep_recent=ctx_cfg.get("reactive_keep_recent", 5),
                     cooldown_seconds=ctx_cfg.get(

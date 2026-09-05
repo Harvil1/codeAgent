@@ -131,6 +131,9 @@ async def build_relevant_memories_message(
             active_tools=list(active_tools) if active_tools else None,
             exclude_ids=set(surfaced) if surfaced else None,
         )
+        # 口径：只统计真正发起过 retrieve_relevant 的请求——空索引早退、
+        # 同轮缓存命中、检索前异常都不计（它们没花检索成本，计了会把
+        # 「没记忆可查」混进「检索请求量」，命中率读数失真）
         _retrieval_stats["requests"] += 1
         _retrieval_stats["llm_returned"] += len(memory_ids or [])
         if _retrieval_stats["requests"] % 20 == 1 and _retrieval_stats["requests"] > 1:

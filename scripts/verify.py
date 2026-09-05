@@ -766,37 +766,42 @@ def check_dispatch_output_cap(tmp):
     def _big_handler(args, **kw):
         return "X" * 100000
 
-    registry.register(
-        name="verify_big_output",
-        toolset="core",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "verify_big_output",
-                "description": "verify 专用：返回超长文本",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        handler=_big_handler,
-        override=True,
-    )
-    result = _aio.run(handle_function_call(
-        "verify_big_output", {},
-        tool_call_id="verify_cap_call_1",
-        codeagent_home=tmp,
-        config={},
-    ))
+    # 临时工具用完就注销（finally 兜底）——不注销的话它会留在全局注册表
+    # 里污染后续检查项（工具集多了仓名工具，schema 白花 token）。
     try:
-        data = json.loads(result)
-    except json.JSONDecodeError:
-        return _fail(f"结果不是 JSON: {result[:120]!r}")
-    if not data.get("truncated") or "full_at" not in data:
-        return _fail(f"大输出没被统一封顶: {str(data)[:150]!r}")
-    if not Path(data["full_at"]).exists():
-        return _fail(f"落盘文件不存在: {data['full_at']}")
-    if "X" * 50 not in data.get("preview", ""):
-        return _fail("预览内容不对")
-    return _ok(f"统一封顶生效（{data['orig_chars']} 字符落盘）")
+        registry.register(
+            name="verify_big_output",
+            toolset="core",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "verify_big_output",
+                    "description": "verify 专用：返回超长文本",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            handler=_big_handler,
+            override=True,
+        )
+        result = _aio.run(handle_function_call(
+            "verify_big_output", {},
+            tool_call_id="verify_cap_call_1",
+            codeagent_home=tmp,
+            config={},
+        ))
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return _fail(f"结果不是 JSON: {result[:120]!r}")
+        if not data.get("truncated") or "full_at" not in data:
+            return _fail(f"大输出没被统一封顶: {str(data)[:150]!r}")
+        if not Path(data["full_at"]).exists():
+            return _fail(f"落盘文件不存在: {data['full_at']}")
+        if "X" * 50 not in data.get("preview", ""):
+            return _fail("预览内容不对")
+        return _ok(f"统一封顶生效（{data['orig_chars']} 字符落盘）")
+    finally:
+        registry.unregister("verify_big_output")
 
 
 def check_delegate_offload(tmp):

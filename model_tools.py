@@ -338,7 +338,19 @@ async def handle_function_call(
     # 就跳过，不会双重落盘。fail-open：封顶失败不挡结果返回。
     if isinstance(result, str) and tool_call_id and codeagent_home:
         try:
-            if not ('"full_at"' in result and '"truncated"' in result):
+            # 幂等判定走真解析：结果确实是 offload 占位（truncated 为真 +
+            # 带 full_at）才跳过。旧版子串匹配会被「正文里恰好含这两个
+            # 字面量」的大结果（如 read_file 读会话 JSONL）误跳过——
+            # 那等于回到无封顶的直通行为。
+            _already = False
+            try:
+                _parsed = json.loads(result)
+                _already = (isinstance(_parsed, dict)
+                            and _parsed.get("truncated") is True
+                            and "full_at" in _parsed)
+            except (json.JSONDecodeError, ValueError):
+                _already = False
+            if not _already:
                 from agent.output_offload import finalize_tool_output
                 result = finalize_tool_output(
                     result, tool_call_id, codeagent_home, config,
