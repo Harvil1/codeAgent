@@ -668,6 +668,52 @@ def check_token_estimation_and_threshold():
     return _ok("CJK 估算 + 窗口对齐 + 锚点口径正常")
 
 
+def check_dispatch_output_cap(tmp):
+    """验证 dispatch 层统一输出封顶：没自觉接 offload 的工具也会被兜底。
+
+    造一个返回 10 万字符的临时工具直接走 handle_function_call 总出口，
+    结果应自动落盘（含 preview/full_at），文件真实存在。
+    """
+    import asyncio as _aio
+    from tools.registry import registry
+    from model_tools import handle_function_call
+
+    def _big_handler(args, **kw):
+        return "X" * 100000
+
+    registry.register(
+        name="verify_big_output",
+        toolset="core",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "verify_big_output",
+                "description": "verify 专用：返回超长文本",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        handler=_big_handler,
+        override=True,
+    )
+    result = _aio.run(handle_function_call(
+        "verify_big_output", {},
+        tool_call_id="verify_cap_call_1",
+        codeagent_home=tmp,
+        config={},
+    ))
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return _fail(f"结果不是 JSON: {result[:120]!r}")
+    if not data.get("truncated") or "full_at" not in data:
+        return _fail(f"大输出没被统一封顶: {str(data)[:150]!r}")
+    if not Path(data["full_at"]).exists():
+        return _fail(f"落盘文件不存在: {data['full_at']}")
+    if "X" * 50 not in data.get("preview", ""):
+        return _fail("预览内容不对")
+    return _ok(f"统一封顶生效（{data['orig_chars']} 字符落盘）")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1144,6 +1190,7 @@ def main():
             ("边界落库与恢复裁剪", lambda: check_compact_boundary_persist(tmp)),
             ("摘要输入保真", check_summary_input_fidelity),
             ("token 估算与阈值", check_token_estimation_and_threshold),
+            ("dispatch 统一封顶", lambda: check_dispatch_output_cap(tmp)),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

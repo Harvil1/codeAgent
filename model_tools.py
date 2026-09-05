@@ -276,6 +276,22 @@ async def handle_function_call(
                 "empty_output": True,
             }, ensure_ascii=False)
 
+    # === 输出统一封顶：单条工具结果超阈值就落盘留预览+指针 ===
+    # 各工具自觉调 finalize_tool_output 的老路子漏了一大片（search_files/
+    # glob/memory_recall/memory list/MCP 全没接），这里在总出口收口——
+    # 任何工具（含未来新工具）的大输出都自动治理，类别化堵死「一条结果
+    # 撑爆上下文」。幂等：结果已是 offload 占位（含 full_at+truncated）
+    # 就跳过，不会双重落盘。fail-open：封顶失败不挡结果返回。
+    if isinstance(result, str) and tool_call_id and codeagent_home:
+        try:
+            if not ('"full_at"' in result and '"truncated"' in result):
+                from agent.output_offload import finalize_tool_output
+                result = finalize_tool_output(
+                    result, tool_call_id, codeagent_home, config,
+                )
+        except Exception as e:
+            logger.warning("工具输出统一封顶失败（fail-open）: %s", e)
+
     return result
 
 
