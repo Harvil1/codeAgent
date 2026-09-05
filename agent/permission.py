@@ -1826,8 +1826,7 @@ class PermissionChecker:
                 # 循环跑协程、宿主循环线程又在 join 等 worker——结构性死锁。
                 # 同步契约下无阻塞解；当前调用方（to_thread worker）不会落到
                 # 这里。真落进来就大声 fail-open 跳过分类，绝不死锁。
-                from agent.loop_host import loop_host as _lh
-                if _lh.loop is not None and _running_loop is _lh.loop:
+                if loop_host.loop is not None and _running_loop is loop_host.loop:
                     logger.error(
                         "bash_llm_classifier: 在宿主循环线程被同步调用"
                         "（契约禁止——fail-open 跳过分类，绝不死锁）",

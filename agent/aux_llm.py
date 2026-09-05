@@ -161,8 +161,8 @@ class AuxLLMRouter:
 
         正被拉闸（熔断中）的端点直接跳过。
 
-        本方法是 async；在线程里（没有事件循环）调用要用 asyncio.run()
-        包一层。
+        本方法是 async；跨线程同步等结果用 loop_host.run_async（外部
+        线程专用——宿主循环线程里禁止同步等，自己等自己死锁）。
 
         参数：
             messages：对话历史（消息列表）

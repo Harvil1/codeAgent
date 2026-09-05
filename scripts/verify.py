@@ -934,10 +934,11 @@ def check_pre_send_guard():
 
 
 def check_loop_host():
-    """验证事件循环宿主七件套：run_async 阻塞等结果且跑在宿主循环上、
+    """验证事件循环宿主八件套：run_async 阻塞等结果且跑在宿主循环上、
     异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
     submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀、
-    run_async(exempt_from_fence=True) 跨回合长活不被栅栏误杀。"""
+    run_async(exempt_from_fence=True) 跨回合长活不被栅栏误杀、
+    submit 的 contextvars 从调用方线程传播进后台任务（create_task(context=)）。"""
     import asyncio
     from agent.loop_host import loop_host, cancel_current_turn
 
@@ -1068,7 +1069,24 @@ def check_loop_host():
         return _fail("exempt 的 run_async 被回合栅栏误杀")
     if ex_fate.get("r") != "done" or _box.get("r") is not None:
         return _fail(f"exempt 长活未跑完: {ex_fate} {_box}")
-    return _ok("loop_host 语义七件套正常（含 exempt 豁免）")
+
+    # 第八件（I-1 传播断言）：submit 的后台任务要读到调用方线程 set 的
+    # ContextVar。修好前 Task 拷的是宿主循环线程的上下文（协程对象不
+    # 绑定 context，ctx.run 白做），调用方 set 的变量全丢——worktree
+    # 会话的后台记忆提取会拿到主进程目录、写错项目分区
+    import contextvars as _cv
+    _probe_var = _cv.ContextVar("verify_loop_host_probe", default="unset")
+    _got = {}
+    async def _ctx_bg():
+        _got["v"] = _probe_var.get()
+    def _setter_thread():
+        _probe_var.set("from-caller")
+        loop_host.submit(_ctx_bg(), name="verify-ctx").result(timeout=5)
+    _ct = _th2.Thread(target=_setter_thread, daemon=True)
+    _ct.start(); _ct.join(timeout=5)
+    if _got.get("v") != "from-caller":
+        return _fail(f"contextvars 没传播到后台任务: {_got}")
+    return _ok("loop_host 语义八件套正常（含 exempt 豁免 + contextvars 传播）")
 
 
 def check_session_append_perf(tmp):

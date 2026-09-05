@@ -24,6 +24,7 @@
   /quit              退出
 """
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -3512,9 +3513,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         """Ctrl+C 双击：关闭所有进程和线程，立刻走人（不走优雅收尾）。
 
         顺序有讲究：先按中断+取消旗（让子代理/后台任务自己断）→
-        EOF 请工作线程离场 → app.exit() 收界面。app.run() 返回后终端
-        恢复正常模式，主线程的 join(2s) 兜底才会用 os._exit——那时
-        终端已不在 raw 模式，强杀不会把用户的终端搞坏。
+        硬取消当前回合（cancel_current_turn，正在烧 LLM 的回合立刻断，
+        worker 线程以 CancelledError 安静出回合）→ EOF 请工作线程离场 →
+        app.exit() 收界面。app.run() 返回后终端恢复正常模式，主线程的
+        join(2s) 兜底才会用 os._exit——那时终端已不在 raw 模式，强杀
+        不会把用户的终端搞坏。
         """
         try:
             console.print("[red]⚡ 强制退出——正在取消所有子代理和后台任务…[/red]")
@@ -3668,6 +3671,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     except Exception:
                         pass
                     console.print("[yellow]\n[已中断][/yellow]")
+                except asyncio.CancelledError:
+                    # 强退主动取消回合（cancel_current_turn）会走到这里——
+                    # 这是用户要走的路不是崩溃，安静收场（强退横幅由 UI 打）。
+                    # CancelledError 是 BaseException，不接住会打穿 worker
+                    # 线程带出满屏 traceback
+                    pass
                 except Exception as e:
                     console.print(f"[red]错误: {e}[/red]")
                     logger.exception("agent 运行错误（后台唤醒轮）")
@@ -3825,6 +3834,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 except Exception:
                     pass
                 console.print("[yellow]\n[已中断][/yellow]")
+            except asyncio.CancelledError:
+                # 强退主动取消回合（cancel_current_turn）会走到这里——
+                # 这是用户要走的路不是崩溃，安静收场（强退横幅由 UI 打）。
+                # CancelledError 是 BaseException，不接住会打穿 worker
+                # 线程带出满屏 traceback
+                pass
             except Exception as e:
                 console.print(f"[red]错误: {e}[/red]")
                 logger.exception("agent 运行错误")
@@ -3895,8 +3910,10 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 #   run_interactive 保持同步签名，内部经 loop_host.run_turn（常驻
 #   循环宿主）同步驱动异步的 run_conversation（避免破坏
 #   run_skill_in_fork 等下游同步调用链）。如果 cli.main 再套一层
-#   asyncio.run，回合的 fut.result() 阻塞等结果会把外层事件循环
-#   线程吊死。所以异步驱动只出现在 run_interactive 内部（紧贴异步
+#   asyncio.run，阻塞在 fut.result() 上等回合结果的其实是 cli-worker
+#   线程（它等的是宿主循环线程，这本身没事）；真正的问题是主线程会被
+#   同步的 run_interactive 整场占死——外层事件循环一次都转不起来，
+#   纯属白搭。所以异步驱动只出现在 run_interactive 内部（紧贴异步
 #   调用点），cli.main 本身只是个同步分发器。
 
 def main(argv: list = None) -> None:

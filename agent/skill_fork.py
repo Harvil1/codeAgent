@@ -76,6 +76,9 @@ def run_skill_in_fork(
             # （等价旧的 asyncio.run，但协程跑在常驻循环上：child 的
             # client 是新实例、只在这个循环上用，绑定稳定不漂移，
             # 与主回合同循环无冲突）。
+            # ⚠️ 前提：调用线程不得是宿主循环线程（run_async 是「把协程
+            # 交给宿主循环、自己阻塞等结果」——宿主循环线程自己等自己
+            # 就是结构性死锁）。本函数从 cli 工作线程调，安全。
             from agent.loop_host import loop_host
             result = loop_host.run_async(child.chat(user_query))
             _fork_success = True

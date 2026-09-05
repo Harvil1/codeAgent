@@ -29,6 +29,11 @@ import asyncio
 import contextvars
 import logging
 import threading
+# _chain_future 是 asyncio.run_coroutine_threadsafe 内部同款的私有 API：
+# 把 asyncio future 的结果/异常/取消搬进 concurrent Future（fut.cancel()
+# 也会反向取消 task）——语义跟随标准库。标准库若哪天改签名，verify 的
+# loop_host 检查会先炸给我们看。
+from asyncio.futures import _chain_future
 from concurrent.futures import Future as ConcurrentFuture
 from typing import Any, Awaitable, Callable, Coroutine, Optional
 
@@ -157,7 +162,8 @@ class AgentLoopHost:
         """外部线程：发出去就不管的后台任务（fire-and-forget）。
 
         任务注册进豁免名单（回合栅栏不取消）；异常打 WARNING（fail-open
-        但要大声）；contextvars 从调用方复制带上（工作目录等上下文可见）。
+        但要大声）；Task 以调用方（submit 线程）的 contextvars 上下文创建
+        （create_task(context=...)），工作目录等上下文对后台任务可见。
         """
         loop = self._ensure_started()
         ctx = contextvars.copy_context()
@@ -177,12 +183,35 @@ class AgentLoopHost:
 
         wrapped = ctx.run(_wrapped)
         # 注册时机竞态（C-1）：必须在提交前同步登记 pending 豁免集——
-        # run_coroutine_threadsafe 的回调创建 task 后、task 首步运行前，
-        # 回合栅栏的 all_tasks() 会看到这个「已创建未启动」的 task，此时
-        # 它还没把自己加进 _bg_tasks，会被当回合遗留误杀。栅栏按协程
-        # 对象豁免兜底（见 _fenced_turn），首步跑起来后再由 _bg_tasks 接管。
+        # 建任务的回调跑完后、task 首步运行前，回合栅栏的 all_tasks()
+        # 会看到这个「已创建未启动」的 task，此时它还没把自己加进
+        # _bg_tasks，会被当回合遗留误杀。栅栏按协程对象豁免兜底
+        # （见 _fenced_turn），首步跑起来后再由 _bg_tasks 接管。
         self._pending_bg_coros.add(wrapped)
-        return asyncio.run_coroutine_threadsafe(wrapped, loop)
+        fut: ConcurrentFuture = ConcurrentFuture()
+
+        def _schedule():
+            # Task 的上下文显式用调用方（submit 线程）的快照 ctx 创建
+            # （3.11+ 的 create_task 支持 context 参数）——contextvars
+            # 传播由这里白纸黑字保证，不依赖 call_soon_threadsafe 的
+            # Handle 自带「上下文顺路拷贝」那种隐式通道（旧实现靠的
+            # 就是隐式通道，行为对不对全凭实现细节，无从审计）。
+            # fut.cancel() 经 _chain_future 的取消回调反向取消 task——
+            # 与 run_coroutine_threadsafe 完全同款语义。
+            try:
+                task = loop.create_task(wrapped, context=ctx)
+                _chain_future(task, fut)
+            except Exception as e:
+                fut.set_exception(e)
+
+        try:
+            loop.call_soon_threadsafe(_schedule)
+        except RuntimeError:
+            # 循环已关（进程收尾窗口）：豁免集退场，异常原样穿透
+            # （与旧 run_coroutine_threadsafe 路径行为一致）
+            self._pending_bg_coros.discard(wrapped)
+            raise
+        return fut
 
     def run_turn(self, coro: Coroutine) -> Any:
         """跑一个「回合」：正常执行 + 结束时清场（回合栅栏）。

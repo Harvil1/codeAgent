@@ -49,8 +49,9 @@ def _spawn_detached(coro, name: str):
     旧实现是「独立 daemon 线程 + 独立事件循环」：因为当时每回合
     asyncio.run 会把关联任务全部取消，后台任务只能另立门户（线程数
     随任务涨）。现在回合跑在常驻宿主循环上，后台任务直接 submit 上去
-    （注册进回合栅栏的豁免名单，不会被回合结束误杀）；contextvars
-    由 submit 内部复制带上。
+    （注册进回合栅栏的豁免名单，不会被回合结束误杀）；submit 会以
+    调用方线程的 contextvars 上下文创建 Task（create_task(context=)），
+    工作目录等上下文对后台任务可见。
 
     参数：
         coro: 要在后台跑的协程（async 函数调用后产生的对象）
