@@ -51,7 +51,7 @@ def _spawn_resumed_agent(
     - spawn_depth+1（从 agent_ref 拿父深度再 +1，防止子代理套子代理无限递归）
     - 只给 minimal 最小工具集（跟 leaf 叶子子代理对齐，免得它乱派活）
     - 关掉 summary_only（resume 要的是完整结果，不是 300 字摘要）
-    - 同步执行（用 asyncio.run 驱动 child.chat 这个 async 方法）
+    - 同步执行（经常驻循环宿主 loop_host.run_async 驱动 child.chat 这个 async 方法）
     - memory_store 透传（漏传的话续跑子代理
       用不上父对话的记忆库，等于失忆）
 
@@ -121,13 +121,16 @@ def _spawn_resumed_agent(
         on_response=None,  # resume 不再递归落盘（主入口已经统一 append 了）
     )
 
-    # 同步跑（asyncio.run 桥接 async chat，跟 _run_child 同款）
-    import asyncio
+    # 同步跑：交给进程级常驻循环宿主桥接 async chat（替代 asyncio.run
+    # 现建现拆循环——child 的 client 是新实例，迁移后绑宿主循环不再漂移；
+    # 本函数从 cli 工作线程或 to_thread 线程调进来，不在宿主循环线程内，
+    # 不会自等自死锁）。
+    from agent.loop_host import loop_host
     # 交接说明：AIAgent.chat(first_msg) 是"发起对话"，会把 first_msg 作为
     # 新的 user 轮追加到 initial_messages 后面。所以 _run_resume 构造
     # messages 时故意不带末尾的 instruction，由 chat 追加，避免出现
     # 两条重复的 user 消息。
-    result = asyncio.run(child.chat(instruction))
+    result = loop_host.run_async(child.chat(instruction))
     return result
 
 
