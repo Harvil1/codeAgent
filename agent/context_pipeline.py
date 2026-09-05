@@ -1317,6 +1317,12 @@ def _profile_messages(messages: list) -> dict:
     返回：{"msg_count": 不含 system 的条数, "total_chars": conv 消息
           content 总字符, "max_tool_chars": 单条 tool 消息最大字符,
           "last_assistant_ts": 最后一条 assistant 的 _timestamp（无则 None）}
+
+    口径注意（last_assistant_ts）：取的是最后一条「带」_timestamp 的
+    assistant——字面上的最后一条 assistant 可能没有 _timestamp。因此
+    时间清理的门可能比原版「多放行」一次调用，但函数内部仍按
+    not last_ts 早退（什么都清不了），方向安全——顶多少省一次扫描，
+    绝不会多清内容。
     """
     msg_count = 0
     total_chars = 0
@@ -1514,13 +1520,17 @@ async def compress_if_needed(
     c_per_msg = False
     msg_threshold = config.get("message_offload_threshold", 200_000)
     # 触发判定改吃 profile 的 total_chars：一段工具结果的总和 ≤ 全部
-    # 对话内容总和（段和是全量和的子集，且内容自 profile 之后只减不
-    # 增——c0/c_freeze 定长占位净变长的例外见 L2 注释）——全量和都
-    # 不超「一段」阈值时任何一段必然不超，_enforce_per_message_budget
-    # 逐段 continue 必然 no-op，不调省掉分组扫描；可能过线照旧调，
-    # 段内挑最大落盘的精确定位原样保留。
+    # 对话内容总和（段和是全量和的子集，且内容对超预览大消息只减不
+    # 增）——全量和都不超「一段」阈值时任何一段必然不超，
+    # _enforce_per_message_budget 逐段 continue 必然 no-op，不调省掉
+    # 分组扫描；可能过线照旧调，段内挑最大落盘的精确定位原样保留。
+    # 守卫必须含 c2：c2 也可能净变长——强制落盘对短消息（内容 ≤
+    # preview_chars）是「全文 + JSON 包装」替换（净变长 ~200 字符/条），
+    # 低 offload 阈值配置下 prof 统计会低估现场总量（原版现场重算会
+    # 超阈值触发压缩），必须放行现场重算。c0/c_freeze 定长占位净变长
+    # 的例外见 L2 注释，同理。
     if msg_threshold > 0 and (
-        prof["total_chars"] > msg_threshold or c0 or c_freeze
+        prof["total_chars"] > msg_threshold or c0 or c_freeze or c2
     ):
         c_per_msg = _enforce_per_message_budget(
             messages,
@@ -1538,10 +1548,15 @@ async def compress_if_needed(
     c26 = False
     TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
     # 触发判定改吃 profile 的 total_chars：工具结果全局总和 ≤ 全部对话
-    # 内容总和（子集 + 内容只减不增）——全和不超预算时「总和超预算→
-    # 挑最大落盘」必然不触发，不扫省掉工具消息全量求和。两个保守修正：
+    # 内容总和（子集 + 内容对超预览大消息只减不增）——全和不超预算时
+    # 「总和超预算→挑最大落盘」必然不触发，不扫省掉工具消息全量求和。
+    # 三个保守修正：
     #   1. c0/c_freeze 定长占位净变长的例外见 L2 注释，出现就不跳；
-    #   2. 下方原求和对 falsy content（如 None）取 len(str(...)) 会算出
+    #   2. c2/c_per_msg 也可能净变长——强制落盘对短消息（内容 ≤
+    #      preview_chars）是「全文 + JSON 包装」替换（净变长 ~200 字符/条），
+    #      低 offload 阈值配置下 prof 统计会低估现场总量（原版现场重算
+    #      会超预算触发落盘），必须放行现场重算；
+    #   3. 下方原求和对 falsy content（如 None）取 len(str(...)) 会算出
     #      几个字符，profile 记 0——留 16×条数的富余把这个理论差盖死，
     #      等价不靠「实际不会这么配」的运气。
     _c26_slack = 16 * max(1, len(messages))
@@ -1549,6 +1564,8 @@ async def compress_if_needed(
         [i for i, m in enumerate(messages) if m.get("role") == "tool"]
         if c0
         or c_freeze
+        or c2
+        or c_per_msg
         or prof["total_chars"] + _c26_slack > TOTAL_TOOL_BUDGET
         else []
     )
