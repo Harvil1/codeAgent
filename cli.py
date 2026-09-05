@@ -24,7 +24,6 @@
   /quit              退出
 """
 
-import asyncio
 import contextvars
 import json
 import logging
@@ -2012,10 +2011,12 @@ def _summarize_rewind(rt: RuntimeContext, sid: str) -> None:
 
     try:
         from agent.context_compressor import _summarize_conversation
+        from agent.loop_host import loop_host
         # _summarize_conversation 是 async（因为底层 LLM 调用是 async）。
-        # 本函数是同步的（被同步的命令处理函数调用），用
-        # asyncio.run 桥接（跟 reflection.py:150 的处理方式相同）。
-        summary = asyncio.run(_summarize_conversation(after, rt.agent.llm_client))
+        # 本函数是同步的（被同步的命令处理函数调用），交常驻循环宿主跑
+        # ——主 client 绑死宿主循环，不再各搭各的临时循环。
+        summary = loop_host.run_async(
+            _summarize_conversation(after, rt.agent.llm_client))
     except Exception as e:
         console.print(f"[red]摘要失败: {e}[/red]")
         return
@@ -2104,21 +2105,13 @@ def _start_new_goal(rt, objective: str) -> None:
     aux_client = getattr(rt.agent, "aux_llm_router", None)
     if aux_client is not None:
         try:
-            # 拆解函数是异步的：CLI 同步路径用 asyncio.run 包一层
-            import asyncio as _asyncio
-            try:
-                loop = _asyncio.get_event_loop()
-                if loop.is_running():
-                    # 已经在事件循环里（比如测试环境）——再 asyncio.run 会报错，跳过
-                    task_ids = []
-                else:
-                    task_ids = _asyncio.run(
-                        _goal_decompose_safe(gs, objective, aux_client)
-                    )
-            except RuntimeError:
-                task_ids = _asyncio.run(
-                    _goal_decompose_safe(gs, objective, aux_client)
-                )
+            # 拆解函数是异步的：交常驻循环宿主跑——斜杠命令都在 cli-worker
+            # 线程、无运行循环，run_async 恒安全（旧 deprecated
+            # get_event_loop() 判嵌套的补丁随迁移删除）
+            from agent.loop_host import loop_host
+            task_ids = loop_host.run_async(
+                _goal_decompose_safe(gs, objective, aux_client)
+            )
             if task_ids:
                 gs.save(_goal_state_path(rt))
                 console.print(f"[dim]aux_llm 拆出 {len(task_ids)} 个子任务[/dim]")
@@ -2543,17 +2536,13 @@ def _handle_init_command(rt, args: str) -> bool:
         )
         return resp.choices[0].message.content or ""
 
-    # asyncio.run 在已有事件循环时会抛 RuntimeError（测试环境/交互式解释器）
-    # —— 用 try/except 兜底，跟 _start_new_goal 的处理方式相同
+    # 生成交常驻循环宿主跑——主 client 绑死宿主循环；斜杠命令都在
+    # cli-worker 线程、无运行循环，run_async 恒安全（旧的「已在事件
+    # 循环」RuntimeError 兜底补丁随迁移删除）
     text = ""
     try:
-        text = asyncio.run(_gen())
-    except RuntimeError:
-        # 已在事件循环里（如 pytest-asyncio 接管时）→ 放弃生成
-        #（对齐 _start_new_goal：循环已跑时再驱动会冲突；
-        #  正常同步 CLI 路径不会进这个分支；测试环境走 mock 不依赖真 LLM）
-        logger.warning("init 生成跳过（已有运行中的事件循环）")
-        text = ""
+        from agent.loop_host import loop_host
+        text = loop_host.run_async(_gen())
     except Exception as e:
         logger.warning("init 生成失败（LLM 调用异常）: %s", e)
         text = ""

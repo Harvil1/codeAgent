@@ -16,7 +16,6 @@ import logging
 import os
 from collections import Counter
 from pathlib import Path
-import asyncio
 from typing import Optional
 
 from rich.table import Table
@@ -93,8 +92,8 @@ def _handle_compact_cli(args: str, rt) -> bool:
     - 正常路径用 llm_compact 走 L4（用 LLM 把早期对话总结成摘要），
       token_threshold 传 0 绕过"够不够长才压"的自动判定——手动压缩的
       意思就是无条件压，跟自动压缩的"快到窗口上限才压"不是一回事；
-    - LLM 不可用时（client 为空 / 调用报错 / 已在事件循环里跑不了）
-      降级用 snip_compact——它不调 LLM、无损地裁掉中段，同样强制执行；
+    - LLM 不可用时（client 为空 / 调用报错）降级用 snip_compact——
+      它不调 LLM、无损地裁掉中段，同样强制执行；
     - 压缩完同步 agent 状态并把本次记入 llm_compact_count（和自动压缩
       的收尾完全一致）。
 
@@ -135,7 +134,8 @@ def _handle_compact_cli(args: str, rt) -> bool:
     llm_client = getattr(agent, "llm_client", None)
     if llm_client is not None:
         try:
-            new_messages, compacted = asyncio.run(llm_compact(
+            from agent.loop_host import loop_host
+            new_messages, compacted = loop_host.run_async(llm_compact(
                 history,
                 llm_client=llm_client,
                 model=getattr(agent, "model", None),
@@ -143,12 +143,11 @@ def _handle_compact_cli(args: str, rt) -> bool:
                 token_threshold=0,  # 传 0 = 无条件压（绕过"够长才压"的判定）
                 precomputed_tokens=before_tokens,  # 复用已算好的 token 数；空历史时 0>0 自然短路
             ))
-        except RuntimeError:
-            # asyncio.run 在已有事件循环的嵌套环境里会抛 RuntimeError——
-            # 走不了 LLM 压缩就降级 snip（和 /init 的桥接做法一致）
-            console.print("[yellow]事件循环冲突，降级为 snip_compact（无损裁剪）[/yellow]")
         except Exception as e:
-            console.print(f"[red]LLM 压缩失败：[/red]{e}")
+            # run_async 抛任何异常（LLM 不可用/调用报错）→ 降级 snip——
+            # 降级是功能行为（fail-open）：触发条件从旧「asyncio.run 抛
+            # RuntimeError」放宽为「run_async 抛 Exception」，语义不变
+            console.print(f"[yellow]LLM 压缩失败（{e}），降级为 snip_compact（无损裁剪）[/yellow]")
 
     if compacted:
         # L4 摘要成功：把新历史写回 agent（收尾动作和自动压缩一致）
