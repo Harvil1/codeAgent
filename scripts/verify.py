@@ -571,6 +571,52 @@ def check_compact_boundary_persist(tmp):
     return _ok("压缩→落库→恢复裁剪全链正常（含 START 剔除）")
 
 
+def check_summary_input_fidelity():
+    """验证 L4 摘要输入保真：工具参数进场、结果头尾、offload 指针、ephemeral 过滤。
+
+    摘要 prompt 要求「文件路径/错误消息逐字保留」，但旧版排版把工具调用
+    参数整个丢掉、结果只留头 200 字符——摘要层是无米之炊。
+    """
+    from agent.context_compressor import _format_dialog_for_summary
+    offload_json = json.dumps({
+        "truncated": True, "orig_chars": 90000,
+        "preview": "P" * 2000,
+        "full_at": r"D:\home\.task_outputs\tool-results\call_abc.txt",
+        "hint": "完整结果已落盘",
+    }, ensure_ascii=False)
+    msgs = [
+        {"role": "user", "content": "帮我修 login.py 的 bug"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "function": {
+                "name": "read_file",
+                "arguments": json.dumps(
+                    {"path": "D:/project/src/login.py", "offset": 100},
+                    ensure_ascii=False),
+            },
+        }]},
+        {"role": "tool", "content": "头部分析结论…\n" + "X" * 800 + "\nTraceback 错误在尾部"},
+        {"role": "tool", "content": offload_json},
+        {"role": "user", "content": "<background_tasks_running>3</background_tasks_running>",
+         "_ephemeral": True},
+    ]
+    out = _format_dialog_for_summary(msgs)
+    # 1) 工具参数进场（文件路径可见）
+    if "D:/project/src/login.py" not in out:
+        return _fail("工具调用参数没进摘要输入（文件路径丢了）")
+    if "read_file" not in out:
+        return _fail("工具名丢了")
+    # 2) 结果头尾保留（错误在尾部）
+    if "头部分析结论" not in out or "Traceback 错误在尾部" not in out:
+        return _fail("工具结果头尾没都保留（尾部报错丢了）")
+    # 3) offload 占位的 full_at 指针存活
+    if "call_abc.txt" not in out:
+        return _fail("offload 占位的 full_at 指针被截丢了")
+    # 4) ephemeral 瞬时消息不进摘要
+    if "background_tasks_running" in out:
+        return _fail("ephemeral 瞬时消息混进了摘要输入")
+    return _ok("摘要输入原料保真")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1045,6 +1091,7 @@ def main():
             ("批量委托并行", lambda: check_delegate_batch(tmp)),
             ("压缩边界占位", check_compact_boundary_marker),
             ("边界落库与恢复裁剪", lambda: check_compact_boundary_persist(tmp)),
+            ("摘要输入保真", check_summary_input_fidelity),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

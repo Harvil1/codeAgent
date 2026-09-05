@@ -378,13 +378,57 @@ async def _summarize_conversation(
     return _rule_based_summary(working_messages)
 
 
-def _format_dialog_for_summary(messages: list) -> str:
-    """把消息列表排版成摘要 prompt 里「对话内容」那一段纯文本。
+def _head_tail(text: str, n: int = 300) -> str:
+    """取文本头尾各 n 字符，中间用省略标注代替（错误堆栈常在尾部）。
 
-    排版逻辑：
-    - 工具结果：截断到 200 字符（别把摘要 prompt 撑爆）
-    - assistant 的工具调用：只显示调了哪些工具（名字列表）
-    - 其他：原样显示角色 + 内容
+    参数：
+        text：原文
+        n：头/尾各取的字符数
+    返回：头尾拼接文本（不够长就原样返回）。
+    """
+    if not isinstance(text, str) or len(text) <= 2 * n:
+        return text
+    return f"{text[:n]} …[中间 {len(text) - 2 * n} 字符省略]… {text[-n:]}"
+
+
+def _compact_tool_result(content) -> str:
+    """工具结果进摘要输入前的压形：占位 JSON 提关键字段，普通文本头尾截取。
+
+    大白话：已经落盘的大结果是一张「提货单」（JSON，带 full_at 指针），
+    摘要器最需要的就是这张单子上的指针——直接头尾截会把指针截丢，
+    所以占位单独把 error/full_at/hint 等关键字段挑出来。
+
+    参数：
+        content：工具结果的原始 content
+    返回：压形后的文本。
+    """
+    if not isinstance(content, str):
+        content = str(content)
+    text = content.strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and ("full_at" in parsed or "error" in parsed):
+                keys = ("error", "full_at", "truncated", "orig_chars", "hint")
+                picked = {k: parsed[k] for k in keys if k in parsed}
+                if "preview" in parsed:
+                    picked["preview"] = _head_tail(str(parsed["preview"]), 150)
+                return json.dumps(picked, ensure_ascii=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return _head_tail(text, 300)
+
+
+def _format_dialog_for_summary(messages: list) -> str:
+    """把消息列表排版成给摘要 LLM 看的纯文本对话（原料保真版）。
+
+    摘要 prompt 要求「文件路径/错误消息逐字保留」，原料里就得真有这些：
+    - 工具调用带参数（read_file(path=…) 紧凑形式，截 300 字符）——
+      文件路径、命令、搜索词都在参数里
+    - 工具结果取头 300 + 尾 300 字符（旧版只留头 200，报错堆栈在尾部全丢）
+    - 已落盘的大结果（offload 占位 JSON）提取 full_at/error 等关键字段——
+      「去哪找回原文」的指针不能被截断丢掉
+    - _ephemeral 瞬时消息（后台任务提醒等）不进摘要，省摘要预算
 
     参数：
         messages：消息列表
@@ -392,20 +436,23 @@ def _format_dialog_for_summary(messages: list) -> str:
     """
     formatted = []
     for msg in messages:
+        if msg.get("_ephemeral"):
+            continue
         role = msg.get("role", "user")
         content = msg.get("content", "") or ""
         if role == "tool":
-            # 工具结果截断（防撑爆摘要 prompt）
-            content = content[:200] + "..." if len(content) > 200 else content
-            formatted.append(f"[工具结果] {content}")
+            formatted.append(f"[工具结果] {_compact_tool_result(content)}")
         elif role == "assistant" and msg.get("tool_calls"):
-            tool_names = [
-                tc.get("function", {}).get("name", "?")
-                for tc in msg["tool_calls"]
-            ]
-            formatted.append(f"[助手调用了工具: {', '.join(tool_names)}]")
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                args = fn.get("arguments", "")
+                if not isinstance(args, str):
+                    args = json.dumps(args, ensure_ascii=False)
+                formatted.append(
+                    f"[助手调用了工具: {fn.get('name', '?')}({_head_tail(args, 300)})]"
+                )
             if content:
-                formatted.append(f"[助手补充] {content[:200]}")
+                formatted.append(f"[助手补充] {_head_tail(content, 200)}")
         else:
             formatted.append(f"[{role}] {content}")
     return "\n\n".join(formatted)
