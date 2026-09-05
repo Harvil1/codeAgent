@@ -779,6 +779,52 @@ def check_memory_retrieval_fallback():
     return _ok("关键词兜底 + ID 纠错正常")
 
 
+def check_memory_injection_wiring():
+    """验证注入链兜底接线：LLM 空手→关键词顶上；抄错 ID→纠错救回；计数器工作。"""
+    import asyncio as _aio
+    from agent import memory_injection as mi
+
+    class _FakeStore:
+        def full_index_text_with_age(self):
+            return (
+                "- [project] codeagent 压缩策略 (proj#abc123): L4 分层压缩\n"
+                "- [user] 用户偏好 (user#def456): 中文回复\n"
+            )
+
+        def get(self, mid):
+            if mid == "proj#abc123":
+                return SimpleNamespace(
+                    type="project", name="压缩策略", body="L4 分层压缩",
+                    updated_at=None,
+                )
+            return None
+
+    class _DeadLLM:
+        async def chat_completions(self, *a, **kw):
+            raise RuntimeError("aux LLM 挂了")
+
+    mi.reset_injection_cache()
+    before = dict(mi._retrieval_stats)
+    # 注意：query 得带分隔符（空格）——_query_tokens 按空白/标点切词、
+    # 不做 CJK 分词，整串"压缩策略怎么配置"会成一个无法命中索引行的
+    # 长 token（brief 原文无空格，此处按意图修正为可分词写法）
+    msg = _aio.run(mi.build_relevant_memories_message(
+        query="压缩策略 怎么配置",
+        memory_store=_FakeStore(),
+        aux_llm_router=_DeadLLM(),
+        max_results=3,
+        surfaced=set(),
+    ))
+    if msg is None:
+        return _fail("LLM 挂了+兜底在场时不该返回 None")
+    if "proj#abc123" not in msg["content"] and "压缩策略" not in msg["content"]:
+        return _fail(f"兜底没把相关记忆注入: {str(msg)[:150]!r}")
+    after = mi._retrieval_stats
+    if after["requests"] <= before["requests"]:
+        return _fail("遥测计数没涨")
+    return _ok(f"兜底接线+遥测正常（requests={after['requests']}）")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1258,6 +1304,7 @@ def main():
             ("dispatch 统一封顶", lambda: check_dispatch_output_cap(tmp)),
             ("子代理结果落盘", lambda: check_delegate_offload(tmp)),
             ("记忆检索兜底", check_memory_retrieval_fallback),
+            ("记忆注入兜底接线", check_memory_injection_wiring),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

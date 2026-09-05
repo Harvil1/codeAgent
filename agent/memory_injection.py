@@ -27,6 +27,10 @@ _last_result_var: ContextVar[Optional[Optional[dict]]] = ContextVar(
     "memory_injection_last_result", default=None,
 )
 
+# 检索命中率遥测：4 个数看记忆系统是否在正常工作（旧版零统计，
+# 「记忆有没有被注入」完全不可见）。每 20 次请求打一次 INFO 汇总。
+_retrieval_stats = {"requests": 0, "llm_returned": 0, "resolved": 0, "injected": 0}
+
 
 def reset_injection_cache() -> None:
     """清空当前上下文的同轮缓存（主要给测试用，避免用例间串味）。"""
@@ -127,6 +131,24 @@ async def build_relevant_memories_message(
             active_tools=list(active_tools) if active_tools else None,
             exclude_ids=set(surfaced) if surfaced else None,
         )
+        _retrieval_stats["requests"] += 1
+        _retrieval_stats["llm_returned"] += len(memory_ids or [])
+        if _retrieval_stats["requests"] % 20 == 1 and _retrieval_stats["requests"] > 1:
+            logger.info(
+                "记忆检索遥测：%s（累计）",
+                _retrieval_stats,
+            )
+        if not memory_ids:
+            # 确定性兜底：LLM 空手/失败时关键词匹配顶上（防单点）
+            from agent.memory_retriever import keyword_fallback_ids
+            memory_ids = keyword_fallback_ids(
+                query, index_text, max_results=max_results,
+                exclude_ids=set(surfaced) if surfaced else None,
+            )
+            if memory_ids:
+                logger.info(
+                    "记忆检索走关键词兜底：%d 条", len(memory_ids),
+                )
     except Exception as e:
         logger.warning("检索式记忆注入失败（fail-open 不注入）: %s", e)
         _last_query_var.set(query)
@@ -143,7 +165,24 @@ async def build_relevant_memories_message(
         except Exception:
             entry = None
         if entry is None:
+            # ID 纠错：LLM 抄错一两位（大小写/截尾）时从索引里救回——
+            # 旧版直接静默丢条，救不回才放弃
+            try:
+                from agent.memory_retriever import correct_memory_id
+                fixed = correct_memory_id(mid, index_text)
+            except Exception:
+                fixed = None
+            if fixed and fixed != mid:
+                try:
+                    entry = memory_store.get(fixed)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    logger.info("记忆 ID 纠错：%s → %s", mid, fixed)
+                    mid = fixed
+        if entry is None:
             continue
+        _retrieval_stats["resolved"] += 1
         body = (getattr(entry, "body", "") or "")[:500]
         # 超过 1 天的记忆里 file:line
         # 引用很可能已过时——旧引用会让错误断言显得有凭有据，必须提示核对
@@ -178,6 +217,7 @@ async def build_relevant_memories_message(
     }
     _last_query_var.set(query)
     _last_result_var.set(msg)
+    _retrieval_stats["injected"] += 1
     return msg
 
 
