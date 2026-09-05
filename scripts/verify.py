@@ -1042,6 +1042,32 @@ def check_context_compress():
     )
 
 
+def check_compress_profile():
+    """验证单遍 profile 统计正确（触发判定改吃它的前提）。"""
+    from agent.context_pipeline import _profile_messages
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "问"},
+        {"role": "assistant", "content": "答", "_timestamp": 111},
+        {"role": "tool", "content": "T" * 300},
+        {"role": "tool", "content": "T" * 500},
+        {"role": "assistant", "content": "答2", "_timestamp": 222},
+    ]
+    p = _profile_messages(msgs)
+    if p["msg_count"] != 5:
+        return _fail(f"msg_count 不对（system 不计）: {p['msg_count']}")
+    if p["total_chars"] != 1 + 1 + 300 + 500 + 2:
+        return _fail(f"total_chars 不对: {p['total_chars']}")
+    if p["max_tool_chars"] != 500:
+        return _fail(f"max_tool_chars 不对: {p['max_tool_chars']}")
+    if p["last_assistant_ts"] != 222:
+        return _fail(f"last_assistant_ts 不对: {p['last_assistant_ts']}")
+    empty = _profile_messages([{"role": "system", "content": "s"}])
+    if empty["msg_count"] != 0 or empty["last_assistant_ts"] is not None:
+        return _fail(f"空会话 profile 不对: {empty}")
+    return _ok("profile 单遍统计正确")
+
+
 # ---------------------------------------------------------------------------
 # slash 命令注册表
 # ---------------------------------------------------------------------------
@@ -1482,6 +1508,7 @@ def main():
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
+            ("压缩管线 profile", check_compress_profile),
         ]),
         ("slash 注册表", [
             ("slash 注册表", check_slash_registry),

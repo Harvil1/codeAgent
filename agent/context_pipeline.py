@@ -1305,6 +1305,42 @@ def _persist_compact_marker(store, session_id: str, text: str) -> None:
         logger.warning("压缩事务标记落盘失败（不阻塞压缩）: %s", e)
 
 
+def _profile_messages(messages: list) -> dict:
+    """单遍扫描消息列表，一次算出压缩各层判定要用的统计量。
+
+    旧版时间清理/L1/L2/L2.5/L2.6 各自全量扫一遍（每轮 4-5 遍
+    O(全部历史)），长会话纯 CPU 叠加可观——这里一遍算全，各层判定
+    只读统计量不再重扫。
+
+    参数：
+        messages：完整消息列表（含可能的 system 头）
+    返回：{"msg_count": 不含 system 的条数, "total_chars": conv 消息
+          content 总字符, "max_tool_chars": 单条 tool 消息最大字符,
+          "last_assistant_ts": 最后一条 assistant 的 _timestamp（无则 None）}
+    """
+    msg_count = 0
+    total_chars = 0
+    max_tool_chars = 0
+    last_assistant_ts = None
+    system, conv = _split_system(messages)
+    for m in conv:
+        msg_count += 1
+        content = m.get("content", "") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        total_chars += len(content)
+        if m.get("role") == "tool" and len(content) > max_tool_chars:
+            max_tool_chars = len(content)
+        if m.get("role") == "assistant" and m.get("_timestamp") is not None:
+            last_assistant_ts = m.get("_timestamp")
+    return {
+        "msg_count": msg_count,
+        "total_chars": total_chars,
+        "max_tool_chars": max_tool_chars,
+        "last_assistant_ts": last_assistant_ts,
+    }
+
+
 async def compress_if_needed(
     messages: list,
     *,
@@ -1374,20 +1410,48 @@ async def compress_if_needed(
         except Exception as e:
             logger.warning("PRE_COMPACT hook 触发异常（视为允许）: %s", e)
 
+    # ── 单遍 profile：一次扫描算出下面各层触发判定要用的统计量 ──
+    # 旧版时间清理/L1/L2/L2.5/L2.6 每层各自全量扫一遍（每轮 4-5 遍
+    # O(全部历史)），长会话纯 CPU 叠加可观。这里开头一遍算全，各层触发
+    # 判定只读统计量：统计量低于该层阈值 ⟹ 该层原本就是 no-op，跳过其
+    # 扫描不改变任何行为；真要出手的层，层内精确定位扫描原样保留
+    # （profile 只替触发判断，不替定位）。
+    prof = _profile_messages(messages)
+
     # ── 时间清理（最先跑，不看 token 超没超）──
-    # 距最后一条 assistant 超 60 分钟时，把旧工具结果内容换成清除标记
-    # 返回的 c0=True 表示确实清了东西——必须算进最终 changed，
-    # 否则 changed=False 会导致对话历史不同步，下一轮又把原始内容塞回去
-    # （等于白清，效果只活一轮）
-    messages, c0 = time_based_clear_old_tool_results(messages, config)
+    # 距最后一条 assistant 超 gap_minutes（默认 60）分钟时，把旧工具结果
+    # 内容换成清除标记。返回的 c0=True 表示确实清了东西——必须算进
+    # 最终 changed，否则 changed=False 会导致对话历史不同步，下一轮又把
+    # 原始内容塞回去（等于白清，效果只活一轮）。
+    # 触发判定改吃 profile 的 last_assistant_ts：开关关着/没有可用
+    # 时间戳/距今不足 gap 分钟时，函数内部原本就在这几步原样返回（清都
+    # 不清）——直接不调，省掉它找 assistant 的倒序扫描。真超时就照旧调，
+    # 函数内部的 keep_recent/幂等检查原样保留（它只可能清得更少，不会多清）。
+    c0 = False
+    _tb_last_ts = prof["last_assistant_ts"]
+    if (
+        config.get("time_based_mc_enabled", True)
+        # 与原函数同款真值判定：None/0/"" 都视为「没有可用时间戳」
+        and _tb_last_ts
+        and (time.time() - _tb_last_ts) / 60
+        >= config.get("time_based_mc_gap_minutes", 60)
+    ):
+        messages, c0 = time_based_clear_old_tool_results(messages, config)
 
     # L1 裁中间（少频繁裁中间，压缩主要靠 L4 的 token 判定）
-    messages, c1 = snip_compact(
-        messages,
-        keep_first=config.get("snip_keep_first", 3),
-        keep_last=config.get("snip_keep_last", 47),
-        threshold=config.get("snip_message_threshold", 200),
-    )
+    # 触发判定改吃 profile 的 msg_count：时间清理只换内容不动条数，
+    # 统计值就是当前 conv 条数——不超过阈值时 snip_compact 内部
+    # 「len(conv) <= threshold」检查原样返回，必然 no-op，不调省掉
+    # 它的占位扫描；条数过线照旧调（占位幂等/头尾保留检查原样）。
+    c1 = False
+    _snip_threshold = config.get("snip_message_threshold", 200)
+    if prof["msg_count"] > _snip_threshold:
+        messages, c1 = snip_compact(
+            messages,
+            keep_first=config.get("snip_keep_first", 3),
+            keep_last=config.get("snip_keep_last", 47),
+            threshold=_snip_threshold,
+        )
 
     # L2 单条折叠（按单条大小折叠 + 落盘留指针 + 保最近 3 条）
     # micro_compact 内部自己按大小触发 + 落盘 + 可读回
@@ -1414,13 +1478,22 @@ async def compress_if_needed(
                 messages[i]["content"] = decision["preview"]
                 c_freeze = True
 
-    messages, c2 = micro_compact(
-        messages,
-        threshold=offload_threshold,
-        preview_chars=offload_preview,
-        keep_recent=config.get("micro_keep_recent_results", 3),
-        agent_home=agent_home,
-    )
+    # 触发判定改吃 profile 的 max_tool_chars：全场最大单条工具结果都
+    # 没超过阈值时，micro_compact 内部逐条「len(content) <= threshold
+    # → 跳过」检查全是跳过——必然 no-op，不调省掉全量扫描；任何一条
+    # 可能过线照旧调（最近 3 条保护/幂等检查原样保留）。
+    # 例外：c0/c_freeze 刚把短内容换成定长占位（清除标记/落盘预览，
+    # 净变长），profile 统计的是换之前的长度——这两种情况不跳，保守
+    # 走原扫描（出现频率低：一个要求闲置超 1 小时，一个只在重放有差异）。
+    c2 = False
+    if prof["max_tool_chars"] > offload_threshold or c0 or c_freeze:
+        messages, c2 = micro_compact(
+            messages,
+            threshold=offload_threshold,
+            preview_chars=offload_preview,
+            keep_recent=config.get("micro_keep_recent_results", 3),
+            agent_home=agent_home,
+        )
     # 把 micro_compact 新产生的落盘决策也记进表（下次照抄）
     if offload_freeze and c2:
         for m in messages:
@@ -1440,7 +1513,15 @@ async def compress_if_needed(
     # 顺序：L2 单条 → L2.5 按段聚合 → L2.6 全局预算
     c_per_msg = False
     msg_threshold = config.get("message_offload_threshold", 200_000)
-    if msg_threshold > 0:
+    # 触发判定改吃 profile 的 total_chars：一段工具结果的总和 ≤ 全部
+    # 对话内容总和（段和是全量和的子集，且内容自 profile 之后只减不
+    # 增——c0/c_freeze 定长占位净变长的例外见 L2 注释）——全量和都
+    # 不超「一段」阈值时任何一段必然不超，_enforce_per_message_budget
+    # 逐段 continue 必然 no-op，不调省掉分组扫描；可能过线照旧调，
+    # 段内挑最大落盘的精确定位原样保留。
+    if msg_threshold > 0 and (
+        prof["total_chars"] > msg_threshold or c0 or c_freeze
+    ):
         c_per_msg = _enforce_per_message_budget(
             messages,
             limit=msg_threshold,
@@ -1456,7 +1537,21 @@ async def compress_if_needed(
     #   阈值，前者是全局总量上限；L2.6 读 tool_result_total_budget（默认 20 万字符）
     c26 = False
     TOTAL_TOOL_BUDGET = config.get("tool_result_total_budget", 200_000)
-    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    # 触发判定改吃 profile 的 total_chars：工具结果全局总和 ≤ 全部对话
+    # 内容总和（子集 + 内容只减不增）——全和不超预算时「总和超预算→
+    # 挑最大落盘」必然不触发，不扫省掉工具消息全量求和。两个保守修正：
+    #   1. c0/c_freeze 定长占位净变长的例外见 L2 注释，出现就不跳；
+    #   2. 下方原求和对 falsy content（如 None）取 len(str(...)) 会算出
+    #      几个字符，profile 记 0——留 16×条数的富余把这个理论差盖死，
+    #      等价不靠「实际不会这么配」的运气。
+    _c26_slack = 16 * max(1, len(messages))
+    tool_indices = (
+        [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+        if c0
+        or c_freeze
+        or prof["total_chars"] + _c26_slack > TOTAL_TOOL_BUDGET
+        else []
+    )
     if tool_indices:
         tool_total = sum(
             len(str(messages[i].get("content", ""))) for i in tool_indices
