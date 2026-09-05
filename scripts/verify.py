@@ -933,6 +933,75 @@ def check_pre_send_guard():
     return _ok("发送前预检判定正常")
 
 
+def check_loop_host():
+    """验证事件循环宿主五件套：run_async 阻塞等结果且跑在宿主循环上、
+    异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
+    submit 豁免不被栅栏误杀。"""
+    import asyncio
+    from agent.loop_host import loop_host, cancel_current_turn
+
+    where = {}
+    async def _coro():
+        where["loop"] = asyncio.get_running_loop()
+        return 42
+    if loop_host.run_async(_coro()) != 42:
+        return _fail("run_async 结果不对")
+    if where.get("loop") is not loop_host.loop:
+        return _fail("协程没跑在宿主循环上")
+
+    async def _boom():
+        raise ValueError("boom")
+    try:
+        loop_host.run_async(_boom())
+        return _fail("异常没穿透")
+    except ValueError:
+        pass
+
+    done = {}
+    async def _bg():
+        done["yes"] = True
+    loop_host.submit(_bg(), name="verify").result(timeout=5)
+    if not done.get("yes"):
+        return _fail("submit 没执行")
+
+    # 栅栏：回合内裸 create_task 的遗留被取消
+    fate = {}
+    async def _leaked():
+        try:
+            await asyncio.sleep(30)
+            fate["leaked"] = "done"
+        except asyncio.CancelledError:
+            fate["leaked"] = "cancelled"
+    async def _turn():
+        asyncio.ensure_future(_leaked())
+        await asyncio.sleep(0.05)
+        return "ok"
+    if loop_host.run_turn(_turn()) != "ok":
+        return _fail("run_turn 结果不对")
+    if fate.get("leaked") != "cancelled":
+        return _fail(f"栅栏没取消遗留任务: {fate}")
+
+    # 豁免：submit 的慢后台任务在另一回合栅栏后仍活着
+    bg_alive = {}
+    async def _slow_bg():
+        try:
+            await asyncio.sleep(0.3)
+            bg_alive["ok"] = True
+        except asyncio.CancelledError:
+            bg_alive["cancelled"] = True
+    bgfut = loop_host.submit(_slow_bg(), name="verify-slow")
+    async def _turn2():
+        await asyncio.sleep(0.05)
+        return "ok2"
+    loop_host.run_turn(_turn2())
+    bgfut.result(timeout=5)
+    if bg_alive.get("cancelled"):
+        return _fail("submit 的后台任务被回合栅栏误杀")
+    # cancel_current_turn 空转不炸（没有回合在跑）
+    cancel_current_turn()
+    return _ok("loop_host 语义五件套正常")
+
+
 def check_session_append_perf(tmp):
     """验证 append 不再 O(n²)：连写 200 条 turn_index 连续正确、文件行数
     吻合、index 卡片去抖中途真的延迟、flush 后最终一致。"""
@@ -1483,6 +1552,7 @@ def main():
             ("terminal 工具", check_terminal_tool),
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
             ("中断机制", check_interrupt),
+            ("事件循环宿主", check_loop_host),
         ]),
         ("记忆系统", [
             ("memory 工具写入", lambda: check_memory_tool_write(tmp)),
