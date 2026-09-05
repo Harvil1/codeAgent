@@ -481,6 +481,39 @@ def check_delegate_batch(tmp):
     return _fail(f"批量失败: {data}")
 
 
+def check_compact_boundary_marker():
+    """验证压缩边界占位统一带 [COMPACT_BOUNDARY] 大写前缀且可被一次性取走。
+
+    旧 bug：生成方写小写 [compact_boundary]，恢复侧/持久化侧只认大写或
+    旧前缀——边界从不落库，重启后全量载入撑爆上下文。
+    """
+    from agent.context_pipeline import (
+        _build_compact_boundary, reactive_compact,
+        take_last_compact_placeholder,
+    )
+    # 1) L4 边界标注块以大写前缀开头
+    text = _build_compact_boundary("消息 1-50", "最近 30 条", transcript_path=None)
+    if not text.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"边界标注缺大写前缀: {text[:40]!r}")
+    # 2) reactive 占位同样带前缀，且成功后可被一次性取走
+    fake_state = SimpleNamespace(reactive_last_at=0.0, reactive_count=0)
+    msgs = [{"role": "system", "content": "s"}] + [
+        {"role": "user", "content": f"m{i}"} for i in range(20)
+    ]
+    new_msgs, changed = reactive_compact(msgs, session_state=fake_state)
+    if not changed:
+        return _fail("reactive_compact 未触发")
+    first = new_msgs[1]["content"]
+    if not first.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"reactive 占位缺前缀: {first[:40]!r}")
+    taken = take_last_compact_placeholder()
+    if not taken or not taken.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"一次性取走失败: {str(taken)[:40]!r}")
+    if take_last_compact_placeholder() is not None:
+        return _fail("取走后应清空（一次性消费），第二次应返回 None")
+    return _ok("边界占位前缀统一 + 暂存机制正常")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -953,6 +986,7 @@ def main():
         ("委托", [
             ("subagent 同步", lambda: check_delegate_sync(tmp)),
             ("批量委托并行", lambda: check_delegate_batch(tmp)),
+            ("压缩边界占位", check_compact_boundary_marker),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

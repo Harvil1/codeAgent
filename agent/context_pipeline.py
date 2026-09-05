@@ -777,7 +777,7 @@ def _build_compact_boundary(
             "文件可能很大，用 offset/limit 分段）\n"
         )
     return (
-        "[compact_boundary]\n"
+        "[COMPACT_BOUNDARY]\n"
         f"- 压缩时间：{ts}\n"
         f"- 摘要覆盖范围：{coverage}（由 LLM 转述，细节可能有省略）\n"
         f"- 保留段范围：{preserved}（原样保留，含工具结果原文）\n"
@@ -926,6 +926,8 @@ async def llm_compact(
             notify_compaction()
         except Exception as e:
             logger.debug("notify_compaction fail-open: %s", e)
+        global _last_compact_placeholder
+        _last_compact_placeholder = placeholder["content"]
         return new_messages, True
 
     # 全量模式（原逻辑，保持向后兼容）
@@ -1001,6 +1003,9 @@ async def llm_compact(
         notify_compaction()
     except Exception as e:
         logger.debug("notify_compaction fail-open: %s", e)
+    # global 声明已在上面 partial 分支的写入点做过（同函数只许声明一次，
+    # 且必须早于任何赋值），这里直接赋值即可
+    _last_compact_placeholder = placeholder["content"]
     return new_messages, True
 
 
@@ -1141,6 +1146,9 @@ def reactive_compact(
     placeholder = {
         "role": "user",
         "content": (
+            # 边界前缀和大写统一：恢复侧 _truncate_at_last_compact_boundary
+            # 只认 [COMPACT_BOUNDARY] 开头，reactive 的占位也得能被裁剪定位
+            "[COMPACT_BOUNDARY]\n"
             "[紧急上下文压缩：API 返回 prompt_too_long，"
             f"已只保留最近 {len(keep)} 条消息。"
             "完整历史见 .transcripts/latest.jsonl]"
@@ -1163,6 +1171,8 @@ def reactive_compact(
         notify_compaction()
     except Exception as e:
         logger.debug("notify_compaction fail-open: %s", e)
+    global _last_compact_placeholder
+    _last_compact_placeholder = placeholder["content"]
     return new_messages, True
 
 
@@ -1202,6 +1212,21 @@ def estimate_turn_growth(messages: list, *, window: int = 3, default: int = 8000
         return max(estimate_message_tokens(t) for t in recent)
     except Exception:
         return default
+
+
+# 最近一次压缩产出的边界占位内容（llm_compact / reactive_compact 成功时
+# 写入，调用方用 take_last_compact_placeholder() 取去持久化）。
+# 压缩在主循环里串行执行、无并发竞争——与 context_compressor 的
+# _last_summary_degraded 同款模块级约定。
+_last_compact_placeholder: Optional[str] = None
+
+
+def take_last_compact_placeholder() -> Optional[str]:
+    """取走并清空最近一次压缩的边界占位（一次性消费，防旧值误用）。"""
+    global _last_compact_placeholder
+    val = _last_compact_placeholder
+    _last_compact_placeholder = None
+    return val
 
 
 def _persist_compact_marker(store, session_id: str, text: str) -> None:
