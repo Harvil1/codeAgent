@@ -92,7 +92,7 @@ def get_tool_definitions(
     # rules 只在这里加载一次再传给 is_tool_denied——旧版逐工具各自调
     # is_tool_denied(n)，每次都要 exists+stat 一遍 settings.json，40+ 个
     # 工具就是 40+ 次系统调用/轮（Windows 上 stat 不便宜）。
-    # deny 清单同时压进缓存键（规则改了缓存跟着失效）。
+    # allow/deny 两份清单都压进缓存键（任一规则改了缓存跟着失效）。
     # 仍选 fail-open（配置坏了就全拒会把 agent 砖死），但必须大声报 ERROR。
     _deny_key: tuple = ()
     _rules = None
@@ -101,7 +101,12 @@ def get_tool_definitions(
             is_tool_denied, load_tool_permission_rules,
         )
         _rules = load_tool_permission_rules()
-        _deny_key = tuple(_rules.get("deny") or [])
+        # 键要同时含 allow 和 deny：is_tool_denied 先查 allow 豁免再查 deny，
+        # 只压 deny 的话改 allow 不会失效缓存（豁免不生效直到 generation 变化）
+        _deny_key = (
+            tuple(_rules.get("allow") or []),
+            tuple(_rules.get("deny") or []),
+        )
     except Exception as e:
         logger.error("deny 规则加载失败，工具可见性过滤本调用失效（fail-open）: %s", e)
 
