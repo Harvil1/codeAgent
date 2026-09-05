@@ -25,6 +25,7 @@
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import json
 import logging
@@ -3671,11 +3672,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     except Exception:
                         pass
                     console.print("[yellow]\n[已中断][/yellow]")
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
                     # 强退主动取消回合（cancel_current_turn）会走到这里——
                     # 这是用户要走的路不是崩溃，安静收场（强退横幅由 UI 打）。
                     # CancelledError 是 BaseException，不接住会打穿 worker
-                    # 线程带出满屏 traceback
+                    # 线程带出满屏 traceback。concurrent 版是 fut.result()
+                    # 把取消搬运到 worker 线程后的实际类型，两个都接
                     pass
                 except Exception as e:
                     console.print(f"[red]错误: {e}[/red]")
@@ -3834,11 +3836,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 except Exception:
                     pass
                 console.print("[yellow]\n[已中断][/yellow]")
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
                 # 强退主动取消回合（cancel_current_turn）会走到这里——
                 # 这是用户要走的路不是崩溃，安静收场（强退横幅由 UI 打）。
                 # CancelledError 是 BaseException，不接住会打穿 worker
-                # 线程带出满屏 traceback
+                # 线程带出满屏 traceback。concurrent 版是 fut.result()
+                # 把取消搬运到 worker 线程后的实际类型，两个都接
                 pass
             except Exception as e:
                 console.print(f"[red]错误: {e}[/red]")
