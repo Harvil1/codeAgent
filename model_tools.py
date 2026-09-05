@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # 模块级暂存：记下最近一次解析出哪些工具名（调试或 UI 展示用）
 _last_resolved_tool_names: List[str] = []
 
+# 工具名清单解析缓存：键 -> tuple(tool_names)。每轮重建 toolset 展开 +
+# mcp list_all 扫描 + deny 过滤在工具多时是重复劳动；registry.generation
+# 在任何登记/注销时 +1，天然当失效信号。只缓存名字（definitions 构建不缓存
+# ——schema_overrides_fn 带实时槽位信息，缓存会出陈旧值）。
+_tool_names_cache: dict = {}
+
 # 标记工具发现这件事是否已经做过（做过就不重复做）
 _tools_discovered = False
 
@@ -53,6 +59,11 @@ def get_tool_definitions(
     4. 去登记处取每份说明书；check_fn（工具自带的"我现在适不适合出场"检查）
        不通过的工具会被自动略过——这就实现了"登记了但当前不可见"
 
+    名字清单这套解析（第 2、3 步的展开 + mcp 扫描 + 过滤）带缓存：
+    键里含 registry.generation（每次登记/注销自动 +1），名单没变就直接
+    复用上一轮的结果；但"说明书"本身绝不缓存——schema_overrides_fn
+    带实时槽位信息，缓存会出陈旧值。
+
     参数：
         enabled_toolsets: 启用哪些工具集（如 ["core", "mcp"]）。
         disabled_tools: 要明确划掉的工具名清单。
@@ -64,62 +75,97 @@ def get_tool_definitions(
     """
     ensure_tools_discovered()
 
-    # 把每个启用的工具集展开成具体工具名
-    tool_names: List[str] = []
-    for ts in enabled_toolsets:
-        tool_names.extend(resolve_toolset(ts))
-
-    # mcp 工具集特殊：它的工具是运行时连上外部服务器才动态登记的，
-    # 名字都以 mcp__ 开头，这里现场扫一遍登记处把它们捞出来
-    if "mcp" in enabled_toolsets:
-        # 子代理可以通过 config["mcp_server_filter"]
-        # 圈定"只看得见哪几个 MCP 服务器"，防止它乱碰别的服务器
-        mcp_filter = (agent.config.get("mcp_server_filter")
-                      if agent and isinstance(getattr(agent, "config", None), dict)
-                      else None)
-        for name in registry.list_all():
-            if name.startswith("mcp__") and name not in tool_names:
-                # 名字格式是 mcp__<服务器名>__<工具名>；有 filter 时只留圈定的服务器
-                if mcp_filter:
-                    parts = name.split("__", 2)
-                    if len(parts) >= 2 and parts[1] not in mcp_filter:
-                        continue
-                tool_names.append(name)
-
-    # 去重（保持原有先后顺序不变；dict.fromkeys 是"按首次出现去重"的惯用写法）
-    tool_names = list(dict.fromkeys(tool_names))
-
-    # 划掉明确禁用的
-    if disabled_tools:
-        disabled_set = set(disabled_tools)
-        tool_names = [n for n in tool_names if n not in disabled_set]
-
-    # 技能可以在触发时改工具可见范围（声明"只许用这些 / 不许用那些"），
-    # 这里应用这个作用域。注意：这个作用域一旦设置，整个会话都生效
+    # ===== 先把所有"影响名单的开关"取出来，压成缓存键 =====
+    # 子代理可以通过 config["mcp_server_filter"]
+    # 圈定"只看得见哪几个 MCP 服务器"，防止它乱碰别的服务器
+    mcp_filter = (agent.config.get("mcp_server_filter")
+                  if agent and isinstance(getattr(agent, "config", None), dict)
+                  else None)
+    # 技能作用域同样影响名单，一并取出来进缓存键
     scope = getattr(agent, "_skill_tool_scope", None) if agent else None
-    if scope:
-        allowed_tools, disallowed_tools_scope = scope
-        if allowed_tools:
-            allow_set = set(allowed_tools)
-            tool_names = [n for n in tool_names if n in allow_set]
-        if disallowed_tools_scope:
-            dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
-            tool_names = [n for n in tool_names if n not in dis_scope]
-
+    scope_key = (
+        (tuple(scope[0] or ()), tuple(scope[1] or ()))
+        if scope else None
+    )
     # settings.json 里 permissions.deny 配的禁用规则，要在 LLM 看到之前就把
     # 工具整类拿掉（支持精确名 / mcp__server__* 通配 / mcp__server 整服务器）。
     # rules 只在这里加载一次再传给 is_tool_denied——旧版逐工具各自调
     # is_tool_denied(n)，每次都要 exists+stat 一遍 settings.json，40+ 个
     # 工具就是 40+ 次系统调用/轮（Windows 上 stat 不便宜）。
+    # deny 清单同时压进缓存键（规则改了缓存跟着失效）。
     # 仍选 fail-open（配置坏了就全拒会把 agent 砖死），但必须大声报 ERROR。
+    _deny_key: tuple = ()
+    _rules = None
     try:
         from agent.tool_permissions import (
             is_tool_denied, load_tool_permission_rules,
         )
         _rules = load_tool_permission_rules()
-        tool_names = [n for n in tool_names if not is_tool_denied(n, rules=_rules)]
+        _deny_key = tuple(_rules.get("deny") or [])
     except Exception as e:
         logger.error("deny 规则加载失败，工具可见性过滤本调用失效（fail-open）: %s", e)
+
+    _cache_key = (
+        tuple(enabled_toolsets),
+        tuple(disabled_tools or ()),
+        scope_key,
+        tuple(mcp_filter or []),
+        registry.generation,
+        _deny_key,
+    )
+    _hit = _tool_names_cache.get(_cache_key)
+    if _hit is not None:
+        # 命中缓存：整段名字解析（展开/扫描/去重/过滤）全省了
+        tool_names = list(_hit)
+    else:
+        # 把每个启用的工具集展开成具体工具名
+        tool_names: List[str] = []
+        for ts in enabled_toolsets:
+            tool_names.extend(resolve_toolset(ts))
+
+        # mcp 工具集特殊：它的工具是运行时连上外部服务器才动态登记的，
+        # 名字都以 mcp__ 开头，这里现场扫一遍登记处把它们捞出来
+        # （mcp_filter 已在缓存键构造处取好，这里直接复用）
+        if "mcp" in enabled_toolsets:
+            for name in registry.list_all():
+                if name.startswith("mcp__") and name not in tool_names:
+                    # 名字格式是 mcp__<服务器名>__<工具名>；有 filter 时只留圈定的服务器
+                    if mcp_filter:
+                        parts = name.split("__", 2)
+                        if len(parts) >= 2 and parts[1] not in mcp_filter:
+                            continue
+                    tool_names.append(name)
+
+        # 去重（保持原有先后顺序不变；dict.fromkeys 是"按首次出现去重"的惯用写法）
+        tool_names = list(dict.fromkeys(tool_names))
+
+        # 划掉明确禁用的
+        if disabled_tools:
+            disabled_set = set(disabled_tools)
+            tool_names = [n for n in tool_names if n not in disabled_set]
+
+        # 技能可以在触发时改工具可见范围（声明"只许用这些 / 不许用那些"），
+        # 这里应用这个作用域。注意：这个作用域一旦设置，整个会话都生效
+        # （scope 已在缓存键构造处取好，这里直接复用）
+        if scope:
+            allowed_tools, disallowed_tools_scope = scope
+            if allowed_tools:
+                allow_set = set(allowed_tools)
+                tool_names = [n for n in tool_names if n in allow_set]
+            if disallowed_tools_scope:
+                dis_scope = set(disabled_tools or []) | set(disallowed_tools_scope)
+                tool_names = [n for n in tool_names if n not in dis_scope]
+
+        # deny 过滤：_rules 已在缓存键构造处加载好，这里传参复用；
+        # _rules 为 None 说明那边加载失败——跳过过滤保持 fail-open
+        # （ERROR 已经在键构造处大声报过了）
+        if _rules is not None:
+            tool_names = [n for n in tool_names if not is_tool_denied(n, rules=_rules)]
+
+        # 容量保护：键里含 generation，老键永远不会再命中，攒超过 32 个就整个清空
+        if len(_tool_names_cache) > 32:
+            _tool_names_cache.clear()
+        _tool_names_cache[_cache_key] = tuple(tool_names)
 
     global _last_resolved_tool_names
     _last_resolved_tool_names = tool_names

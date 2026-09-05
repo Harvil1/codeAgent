@@ -104,6 +104,67 @@ def check_rules_param_equiv(tmp):
         tp.reset_rules_cache()
 
 
+def check_tool_names_cache():
+    """验证工具名清单缓存：同键两调只扫一次 registry，generation 变化自动失效。
+
+    大白话：get_tool_definitions 里"算出本轮有哪些工具名"这段（toolset 展开 +
+    mcp 扫描 + deny 过滤）带缓存；registry.generation（每次登记/注销 +1）
+    是失效信号。这里三连测：注册新工具能立刻看见、同参数连调两次结果一致
+    且第二次不重扫、注销后立刻隐身。
+    """
+    from model_tools import get_tool_definitions
+    from tools.registry import registry
+
+    def _handler(args, **kw):
+        return '{"ok": true}'
+
+    # core 套餐是写死的静态名单，登记新工具不会进 resolve_toolset 的结果；
+    # 真正"动态"的名字来源是 mcp__ 扫描分支——探针得起 mcp__ 开头的名字才测得到
+    probe = "mcp__verify_cache__probe"
+    registry.register(
+        name=probe,
+        toolset="mcp",
+        schema={"type": "function", "function": {
+            "name": probe,
+            "description": "verify 专用探针",
+            "parameters": {"type": "object", "properties": {}},
+        }},
+        handler=_handler,
+        override=True,
+    )
+    try:
+        # 数 registry.list_all 被扫了几次：同键第二次调用应命中缓存、不再扫
+        orig_list_all = registry.list_all
+        scans = [0]
+
+        def _counting_list_all():
+            scans[0] += 1
+            return orig_list_all()
+
+        registry.list_all = _counting_list_all
+        try:
+            names = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+            names2 = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+        finally:
+            del registry.list_all  # 摘掉实例上的影子属性，恢复类里定义的原方法
+
+        if probe not in names:
+            return _fail("注册后清单没包含新工具（generation 失效没生效）")
+        if names != names2:
+            return _fail("两次结果不一致")
+        if scans[0] > 1:
+            return _fail(f"同键两调扫了 {scans[0]} 次 registry（缓存没生效）")
+
+        # 注销让 generation 再 +1：缓存必须跟着失效，名单里不能再有探针
+        registry.unregister(probe)
+        names3 = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+        if probe in names3:
+            return _fail("注销后清单还残留旧工具（generation 失效没生效）")
+        return _ok("名字解析缓存 + generation 失效正常")
+    finally:
+        registry.unregister(probe)
+
+
 def check_terminal_tool():
     """验证 terminal 工具真的能执行一条命令（跑 echo 看输出）。
 
@@ -1377,6 +1438,7 @@ def main():
             ("agent 初始化", check_agent_initialization),
             ("工具定义加载", check_tool_definitions),
             ("rules 传参等价", lambda: check_rules_param_equiv(tmp)),
+            ("工具名清单缓存", check_tool_names_cache),
             ("terminal 工具", check_terminal_tool),
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
             ("中断机制", check_interrupt),
