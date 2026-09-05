@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -827,7 +828,6 @@ class RuntimeContext:
             memory_manager=self.memory_manager,
             session_store=self.session_store,
             codeagent_home=self.home,
-            on_tool_call=_make_tool_call_callback(self.config),
             config=self.config,
             hooks_registry=self.hooks_registry,  # hook 注册表
             bg_manager=self.bg_manager,  # 后台任务管理器
@@ -1321,62 +1321,6 @@ def _make_ask_user_bridge():
         _echo([raw] if raw else [])
         return [raw] if raw else []
     return bridge
-
-
-def _ts() -> str:
-    """生成"[时:分:秒]"格式的时间戳前缀，用在工具调用进度输出里。
-
-    参数：无。返回：如 "[14:30:05]" 的字符串。
-    """
-    from datetime import datetime
-    return f"[{datetime.now().strftime('%H:%M:%S')}]"
-
-
-def _make_tool_call_callback(config: dict):
-    """造工具调用进度回调——把"要不要显示进度"的配置读一次存进闭包
-    （免得每次工具调用都现读 settings.json）。
-
-    参数：
-        config: 配置字典（读 display.show_tool_progress 开关）
-    返回：回调函数 callback(name, args)。
-    """
-    show = (config or {}).get("display", {}).get("show_tool_progress", True)
-
-    def callback(name: str, args: dict):
-        """每次工具被调用时在屏幕打一行灰字进度（开关关了就什么都不打）。
-
-        参数：
-            name: 工具名
-            args: 工具参数（超 80 字符的值截断显示）
-        """
-        if not show:
-            return
-        short_args = {}
-        for k, v in (args or {}).items():
-            s = str(v)
-            short_args[k] = s if len(s) <= 80 else s[:77] + "..."
-        console.print(f"[dim]{_ts()} → 调用工具: {name} {short_args}[/dim]")
-
-    return callback
-
-
-# 向后兼容的接口：模块级函数仍然能用，但每次调用都重读配置文件（不推荐新代码用）
-def _on_tool_call(name: str, args: dict):
-    """工具调用时的进度打印（兼容接口：每次现读 config）。
-
-    保留它只为兼容既有引用；新代码请用 _make_tool_call_callback。
-
-    参数：
-        name: 工具名
-        args: 工具参数（超 80 字符的值截断显示）
-    """
-    if not load_config().get("display", {}).get("show_tool_progress", True):
-        return
-    short_args = {}
-    for k, v in (args or {}).items():
-        s = str(v)
-        short_args[k] = s if len(s) <= 80 else s[:77] + "..."
-    console.print(f"[dim]{_ts()} → 调用工具: {name} {short_args}[/dim]")
 
 
 def _make_cli_stream_callback():
@@ -3318,16 +3262,28 @@ def _statusline_segments(rt, agent) -> list[str]:
     return segs
 
 
-def _render_statusline(rt, agent) -> str:
-    """拼一行状态摘要，每轮回答后打在屏幕上。
+def _fmt_turn_duration(seconds: float) -> str:
+    """秒数 → 回合耗时文案（claude code 的 ✻ 行同款节奏）。
 
-    段的拼装委托给 _statusline_segments。
+    不足 1 分钟给秒（45s）；满 1 分钟给「1m 57s」。
+    """
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60}s"
+
+
+def _render_statusline(rt, agent, elapsed_s=None) -> str:
+    """拼一行回合收尾摘要（claude code 的 ✻ 行同款），每轮回答后打。
+
+    形如：✻ 用时 1m 57s · 会话 19.1K tok（goal 进行中再补一段）。
     返回值约定：非空字符串 → 主循环打印它；空串 → 什么都不打。
     任何异常都吞掉返回空串（状态行绝不能把主流程搞挂）。
 
     参数：
         rt: RuntimeContext
         agent: AIAgent 实例
+        elapsed_s: 本回合耗时秒数（None=不显示耗时段）
     返回：状态行字符串（可能为空）。
     """
     try:
@@ -3337,7 +3293,33 @@ def _render_statusline(rt, agent) -> str:
         if not sl_cfg.get("enabled", True):
             return ""
 
-        return " │ ".join(_statusline_segments(rt, agent))
+        segs = []
+        if elapsed_s is not None:
+            segs.append(f"✻ 用时 {_fmt_turn_duration(elapsed_s)}")
+
+        # token 段：优先用实时累加的用量统计（含缓存部分）；
+        # 没有就退回 session_total_tokens 老字段（兼容 mock/旧实例）。
+        usage_stats = getattr(agent, "_llm_usage_stats", None)
+        if usage_stats and isinstance(usage_stats, dict):
+            tokens = (
+                int(usage_stats.get("total_prompt_tokens", 0) or 0)
+                + int(usage_stats.get("total_completion_tokens", 0) or 0)
+            )
+        else:
+            tokens = int(getattr(agent, "session_total_tokens", 0) or 0)
+        segs.append(f"会话 {_format_tokens(tokens)} tok")
+
+        # goal 段：进行中/暂停才显示（完成/失败也提一嘴，取消的不提）
+        goal = getattr(agent, "_goal_state", None)
+        if goal is not None:
+            gstatus = getattr(goal, "status", "") or ""
+            if gstatus == "active":
+                segs.append(
+                    f"goal:进行中#{getattr(goal, 'iteration_count', 0) or 0}")
+            elif gstatus == "paused":
+                segs.append("goal:已暂停")
+
+        return " · ".join(segs)
     except Exception:
         return ""
 
@@ -3491,6 +3473,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     # 执行——否则 stdin 被 pt 独占，提问挂着永远没人能答
     cli_layout.install_input_bridge(_app)
 
+    # 把 app 登记给打印漏斗（cli_ui.emit_ansi 靠它把工作线程的打印搬进
+    # UI 事件循环——不登记的话 spinner/状态栏会被冻进滚动历史）
+    from cli_ui import set_active_app as _set_active_app
+    _set_active_app(_app)
+
     # === 事件行渲染器：工具/子代理/任务 全走这里（完成行 + 工具栏黑板） ===
     import cli_events
     cli_events.install_event_lines(rt)
@@ -3580,6 +3567,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     )
                 try:
                     cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
+                    _turn_t0 = time.monotonic()
                     rt.turn_active = True
                     try:
                         response = asyncio.run(rt.agent.run_conversation(_BG_WAKE_MESSAGE))
@@ -3602,7 +3590,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                             rt.session_id, "assistant", response,
                         )
                     try:
-                        _sl = _render_statusline(rt, rt.agent)
+                        _sl = _render_statusline(
+                            rt, rt.agent, time.monotonic() - _turn_t0)
                         if _sl:
                             console.print(f"[dim]{_sl}[/dim]")
                     except Exception as _e:
@@ -3625,6 +3614,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
 
             # 用户真实输入：唤醒预算回血（自动唤醒不许自回血，只有真人说话算数）
             _wake_budget.reset()
+
+            # 输入回显（claude code 同款 "> 消息"）——输入框提交后就清空了，
+            # 对话历史里留个影子，翻记录时才知道哪句是用户说的。
+            # 用 rich Text（不解析 markup）：用户输入里带 [red] 之类不会被误上色。
+            from rich.text import Text as _EchoText
+            console.print(_EchoText("> " + user_input.replace("\n", "\n> ")))
 
             # 大段粘贴内容转存外部文件 + 留占位符（会话库里只存
             # 占位符省空间，发送时再展开）
@@ -3755,6 +3750,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # （run_skill_in_fork 等下游依赖同步上下文），所以每轮用
                 # asyncio.run 驱动一次完整的异步对话。
                 cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
+                _turn_t0 = time.monotonic()
                 rt.turn_active = True
                 try:
                     response = asyncio.run(rt.agent.run_conversation(agent_input))
@@ -3784,11 +3780,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                         rt.session_id, "assistant", response,
                     )
 
-                # 每轮回答完打印状态行（模型/token/goal/项目）
-                # 放在回答完整输出之后、不接 Live 动态刷新（Windows 上跟 input()
-                # 有冲突）；中断/异常路径都不打（用户主动断开就别再追加信息了）。
+                # 每轮回答完打印 ✻ 收尾行（用时/token/goal，claude code 同款）。
+                # 中断/异常路径都不打（用户主动断开就别再追加信息了）。
                 try:
-                    _sl = _render_statusline(rt, rt.agent)
+                    _sl = _render_statusline(
+                        rt, rt.agent, time.monotonic() - _turn_t0)
                     if _sl:
                         console.print(f"[dim]{_sl}[/dim]")
                 except Exception as _e:
@@ -3833,6 +3829,7 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     finally:
         # 工作线程收到 EOF → request_app_exit → app.run 返回；
         # 这里反向兜底：UI 先退了（异常），也让工作线程尽快收工
+        _set_active_app(None)   # 注销 app：之后的打印走直写（不再搬事件循环）
         _input_stop.set()
         _input_q.put(_EOF_SENTINEL)
         _worker_thread.join(timeout=2.0)

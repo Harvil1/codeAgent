@@ -582,30 +582,54 @@ def check_cli_completer():
 
 
 def check_event_lines():
-    """验证事件行渲染器：hermes 风格工具行 + 失败标记 + 启动询问已删。"""
+    """验证事件行渲染器：claude code 风格 ● 头行 + ⎿ 结果块 + 带行号 diff。"""
+    import json as _json
     import cli_events as ce
-    line = ce.format_tool_line("terminal", {"command": "pytest -q"}, 4.06,
-                               '{"output": "21 passed"}')
-    for frag in ("┊", "💻", "pytest -q", "✓", "4.1s"):
-        if frag not in line:
-            return _fail(f"工具行缺 {frag!r}：{line}")
+    head = ce.format_tool_line("terminal", {"command": "pytest -q"}, 4.06,
+                               '{"stdout": "ok"}')
+    if "● Bash(pytest -q)" not in head:
+        return _fail(f"工具头行不对（应 ● Bash(命令)）：{head!r}")
     bad = ce.format_tool_line("terminal", {"command": "boom"}, 0.2,
                               '{"error": "exit 1"}')
-    if "✗" not in bad or "exit 1" not in bad:
-        return _fail(f"失败行缺 ✗/错误摘要：{bad}")
+    if "✗" not in bad:
+        return _fail(f"失败头行缺 ✗：{bad!r}")
     # 摘要字段名对齐工具 schema（read_file 用 path 不是 file_path）
-    rl = ce.format_tool_line("read_file", {"path": "src/app.py"}, 0.05,
-                             '{"content": "x"}')
-    if "src/app.py" not in rl:
-        return _fail(f"read_file 行缺路径摘要（字段名对不上 schema？）：{rl}")
-    # inline diff：红删绿增行 + 截断提示
-    dlines = ce.build_edit_diff("a\nb\nc\n", "a\nX\nc\nd\n")
-    kinds = [k for k, _ in dlines]
+    rl = ce.format_tool_line("read_file", {"path": "src/app.py"}, 0.05, None)
+    if "● Read(src/app.py)" not in rl:
+        return _fail(f"read 头行缺路径摘要（字段名对不上 schema？）：{rl!r}")
+    # write_file：覆盖已有文件 → Update；新文件 → Write
+    if "Update(" not in ce.format_tool_line(
+            "write_file", {"path": "a.py"}, 0.1, "{}", is_update=True):
+        return _fail("write_file 覆盖已有文件应显示 Update")
+    if "Write(" not in ce.format_tool_line(
+            "write_file", {"path": "a.py"}, 0.1, "{}"):
+        return _fail("write_file 新文件应显示 Write")
+    # 结果块：stdout 预览 + 折叠提示（5 行只展示 3 行，剩 2 行折叠）
+    blk = ce.format_result_block("terminal", _json.dumps(
+        {"stdout": "l1\nl2\nl3\nl4\nl5\n"}))
+    btext = "\n".join(t for _, t in blk)
+    if "l1" not in btext or "+2 lines" not in btext or not \
+            any(t.startswith("  ") for _, t in blk):
+        return _fail(f"stdout 预览块不对：{blk}")
+    err = ce.format_result_block("terminal", '{"error": "exit 1"}')
+    if "✗" not in err[0][1] or "exit 1" not in err[0][1]:
+        return _fail(f"错误块不对：{err}")
+    rd = ce.format_result_block("read_file", '{"total_lines": 135}')
+    if "读取 135 行" not in rd[0][1]:
+        return _fail(f"read 块不对：{rd}")
+    # 带行号 diff：红删绿增 + 截断提示 + 行号必须是整数
+    d = ce.build_numbered_diff("a\nb\nc\n", "a\nX\nc\nd\n")
+    kinds = [k for k, _, _ in d]
     if "-" not in kinds or "+" not in kinds:
-        return _fail(f"diff 缺删/增行：{dlines}")
-    dcap = ce.build_edit_diff("", "\n".join(f"line{i}" for i in range(100)))
-    if not any(k == "…" for k, _ in dcap):
+        return _fail(f"diff 缺删/增行：{d}")
+    if not all(isinstance(no, int) for k, no, _ in d if k in " +-"):
+        return _fail(f"diff 行号不是整数：{d}")
+    dcap = ce.build_numbered_diff(
+        "", "\n".join(f"line{i}" for i in range(100)))
+    if not any(k == "…" for k, _, _ in dcap):
         return _fail("diff 超长没有截断提示")
+    if ce._diff_counts("a\nb\n", "a\n") != (0, 1):
+        return _fail("_diff_counts 数错了")
     p = ce.EventPairer()
     p.record("x", {})
     if p.pop("x", {}) is None or p.pop("x", {}) is not None:
@@ -613,49 +637,51 @@ def check_event_lines():
     import cli_session_cmds
     if hasattr(cli_session_cmds, "_maybe_prompt_resume"):
         return _fail("启动询问函数 _maybe_prompt_resume 还在")
-    return _ok("事件行渲染器 + 启动回归正常")
+    return _ok("claude code 风格事件行（头行+结果块+行号diff）正常")
 
 
 def check_stream_box():
-    """验证流式回答框：框头/框尾、思考框押后、CJK 表格重排。"""
+    """验证流式渲染：无框直排、思考押后先行、CJK 表格重排。"""
     from cli_stream import StreamBoxRenderer
 
     got = []
-    r = StreamBoxRenderer(print_fn=got.append, width_fn=lambda: 60)
+    r = StreamBoxRenderer(print_fn=got.append)
 
-    # 思考流 → 正文（押后）：思考框必须排在回答框前面
+    # 思考流 → 正文（押后）：思考必须排在正文前面
     r.on_event({"type": "reasoning", "delta": "先想一想\n"})
     r.on_event({"type": "content", "delta": "| 名字 | 数量 |\n|---|---|\n"})
     r.on_event({"type": "content",
                 "delta": "| 苹果 | 1 |\n| 香蕉香蕉 | 22 |\n\n"})
     r.on_event({"type": "content", "delta": "回答结束"})
     r.on_event({"type": "done"})
-    # 剥掉 ANSI 色码再断言（默认皮肤给正文上真彩色）
+    # 剥掉 ANSI 色码再断言
     import re
     text = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(got))
 
-    if "┌─思考" not in text:
-        return _fail(f"思考框头缺失：{text[:120]!r}")
-    if text.index("思考") > text.index("╭─"):
-        return _fail("思考框必须排在回答框前面")
-    if "╭─" not in text or "╰" not in text:
-        return _fail(f"回答框头/尾缺失：{text[:120]!r}")
+    if "先想一想" not in text:
+        return _fail(f"思考流丢失：{text[:120]!r}")
+    if text.index("先想一想") > text.index("| 名字"):
+        return _fail("思考必须排在正文前面")
+    # 无框直排：不允许再出现任何框线
+    for frag in ("╭─", "╰", "┌─", "└"):
+        if frag in text:
+            return _fail(f"还有框线 {frag!r}（应为无框直排）")
     if "回答结束" not in text:
         return _fail("done 后正文丢失")
     # CJK 表格重排：表头行和数据行的竖线位置必须一致（占宽对齐）
-    lines = [ln for ln in text.split("\n") if ln.startswith("    |")]
+    lines = [ln for ln in text.split("\n") if ln.startswith("|")]
     if len(lines) < 4:
         return _fail(f"表格行数不对：{lines}")
-    pipe_pos = {ln.index("|", 4) for ln in (lines[0], lines[2])}
+    pipe_pos = {ln.index("|", 1) for ln in (lines[0], lines[2])}
     if len(pipe_pos) != 1:
         return _fail(f"CJK 列没对齐：{lines}")
     # 表格半行兜底：done 冲掉一切残留
-    r2 = StreamBoxRenderer(print_fn=lambda s: None, width_fn=lambda: 60)
+    r2 = StreamBoxRenderer(print_fn=lambda s: None)
     r2.on_event({"type": "content", "delta": "半行"})
     r2.on_event({"type": "done"})
     if r2._buf != "":
         return _fail("done 后半行缓冲没清")
-    return _ok("框头/尾 + 思考押后 + CJK 表格对齐正常")
+    return _ok("无框直排 + 思考押后 + CJK 表格对齐正常")
 
 
 # ---------------------------------------------------------------------------
@@ -836,14 +862,14 @@ def check_console_bridge():
     import threading as _th
     import cli_ui
 
-    # print 桥：rich 渲染产物（含 ANSI 色码）进 _emit_ansi，不直写 stdout
+    # print 桥：rich 渲染产物（含 ANSI 色码）进 emit_ansi，不直写 stdout
     got = []
-    orig = cli_ui._emit_ansi
-    cli_ui._emit_ansi = got.append
+    orig = cli_ui.emit_ansi
+    cli_ui.emit_ansi = got.append
     try:
         cli_ui.console.print("[red]你好[/red]")
     finally:
-        cli_ui._emit_ansi = orig
+        cli_ui.emit_ansi = orig
     if len(got) != 1 or "\x1b[" not in got[0] or "你好" not in got[0]:
         return _fail(f"print 桥产物异常：{got!r}")
 
