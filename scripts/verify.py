@@ -546,12 +546,14 @@ def check_compact_boundary_persist(tmp):
     if len(recorded) != 1 or recorded[0][0] != "s1":
         return _fail(f"落库记录不对: {recorded}")
 
-    # 恢复裁剪：库里 = 旧消息 + START + 边界占位 + 尾部新消息
+    # 恢复裁剪：库里 = 旧消息 + START + 边界占位 + 尾部新消息；
+    # 尾部再塞一条 START，模拟「中断后又手动压缩过」的混合态
     db_msgs = (
         [{"role": "user", "content": "旧消息1"}, {"role": "assistant", "content": "旧答1"}]
         + [{"role": "user", "content": "[COMPACT_START] L4 开跑"}]
         + [{"role": "user", "content": recorded[0][2]}]
-        + [{"role": "user", "content": "压缩后的新消息"}]
+        + [{"role": "user", "content": "压缩后的新消息"},
+           {"role": "user", "content": "[COMPACT_START] 又一次没跑完"}]
     )
     loaded = _truncate_at_last_compact_boundary(db_msgs)
     contents = [m["content"] for m in loaded]
@@ -561,7 +563,12 @@ def check_compact_boundary_persist(tmp):
         return _fail("边界之后的新消息丢了")
     if any(c.startswith("[COMPACT_BOUNDARY]") for c in contents):
         return _fail("边界标记行应被剥掉（摘要正文保留）")
-    return _ok("压缩→落库→恢复裁剪全链正常")
+    if any(c.startswith("[COMPACT_START]") for c in contents):
+        return _fail("孤立的 [COMPACT_START] 没被剔除（会当废话发给模型）")
+    summary_body = recorded[0][2].replace("[COMPACT_BOUNDARY]\n", "", 1)
+    if not any(summary_body in c for c in contents):
+        return _fail("摘要正文丢了（边界消息可能被整条跳过——切片下标错位）")
+    return _ok("压缩→落库→恢复裁剪全链正常（含 START 剔除）")
 
 
 # ---------------------------------------------------------------------------

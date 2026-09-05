@@ -1743,11 +1743,25 @@ def _handle_command(cmd: str, rt: RuntimeContext) -> bool:
     return result is not False and result is not None
 
 
+def _is_orphan_compact_start(m: dict) -> bool:
+    """判断一条消息是不是孤立的 [COMPACT_START] 事务标记（整条 user 消息就是 START 开头）。
+
+    恢复载入时这类消息要剔除：它是「压缩开了头但没跑完」的事务痕迹，
+    当正文发给模型只有干扰。集中放一个小函数，裁剪的两个出口共用。
+    """
+    return (
+        m.get("role") == "user"
+        and isinstance(m.get("content"), str)
+        and m.get("content").startswith("[COMPACT_START]")
+    )
+
+
 def _truncate_at_last_compact_boundary(msgs: list) -> list:
     """恢复会话时，从最后一条"[COMPACT_BOUNDARY]"（压缩边界标记）起截断。
 
     标记之前的旧消息已被总结进摘要，载入只会撑上下文，全部裁掉；
-    标记行本身剥掉，摘要正文保留。找不到标记就原样返回。
+    标记行本身剥掉，摘要正文保留。孤立落库的 [COMPACT_START]（压缩
+    被中断的事务痕迹）一并剔除；找不到边界标记就全量载入（剔完 START）。
 
     参数：
         msgs: 从会话库读出的消息列表
@@ -1781,13 +1795,27 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
             "边界保守载入（无边界则全量）"
         )
 
+    # 孤立的 [COMPACT_START]（压缩被中断的事务痕迹）不该作为一条
+    # user 消息发给模型——场上的 START 要么在边界之前（成功压缩的
+    # 正常形态，被下面的边界切片自然带走），要么就是上面的悬挂证据。
+    # ⚠️ 两个顺序坑：
+    # 1) 剔除必须放在上面两轮扫描之后——先滤再扫会让悬挂检测永远
+    #    看不到 START，等于把告警弄死；
+    # 2) 不能先滤掉 START 再按 last_idx 切——last_idx 是按原始列表
+    #    算的下标，边界前的 START 被滤掉后边界左移一位，
+    #    msgs[last_idx:] 会从摘要后面那条切起，等于把整份摘要弄丢。
+    # 所以切片始终用原始 msgs，START 只在两个出口的返回值里剔
+    # （判断逻辑集中在 _is_orphan_compact_start，两处共用）。
     if last_idx < 0:
-        return msgs
+        # 完全无边界：全量载入，孤立 START 依然不能带给模型
+        return [m for m in msgs if not _is_orphan_compact_start(m)]
     kept = [dict(m) for m in msgs[last_idx:]]
     # 剥掉首条的标记行（摘要正文保留）
     first = kept[0]
     content = first.get("content", "")
     first["content"] = content.replace("[COMPACT_BOUNDARY]\n", "", 1)
+    # 边界之后混进来的孤立 START（悬挂证据）在这里剔除
+    kept = [m for m in kept if not _is_orphan_compact_start(m)]
     logger.info(
         "resume：按 compact 边界裁剪（丢弃 %d 条 pre-compact 消息）",
         last_idx,
