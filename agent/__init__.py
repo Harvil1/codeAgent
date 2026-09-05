@@ -1545,11 +1545,20 @@ class AIAgent:
             # 工具结果」功能会失效；放这里压缩层能读到时间
             # 标记（按时清理真正生效），发给 LLM 的消息又不带这些内部字段
             # （保护前缀缓存）。重复剥也无害（每次都建新 dict）。
+            # 先存一份 strip 前快照：下面「发送前预检」若触发 force 压缩，
+            # 输入必须用这份（_ephemeral 还在）——用剥过的消息跑压缩，
+            # 历史同步过滤器的 not m.get("_ephemeral") 全部失守，
+            # 本轮临时注入会被焊进正式历史随边界落库。
+            pre_strip = messages
             messages = strip_internal_fields(messages)
 
             # 等记忆检索预取的结果（并行窗口覆盖收消息/组装/压缩/剥字段
             # 全程；结果直接追加到本轮 messages——天然是临时消息，不进正式历史）
             messages = await self._consume_memory_prefetch(messages)
+            # strip 之后才追加的尾部（记忆预取消息，_ephemeral 天然完好）——
+            # 快照要在配对修复之前取：修复可能增删头部消息改变列表长度，
+            # 之后按下标切就不准了。strip 只换 dict 不变长度，这里对齐成立。
+            post_strip_appendix = messages[len(pre_strip):]
 
             # 刷新工具集（计划模式切换）+ 失败重试警告 + PRE_LLM_CALL 钩子
             tool_schemas = await self._prepare_toolset_and_injections(messages)
@@ -1578,11 +1587,18 @@ class AIAgent:
                         and needs_pre_send_compaction(
                             messages, self._last_usage_anchor, self.model)):
                     logger.warning(
-                        "发送前预检：估算超窗口 90%%，先跑一次 force 压缩再发",
+                        "发送前预检：估算超窗口 90%，先跑一次 force 压缩再发",
                     )
+                    # force 压缩的输入不能用 strip 后的 messages——_ephemeral
+                    # 已被剥掉，压缩内部「同步回正式历史」的过滤器会把本轮
+                    # 临时注入（task_notification 等）当正式消息焊进历史。
+                    # 拼法：头段用 strip 前快照（flag 完好）+ 尾段用 strip 后
+                    # 追加的记忆消息（flag 也完好）。配对修复若动过头部，
+                    # 压缩管线收尾自己会再修一遍配对，无碍。
+                    force_in = pre_strip + post_strip_appendix
                     messages, system_prompt, compacted_this_turn = (
                         await self._run_context_compression(
-                            messages, system_prompt, force=True,
+                            force_in, system_prompt, force=True,
                         )
                     )
                     messages = strip_internal_fields(messages)

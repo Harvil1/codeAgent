@@ -850,33 +850,47 @@ def check_pre_send_guard():
 def check_context_compress():
     """验证上下文压缩：消息条数超阈值时新管线会把历史压短（LLM 用假实现）。
 
-    这里把触发阈值调得很低，确保压缩一定会发生。
+    这里把触发阈值调得很低，确保压缩一定会发生；再给一个记录型的假
+    会话库，断言 L4 成功后 [COMPACT_BOUNDARY] 边界真的落了库——
+    不落库的话压完重启恢复全量载入，压缩等于白压（落库接线回归）。
 
     返回：PASS/FAIL 结果。
     """
     from agent.context_pipeline import compress_if_needed, CompressionSessionState
     from config import DEFAULT_CONFIG
 
-    def fake_create(**kw):
+    # 假 LLM 客户端：_summarize_conversation 认的是异步 chat_completions
+    # 接口（fork 前缀 / 独立调用两条路都走它），返回固定摘要文本
+    async def fake_chat_completions(messages, **kw):
         return SimpleNamespace(
             choices=[SimpleNamespace(
-                message=SimpleNamespace(content="总结内容")
+                message=SimpleNamespace(content="总结内容：这是测试摘要。")
             )]
         )
 
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
-    )
+    client = SimpleNamespace(chat_completions=fake_chat_completions)
 
     msgs = [{"role": "system", "content": "sys"}]
     for i in range(30):
-        msgs.append({"role": "user", "content": f"消息 {i}"})
-        msgs.append({"role": "assistant", "content": f"回复 {i}"})
+        # 内容塞长一点：被摘要段必须比摘要占位大，L4 收敛检查才过得去
+        msgs.append({"role": "user", "content": f"消息 {i} " + "细节" * 20})
+        msgs.append({"role": "assistant", "content": f"回复 {i} " + "答复" * 20})
 
     ctx_cfg = dict(DEFAULT_CONFIG.get("context", {}))
     # 把触发阈值调低到必触发，否则样例对话不够长压不动
     ctx_cfg["snip_message_threshold"] = 50
+    # token 阈值压到 1：强制走 L4（假 LLM 摘要）成功路径，才验得到边界落库
+    ctx_cfg["llm_compact_token_threshold"] = 1
+    # agent_home=None 落不了 transcript 快照，干脆关掉省 WARNING 噪音
+    ctx_cfg["transcript_enabled"] = False
     state = CompressionSessionState()
+    # 假会话库：只记录 append_message 的调用，最后断言边界标记真落了库
+    recorded = []
+
+    def _fake_append(sid, role, text, **kw):
+        recorded.append((sid, role, text))
+
+    fake_store = SimpleNamespace(append_message=_fake_append)
     new_msgs, compressed, _compacted = asyncio.run(compress_if_needed(
         msgs,
         llm_client=client,
@@ -885,10 +899,16 @@ def check_context_compress():
         session_state=state,
         agent_home=None,
         session_id="verify",
+        session_store=fake_store,
     ))
-    if compressed and len(new_msgs) < len(msgs):
-        return _ok(f"{len(msgs)} → {len(new_msgs)} 条")
-    return _fail("未压缩")
+    if not (compressed and len(new_msgs) < len(msgs)):
+        return _fail("未压缩")
+    boundaries = [t for (_s, _r, t) in recorded if t.startswith("[COMPACT_BOUNDARY]")]
+    if not boundaries:
+        return _fail(f"L4 压缩成功但边界没落库（会话库记录 {len(recorded)} 条）")
+    return _ok(
+        f"{len(msgs)} → {len(new_msgs)} 条，边界已落库（共 {len(recorded)} 条标记）"
+    )
 
 
 # ---------------------------------------------------------------------------

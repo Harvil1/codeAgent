@@ -1283,16 +1283,18 @@ def _persist_compact_marker(store, session_id: str, text: str) -> None:
     """往会话库落一条压缩事务标记（fail-open：落盘失败不阻塞压缩）。
 
     start 标记在 L4 开跑前写、成功后的边界标记（[COMPACT_BOUNDARY]，
-    由 agent 主类写）当 end 用——恢复时"有 start 无更晚 boundary"
-    即压缩被中断的证据（可检测，无需修复：无 boundary 时保守全量
-    载入本就是正确行为）。
+    由 compress_if_needed 自己写；紧急压缩/手动压缩路径也各自调本函数
+    补写）当 end 用——恢复时"有 start 无更晚 boundary"即压缩被中断的
+    证据（可检测，无需修复：无 boundary 时保守全量载入本就是正确行为）。
+    落库失败要大声（WARNING）：静默吞掉的话重启后全量载入、压缩白压，
+    排查时连条日志线索都没有。
     """
     if store is None or not session_id:
         return
     try:
         store.append_message(session_id, "user", text)
     except Exception as e:
-        logger.debug("压缩事务标记落盘失败（不阻塞压缩）: %s", e)
+        logger.warning("压缩事务标记落盘失败（不阻塞压缩）: %s", e)
 
 
 async def compress_if_needed(

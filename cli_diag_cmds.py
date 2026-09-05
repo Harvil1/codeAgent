@@ -159,6 +159,22 @@ def _handle_compact_cli(args: str, rt) -> bool:
                 state.record_llm_compact()
             except Exception:
                 pass
+        # 边界占位落库（和自动压缩的收尾一致）：手动压缩不落边界的话，
+        # 压完重启 = 会话库里没有 [COMPACT_BOUNDARY] 锚点，恢复时全量
+        # 载入旧历史，这次压缩等于白压。fail-open：落库失败不挡压缩。
+        try:
+            from agent.context_pipeline import (
+                _persist_compact_marker, take_last_compact_placeholder,
+            )
+            _ph = take_last_compact_placeholder()
+            if _ph:
+                _persist_compact_marker(
+                    getattr(agent, "session_store", None),
+                    getattr(agent, "session_id", None) or "",
+                    _ph,
+                )
+        except Exception as e:
+            logger.warning("手动压缩边界落库失败（fail-open）: %s", e)
         after_tokens = estimate_message_tokens(agent.conversation_history)
         _print_compact_delta(
             before_msgs, before_tokens,

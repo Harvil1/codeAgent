@@ -137,6 +137,32 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     except Exception:
         pass
 
+    # 冷却记账（与主循环 L4 成功后的收尾对齐）：不记账的话，紧接着的
+    # 自动压缩看不到"刚压过"，冷却期判定失真、可能连着再压一次
+    _state = getattr(agent, "_compress_session_state", None)
+    if _state is not None:
+        try:
+            _state.record_llm_compact()
+        except Exception as e:
+            logger.warning("compact 工具冷却记账失败（不阻塞）: %s", e)
+
+    # 边界占位落库（与主循环/紧急压缩的收尾一致）：不落 [COMPACT_BOUNDARY]
+    # 的话，压完重启 = 会话库没有裁剪锚点，恢复全量载入旧历史，白压了。
+    # agent_ref 身上有 session_store/session_id（主循环同款取法），fail-open。
+    try:
+        from agent.context_pipeline import (
+            _persist_compact_marker, take_last_compact_placeholder,
+        )
+        _ph = take_last_compact_placeholder()
+        if _ph:
+            _persist_compact_marker(
+                getattr(agent, "session_store", None),
+                getattr(agent, "session_id", None) or "",
+                _ph,
+            )
+    except Exception as e:
+        logger.warning("compact 工具边界落库失败（fail-open）: %s", e)
+
     before_len = len(full_messages)
     after_len = len(new_messages)
     mode_desc = f"partial {from_idx}-{up_to_idx}" if is_partial else "full"
