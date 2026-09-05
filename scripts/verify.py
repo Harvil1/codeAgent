@@ -876,6 +876,19 @@ def check_session_append_perf(tmp):
     return _ok("append 线性化 + 卡片去抖 + 重启引导全正常")
 
 
+def check_msgs_cache_lru(tmp):
+    """验证消息缓存有淘汰：加载 20 个会话后容量不超过上限（防常驻内存无限涨）。"""
+    from agent.session_store import SessionStore, _MSGS_CACHE_CAP
+    store = SessionStore(tmp / "lru_sessions")
+    for i in range(_MSGS_CACHE_CAP + 4):
+        sid = store.create_session(title=f"s{i}", model="t")
+        store.append_message(sid, "user", f"hello {i}")
+        store.get_messages(sid)  # 触发加载进缓存
+    if len(store._msgs_cache) > _MSGS_CACHE_CAP:
+        return _fail(f"缓存无淘汰: {len(store._msgs_cache)} > {_MSGS_CACHE_CAP}")
+    return _ok(f"LRU 生效（容量 {len(store._msgs_cache)} ≤ {_MSGS_CACHE_CAP}）")
+
+
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
@@ -1378,6 +1391,7 @@ def main():
             ("记忆注入兜底接线", check_memory_injection_wiring),
             ("发送前窗口预检", check_pre_send_guard),
             ("session append 线性化", lambda: check_session_append_perf(tmp)),
+            ("消息缓存 LRU", lambda: check_msgs_cache_lru(tmp)),
         ]),
         ("上下文压缩", [
             ("自动压缩", check_context_compress),

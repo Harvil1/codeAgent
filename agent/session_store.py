@@ -28,6 +28,7 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -59,6 +60,10 @@ def _contains_cjk(s: str) -> bool:
 # 每条消息都原子重写整个 index.json 在长会话里是 IO 热点。
 _INDEX_FLUSH_COUNT = 50
 _INDEX_FLUSH_SECONDS = 2.0
+
+# 消息缓存最多同时驻留几个会话（LRU）：/search 一次能扫上千个会话，
+# 全部解析结果常驻内存会无限涨；16 个已覆盖「当前会话 + 热浏览」需求。
+_MSGS_CACHE_CAP = 16
 
 
 class SessionStore:
@@ -97,7 +102,7 @@ class SessionStore:
         # 为什么键用 mtime+size 双因子：Windows 的 mtime 精度只有 ~15ms，
         # 同一时间窗内 append 前后 mtime 可能一样，单看 mtime 会误判
         # "文件没变"而漏读新消息。
-        self._msgs_cache: dict = {}
+        self._msgs_cache: "OrderedDict[str, tuple]" = OrderedDict()
         # 轮次号内存表：session_id -> max(turn_index)。旧版每条 append 都
         # 全量重读会话文件算 max(turn_index)（N 条消息 O(N²) 读盘），现在
         # 首见会话读一次文件引导、之后纯内存加法。
@@ -179,6 +184,7 @@ class SessionStore:
             return []
         cached = self._msgs_cache.get(session_id)
         if cached is not None and cached[0] == cache_key:
+            self._msgs_cache.move_to_end(session_id)  # LRU：命中挪到最热端
             return cached[1]
         msgs = []
         try:
@@ -194,6 +200,9 @@ class SessionStore:
             except json.JSONDecodeError:
                 continue
         self._msgs_cache[session_id] = (cache_key, msgs)
+        # LRU 淘汰：超容量就丢最冷端的会话（当前活跃会话天然在最热端）
+        while len(self._msgs_cache) > _MSGS_CACHE_CAP:
+            self._msgs_cache.popitem(last=False)
         return msgs
 
     def _compute_turn_index(self, session_id: str, role: str) -> int:
