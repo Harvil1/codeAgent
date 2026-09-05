@@ -1221,6 +1221,55 @@ def check_compress_profile():
     return _ok("profile 单遍统计正确")
 
 
+def check_low_threshold_offload_equivalence(tmp):
+    """低 offload 阈值下 L2/L2.5 守卫仍放行现场重算（第四期终审建议）。
+
+    背景：压缩管线的各层触发判定吃 profile 统计量（省扫描），但强制
+    落盘对短消息（内容 ≤ 预览长度）是「全文 + JSON 包装」替换、净变长
+    ~200 字符/条——低 offload 阈值配置下 profile 会低估现场总量，守卫
+    若不放行现场重算，L2.5/L2.6 的段和/总和判定就会漏触发（等价破坏）。
+    本检查用低阈值造出这种「每条都净变长」的会话，断言 L2/L2.5 落盘
+    确实发生（changed=True 且出现 full_at 落盘占位），作为永久回归门。
+    """
+    from agent.context_pipeline import (
+        compress_if_needed, CompressionSessionState, reset_offload_decisions,
+    )
+    import time as _t
+
+    # 冻结决策表是模块级全局（跨检查共享），先清空保证本检查从零开始
+    # （别的检查若碰巧用过 c0..c39 这类 id，照抄旧预览会搅乱断言）
+    reset_offload_decisions()
+
+    # 40 条 1900 字符工具结果：低阈值（1000）下 L2 会把它们折成
+    # 「全文+包装」（净变长），L2.5/L2.6 门必须放行现场重算而不是
+    # 被 profile 统计跳过
+    msgs = [{"role": "system", "content": "s"}]
+    msgs.append({"role": "user", "content": "go", "_timestamp": _t.time()})
+    for i in range(40):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "function": {
+                         "name": "t", "arguments": "{}"}}],
+                     "_timestamp": _t.time()})
+        msgs.append({"role": "tool", "content": "X" * 1900,
+                     "tool_call_id": f"c{i}", "_timestamp": _t.time()})
+    new_msgs, changed, _ = asyncio.run(compress_if_needed(
+        msgs, llm_client=None, model="deepseek-chat",
+        config={"output_offload_threshold": 1000,
+                "tool_result_total_budget": 20000},
+        session_state=CompressionSessionState(),
+        agent_home=tmp, session_id="verify-low-th",
+    ))
+    # 断言：确实发生了落盘（changed=True 且出现 full_at 落盘占位；
+    # llm_client=None 时 L4 不会触发，这里验的是 L2/L2.5 无损层）
+    body = "".join(str(m.get("content", "")) for m in new_msgs)
+    if changed and '"full_at"' not in body:
+        return _fail("changed 但没有落盘占位，行为异常")
+    if not changed and '"full_at"' not in body:
+        return _fail("低阈值下守卫没放行现场重算（等价破坏回归）")
+    n_placeholders = body.count('"full_at"')
+    return _ok(f"低阈值 offload 等价门通过（落盘占位 {n_placeholders} 处）")
+
+
 # ---------------------------------------------------------------------------
 # slash 命令注册表
 # ---------------------------------------------------------------------------
@@ -1663,6 +1712,7 @@ def main():
         ("上下文压缩", [
             ("自动压缩", check_context_compress),
             ("压缩管线 profile", check_compress_profile),
+            ("低阈值 offload 等价", lambda: check_low_threshold_offload_equivalence(tmp)),
         ]),
         ("slash 注册表", [
             ("slash 注册表", check_slash_registry),

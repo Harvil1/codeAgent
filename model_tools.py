@@ -348,7 +348,7 @@ async def handle_function_call(
                 _already = (isinstance(_parsed, dict)
                             and _parsed.get("truncated") is True
                             and "full_at" in _parsed)
-            except (json.JSONDecodeError, ValueError):
+            except ValueError:  # JSONDecodeError 本就是 ValueError 子类
                 _already = False
             if not _already:
                 from agent.output_offload import finalize_tool_output

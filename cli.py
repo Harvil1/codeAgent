@@ -1169,6 +1169,14 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("agent.cleanup 失败: %s", e)
 
+        # 最后停常驻事件循环宿主（client 已关、生产已停；daemon 属性
+        # 保证异常路径也不吊死进程）
+        try:
+            from agent.loop_host import loop_host
+            loop_host.stop()
+        except Exception as e:
+            logger.warning("loop_host 停机失败（daemon 兜底）: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # 回调（把"CLI 怎么跟用户互动"做成函数，传给 agent 内部调用）
@@ -3565,7 +3573,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     _set_active_app(_app)
 
     # === 事件行渲染器：工具/子代理/任务 全走这里（完成行 + 工具栏黑板） ===
-    import cli_events
     cli_events.install_event_lines(rt)
 
     # spinner 线程接管底部条的节奏（0.1s 一拍：翻帧/计时/重绘）

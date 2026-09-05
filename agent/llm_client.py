@@ -276,18 +276,25 @@ class OpenAICompatClient(LLMClient):
     def close(self) -> None:
         """尽力释放底层 SDK 的 HTTP 连接池（同步版，agent.cleanup() 调）。
 
-        底层的 close 是协程：已经在事件循环里就排个任务异步关；没有
-        运行中的循环就起一次性的关掉。关不上也不报错——打扫失败不该
-        影响正事。
+        底层的 close 是协程：调用线程不定（主线程收尾、后台线程兜底
+        都有），按「线程归属」分流——就在宿主循环上就排个任务异步关；
+        其余情况（没在循环里 / 在别的循环线程上）交给宿主循环跑完
+        （run_async 阻塞等结果，等于原来的 asyncio.run，但协程落在
+        常驻循环上，连接池不会绑到用完即弃的临时循环）。关不上也不
+        报错——打扫失败不该影响正事。
         """
         try:
             coro = self.client.close()
             if asyncio.iscoroutine(coro):
+                from agent.loop_host import loop_host
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(coro)
                 except RuntimeError:
-                    asyncio.run(coro)
+                    loop = None
+                if loop is not None and loop is loop_host.loop:
+                    asyncio.create_task(coro)
+                else:
+                    loop_host.run_async(coro)
         except Exception:
             pass
 
@@ -454,18 +461,25 @@ class AnthropicClient(LLMClient):
     def close(self) -> None:
         """尽力释放底层 SDK 的 HTTP 连接池（同步版，agent.cleanup() 调）。
 
-        底层的 close 是协程：已经在事件循环里就排个任务异步关；没有
-        运行中的循环就起一次性的关掉。关不上也不报错——打扫失败不该
-        影响正事。
+        底层的 close 是协程：调用线程不定（主线程收尾、后台线程兜底
+        都有），按「线程归属」分流——就在宿主循环上就排个任务异步关；
+        其余情况（没在循环里 / 在别的循环线程上）交给宿主循环跑完
+        （run_async 阻塞等结果，等于原来的 asyncio.run，但协程落在
+        常驻循环上，连接池不会绑到用完即弃的临时循环）。关不上也不
+        报错——打扫失败不该影响正事。
         """
         try:
             coro = self.client.close()
             if asyncio.iscoroutine(coro):
+                from agent.loop_host import loop_host
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(coro)
                 except RuntimeError:
-                    asyncio.run(coro)
+                    loop = None
+                if loop is not None and loop is loop_host.loop:
+                    asyncio.create_task(coro)
+                else:
+                    loop_host.run_async(coro)
         except Exception:
             pass
 

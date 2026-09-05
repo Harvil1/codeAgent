@@ -414,7 +414,7 @@ def _compact_tool_result(content) -> str:
                 if "preview" in parsed:
                     picked["preview"] = _head_tail(str(parsed["preview"]), 150)
                 return json.dumps(picked, ensure_ascii=False)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:  # JSONDecodeError 本就是 ValueError 子类
             pass
     return _head_tail(text, 300)
 
