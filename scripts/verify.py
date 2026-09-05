@@ -935,10 +935,21 @@ def check_pre_send_guard():
 
 def check_session_append_perf(tmp):
     """验证 append 不再 O(n²)：连写 200 条 turn_index 连续正确、文件行数
-    吻合、index 卡片去抖后最终一致。"""
+    吻合、index 卡片去抖中途真的延迟、flush 后最终一致。"""
+    import json as _j
     from agent.session_store import SessionStore
     store = SessionStore(tmp / "perf_sessions")
     sid = store.create_session(title="perf", model="t")
+    # 去抖延迟断言：另开一个会话连写 3 条，磁盘卡片应停在首条 flush 的
+    # 状态（首条触发 _index_last_flush=0.0 的立即写盘，之后 3 条在窗口内
+    # 只进内存）——若实现退化为每条都写盘，这里会 FAIL
+    sid_d = store.create_session(title="debounce", model="t")
+    for i in range(3):
+        store.append_message(sid_d, "user", f"d{i}")
+    disk_d = _j.loads((tmp / "perf_sessions" / "index.json").read_text(encoding="utf-8"))
+    entry_d = next(s for s in disk_d["sessions"] if s["id"] == sid_d)
+    if entry_d.get("message_count") != 1:
+        return _fail(f"去抖没延迟：3 条后磁盘计数应为 1（首条 flush），实际 {entry_d.get('message_count')}")
     # 交替 user/assistant 各 100 条：user 各开新轮
     for i in range(100):
         store.append_message(sid, "user", f"问{i}")
@@ -952,7 +963,6 @@ def check_session_append_perf(tmp):
         return _fail(f"turn_index 序列不对: {turns[:4]}...{turns[-4:]}")
     # 去抖：磁盘卡片允许落后，但 flush 后必须追平
     store.flush_index()
-    import json as _j
     disk = _j.loads((tmp / "perf_sessions" / "index.json").read_text(encoding="utf-8"))
     entry = next(s for s in disk["sessions"] if s["id"] == sid)
     if entry.get("message_count") != 200:

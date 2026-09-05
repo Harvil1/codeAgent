@@ -184,8 +184,13 @@ class SessionStore:
             return []
         cached = self._msgs_cache.get(session_id)
         if cached is not None and cached[0] == cache_key:
-            self._msgs_cache.move_to_end(session_id)  # LRU：命中挪到最热端
-            return cached[1]
+            try:
+                self._msgs_cache.move_to_end(session_id)  # LRU：命中挪到最热端
+                return cached[1]
+            except KeyError:
+                # 竞态兜底：另一线程并发淘汰了这个键（get 命中和挪动之间
+                # 的窗口）——当没命中处理，走下面的重读路径
+                cached = None
         msgs = []
         try:
             content = path.read_text(encoding="utf-8")
@@ -224,6 +229,20 @@ class SessionStore:
             msgs = self._read_session_msgs(session_id)
             max_turn = max((m.get("turn_index", 0) for m in msgs), default=0)
             self._turn_state[session_id] = max_turn
+            # 自愈：去抖窗口内崩溃会让磁盘/内存的卡片计数低估（最多落后
+            # 50 条且永不追平）——这里反正已经全量读了文件，顺手把该会话
+            # 的卡片计数校准成真实行数（仅首见引导时，零额外读盘）
+            try:
+                index = self._load_index()
+                for entry in index:
+                    if entry["id"] == session_id:
+                        real = len(msgs)
+                        if entry.get("message_count", 0) != real:
+                            entry["message_count"] = real
+                            self._index_dirty_count += 1
+                        break
+            except Exception:
+                pass  # fail-open：卡片校准失败不影响轮次号
         return max_turn + 1 if role == "user" else max_turn
 
     # ------------------------------------------------------------------
