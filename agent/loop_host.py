@@ -82,7 +82,7 @@ class AgentLoopHost:
                 # 停机后拒绝复活：shutdown 后某个 straggler 线程再来调
                 # run_async/submit，旧版会悄悄拉起一个新循环（进程将退，
                 # 白造线程还可能半路死锁在垂死循环上）——fail-open 由
-                # 调用方处理，这里大声拒绝
+                # 调用方处理，这里抛 RuntimeError 拒绝（异常消息即提示）
                 raise RuntimeError("loop_host 已停机，拒绝再启动")
             if self._loop is not None and not self._loop.is_closed():
                 return self._loop

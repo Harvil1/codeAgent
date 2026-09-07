@@ -14,6 +14,8 @@
   - 所有改动都可回滚（.archive/ 里完整保留原文）
 """
 
+import asyncio
+import concurrent.futures
 import datetime
 import logging
 import re
@@ -517,7 +519,8 @@ def run_memory_review(
     errors = 0
     buckets_reviewed = 0
 
-    # 全程复用一个 agent（省得每批都重新构造一遍）
+    # 全程复用一个 agent（省得每批都重新构造一遍）；client 的关闭
+    # 见下方 finally——全部 batch 跑完后再关，不是每批后关
     try:
         review_agent = agent_factory()
     except Exception as e:
@@ -529,47 +532,60 @@ def run_memory_review(
         }
 
     import json
-    for type_name, entries in buckets.items():
-        for batch in chunk_batch(entries, size=max_batch_size):
-            buckets_reviewed += 1
-            # 拼 prompt：把这一批条目序列化成 JSON
-            entries_json = json.dumps([
-                {
-                    "id": e.id, "name": e.name, "description": e.description,
-                    "body": e.body,
-                    "updated_at": e.updated_at.isoformat(timespec="seconds"),
-                }
-                for e in batch
-            ], ensure_ascii=False, indent=2)
+    try:
+        for type_name, entries in buckets.items():
+            for batch in chunk_batch(entries, size=max_batch_size):
+                buckets_reviewed += 1
+                # 拼 prompt：把这一批条目序列化成 JSON
+                entries_json = json.dumps([
+                    {
+                        "id": e.id, "name": e.name, "description": e.description,
+                        "body": e.body,
+                        "updated_at": e.updated_at.isoformat(timespec="seconds"),
+                    }
+                    for e in batch
+                ], ensure_ascii=False, indent=2)
 
-            prompt = MEMORY_REVIEW_PROMPT_TEMPLATE.format(
-                type_name=type_name, n=len(batch), entries_json=entries_json,
-            )
+                prompt = MEMORY_REVIEW_PROMPT_TEMPLATE.format(
+                    type_name=type_name, n=len(batch), entries_json=entries_json,
+                )
 
-            # 每批单独 try/except——一批失败不连累其他批
-            try:
-                # 本函数是 sync 的，AIAgent.chat 是 async 的——本函数在
-                # curator 后台线程里跑（不在宿主循环线程），交给进程级
-                # 常驻循环宿主同步等结果（等价旧的 asyncio.run，client
-                # 绑定常驻循环不漂移）
-                from agent.loop_host import loop_host
-                raw_output = loop_host.run_async(review_agent.chat(prompt), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
-            except Exception as e:
-                logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
-                errors += 1
-                continue
-
-            actions = parse_yaml_actions(raw_output)
-            for action in actions:
-                # execute_action 内部已对删除/改写做了异常兜底；
-                # 这里再包一层，保证任何异常都打不断主循环
+                # 每批单独 try/except——一批失败不连累其他批
                 try:
-                    result = execute_action(action, store, archive_root)
-                    total_actions += 1
-                    logger.info("执行: %s", result)
+                    # 本函数是 sync 的，AIAgent.chat 是 async 的——本函数在
+                    # curator 后台线程里跑（不在宿主循环线程），交给进程级
+                    # 常驻循环宿主同步等结果（等价旧的 asyncio.run，client
+                    # 绑定常驻循环不漂移）
+                    from agent.loop_host import loop_host
+                    raw_output = loop_host.run_async(review_agent.chat(prompt), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
                 except Exception as e:
-                    logger.warning("action 执行失败: %s | action=%s", e, action)
+                    logger.warning("LLM 调用失败(type=%s): %s", type_name, e)
                     errors += 1
+                    continue
+
+                actions = parse_yaml_actions(raw_output)
+                for action in actions:
+                    # execute_action 内部已对删除/改写做了异常兜底；
+                    # 这里再包一层，保证任何异常都打不断主循环
+                    try:
+                        result = execute_action(action, store, archive_root)
+                        total_actions += 1
+                        logger.info("执行: %s", result)
+                    except Exception as e:
+                        logger.warning("action 执行失败: %s | action=%s", e, action)
+                        errors += 1
+    finally:
+        # 一次性 review agent 的 client 用完就关——chat 走常驻循环真分配了
+        # 连接池，不关就滞留到进程退出。agent 跨全部 batch 复用，所以关闭
+        # 放所有 batch 跑完之后（含中途异常收场），不是每批后（fail-open）
+        try:
+            from agent.llm_client import aclose_llm_client
+            from agent.loop_host import loop_host
+            loop_host.run_async(aclose_llm_client(review_agent.llm_client))
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass  # 取消不打穿关闭（concurrent 版是 fut.result() 搬运后的实际类型）
+        except Exception as e:
+            logger.warning("review agent client 关闭失败（fail-open）: %s", e)
 
     return {
         "dry_run": False,

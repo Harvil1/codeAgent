@@ -1604,8 +1604,9 @@ def _run_child(
 
         # === 子代理 client 用后即关（放 finally 尾部）===
         # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
-        # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
-        # 关循环顺带释放池，迁常驻循环后不主动关就一直滞留到进程退出。
+        # create_llm_client 现造，不共享父代理的）——child.chat 虽仍跑
+        # 在自己的 asyncio.run 里，但 httpx 连接池不随循环关闭自动回收，
+        # 显式关才稳。
         # 放尾部是因为走到这时 _summarize_child_result 等真正用
         # child.llm_client 的步骤都已完成（它们全在 try 体的 return
         # 之前），这时关不碰任何人。fail-open：关不上只警告。

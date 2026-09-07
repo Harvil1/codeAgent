@@ -235,6 +235,11 @@ class AuxLLMRouter:
                         self.CIRCUIT_OPEN_SECONDS,
                     )
 
+        if self._main_client is None:
+            # close() 之后 straggler 调用会走到这——死得明白，别让人看
+            # NoneType.chat_completions 的莫名报错（对齐 loop_host 停机风格）
+            raise RuntimeError("AuxLLMRouter 已关闭")
+
         # 辅助端点全军覆没 → 请主 client 出面兜底
         if tried:
             logger.info(

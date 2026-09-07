@@ -104,9 +104,10 @@ def run_skill_in_fork(
                 from agent.loop_host import loop_host
                 loop_host.run_async(aclose_llm_client(child.llm_client))
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                # 回合栅栏恰好落下时关闭协程被顺带取消——CancelledError 是
-                # BaseException，except Exception 接不住会打穿本 finally
-                # 盖掉技能结果。池留给进程退出收尾，安静放行
+                # 回合栅栏恰好落下时关闭协程被顺带取消——会打穿本 finally
+                # 盖掉技能结果。concurrent 版是 fut.result() 搬运后的实际
+                # 类型，两个都接；asyncio 版是 BaseException，except
+                # Exception 接不住。池留给进程退出收尾，安静放行
                 pass
             except Exception as e:
                 logger.warning("子代理 client 关闭失败（fail-open）: %s", e)

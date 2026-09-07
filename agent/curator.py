@@ -16,6 +16,8 @@
 手动触发：codeagent curator run [--dry-run]
 """
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import re
@@ -358,6 +360,7 @@ def run_curator_review(
             prompt = f"{CURATOR_REVIEW_PROMPT}\n\n{candidate_list}"
 
             # 起一个后台 agent 来干活
+            review_agent = None
             try:
                 review_agent = agent_factory(
                     enabled_toolsets=["core"],  # core 工具集里有技能管理工具
@@ -378,6 +381,19 @@ def run_curator_review(
                     "prunings": [],
                     "error": str(e),
                 }
+            finally:
+                # 一次性 review agent 的 client 用完就关——chat 走常驻循环真分配了
+                # 连接池，不关就滞留到进程退出（fail-open）。agent_factory
+                # 本身抛异常时 review_agent 还是 None，跳过
+                if review_agent is not None:
+                    try:
+                        from agent.llm_client import aclose_llm_client
+                        from agent.loop_host import loop_host
+                        loop_host.run_async(aclose_llm_client(review_agent.llm_client))
+                    except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                        pass  # 取消不打穿关闭（concurrent 版是 fut.result() 搬运后的实际类型）
+                    except Exception as e:
+                        logger.warning("review agent client 关闭失败（fail-open）: %s", e)
 
     # 写报告 + 更新状态
     duration = (datetime.now(timezone.utc) - start).total_seconds()
