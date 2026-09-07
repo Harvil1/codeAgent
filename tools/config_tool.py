@@ -42,8 +42,8 @@ _CONFIG_WHITELIST = frozenset({
     "context.reactive_compact_cooldown_seconds",
     "context.reactive_compact_max_per_session",
     # skill_learning 开关 + 观察后端（读取点在
-    # agent/__init__.py:_maybe_skill_learning，start/stop 也可走 CLI
-    # /skill-learning，这里给 LLM 一条持久化通道）
+    # agent/skill_learning/turn_observer.py:maybe_skill_learning，
+    # start/stop 也可走 CLI /skill-learning，这里给 LLM 一条持久化通道）
     "skill_learning.enabled",
     "skill_learning.observer",
 })
