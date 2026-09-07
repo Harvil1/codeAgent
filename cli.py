@@ -739,6 +739,10 @@ class RuntimeContext:
                     main_model=model_cfg["name"],
                     aux_config=aux_cfg if not endpoints else None,
                     endpoints=endpoints,
+                    # owns_main=True：上面这个 main_client 是专为 router 现造的
+                    # 专用 client（agent 主对话用的是 AIAgent 自建的另一套），
+                    # 所有权明确归 router——shutdown 时由 router.close() 一并关
+                    owns_main=True,
                 )
             except Exception as e:
                 logger.warning("AuxLLMRouter 创建失败，辅助任务用主模型: %s", e)
@@ -1170,6 +1174,19 @@ class RuntimeContext:
                 self.agent.cleanup()
             except Exception as e:
                 logger.warning("agent.cleanup 失败: %s", e)
+
+        # === 关 aux router 的 endpoint/兜底 client ===
+        # router 挂在 agent 身上（aux_llm_router），不在 rt 上（rt 上的
+        # aux 字段是没人读的死字段，项目约定不加）；close 是 async 协程，
+        # 必须趁宿主循环还活着、经 loop_host.run_async 跑——所以这段
+        # 必须在 loop_host.stop() 之前。
+        _aux_router = getattr(getattr(self, "agent", None), "aux_llm_router", None)
+        if _aux_router is not None:
+            try:
+                from agent.loop_host import loop_host
+                loop_host.run_async(_aux_router.close())
+            except Exception as e:
+                logger.warning("aux router 关闭失败（fail-open）: %s", e)
 
         # 最后停常驻事件循环宿主（client 已关、生产已停；daemon 属性
         # 保证异常路径也不吊死进程）

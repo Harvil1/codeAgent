@@ -62,6 +62,7 @@ class AuxLLMRouter:
         main_model: Optional[str] = None,
         aux_config: Optional[Dict[str, Any]] = None,
         endpoints: Optional[List[LLMEndpoint]] = None,
+        owns_main: bool = False,
     ):
         """把端点列表准备好、造好 client、初始化熔断账本。
 
@@ -70,9 +71,14 @@ class AuxLLMRouter:
             main_model：主模型名（保留的参数，会透传给 chat_completions）
             aux_config：旧式单 aux 配置（自动转成一个端点）
             endpoints：新的多端点列表（给了它就无视 aux_config）
+            owns_main：main_client 的所有权声明——外部传入的东西谁传谁
+                       负责，默认 False（共享引用，close() 绝不越权关它）；
+                       只有调用方明确说「这是我专为你造的」（True），
+                       close() 才会连兜底 client 一起关
         """
         self._main_client = main_client
         self._main_model = main_model
+        self._owns_main = owns_main
 
         # 兼容旧配置：aux_config 里有 model 字段时，转成 1 个端点
         raw_endpoints: List[LLMEndpoint] = []
@@ -150,6 +156,27 @@ class AuxLLMRouter:
         except Exception as e:
             logger.warning("创建 endpoint %s 的 client 失败: %s", ep.name, e)
             return None
+
+    async def close(self) -> None:
+        """关掉 router 自己造/拥有的全部 LLM client（进程收尾用，fail-open）。
+
+        - endpoint 的缓存 client：router 构造时造的，一律关
+        - 兜底 main_client：外部传入——owns_main=True（调用方声明「专用」）
+          才关，共享引用（比如直接传了 agent 主 client）绝不越权关闭
+        """
+        from agent.llm_client import aclose_llm_client
+        for name, client in list(self._client_cache.items()):
+            try:
+                await aclose_llm_client(client)
+            except Exception as e:
+                logger.warning("关闭 endpoint %s 的 client 失败（fail-open）: %s", name, e)
+        self._client_cache.clear()
+        if self._owns_main and self._main_client is not None:
+            try:
+                await aclose_llm_client(self._main_client)
+            except Exception as e:
+                logger.warning("关闭兜底 main client 失败（fail-open）: %s", e)
+            self._main_client = None
 
     @property
     def is_aux_configured(self) -> bool:
