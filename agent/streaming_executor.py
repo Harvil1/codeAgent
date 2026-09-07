@@ -78,7 +78,7 @@ def _is_preset_safe(tc: SimpleNamespace) -> bool:
 class StreamingToolExecutor:
     """模型还在流式输出时，抢先执行已收齐参数的工具调用的执行器。
 
-    用法（在流式调用 _call_llm_streaming 里）：
+    用法（在 agent/llm_streaming.py 的流式调用里）：
         ex = StreamingToolExecutor(agent) if enabled else None
         # 流循环里：新序号出现 → ex.complete(idx, prev_buf)（预执行）
         # 流正常结束 → results = await ex.collect() → agent 暂存结果

@@ -2044,7 +2044,7 @@ class AIAgent:
         cache_state = None
         try:
             from agent.cache_monitor import record_prompt_state
-            # 从 config 提取 LLM 调用参数（和 _call_llm_streaming 取 max_tokens 的逻辑保持一致）
+            # 从 config 提取 LLM 调用参数（和 llm_streaming.call_llm_streaming 取 max_tokens 的逻辑保持一致）
             _cfg = self.config or {}
             _mt = (
                 _cfg.get("model", {}).get("max_tokens")

@@ -132,7 +132,7 @@ def extract_cache_read(usage) -> int:
 
     各家服务商字段名不一样——DeepSeek 叫 prompt_cache_hit_tokens，
     Anthropic 叫 cache_read_input_tokens。流式路径合成的 usage 对象两个
-    字段都塞了值（见 _call_llm_streaming 末尾），所以这里用 or 短路，
+    字段都塞了值（见 agent/llm_streaming.py 末尾），所以这里用 or 短路，
     哪个非零用哪个。dict 和对象两种形态都兼容，出错返回 0。
 
     参数：

@@ -335,7 +335,7 @@ def discard_partial_stream_state(agent) -> None:
     以后有人把增量提前塞进历史或暂存区，这里负责清痕迹 + 打日志提醒，
     顺手清空流式预执行结果。
 
-    参数：无。返回：无。
+    参数：agent——AIAgent 实例（原 self）；其余见签名。返回：无。
     """
     agent._streaming_preset_results = {}
     logger.debug("流式失败：半截增量已丢弃（不入 history）")
