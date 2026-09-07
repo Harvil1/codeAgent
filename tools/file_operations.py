@@ -111,7 +111,7 @@ READ_FILE_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "读取行数（默认全部）。文件 >256KB 或单次读取 >25K tokens 会报错——用 offset/limit 分段",
+                "description": "读取行数（默认前 2000 行，没读完会在 hint 里给续读 offset）。文件 >256KB 或单次读取 >25K tokens 会报错——用 offset/limit 分段",
             },
         },
         "required": ["path"],
@@ -121,6 +121,9 @@ READ_FILE_SCHEMA = {
 # Read 双重上限（超限直接报错而不是截断）
 READ_MAX_FILE_BYTES = 256 * 1024   # 第一道：文件大小预检上限（256KB），不读盘就能拒
 READ_MAX_OUTPUT_TOKENS = 25_000    # 第二道：输出 token 上限（字符数/3 粗略估算）
+# 不传 limit 时的默认读取行数：防 LLM 一把误读大文件吃满上下文预算。
+# 2000 行对绝大多数源码文件够看全，看不完就在返回里给续读提示（hint）。
+READ_DEFAULT_LINES = 2000
 
 
 def _handle_read_file(args: dict, **kwargs) -> str:
@@ -129,12 +132,15 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     参数：
         args: LLM 按 schema 填的参数——
             path 要读的文件路径；offset 起始行（从 0 数）；
-            limit 读多少行（不传 = 读到底）
+            limit 读多少行（不传 = 默认前 READ_DEFAULT_LINES=2000 行，
+            没读完会在返回里带 hint 续读提示；显式传了就走老行为）
         **kwargs: 命名上下文（tool_call_id、config、codeagent_home 等，
             大输出落盘时用）
 
     返回：JSON 字符串——成功含 content（带行号正文）、content_hash（内容指纹）、
-    total_lines 等；失败是 {"error": ..., "error_type": ...}。
+    total_lines、shown_lines（本次读了第几到第几行）等；默认 limit 没读完时
+    额外带 hint（「已读 1-2000/共 N 行，继续读传 offset=2000」）；
+    失败是 {"error": ..., "error_type": ...}。
     文件太大（>256KB）或输出太多（约 >25K token）会报错引导分段读，不是悄悄截断；
     同文件同范围且内容没变时返回"文件未变"的省 token 提示。
     """
@@ -150,8 +156,13 @@ def _handle_read_file(args: dict, **kwargs) -> str:
 
     offset = int(args.get("offset", 0) or 0)
     limit = args.get("limit")
+    _limit_explicit = limit is not None  # LLM 是否显式传了 limit（显式路径行为保持不变）
     if limit is not None:
         limit = int(limit)
+    else:
+        # 不传 limit：默认只读前 READ_DEFAULT_LINES（2000）行，不再"读到底"——
+        # 防止一把误读大文件吃满上下文预算。没读完的部分会在返回里给续读提示（hint）。
+        limit = READ_DEFAULT_LINES
 
     path = Path(path_str).expanduser()
     if not path.exists():
@@ -272,14 +283,22 @@ def _handle_read_file(args: dict, **kwargs) -> str:
         except Exception:
             pass
 
-        return json.dumps({
+        # 默认 limit（没显式传）截断了、后面还有没读到的行 → 给续读提示，
+        # 告诉 LLM 从哪一行接着读（显式传了 limit 的老路径不加，行为保持不变）
+        result = {
             "path": str(path),
             "content": final_content,
             "content_hash": _content_hash(content),  # 内容指纹：给 write_file 写前校验"文件没被别人动过"用
             "content_offloaded": content_offloaded,
             "total_lines": len(lines),
             "shown_lines": f"{offset + 1}-{offset + len(selected)}",
-        }, ensure_ascii=False)
+        }
+        if not _limit_explicit and offset + len(selected) < len(lines):
+            result["hint"] = (
+                f"已读 {offset + 1}-{offset + len(selected)}/{len(lines)} 行，"
+                f"继续读传 offset={offset + len(selected)}"
+            )
+        return json.dumps(result, ensure_ascii=False)
     except UnicodeDecodeError:
         return json.dumps({"error": "无法解码为文本（可能是二进制文件）"}, ensure_ascii=False)
     except Exception as e:

@@ -196,6 +196,38 @@ def check_read_file_tool(tmp):
     return _fail(f"读取失败: {data}")
 
 
+def check_read_file_default_limit(tmp):
+    """验证不传 limit 默认读前 2000 行并给续读提示。
+
+    断言键名对齐 handler 真实返回形状：成功 JSON 含 content / total_lines /
+    shown_lines（形如 "1-2000"）/ hint（被截断时才有），没有 lines_read 字段。
+
+    参数：
+        tmp  临时目录 Path，测试文件写在这底下
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    f = tmp / "big3000.txt"
+    f.write_text("".join(f"line{i}\n" for i in range(3000)), encoding="utf-8")
+    result = asyncio.run(registry.dispatch("read_file", {"path": str(f)}))
+    data = json.loads(result)
+    if data.get("total_lines") != 3000:
+        return _fail(f"total_lines 不对: {data.get('total_lines')}")
+    if data.get("shown_lines") != "1-2000" or "line1999" not in data.get("content", ""):
+        return _fail("默认没截到 2000 行")
+    if "line2999" in data.get("content", ""):
+        return _fail("默认读了全文")
+    if "offset" not in data.get("hint", data.get("content", "")):
+        return _fail("缺续读提示")
+    # 显式 limit 行为不变：传 2500 就老老实实读 2500 行
+    r2 = asyncio.run(registry.dispatch("read_file", {"path": str(f), "limit": 2500}))
+    d2 = json.loads(r2)
+    if "line2499" not in d2.get("content", "") or "line2500" in d2.get("content", ""):
+        return _fail(f"显式 limit=2500 行为变了: {str(d2)[:120]}")
+    return _ok("read_file 默认 2000 行 + 续读提示正常")
+
+
 def check_interrupt():
     """验证中断机制：调用 interrupt() 后，中断标志确实被设置
     （用户按 Ctrl+C 优雅打断 agent 的底层开关）。
@@ -1888,6 +1920,7 @@ def main():
             ("工具名清单缓存", check_tool_names_cache),
             ("terminal 工具", check_terminal_tool),
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
+            ("read_file 默认 2000 行", lambda: check_read_file_default_limit(tmp)),
             ("中断机制", check_interrupt),
             ("事件循环宿主", check_loop_host),
             ("拆分符号面契约", check_split_symbol_surface),
