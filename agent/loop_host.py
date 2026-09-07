@@ -66,6 +66,9 @@ class AgentLoopHost:
         self._pending_bg_coros: set = set()
         # 回合是否在跑（并发契约警示用；调用方线程读写在容忍窗口内）
         self._turn_active = False
+        # 停机旗：stop() 置位后永不复位——_ensure_started 见到它就拒绝
+        # 再拉新循环（防 straggler 线程在进程收尾窗口复活宿主）
+        self._stopped: bool = False
         # 当前在跑的回合 future（force_exit 主动取消用；无回合时为 None）
         self._current_turn_fut: Optional[ConcurrentFuture] = None
 
@@ -75,6 +78,12 @@ class AgentLoopHost:
     def _ensure_started(self) -> asyncio.AbstractEventLoop:
         """确保宿主线程和循环就绪（惰性 + 幂等 + 线程安全）。"""
         with self._lock:
+            if self._stopped:
+                # 停机后拒绝复活：shutdown 后某个 straggler 线程再来调
+                # run_async/submit，旧版会悄悄拉起一个新循环（进程将退，
+                # 白造线程还可能半路死锁在垂死循环上）——fail-open 由
+                # 调用方处理，这里大声拒绝
+                raise RuntimeError("loop_host 已停机，拒绝再启动")
             if self._loop is not None and not self._loop.is_closed():
                 return self._loop
             self._loop = asyncio.new_event_loop()
@@ -102,8 +111,13 @@ class AgentLoopHost:
             self._loop.close()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """优雅停机：停循环并收线程（幂等；异常退出路径由 os._exit 兜底）。"""
+        """优雅停机：停循环并收线程（幂等；异常退出路径由 os._exit 兜底）。
+
+        置 _stopped 旗：之后任何线程再来 run_async/submit 都被拒绝复活
+        （一次性宿主——stop 即退役，进程收尾后不该再有新活儿上舞台）。
+        """
         with self._lock:
+            self._stopped = True
             loop = self._loop
         if loop is None or loop.is_closed():
             return
@@ -125,6 +139,7 @@ class AgentLoopHost:
         timeout 只限制「等结果」的时长；超时会顺手取消协程（wait_for 语义），
         不然调用方都超时走了，协程还赖在常驻循环上白跑到天荒地老。
         ⚠️ 不得在宿主循环线程内调用（自己等自己 = 死锁）。
+        停机后调用抛 RuntimeError（stop 之后拒绝复活，见 _ensure_started）。
         exempt_from_fence：True = 该协程注册进回合栅栏豁免名单（出生即
         登记，机制同 submit）——给「跨回合/回合期间的后台线程长活」用
         （curator 审查、进度播报这类）。回合栅栏只清回合自己的遗留，
@@ -164,8 +179,19 @@ class AgentLoopHost:
         任务注册进豁免名单（回合栅栏不取消）；异常打 WARNING（fail-open
         但要大声）；Task 以调用方（submit 线程）的 contextvars 上下文创建
         （create_task(context=...)），工作目录等上下文对后台任务可见。
+        停机后调用不炸调用方：返回一个已设 RuntimeError 的 future
+        （fail-open 但要大声——WARNING 打进日志）。
         """
-        loop = self._ensure_started()
+        try:
+            loop = self._ensure_started()
+        except RuntimeError as e:
+            # straggler 线程停机后才来交活：不给拉新循环，也别把
+            # RuntimeError 直接砸给「发出去就不管」的调用方——给个
+            # 已设异常的 future，等 result 的人自己看到（fail-open 大声）
+            logger.warning("submit 被拒（loop_host 已停机）: %s", e)
+            fut: ConcurrentFuture = ConcurrentFuture()
+            fut.set_exception(e)
+            return fut
         ctx = contextvars.copy_context()
 
         async def _wrapped():

@@ -934,11 +934,13 @@ def check_pre_send_guard():
 
 
 def check_loop_host():
-    """验证事件循环宿主八件套：run_async 阻塞等结果且跑在宿主循环上、
+    """验证事件循环宿主十件套：run_async 阻塞等结果且跑在宿主循环上、
     异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
     submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀、
     run_async(exempt_from_fence=True) 跨回合长活不被栅栏误杀、
-    submit 的 contextvars 从调用方线程传播进后台任务（create_task(context=)）。"""
+    submit 的 contextvars 从调用方线程传播进后台任务（create_task(context=)）、
+    run_async 超时抛 TimeoutError 且协程被取消、stop 后拒绝复活
+    （run_async 抛 RuntimeError，submit 返回已设异常的 future）。"""
     import asyncio
     from agent.loop_host import loop_host, cancel_current_turn
 
@@ -1086,7 +1088,49 @@ def check_loop_host():
     _ct.start(); _ct.join(timeout=5)
     if _got.get("v") != "from-caller":
         return _fail(f"contextvars 没传播到后台任务: {_got}")
-    return _ok("loop_host 语义八件套正常（含 exempt 豁免 + contextvars 传播）")
+
+    # 第九件（timeout 取消语义）：run_async 超时抛 TimeoutError 且协程
+    # 真被取消——不然调用方都超时走了，协程还赖在常驻循环上白跑到天荒地老
+    t_fate = {}
+    async def _t_long():
+        try:
+            await asyncio.sleep(5)
+            t_fate["r"] = "done"
+        except asyncio.CancelledError:
+            t_fate["r"] = "cancelled"
+    try:
+        loop_host.run_async(_t_long(), timeout=0.1)
+        return _fail("timeout 没抛 TimeoutError")
+    except TimeoutError:
+        pass
+    import time
+    _t0 = time.monotonic()
+    while t_fate.get("r") is None and time.monotonic() - _t0 < 2:
+        time.sleep(0.02)
+    if t_fate.get("r") != "cancelled":
+        return _fail(f"timeout 后协程没被取消: {t_fate}")
+
+    # 第十件（stop 拒绝复活）：stop 后 straggler 线程再来调 run_async/submit
+    # 必须被拒——旧版会悄悄拉起一个新循环（用独立实例验证，不碰全局单例）
+    from agent.loop_host import AgentLoopHost
+    h2 = AgentLoopHost()
+    async def _smoke():
+        return 1
+    if h2.run_async(_smoke()) != 1:
+        return _fail("独立实例基础语义坏了")
+    h2.stop()
+    try:
+        h2.run_async(_smoke())
+        return _fail("stop 后 run_async 没拒绝")
+    except RuntimeError:
+        pass
+    bgf = h2.submit(_smoke(), name="verify-stopped")
+    try:
+        bgf.result(timeout=2)
+        return _fail("stop 后 submit 的 future 不该成功")
+    except RuntimeError:
+        pass
+    return _ok("loop_host 语义十件套正常（含 timeout 取消与 stop 拒绝）")
 
 
 def check_session_append_perf(tmp):
