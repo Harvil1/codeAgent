@@ -1167,6 +1167,16 @@ def check_split_symbol_surface():
         llm_retry_heartbeat,
     )):
         return _fail("块 A 五自由函数有不可调用者")
+    # 拆分二期块 B：流式调用心脏（call_llm_streaming + 墓碑清理）拆到
+    # llm_streaming，agent root 模块级引入防退回惰性
+    import agent.llm_streaming  # noqa: F401
+    from agent.llm_streaming import (
+        call_llm_streaming, discard_partial_stream_state,
+    )
+    if not all(callable(f) for f in (
+        call_llm_streaming, discard_partial_stream_state,
+    )):
+        return _fail("块 B 二自由函数有不可调用者")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
