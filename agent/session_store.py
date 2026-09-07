@@ -400,6 +400,7 @@ class SessionStore:
         tool_calls: Optional[list] = None,
         tool_call_id: Optional[str] = None,
         name: Optional[str] = None,
+        pinned: bool = None,
     ) -> str:
         """往会话末尾追加一条消息（像在档案袋里再加一张纸条）——主循环每产生一条消息都落盘，崩溃/重启后才能完整恢复对话。
 
@@ -410,6 +411,9 @@ class SessionStore:
             tool_calls：assistant 消息携带的工具调用列表（可不填）
             tool_call_id：tool 消息对应的调用 ID，用于配对（可不填）
             name：tool 消息的工具名（会话恢复格式用）
+            pinned：是否钉住这条消息（可不填）。None=不写该字段，
+                保持老行形状（历史 .jsonl 里没这字段，新行也不添，
+                前向兼容旧会话文件）；True/False 才落进 JSONL
 
         返回：这条消息自己的 msg_id（UUID 字符串）。
         """
@@ -426,6 +430,9 @@ class SessionStore:
             "timestamp": now,
             "turn_index": turn_index,
         }
+        # 钉住标志只在显式传参时才写（None 不落字段，老行形状不变）
+        if pinned is not None:
+            line_obj["pinned"] = pinned
         with self._lock:
             # 往 .jsonl 尾部追加一行（单行小写入，在 POSIX 上小于
             # PIPE_BUF 时天然原子，不会被别的进程写穿插）
@@ -483,12 +490,15 @@ class SessionStore:
             limit：只要最后 N 条（按写入顺序），不填给全部
 
         返回：消息 dict 列表，只保留 role/content/tool_calls 等
-        对外字段（id/timestamp 等内部记账字段已剥掉）。
+        对外字段（id/turn_index 等内部记账字段已剥掉）；
+        timestamp 与 pinned 有才透传（老行没有就不带这两个键）。
         """
         msgs = self._read_session_msgs(session_id)
         if limit:
             msgs = msgs[-limit:]  # 只保留最后 N 条
-        # 转成兼容格式（去掉 id/timestamp/turn_index 等内部字段）
+        # 转成兼容格式（去掉 id/turn_index 等内部字段；timestamp 和
+        # pinned 有才透传——pinned 供钉住标记跨重启存活，timestamp 供
+        # resume 预热等上层按时间排序/过滤，ISO 字符串原样搬运）
         result = []
         for m in msgs:
             msg = {
@@ -501,6 +511,10 @@ class SessionStore:
                 msg["tool_call_id"] = m["tool_call_id"]
             if m.get("name"):
                 msg["name"] = m["name"]
+            if m.get("pinned") is not None:
+                msg["pinned"] = m["pinned"]
+            if m.get("timestamp"):
+                msg["timestamp"] = m["timestamp"]
             result.append(msg)
         return result
 

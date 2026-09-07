@@ -1250,6 +1250,23 @@ def check_session_append_perf(tmp):
     return _ok("append 线性化 + 卡片去抖 + 重启引导全正常")
 
 
+def check_session_field_passthrough(tmp):
+    """验证 pinned/timestamp 落库往返：append 带参 → get_messages 带回。"""
+    from agent.session_store import SessionStore
+    store = SessionStore(tmp / "passthrough")
+    sid = store.create_session(title="pt", model="t")
+    store.append_message(sid, "user", "钉住这条", pinned=True)
+    store.append_message(sid, "assistant", "普通回复")
+    msgs = store.get_messages(sid)
+    if msgs[0].get("pinned") is not True:
+        return _fail(f"pinned 没往返: {msgs[0]}")
+    if not msgs[0].get("timestamp"):
+        return _fail(f"timestamp 没透传: {msgs[0]}")
+    if "pinned" in msgs[1]:
+        return _fail(f"未钉住的消息不该带 pinned: {msgs[1]}")
+    return _ok("pinned/timestamp 往返正常")
+
+
 def check_msgs_cache_lru(tmp):
     """验证消息缓存有淘汰：加载 20 个会话后容量不超过上限（防常驻内存无限涨）。"""
     from agent.session_store import SessionStore, _MSGS_CACHE_CAP
@@ -1911,6 +1928,7 @@ def main():
             ("记忆注入兜底接线", check_memory_injection_wiring),
             ("发送前窗口预检", check_pre_send_guard),
             ("session append 线性化", lambda: check_session_append_perf(tmp)),
+            ("session 字段透传", lambda: check_session_field_passthrough(tmp)),
             ("消息缓存 LRU", lambda: check_msgs_cache_lru(tmp)),
         ]),
         ("上下文压缩", [
