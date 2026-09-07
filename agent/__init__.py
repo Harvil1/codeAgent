@@ -47,6 +47,15 @@ from agent.ephemeral_inject import (
     drop_leading_system as _drop_leading_system,
 )
 from agent.prompt_builder import build_system_prompt
+# 批间摘要 + 条件技能激活五件拆到独立模块（行为零变化搬迁）；属性全留
+# AIAgent，自由函数第一参收 agent 实例（原 self）
+from agent.tool_batch_summary import (
+    activate_conditional_skills,
+    flush_skill_activations,
+    generate_tool_batch_summary,
+    queue_skill_activation,
+    start_tool_batch_summary,
+)
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -1288,7 +1297,7 @@ class AIAgent:
         # 上一条消息异常退出（预算耗尽/中断）时已入队的
         # 技能激活路径，在这里处理掉而不是扔掉——激活通知进临时队列，
         # 本条消息组装时透出；有去重集合保证不会重复激活
-        self._flush_skill_activations()
+        flush_skill_activations(self)
         # 记下本轮历史的起点下标（轮末的行为学习只看本轮轨迹）
         self._sl_turn_start = len(self.conversation_history)
 
@@ -1912,7 +1921,7 @@ class AIAgent:
         # 开头先把上一批工具触碰收集的技能激活路径处理掉——必须赶
         # 在本方法末尾消费临时消息队列之前，激活通知才能搭上同一轮组装的
         # 车被模型看到，不晚一拍。
-        self._flush_skill_activations()
+        flush_skill_activations(self)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -2857,78 +2866,6 @@ class AIAgent:
             except Exception as e:
                 logger.debug("checkpoint track 失败: %s", e)
 
-    def _queue_skill_activation(self, path: str) -> None:
-        """工具触发的条件技能激活，走「先收集、后批量执行」。
-
-        回调里同步扫技能目录（磁盘 glob）太浪费——一轮跑多个工具
-        就扫多次。所以回调里只收集路径（去重），
-        等组装消息时统一处理——时机正好赶在临时消息队列消费之前，激活
-        结果当轮可见。
-
-        参数：path: 工具触碰到的文件路径。返回：无。
-        """
-        if self._pending_skill_paths is None:
-            self._pending_skill_paths = []
-        if path and path not in self._pending_skill_paths:
-            self._pending_skill_paths.append(path)
-
-    def _flush_skill_activations(self) -> None:
-        """把收集到的条件技能激活批量处理掉（出错放行）。
-
-        这里保持同步是因为调用方（组装消息）本身是同步方法，主循环
-        每轮 LLM 调用前来一次；扫描有「修改时间+文件大小」双因子缓存兜底，
-        又已从「每工具一次」去重到「每轮一次」——不值得为此改成 async。
-
-        参数：无。返回：无。
-        """
-        paths, self._pending_skill_paths = (self._pending_skill_paths or []), []
-        for p in paths:
-            try:
-                self._activate_conditional_skills(p)
-            except Exception as e:
-                logger.debug("条件技能激活失败（fail-open）: %s", e)
-
-    def _activate_conditional_skills(self, path) -> None:
-        """碰到匹配的文件 → 动态激活「条件技能」。
-
-        技能的 frontmatter（文件头元数据）里写了 paths 的，默认不进
-        静态索引（省索引空间）；等读/写/替换工具真的碰到匹配文件时才激活
-        ——发一条临时消息告诉模型这个技能可用了（用 load_skill 取正文），
-        会话内只激活一次。出错放行。
-
-        参数：path: 被触碰的文件路径。返回：无。
-        """
-        try:
-            from agent.skill_commands import find_conditional_skill_matches
-            hits = find_conditional_skill_matches(str(path))
-            new_hits = [
-                h for h in hits
-                if h["name"] not in self._activated_conditional_skills
-            ]
-            if not new_hits:
-                return
-            for h in new_hits:
-                self._activated_conditional_skills.add(h["name"])
-                self._record_recent("skill", h["name"])
-            lines = "\n".join(
-                f"- {h['name']}: {h['description']}" for h in new_hits
-            )
-            self._pending_ephemeral_messages.append({
-                "role": "user",
-                "content": (
-                    "<conditional_skills_ready>你刚触碰了匹配的文件，"
-                    "以下技能现已激活（用 load_skill(name) 获取完整正文）：\n"
-                    f"{lines}\n</conditional_skills_ready>"
-                ),
-                "_ephemeral": True,
-            })
-            logger.info(
-                "条件技能激活（触碰 %s）：%s",
-                path, ", ".join(h["name"] for h in new_hits),
-            )
-        except Exception as e:
-            logger.debug("条件技能激活失败（fail-open）: %s", e)
-
     def _maybe_auto_extract(self) -> None:
         """对话级轻量记忆提取的启动器（主循环末尾调）。
 
@@ -3202,86 +3139,13 @@ class AIAgent:
 
         # 批间摘要（发出去就不管；已请求停下时不启动）
         if not self._idle_requested:
-            self._maybe_start_tool_batch_summary(tool_calls, safe_processed, unsafe_processed)
+            start_tool_batch_summary(self, tool_calls, safe_processed, unsafe_processed)
 
         # 检查「主动停下」标志
         if self._idle_requested:
             logger.info("idle 已请求，退出 run_conversation")
             return False
         return True
-
-    def _maybe_start_tool_batch_summary(self, tool_calls, safe_processed, unsafe_processed) -> None:
-        """启动「批间摘要」后台任务。
-
-        每批工具跑完后，后台让辅助小模型写一句话总结，下一轮以临时
-        消息注入（生成延迟藏在模型流式输出期间，感觉不到）。
-        门控：config 的 context.tool_batch_summary_enabled 开着（默认关）+
-        有辅助模型 + 只有主代理做（防止子代理也来一套白花钱）。
-        整条链失败放行。
-
-        参数：
-            tool_calls: 本批工具调用列表
-            safe_processed: safe 组的 (调用, 结果) 列表
-            unsafe_processed: unsafe 组的 (调用, 结果) 列表
-
-        返回：无。
-        """
-        try:
-            ctx_cfg = (self.config or {}).get("context", {})
-            flag = ctx_cfg.get("tool_batch_summary_enabled", False)
-            # flag 显式开照旧；flag 关但长任务信号也开
-            # （auto 是独立 kill switch，只关自动开、不影响手动开关语义）
-            auto = ctx_cfg.get("tool_batch_summary_auto_long_task", True)
-            if not flag and not (auto and self._is_long_task()):
-                return
-            if self.aux_llm_router is None or self.spawn_depth > 0:
-                return
-            if not tool_calls:
-                return
-            # 汇总 (工具名, 结果前 300 字)
-            items = []
-            for tc, content in list(safe_processed) + list(unsafe_processed):
-                items.append((tc.function.name, str(content)[:300]))
-            if not items:
-                return
-            # 上一批的任务还没跑完 → 直接覆盖（新摘要取代旧的，符合「看最新」语义）
-            # 用 _spawn_detached 跑：submit 到常驻宿主循环（进回合栅栏
-            # 豁免名单），不会被回合收尾当遗留清掉
-            self._tool_summary_task = _spawn_detached(
-                self._generate_tool_batch_summary(items), "tool-batch-summary",
-            )
-        except Exception as e:
-            logger.debug("批间摘要启动失败（fail-open）: %s", e)
-
-    async def _generate_tool_batch_summary(self, items) -> None:
-        """让辅助小模型用一句话总结这批工具干了什么（出错全吞不炸）。
-
-        参数：items: (工具名, 结果片段) 列表。返回：无（结果存到
-        self._pending_tool_batch_summary，下轮注入）。
-        """
-        try:
-            lines = "\n".join(
-                f"- {name}: {content}" for name, content in items[:20]
-            )
-            prompt = (
-                "用一句中文（不超过 80 字）总结这批工具调用做了什么，"
-                "突出关键产出（文件/命令/结论），直接输出句子：\n" + lines
-            )
-            resp = await self.aux_llm_router.chat_completions(
-                [{"role": "user", "content": prompt}],
-            )
-            text = ""
-            try:
-                text = resp.choices[0].message.content or ""
-            except (AttributeError, IndexError, TypeError):
-                text = resp if isinstance(resp, str) else ""
-            text = str(text).strip()
-            if text:
-                # 只留最新一批的摘要（后到的覆盖先到的）
-                self._pending_tool_batch_summary = text[:200]
-                logger.debug("批间摘要已生成（%d 字）", len(text))
-        except Exception as e:
-            logger.debug("批间摘要生成失败（fail-open）: %s", e)
 
     def _run_tool_pre_callbacks(self, tc) -> None:
         """工具执行前的记录/通知类小事（safe 组顺序版和流式预执行共用）。
@@ -3303,7 +3167,7 @@ class AIAgent:
         # 碰到文件 → 条件技能动态激活（paths 匹配）
         # 先收集后批量（回调里只入队，统一处理见组装消息处）
         if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
-            self._queue_skill_activation(str(tool_args["path"]))
+            queue_skill_activation(self, str(tool_args["path"]))
         # 主代理本轮写过记忆 → 记互斥标记（自动提取要避让）
         if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
             self._memory_touched_this_turn = True
@@ -3383,7 +3247,7 @@ class AIAgent:
         # 碰到文件 → 条件技能动态激活（paths 匹配）
         # 先收集后批量（回调里只入队，统一处理见组装消息处）
         if tool_name in ("read_file", "write_file", "str_replace") and tool_args.get("path"):
-            self._queue_skill_activation(str(tool_args["path"]))
+            queue_skill_activation(self, str(tool_args["path"]))
         # 主代理本轮写过记忆 → 记互斥标记（自动提取要避让）
         if tool_name == "memory" and tool_args.get("action") in ("save", "update"):
             self._memory_touched_this_turn = True
