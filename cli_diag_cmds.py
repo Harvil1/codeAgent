@@ -131,6 +131,10 @@ def _handle_compact_cli(args: str, rt) -> bool:
 
     compacted = False
     new_messages = history
+    # 降级旗：True = LLM 压缩试过但失败、已经打过降级黄字；下面 snip
+    # 路径再看到它就不重复喊「LLM 不可用」——主动选 snip 和失败降级
+    # 两种场景只在进入 snip 前打一条降级提示，不再双重报话
+    _degraded = False
     llm_client = getattr(agent, "llm_client", None)
     if llm_client is not None:
         try:
@@ -148,6 +152,7 @@ def _handle_compact_cli(args: str, rt) -> bool:
             # 降级是功能行为（fail-open）：触发条件从旧「asyncio.run 抛
             # RuntimeError」放宽为「run_async 抛 Exception」，语义不变
             console.print(f"[yellow]LLM 压缩失败（{e}），降级为 snip_compact（无损裁剪）[/yellow]")
+            _degraded = True
 
     if compacted:
         # L4 摘要成功：把新历史写回 agent（收尾动作和自动压缩一致）
@@ -189,7 +194,10 @@ def _handle_compact_cli(args: str, rt) -> bool:
     if not snipped:
         console.print("[yellow]历史太短，无需压缩[/yellow]")
         return True
-    console.print("[yellow]LLM 不可用，已降级 snip_compact（无损裁剪）[/yellow]")
+    if not _degraded:
+        # 只有「一开始就没 LLM 可用」这种主动选 snip 的场景才在这里喊；
+        # 失败降级上面已经打过黄字了，不重复
+        console.print("[yellow]LLM 不可用，已降级 snip_compact（无损裁剪）[/yellow]")
     _sync_history_after_compact(agent, new_messages)
     after_tokens = estimate_message_tokens(agent.conversation_history)
     _print_compact_delta(

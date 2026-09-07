@@ -1133,6 +1133,25 @@ def check_loop_host():
     return _ok("loop_host 语义十件套正常（含 timeout 取消与 stop 拒绝）")
 
 
+def check_anthropic_usage_fields():
+    """验证 Anthropic 响应包装后的 usage 带 cache 字段（缓存记账/锚点口径依赖）。"""
+    from types import SimpleNamespace as NS
+    from agent.llm_client import AnthropicClient
+    fake = NS(
+        content=[NS(type="text", text="hi")],
+        usage=NS(input_tokens=10, output_tokens=5,
+                 cache_read_input_tokens=7, cache_creation_input_tokens=3),
+    )
+    client = AnthropicClient.__new__(AnthropicClient)  # 不跑 __init__（不碰网络）
+    wrapped = client._wrap_response(fake)
+    u = wrapped.usage
+    if getattr(u, "cache_read_input_tokens", None) != 7:
+        return _fail(f"cache_read_input_tokens 丢失: {u}")
+    if getattr(u, "cache_creation_input_tokens", None) != 3:
+        return _fail(f"cache_creation_input_tokens 丢失: {u}")
+    return _ok("Anthropic usage 缓存字段齐全")
+
+
 def check_session_append_perf(tmp):
     """验证 append 不再 O(n²)：连写 200 条 turn_index 连续正确、文件行数
     吻合、index 卡片去抖中途真的延迟、flush 后最终一致。"""
@@ -1799,6 +1818,7 @@ def main():
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
             ("中断机制", check_interrupt),
             ("事件循环宿主", check_loop_host),
+            ("Anthropic usage 字段", check_anthropic_usage_fields),
         ]),
         ("记忆系统", [
             ("memory 工具写入", lambda: check_memory_tool_write(tmp)),

@@ -829,6 +829,13 @@ class AnthropicClient(LLMClient):
             usage=SimpleNamespace(
                 prompt_tokens=getattr(anthropic_response.usage, "input_tokens", 0),
                 completion_tokens=getattr(anthropic_response.usage, "output_tokens", 0),
+                # 缓存字段用 Anthropic 原名透传——_record_llm_usage 的锚点
+                # 口径按字段名判语义（有这俩名字→三项相加），丢了它们
+                # Anthropic 路径的缓存记账就失真、锚点退化成单值
+                cache_read_input_tokens=getattr(
+                    anthropic_response.usage, "cache_read_input_tokens", 0),
+                cache_creation_input_tokens=getattr(
+                    anthropic_response.usage, "cache_creation_input_tokens", 0),
             ) if hasattr(anthropic_response, "usage") else None,
         )
 

@@ -333,6 +333,7 @@ class SessionStore:
                     )
             self._index_cache = new_index
             self._save_index()
+            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         finally:
             conn.close()
 
@@ -381,6 +382,7 @@ class SessionStore:
                 "provider": provider,
             })
             self._save_index()
+            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         # 建一个空的 .jsonl 档案袋占位
         self._session_file(session_id).touch()
         return session_id
@@ -553,6 +555,7 @@ class SessionStore:
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     break
             self._save_index()
+            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
 
     def delete_session(self, session_id: str) -> None:
         """删除会话——但其实是"假删"：消息文件改名成 .bak 备份，随时可恢复。
@@ -582,6 +585,7 @@ class SessionStore:
             index = self._load_index()
             self._index_cache = [s for s in index if s["id"] != session_id]
             self._save_index()
+            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
 
     # ------------------------------------------------------------------
     # 会话 fork（克隆）
@@ -631,6 +635,7 @@ class SessionStore:
                         s["message_count"] = line_count
                         break
                 self._save_index()
+                self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         return new_id
 
     # ------------------------------------------------------------------

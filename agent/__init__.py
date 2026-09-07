@@ -1923,14 +1923,14 @@ class AIAgent:
         try:
             if self.bg_manager is not None and self.bg_manager.has_notifications():
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("has_notifications 预检失败（fail-open 视为无）: %s", e)
         try:
             queue = getattr(self, "_delegation_queue", None)
             if queue is not None and queue.has_pending():
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("delegation_queue 预检失败（fail-open 视为无）: %s", e)
         return False
 
     def _build_bg_running_note(self):
