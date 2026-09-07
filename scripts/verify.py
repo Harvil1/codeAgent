@@ -1299,6 +1299,94 @@ def check_session_field_passthrough(tmp):
     return _ok("pinned/timestamp 往返正常")
 
 
+def check_resume_warmup(tmp):
+    """验证 resume 预热：_timestamp 盖回 + 大结果落盘占位 + timestamp/pinned 剥离。
+
+    伪造一份 store 会话（大工具结果 + pinned 消息），走 get_messages →
+    cli 的 _resume_warmup（假 rt，llm_client=None 只验无损层不烧 LLM），
+    断言三件事：
+    1) store 的 ISO timestamp 盖回内存的 _timestamp（float——时间清理层
+       跨重启复活的前提）；
+    2) 大工具结果被无损层落盘折成占位（full_at 找回指针在场——压缩
+       前移到恢复时，首轮不再慢慢吞吞中途才压）；
+    3) timestamp/pinned 两个键从消息上剥掉（strip_internal_fields 是
+       黑名单制只认 _ 前缀键，这两个非下划线键它剥不掉，带进 LLM
+       请求体在严格的 OpenAI 兼容端可能 400）。附带验证开关关闭 =
+       只盖时间戳不跑压缩。
+    """
+    from agent.session_store import SessionStore
+    from agent.context_pipeline import reset_offload_decisions
+    import cli as _cli
+
+    # 冻结决策表是模块级全局（跨检查共享），先清空保证本检查从零开始
+    # （别的检查若碰巧用过 w0..w7 这类 id，照抄旧预览会搅乱断言）
+    reset_offload_decisions()
+    store = SessionStore(tmp / "warmup_sessions")
+    sid = store.create_session()
+    store.append_message(sid, "user", "go")
+    for i in range(8):
+        store.append_message(
+            sid, "assistant", "",
+            tool_calls=[{"id": f"w{i}", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}])
+        store.append_message(sid, "tool", "X" * 5000,
+                             tool_call_id=f"w{i}", name="t")
+    store.append_message(sid, "assistant", "done", pinned=True)
+
+    msgs = store.get_messages(sid)
+    conv = [m for m in msgs if m.get("role") != "system"]
+    if not conv or not conv[0].get("timestamp"):
+        return _fail(f"store 没透传 timestamp（前置条件已坏）: {conv[0] if conv else None}")
+
+    rt = SimpleNamespace(
+        config={"context": {
+            "resume_warmup_enabled": True,
+            "output_offload_threshold": 1000,   # 低阈值：5000 字符大结果必落盘
+        }},
+        agent=SimpleNamespace(llm_client=None, model="verify-model"),
+        home=tmp,
+        session_id=sid,
+        session_store=store,
+    )
+    out = _cli._resume_warmup(rt, conv)
+
+    # 断言 1：_timestamp 盖回（float 且为正数；首条 user 与末条 assistant 都验）
+    for probe in (out[0], out[-1]):
+        ts = probe.get("_timestamp")
+        if not isinstance(ts, float) or ts <= 0:
+            return _fail(f"_timestamp 没盖回（时间清理层仍哑）: {probe}")
+
+    # 断言 2：大工具结果落盘折成占位（keep_recent 保最近 3 条，8 条至少折 5 条）
+    n_placeholder = sum(
+        1 for m in out
+        if m.get("role") == "tool" and "full_at" in str(m.get("content", ""))
+    )
+    if n_placeholder < 1:
+        return _fail("大工具结果没被落盘折占位（无损层没前移到恢复时）")
+
+    # 断言 3：timestamp/pinned 已剥 + system 占位没混进对话历史
+    leaked = [m for m in out if "timestamp" in m or "pinned" in m]
+    if leaked:
+        return _fail(f"timestamp/pinned 没剥掉（会带进 LLM 请求体）: {leaked[0]}")
+    if out and out[0].get("role") == "system":
+        return _fail("system 占位混进了对话历史")
+
+    # 开关关闭路径：只盖时间戳不跑压缩（大结果保持原文、键照样剥）
+    rt_off = SimpleNamespace(
+        config={"context": {"resume_warmup_enabled": False}},
+        agent=SimpleNamespace(llm_client=None, model="verify-model"),
+        home=tmp, session_id=sid, session_store=store,
+    )
+    conv2 = [m for m in store.get_messages(sid) if m.get("role") != "system"]
+    out2 = _cli._resume_warmup(rt_off, conv2)
+    if any("full_at" in str(m.get("content", ""))
+           for m in out2 if m.get("role") == "tool"):
+        return _fail("开关关了还在跑压缩")
+    if not isinstance(out2[0].get("_timestamp"), float) or "timestamp" in out2[0]:
+        return _fail("开关关闭路径的时间戳盖回/剥离坏了")
+    return _ok(f"预热盖回 _timestamp + 折占位 {n_placeholder} 条 + 双键已剥（含开关关闭路径）")
+
+
 def check_msgs_cache_lru(tmp):
     """验证消息缓存有淘汰：加载 20 个会话后容量不超过上限（防常驻内存无限涨）。"""
     from agent.session_store import SessionStore, _MSGS_CACHE_CAP
@@ -1976,6 +2064,7 @@ def main():
         ("会话存储", [
             ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # 名字来自清单原文，实际查的是 .sessions/ 目录
             ("session_search", lambda: check_session_search(tmp)),
+            ("resume 预热", lambda: check_resume_warmup(tmp)),
         ]),
         ("Curator", [
             ("status 状态", lambda: check_curator_status(tmp)),

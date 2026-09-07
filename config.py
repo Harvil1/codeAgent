@@ -155,6 +155,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "post_compact_recovery_enabled": True,          # 总开关（False = 压缩后不重注入）
         "post_compact_recovery_max_files": 5,            # 最多恢复几个最近文件
         "post_compact_recovery_max_skills": 5,           # 最多恢复几个最近技能
+        # ── resume 预热：恢复会话时的「进场前热身」 ──
+        # 把 store 透传的 ISO timestamp 盖回内存 _timestamp（时间清理层
+        # 跨重启复活），并同步跑一遍压缩无损层（大结果落盘前移到恢复
+        # 时，首轮对话不再中途才压）；False = 只盖时间戳/剥键不跑压缩
+        "resume_warmup_enabled": True,
     },
 
     # Hook 系统：在固定事件点（如工具调用前后）自动执行用户配置的脚本

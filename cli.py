@@ -1086,9 +1086,12 @@ class RuntimeContext:
                 conv = fixed
         except Exception as e:
             logger.warning("resume 孤儿修复失败（忽略，发送前还会兜底）: %s", e)
-        self.agent.conversation_history = conv
+        # resume 预热：先切好会话 id（预热真触发 L4 时压缩事务标记要落
+        # 进「恢复的这个会话」而不是刚建的空会话），再把「盖回
+        # _timestamp + 无损压缩前移」的预热结果装回对话历史
         self.session_id = session_id
         self.agent.session_id = session_id
+        self.agent.conversation_history = _resume_warmup(self, conv)
         self.agent.invalidate_system_prompt()
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
@@ -1858,6 +1861,71 @@ def _truncate_at_last_compact_boundary(msgs: list) -> list:
         last_idx,
     )
     return kept
+
+
+def _resume_warmup(rt, conv: list) -> list:
+    """恢复预热：盖回 _timestamp（时间清理层复活）+ 跑一遍压缩无损层。
+
+    大白话：会话从盘上读回来时，内存消息没有 _timestamp（时间清理层
+    全哑——「距最后一条 assistant 超 60 分钟就清旧工具结果」没有时间
+    依据）、也没跑过压缩（大工具结果都是原文）——首轮对话要么慢、
+    要么中途才压。这里在用户看到提示符之前把这些活先干了（fail-open，
+    预热失败照常进 REPL，首轮会自然补上）。
+
+    timestamp/pinned 两个键必须剥掉（审查裁定）：store 透传的是非下划线
+    键，strip_internal_fields 是黑名单制（只认 _timestamp/_ephemeral）
+    剥不掉它们，带进 LLM 请求体在严格的 OpenAI 兼容端可能 400。pin
+    保护不受影响——靠 [pinned] 文本前缀的机制仍在，字典标志只做
+    store 往返（压缩层的 pinned 判定两者都认）。
+
+    参数：
+        rt：RuntimeContext（取 config/agent/home/session_id/session_store）
+        conv：恢复裁剪后的对话消息（不含 system）
+    返回：预热后的消息列表；timestamp 已消费成 _timestamp、双键已剥、
+        无损压缩（落盘/时间清理/折叠）已跑。任何异常 fail-open 返回
+        原列表（键可能已剥、时间戳可能已盖——都是无害的半成品）。
+    """
+    try:
+        from datetime import datetime as _dt
+        for m in conv:
+            # 先消费/剥离两个 store 往返键（无论开关开不开都剥——协议
+            # 安全不属于「预热可关」的范畴）
+            ts = m.pop("timestamp", None)
+            m.pop("pinned", None)
+            if ts and not m.get("_timestamp"):
+                try:
+                    m["_timestamp"] = _dt.fromisoformat(str(ts)).timestamp()
+                except (ValueError, TypeError):
+                    pass  # 解析失败跳过该条（fail-open，时间清理层少一条依据）
+
+        cfg = (rt.config or {}).get("context", {})
+        if not cfg.get("resume_warmup_enabled", True):
+            return conv
+        from agent.context_pipeline import compress_if_needed, CompressionSessionState
+        from agent.loop_host import loop_host
+        # compress_if_needed 按「system 在场」的完整消息列表工作（内部
+        # _split_system 摘出 system 保护、_reassemble 放回头部）——这里
+        # 垫一条空 system 占位，跑完再用防御版剥头（与 agent 主循环压缩
+        # 入口的消息形状一致）。llm_client 用主 agent 的：真到 L4 阈值就
+        # 现场做摘要（比首轮对话中途压更好）；session_state 也用 agent
+        # 的记账簿（预热的触发次数计入冷却/熔断，不白拿额度）
+        msgs = [{"role": "system", "content": ""}] + conv
+        msgs, _changed, _compacted = loop_host.run_async(compress_if_needed(
+            msgs,
+            llm_client=getattr(rt.agent, "llm_client", None),
+            model=getattr(rt.agent, "model", None),
+            config=cfg,
+            session_state=getattr(rt.agent, "_compress_session_state", None)
+            or CompressionSessionState(),
+            agent_home=rt.home,
+            session_id=rt.session_id or "",
+            session_store=rt.session_store,
+        ))
+        from agent.ephemeral_inject import drop_leading_system
+        return [m for m in drop_leading_system(msgs) if not m.get("_ephemeral")]
+    except Exception as e:
+        logger.warning("resume 预热失败（fail-open 直接进 REPL）: %s", e)
+        return conv
 
 
 def _inject_progress_recovery(rt, session_id: str) -> None:
