@@ -1406,6 +1406,41 @@ def check_compress_profile():
     return _ok("profile 单遍统计正确")
 
 
+def check_time_clear_pointer(tmp):
+    """验证 60 分钟清理的占位带 full_at 找回指针（agent_home 在场时）。
+
+    旧版时间清理把旧工具结果换成纯文本占位（半丢失）；新版清空前先
+    maybe_offload 落盘，占位升级成 offload JSON（预览 + full_at 文件指针），
+    模型想看全文可自己读回。agent_home=None 时退回纯文本占位（测试兼容）。
+    """
+    import time as _t
+    from agent.context_pipeline import time_based_clear_old_tool_results
+    old = _t.time() - 3600 * 3
+    msgs = [{"role": "system", "content": "s"}]
+    for i in range(8):
+        msgs.append({"role": "tool", "content": f"R{i}" + "X" * 800,
+                     "tool_call_id": f"tc{i}", "_timestamp": old})
+    msgs.append({"role": "assistant", "content": "done", "_timestamp": old})
+    out, changed = time_based_clear_old_tool_results(
+        [dict(m) for m in msgs], {}, agent_home=tmp)
+    if not changed:
+        return _fail("时间清理没触发")
+    body = "".join(str(m.get("content", "")) for m in out[:6])
+    if "full_at" not in body:
+        return _fail(f"占位缺找回指针: {body[:120]}")
+    import json as _j
+    ph = next(m for m in out if isinstance(m.get("content"), str) and "full_at" in m["content"])
+    fa = _j.loads(ph["content"]).get("full_at")
+    if not Path(fa).exists():
+        return _fail(f"落盘文件不存在: {fa}")
+    # agent_home=None 退回旧占位（测试兼容路径）
+    out2, ch2 = time_based_clear_old_tool_results(
+        [dict(m) for m in msgs], {})
+    if ch2 and all("[Old tool result content cleared]" != m.get("content") for m in out2[:6]):
+        return _fail("None 路径没退回旧占位")
+    return _ok("时间清理占位带指针")
+
+
 def check_low_threshold_offload_equivalence(tmp):
     """低 offload 阈值下 L2/L2.5/L2.6 守卫仍放行现场重算（R4T6 守卫回归门）。
 
@@ -1968,6 +2003,7 @@ def main():
             ("自动压缩", check_context_compress),
             ("压缩管线 profile", check_compress_profile),
             ("低阈值 offload 等价", lambda: check_low_threshold_offload_equivalence(tmp)),
+            ("时间清理占位指针", lambda: check_time_clear_pointer(tmp)),
         ]),
         ("slash 注册表", [
             ("slash 注册表", check_slash_registry),

@@ -104,14 +104,23 @@ def _is_tool_result(msg: dict) -> bool:
     return msg.get("role") == "tool"
 
 
-def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[list, bool]:
-    """按时间清旧工具结果：距最后一次助手回复超过 N 分钟没动静，就把更早的工具结果内容清空——用户放着一两个小时没说话时，中间的工具输出基本不会再被用到，换成一句「旧工具结果已清空」的标记。
+def time_based_clear_old_tool_results(
+    messages: list, config: dict, agent_home=None,
+) -> Tuple[list, bool]:
+    """按时间清旧工具结果：距最后一次助手回复超过 N 分钟没动静，就把更早的工具结果内容清空——用户放着一两个小时没说话时，中间的工具输出基本不会再被用到。
+
+    清空不是半丢失：agent_home 在场时，清空前先 maybe_offload 把原文
+    落盘到 .task_outputs/，占位从一句纯文本升级成 offload JSON
+    （开头预览 + full_at 文件指针）——模型想看全文可以自己读回。
+    agent_home=None（或落盘失败）退回纯文本占位「[Old tool result
+    content cleared]」（老行为，测试兼容路径）。
 
     在 compress_if_needed 的流水线里最先跑（不看 token 超没超），排在 L1 之前。
 
     参数：
         messages：完整消息列表
         config：context 配置子字典（由 compress_if_needed 从 self.config 的 "context" 段传入）
+        agent_home：CodeAgent 数据目录（~/.codeAgent）；None = 不落盘、退纯文本占位
     返回：(消息列表, 本次是否真的清了内容)。第二个值让上层正确统计「这次有没有改动」。
 
     行为（大白话版）：
@@ -123,7 +132,8 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[lis
          但最近 keep_recent 条保留不清
 
     fail-open：出异常不影响主流程，原样返回。
-    幂等：已经清过的（内容已是占位标记）再跑一遍也不重复计「有变化」。
+    幂等：已经清过的（内容是纯文本占位、或已带 full_at 指针的
+    offload 占位）再跑一遍也不重复计「有变化」。
     """
     CLEARED_MARK = "[Old tool result content cleared]"
     try:
@@ -166,10 +176,31 @@ def time_based_clear_old_tool_results(messages: list, config: dict) -> Tuple[lis
         to_clear = tool_indices[:-keep_recent] if keep_recent > 0 else tool_indices
         cleared_count = 0
         for i in to_clear:
-            # 幂等：content 已经是 CLEARED_MARK 的不再计 cleared_count
-            if messages[i].get("content") and messages[i].get("content") != CLEARED_MARK:
-                messages[i]["content"] = CLEARED_MARK
-                cleared_count += 1
+            content = messages[i].get("content")
+            # 幂等：清过的不再计 cleared_count——纯文本占位（CLEARED_MARK）
+            # 和已带 full_at 找回指针的 offload 占位（'"full_at"' 子串是它的
+            # 指纹）都算「已清过」，再跑一遍结果一个字节都不变
+            if not content or content == CLEARED_MARK or '"full_at"' in content:
+                continue
+            # agent_home 在场：清空前先落盘，占位升级成「预览 + full_at 指针」
+            # ——旧内容从「半丢失」变「可找回」。threshold=0 = 无视单条
+            # 大小强制落盘（时间清理看的是「多久没动」，不看内容长短）
+            if agent_home is not None:
+                try:
+                    from agent.output_offload import maybe_offload
+                    tcid = str(messages[i].get("tool_call_id") or f"timeclear_{i}")
+                    new_content = maybe_offload(
+                        content, tool_call_id=tcid, agent_home=agent_home,
+                        threshold=0,
+                    )
+                    messages[i]["content"] = new_content
+                    cleared_count += 1
+                    continue
+                except Exception as off_e:
+                    logger.warning("时间清理落盘失败（退纯占位）: %s", off_e)
+            # 兜底：没传 agent_home 或落盘失败 → 纯文本占位（老行为）
+            messages[i]["content"] = CLEARED_MARK
+            cleared_count += 1
 
         if cleared_count:
             logger.info(
@@ -1426,7 +1457,8 @@ async def compress_if_needed(
 
     # ── 时间清理（最先跑，不看 token 超没超）──
     # 距最后一条 assistant 超 gap_minutes（默认 60）分钟时，把旧工具结果
-    # 内容换成清除标记。返回的 c0=True 表示确实清了东西——必须算进
+    # 内容换成占位（agent_home 在场时先落盘，占位带 full_at 找回指针）。
+    # 返回的 c0=True 表示确实清了东西——必须算进
     # 最终 changed，否则 changed=False 会导致对话历史不同步，下一轮又把
     # 原始内容塞回去（等于白清，效果只活一轮）。
     # 触发判定改吃 profile 的 last_assistant_ts：开关关着/没有可用
@@ -1442,7 +1474,9 @@ async def compress_if_needed(
         and (time.time() - _tb_last_ts) / 60
         >= config.get("time_based_mc_gap_minutes", 60)
     ):
-        messages, c0 = time_based_clear_old_tool_results(messages, config)
+        messages, c0 = time_based_clear_old_tool_results(
+            messages, config, agent_home=agent_home,
+        )
 
     # L1 裁中间（少频繁裁中间，压缩主要靠 L4 的 token 判定）
     # 触发判定改吃 profile 的 msg_count：时间清理只换内容不动条数，
