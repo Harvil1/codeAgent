@@ -140,7 +140,9 @@ class MCPTransport(ABC):
         try:
             resp = self.send_request("resources/list", {})
             return (resp or {}).get("resources")
-        except Exception:
+        except Exception as e:
+            # fail-open 但要大声：坏了照样返回 None，但必须在日志里留痕
+            logger.warning("MCP list_resources 失败（fail-open 返回 None）: %s", e)
             return None
 
     def read_resource(self, uri: str) -> Optional[dict]:
@@ -153,7 +155,9 @@ class MCPTransport(ABC):
         """
         try:
             return self.send_request("resources/read", {"uri": uri})
-        except Exception:
+        except Exception as e:
+            # fail-open 但要大声：坏了照样返回 None，但必须在日志里留痕
+            logger.warning("MCP read_resource 失败（fail-open 返回 None）: %s", e)
             return None
 
     # 各子类共用：MCP 标准握手流程（子类 connect() 末尾调用）

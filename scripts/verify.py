@@ -1748,6 +1748,34 @@ def check_cc_double_press():
 
 
 # ---------------------------------------------------------------------------
+# MCP
+# ---------------------------------------------------------------------------
+
+def check_mcp_method_names():
+    """验证 MCP 方法名字面量没被反斜杠转义污染（resources\\read 回车转义事故的回归门）。
+
+    大白话：源码字符串里写 "resources\\read"（反斜杠）时，Python 会把
+    \\r 解读成回车转义——真正发出去的方法名是 resources<CR>ead，MCP
+    服务器永远不认，而且这种错在界面上毫无声响。这里直接翻源码文本
+    （inspect.getsource），两头卡：反斜杠形态不许出现 + 四个正常方法
+    名（resources/list、resources/read、tools/list、tools/call）必须都在。
+
+    返回：PASS/FAIL 结果。
+    """
+    import inspect
+    import agent.mcp_client as mc
+    src = inspect.getsource(mc)
+    # 反斜杠转义会把 r 变回车："resources\read" 实际发的是 resources<CR>ead
+    if "resources\\read" in src or "resources\\xread" in src:
+        return _fail("方法名字面量含反斜杠转义（resources\\read bug 回归）")
+    # 正常形态：resources/list、resources/read、tools/list、tools/call
+    for good in ("resources/list", "resources/read", "tools/list", "tools/call"):
+        if f'"{good}"' not in src:
+            return _fail(f"缺正常方法名字面量: {good}")
+    return _ok("MCP 方法名字面量干净")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -1836,6 +1864,9 @@ def main():
         ]),
         ("CLI 流式框", [
             ("流式回答框", check_stream_box),
+        ]),
+        ("MCP", [
+            ("方法名字面量", check_mcp_method_names),
         ]),
     ]
 
