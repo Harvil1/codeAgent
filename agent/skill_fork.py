@@ -7,6 +7,8 @@
 user 消息注入主循环继续对话。
 """
 
+import asyncio
+import concurrent.futures
 import logging
 
 from agent import AIAgent
@@ -92,6 +94,22 @@ def run_skill_in_fork(
                     })
                 except Exception:
                     pass
+            # === 子代理 client 用后即关 ===
+            # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
+            # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
+            # 关循环顺带释放池，迁常驻循环后不主动关就一直滞留到进程退出。
+            # fail-open：关不上只警告，不影响技能结果。
+            try:
+                from agent.llm_client import aclose_llm_client
+                from agent.loop_host import loop_host
+                loop_host.run_async(aclose_llm_client(child.llm_client))
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                # 回合栅栏恰好落下时关闭协程被顺带取消——CancelledError 是
+                # BaseException，except Exception 接不住会打穿本 finally
+                # 盖掉技能结果。池留给进程退出收尾，安静放行
+                pass
+            except Exception as e:
+                logger.warning("子代理 client 关闭失败（fail-open）: %s", e)
     except Exception as e:
         logger.warning("run_skill_in_fork 失败: %s", e)
         return f"(技能 {skill_name} 隔离执行失败: {e})"

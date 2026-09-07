@@ -19,6 +19,8 @@
 - **留了 _spawn_resumed_agent 这个接缝**：生产代码跑真子代理，测试时
   patch 掉它做隔离
 """
+import asyncio
+import concurrent.futures
 import json
 import logging
 from typing import Optional
@@ -130,7 +132,24 @@ def _spawn_resumed_agent(
     # 新的 user 轮追加到 initial_messages 后面。所以 _run_resume 构造
     # messages 时故意不带末尾的 instruction，由 chat 追加，避免出现
     # 两条重复的 user 消息。
-    result = loop_host.run_async(child.chat(instruction))
+    try:
+        result = loop_host.run_async(child.chat(instruction))
+    finally:
+        # === 子代理 client 用后即关 ===
+        # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
+        # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
+        # 关循环顺带释放池，迁常驻循环后不主动关就一直滞留到进程退出。
+        # fail-open：关不上只警告，不影响续跑结果（异常照样往上穿透）。
+        try:
+            from agent.llm_client import aclose_llm_client
+            loop_host.run_async(aclose_llm_client(child.llm_client))
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            # 回合栅栏恰好落下时关闭协程被顺带取消——CancelledError 是
+            # BaseException，except Exception 接不住会打穿本 finally
+            # 盖掉续跑真正的异常/结果。池留给进程退出收尾，安静放行
+            pass
+        except Exception as e:
+            logger.warning("子代理 client 关闭失败（fail-open）: %s", e)
     return result
 
 

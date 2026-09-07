@@ -22,6 +22,8 @@
   - 批量（tasks=[...]）：多个子代理真并行同时跑
 """
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -1599,6 +1601,27 @@ def _run_child(
                 })
             except Exception:
                 pass  # fail-open
+
+        # === 子代理 client 用后即关（放 finally 尾部）===
+        # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
+        # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
+        # 关循环顺带释放池，迁常驻循环后不主动关就一直滞留到进程退出。
+        # 放尾部是因为走到这时 _summarize_child_result 等真正用
+        # child.llm_client 的步骤都已完成（它们全在 try 体的 return
+        # 之前），这时关不碰任何人。fail-open：关不上只警告。
+        if child is not None:
+            try:
+                from agent.llm_client import aclose_llm_client
+                from agent.loop_host import loop_host
+                loop_host.run_async(aclose_llm_client(child.llm_client))
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                # 回合栅栏恰好落下时关闭协程被顺带取消——CancelledError 是
+                # BaseException，except Exception 接不住会打穿本 finally，
+                # 把子代理真正的结果/异常盖成取消错误。池留给进程退出
+                # 收尾，安静放行
+                pass
+            except Exception as e:
+                logger.warning("子代理 client 关闭失败（fail-open）: %s", e)
 
 
 def _review_handoff(result: str, parent_agent) -> str:
