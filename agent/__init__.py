@@ -3531,7 +3531,8 @@ class AIAgent:
         # 任务级反思（后台跑，不阻塞返回）
         if self._reflection_enabled:
             try:
-                self._trigger_reflection_async()
+                from agent.reflection import trigger_reflection_async
+                trigger_reflection_async(self)
             except Exception as e:
                 logger.warning("触发反思失败（不影响主流程）: %s", e)
 
@@ -3852,78 +3853,3 @@ class AIAgent:
             self.memory_manager.sync_all(user_message, assistant_message)
         except Exception as e:
             logger.debug("memory_manager.sync_all 失败: %s", e)
-
-    def _trigger_reflection_async(self) -> None:
-        """后台触发任务级反思（不阻塞最终回答的返回）。
-
-        策略：
-        - 起 daemon 线程跑反思
-        - 优先用辅助小模型（便宜），不行再用主模型
-        - 没有记忆仓库就不做
-        - 反思看当前会话最近 20 条消息（含本轮问答和中间过程）
-        - 节流：任意时刻最多 1 个反思在跑 + 距上次不足 N 轮就跳过
-
-        参数：无。返回：无。
-        """
-        import contextvars
-        import threading
-        # 拷贝引用（线程启动后对话历史还会变，先抓快照）
-        store = self.memory_store
-        if store is None:
-            return
-
-        # 节流 1：已经有反思在跑 → 跳过（防连环问烧 token）
-        # 节流 2：距上次启动不足冷却轮数 → 跳过
-        with self._reflection_lock:
-            current_turn = self._last_reflection_turn + 1  # 本轮的"逻辑序号"
-            if self._active_reflections >= 1:
-                return
-            if (self._last_reflection_turn >= 0
-                    and current_turn - self._last_reflection_turn < self._reflection_cooldown_turns):
-                return
-            self._active_reflections += 1
-            self._last_reflection_turn = current_turn
-
-        # 优先用辅助小模型（便宜）
-        llm_for_reflection = self.aux_llm_router or self.llm_client
-        # 拍最近 20 条消息的快照（防线程启动后列表被改）
-        messages_snapshot = list(self.conversation_history[-20:])
-
-        def _bg():
-            try:
-                from agent.reflection import apply_reflection
-                apply_reflection(
-                    messages=messages_snapshot,
-                    memory_store=store,
-                    llm_client=llm_for_reflection,
-                    session_id=self.session_id or "",
-                )
-
-                # 批次 C：用户画像更新（每 5 次反思做一次）
-                try:
-                    from agent.user_profile import should_update_profile, build_and_save_profile
-                    if should_update_profile() and self.aux_llm_router:
-                        build_and_save_profile(
-                            memory_store=store,
-                            aux_llm=self.aux_llm_router,
-                            agent_home=self.codeAgent_home,
-                        )
-                except Exception as e:
-                    logger.debug("用户画像更新失败(fail-open): %s", e)
-            except Exception as e:
-                logger.debug("反思后台任务异常: %s", e)
-            finally:
-                with self._reflection_lock:
-                    self._active_reflections -= 1
-
-        # daemon 线程不会自动继承主线程的
-        # contextvars（线程内共享的上下文变量）——不复制的话，会话内切过
-        # 工作目录后，反思写项目记忆会落错项目区（退回 os.getcwd() 兜底）。
-        # 所以主线程先 copy_context()，线程入口用 ctx.run 包一层。
-        _reflection_ctx = contextvars.copy_context()
-        t = threading.Thread(
-            target=lambda: _reflection_ctx.run(_bg),
-            daemon=True,
-            name="reflection",
-        )
-        t.start()
