@@ -1145,6 +1145,14 @@ def check_split_symbol_surface():
         return _fail("LoopExitReason 双导不一致")
     if not callable(_spawn_detached):
         return _fail("_spawn_detached 丢了")
+    # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
+    import inspect
+    import agent.mcp_client as _mc
+    _src = inspect.getsource(_mc)
+    if "set_event_loop" in _src or "new_event_loop" in _src:
+        return _fail("mcp_client 仍有自建事件循环残留")
+    if "loop_host.run_async" not in _src:
+        return _fail("WS transport 没走 loop_host")
     return _ok("拆分符号面契约成立")
 
 

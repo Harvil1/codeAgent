@@ -51,7 +51,6 @@ Feature flags（功能开关，settings.json 里配）：
     不打开时，对应 transport 的配置会被自动跳过（工具通过 check_fn 机制隐藏）。
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -1018,8 +1017,9 @@ class WebSocketTransport(MCPTransport):
     """WebSocket transport。
 
     用 websockets 库建立一条长连接，JSON-RPC 消息双向收发（像打电话，
-    两边都能随时开口）。websockets 库原生是 async 异步的，这里用
-    asyncio.run 桥接成同步接口。
+    两边都能随时开口）。websockets 库原生是 async 异步的，这里把协程
+    统一交给 loop_host 常驻事件循环跑（run_async 桥接成同步接口）——
+    连接对象从建立到关闭一直绑在同一个循环上，不再来回搬家。
 
     适用场景：需要低延迟双向通信的 MCP server（比如实时协作工具）。
     """
@@ -1046,13 +1046,16 @@ class WebSocketTransport(MCPTransport):
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
         self._ws = None  # websockets 连接对象
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # 驱动交给 loop_host 常驻循环（不再自建事件循环字段）
         self._connected = False
         self._request_id = 0
         self._lock = threading.Lock()
 
     def connect(self) -> None:
-        """建立连接：自建一个 asyncio 事件循环 → 拿 OAuth 令牌 → 连 WebSocket → MCP 握手。
+        """建立连接：拿 OAuth 令牌 → 连 WebSocket → MCP 握手。
+
+        异步部分全部交给 loop_host 常驻循环驱动（不再自建事件循环，
+        也不动调用线程的循环视图）。失败清理现场后抛。
 
         参数：无。返回：无；失败清理现场后抛。
         """
@@ -1061,21 +1064,18 @@ class WebSocketTransport(MCPTransport):
         except ImportError as e:
             raise RuntimeError(f"缺少 WebSocket 依赖（websockets）: {e}")
 
+        # 惰性 import（防模块级循环依赖）；宿主循环也是首次用到才拉起
+        from agent.loop_host import loop_host
+
         # 配了 OAuth 先拿门票
         if self._oauth:
             self._refresh_access_token()
 
-        # 自建事件循环（不用主线程已有的 asyncio 循环，避免互相干扰）
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-
         try:
-            self._loop.run_until_complete(self._ws_connect())
+            loop_host.run_async(self._ws_connect())
             self._do_initialize_handshake()
         except Exception:
-            self._loop.run_until_complete(self._ws_close())
-            self._loop.close()
-            self._loop = None
+            loop_host.run_async(self._ws_close())
             raise
         self._connected = True
 
@@ -1142,9 +1142,12 @@ class WebSocketTransport(MCPTransport):
 
         返回：响应里的 result 字段；server 报错抛 RuntimeError。
         """
-        if self._ws is None or self._loop is None:
+        if self._ws is None:
             raise RuntimeError("MCP WebSocket 未建立")
         self._ensure_token()
+
+        # 惰性 import（防模块级循环依赖）
+        from agent.loop_host import loop_host
 
         with self._lock:
             self._request_id += 1
@@ -1153,7 +1156,10 @@ class WebSocketTransport(MCPTransport):
                 "jsonrpc": "2.0", "id": req_id,
                 "method": method, "params": params,
             }
-            return self._loop.run_until_complete(self._ws_send_and_recv(msg, req_id))
+            # 防死锁：send_request 的调用方是 to_thread 工具线程/启动期
+            # 主线程，均不在宿主循环线程——loop_host.run_async 安全
+            #（run_async 若在宿主循环线程内调用会自己等自己，死锁）
+            return loop_host.run_async(self._ws_send_and_recv(msg, req_id))
 
     async def _ws_send_and_recv(self, msg: dict, expected_id: int) -> Optional[dict]:
         """（内部）把请求发出去，然后收消息直到等到 id 对得上的那条响应。
@@ -1181,11 +1187,12 @@ class WebSocketTransport(MCPTransport):
 
     def send_notification(self, method: str, params: dict) -> None:
         """发一个不等回复的通知（失败静默吞掉）。"""
-        if self._ws is None or self._loop is None:
+        if self._ws is None:
             return
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         try:
-            self._loop.run_until_complete(self._ws.send(json.dumps(msg)))
+            from agent.loop_host import loop_host
+            loop_host.run_async(self._ws.send(json.dumps(msg)))
         except Exception:
             pass
 
@@ -1199,15 +1206,14 @@ class WebSocketTransport(MCPTransport):
             self._ws = None
 
     def close(self) -> None:
-        """关闭连接：关 WebSocket + 关事件循环。"""
+        """关闭连接：关 WebSocket（驱动在 loop_host 常驻循环上）。"""
         self._connected = False
-        if self._loop is not None:
+        if self._ws is not None:
             try:
-                self._loop.run_until_complete(self._ws_close())
-                self._loop.close()
+                from agent.loop_host import loop_host
+                loop_host.run_async(self._ws_close())
             except Exception:
                 pass
-            self._loop = None
 
     @property
     def is_connected(self) -> bool:
