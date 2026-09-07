@@ -1133,6 +1133,21 @@ def check_loop_host():
     return _ok("loop_host 语义十件套正常（含 timeout 取消与 stop 拒绝）")
 
 
+def check_split_symbol_surface():
+    """验证拆分后符号面不缩：agent root 的旧符号照常可用，新模块独立可导。"""
+    import agent
+    from agent import AIAgent, _spawn_detached, LoopExitReason, _drop_leading_system
+    from agent import (
+        _build_goal_continue_message, _build_channel_injection, _build_mail_injection,
+    )
+    import agent.ephemeral_inject as ei
+    if ei.LoopExitReason is not LoopExitReason:
+        return _fail("LoopExitReason 双导不一致")
+    if not callable(_spawn_detached):
+        return _fail("_spawn_detached 丢了")
+    return _ok("拆分符号面契约成立")
+
+
 def check_anthropic_usage_fields():
     """验证 Anthropic 响应包装后的 usage 带 cache 字段（缓存记账/锚点口径依赖）。"""
     from types import SimpleNamespace as NS
@@ -1818,6 +1833,7 @@ def main():
             ("read_file 工具", lambda: check_read_file_tool(tmp)),
             ("中断机制", check_interrupt),
             ("事件循环宿主", check_loop_host),
+            ("拆分符号面契约", check_split_symbol_surface),
             ("Anthropic usage 字段", check_anthropic_usage_fields),
         ]),
         ("记忆系统", [
