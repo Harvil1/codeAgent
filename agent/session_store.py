@@ -143,6 +143,10 @@ class SessionStore:
 
         为什么用 atomic_write_text（先写临时文件再改名）：保证写一半
         断电/崩溃也不会留下半个坏文件，跨平台行为一致。
+
+        写盘成功后顺手把脏计数清零（原来散在 7 个调用点各写一行重置，
+        现在收拢到这里——语义不变：写盘后脏计数归零；写失败抛异常时
+        不清零，atexit 的 flush_index 还能兜底重试）。
         """
         from agent.atomic_io import atomic_write_text
         if self._index_cache is None:
@@ -152,6 +156,8 @@ class SessionStore:
             self._index_path,
             json.dumps(data, ensure_ascii=False, indent=2),
         )
+        # 已写盘，脏计数清零（防冗余提前 flush）
+        self._index_dirty_count = 0
 
     def _session_file(self, session_id: str) -> Path:
         """（内部）算出某个会话的 .jsonl 档案袋文件完整路径。
@@ -333,7 +339,6 @@ class SessionStore:
                     )
             self._index_cache = new_index
             self._save_index()
-            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         finally:
             conn.close()
 
@@ -382,7 +387,6 @@ class SessionStore:
                 "provider": provider,
             })
             self._save_index()
-            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         # 建一个空的 .jsonl 档案袋占位
         self._session_file(session_id).touch()
         return session_id
@@ -449,7 +453,6 @@ class SessionStore:
             if (self._index_dirty_count >= _INDEX_FLUSH_COUNT
                     or _now_mono - self._index_last_flush >= _INDEX_FLUSH_SECONDS):
                 self._save_index()
-                self._index_dirty_count = 0
                 self._index_last_flush = _now_mono
         return msg_id
 
@@ -465,7 +468,6 @@ class SessionStore:
         with self._lock:
             if self._index_dirty_count > 0:
                 self._save_index()
-                self._index_dirty_count = 0
                 self._index_last_flush = time.monotonic()
 
     def get_messages(
@@ -555,7 +557,6 @@ class SessionStore:
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     break
             self._save_index()
-            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
 
     def delete_session(self, session_id: str) -> None:
         """删除会话——但其实是"假删"：消息文件改名成 .bak 备份，随时可恢复。
@@ -585,7 +586,6 @@ class SessionStore:
             index = self._load_index()
             self._index_cache = [s for s in index if s["id"] != session_id]
             self._save_index()
-            self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
 
     # ------------------------------------------------------------------
     # 会话 fork（克隆）
@@ -635,7 +635,6 @@ class SessionStore:
                         s["message_count"] = line_count
                         break
                 self._save_index()
-                self._index_dirty_count = 0  # 已写盘，脏计数清零（防冗余提前 flush）
         return new_id
 
     # ------------------------------------------------------------------
