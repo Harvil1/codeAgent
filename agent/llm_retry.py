@@ -595,3 +595,233 @@ def _compute_backoff(
         return base
     jitter = random.uniform(0, base * jitter_ratio)
     return base + jitter
+
+
+# ---------------------------------------------------------------------------
+# 拆分二期块 A：max_tokens 升级判定 / usage 加总 / 续写恢复两件 + 长退避
+# 心跳——五件从 agent/__init__.py 逐字节平移而来（self→agent，属性仍全
+# 在 AIAgent 实例上；两个纯函数原为 staticmethod，去壳直落模块级）
+# ---------------------------------------------------------------------------
+
+def try_escalate_max_tokens(agent, trigger_desc):
+    """max_tokens 截断后的「升级判定」：看能不能调大上限，能就调并打日志。
+
+    大白话：先过两道门——没装升级器（agent._max_tokens_escalator 为
+    None）、或本轮已经升过级（防无限套娃）——任一道挡住就返回 None，
+    调用方沿用截断响应。两道门都过了才真正调 escalate() 拿新上限
+    （这步有副作用：标记「已升级」），并打一条 info 日志。
+
+    参数：
+        trigger_desc: 触发原因文案，原样进日志（如「非流式」、
+            「finish_reason=length」、「纯 thinking（content 空）」）
+
+    返回：新的 max_tokens 上限；不该/不能升级时返回 None。
+    """
+    if (agent._max_tokens_escalator is None
+            or agent._max_tokens_escalator.has_escalated):
+        return None
+    new_max = agent._max_tokens_escalator.escalate()
+    logger.info(
+        "max_tokens 截断（%s），升级到 %d 重试", trigger_desc, new_max
+    )
+    return new_max
+
+
+def merge_usage_tokens(final_usage, retried):
+    """把升级重试响应的 usage 逐字段加总进旧账本。
+
+    大白话：截断那次和升级重试这次是两笔真实花费，直接拿新 usage
+    覆盖会漏记前一笔，所以四个字段（prompt/completion/两类缓存）
+    逐项相加——Anthropic 字段优先、DeepSeek 字段兜底，加总顺序与
+    字段名和原内联实现逐字节一致。重试响应没带 usage 就原样返回
+    旧账本（新调用一分钱没记）。
+
+    参数：
+        final_usage: 已有用量 dict（不是 dict 时按空账本处理）
+        retried: 升级重试拿到的响应对象
+
+    返回：加总后的新用量 dict（不原地改旧 dict）。
+    """
+    if getattr(retried, "usage", None) is None:
+        return final_usage
+    u = retried.usage
+    retry_usage = {
+        "prompt_tokens": getattr(u, "prompt_tokens", 0),
+        "completion_tokens": getattr(u, "completion_tokens", 0),
+        "cache_read": (
+            getattr(u, "cache_read_input_tokens", 0)
+            or getattr(u, "prompt_cache_hit_tokens", 0)
+        ),
+        "cache_creation": (
+            getattr(u, "cache_creation_input_tokens", 0)
+            or getattr(u, "prompt_cache_miss_tokens", 0)
+        ),
+    }
+    prev_usage = final_usage if isinstance(final_usage, dict) else {}
+    return {
+        k: (prev_usage.get(k, 0) or 0) + (retry_usage.get(k, 0) or 0)
+        for k in retry_usage
+    }
+
+
+async def recover_output_truncation(agent, response, messages, tool_schemas):
+    """调大上限后仍被截断 → 让模型「从断点接着写」的续写恢复。
+
+    做法：把截断的半截回答 +
+    一条「从中断处直接继续、不道歉不复述」的指令，追加到**只在本次请求
+    里用的局部消息**上再调 LLM，把续写拼上去；最多重试
+    llm.output_recovery_limit 次（默认 3）。
+
+    设计要点：
+    - 局部 messages 不进正式历史——恢复成功后以「拼接好的完整回答」
+      一条消息返回（主循环正常入史），不污染会话记录
+    - 只处理纯文本截断；工具调用被截断（罕见）或没有可续内容就原样返回
+    - 还没做过上限升级的截断不接手（那是上游升级路径的事）
+    - 失败放行：恢复调用挂了就返回已拼接的部分（保留截断标记，
+      主循环当最终响应处理）
+
+    参数：
+        response: 被截断的响应对象
+        messages: 本轮消息列表
+        tool_schemas: 工具 schema 列表
+
+    返回：恢复后的响应对象（或原样返回）。
+    """
+    from agent.llm_retry import (
+        DEFAULT_OUTPUT_RECOVERY_LIMIT,
+        call_with_retry,
+        detect_length_finish,
+    )
+    if not detect_length_finish(response):
+        return response
+    if (agent._max_tokens_escalator is not None
+            and not agent._max_tokens_escalator.has_escalated):
+        return response
+    msg = response.choices[0].message
+    if getattr(msg, "tool_calls", None):
+        return response
+    accumulated = msg.content or ""
+    if not accumulated.strip():
+        return response
+
+    try:
+        limit = int(
+            (agent.config or {}).get("llm", {}).get(
+                "output_recovery_limit", DEFAULT_OUTPUT_RECOVERY_LIMIT,
+            )
+        )
+    except (TypeError, ValueError):
+        limit = DEFAULT_OUTPUT_RECOVERY_LIMIT
+    limit = max(0, limit)
+
+    recovery_meta = (
+        "你的上一条回复因输出 token 上限被截断。"
+        "从中断处直接继续——不要道歉、不要复述已写内容，"
+        "从被切断的那个位置接着写。把剩余工作拆成小块完成。"
+    )
+    recovery_max_tokens = (
+        agent._max_tokens_escalator.get_next_max_tokens()
+        if agent._max_tokens_escalator is not None else None
+    )
+    local_messages = list(messages) + [
+        {"role": "assistant", "content": accumulated},
+        {"role": "user", "content": recovery_meta},
+    ]
+    for attempt in range(1, limit + 1):
+        try:
+            resp = await call_with_retry(
+                agent.llm_client,
+                local_messages,
+                tools=tool_schemas if tool_schemas else None,
+                fallback_llm_client=agent.fallback_llm_client,
+                max_tokens=recovery_max_tokens,
+                config=agent.config,
+                heartbeat_cb=llm_retry_heartbeat,  # 长退避心跳
+            )
+        except Exception as e:
+            logger.warning("续写恢复调用失败（返回已拼接内容）: %s", e)
+            break
+        piece = (resp.choices[0].message.content or "")
+        if piece:
+            accumulated += piece
+        if not detect_length_finish(resp):
+            logger.info("续写恢复成功（第 %d 次），拼接 %d 字符", attempt, len(accumulated))
+            return merge_continuation_response(
+                response, resp, accumulated, finished=True,
+            )
+        local_messages = list(local_messages) + [
+            {"role": "assistant", "content": piece},
+            {"role": "user", "content": recovery_meta},
+        ]
+    if limit > 0:
+        logger.warning("续写恢复 %d 次后仍截断，返回已拼接内容", limit)
+    return merge_continuation_response(
+        response, None, accumulated, finished=False,
+    )
+
+
+def merge_continuation_response(
+    truncated_response, last_response, content, *, finished: bool,
+):
+    """续写恢复的最后一步：把截断响应和续写响应合并成一个。
+
+    拼上内容、取最后一轮的用量，形状对齐截断前的响应结构。
+    最后一轮续写如果带工具调用，必须保留并把
+    结束原因标成 "tool_calls"（主循环按它分发工具；硬编码成
+    「无工具调用 + stop」会把模型明确要调工具的意图吞掉还伪装成正常
+    完成）。还没写完（仍截断）就维持 "length"。
+
+    参数：
+        truncated_response: 最初被截断的响应
+        last_response: 最后一轮续写的响应（可能为 None）
+        content: 拼接好的完整文本
+        finished: 关键字参数，True = 恢复完成不再截断
+
+    返回：合并后的响应对象。
+    """
+    from types import SimpleNamespace
+    src_msg = truncated_response.choices[0].message
+    last_msg = None
+    if last_response is not None:
+        try:
+            last_msg = last_response.choices[0].message
+        except (IndexError, AttributeError):
+            last_msg = None
+    tool_calls = getattr(last_msg, "tool_calls", None) if last_msg else None
+    merged = SimpleNamespace(
+        content=content if content else None,
+        tool_calls=tool_calls,
+        reasoning_content=getattr(src_msg, "reasoning_content", None),
+        thinking_signature=getattr(src_msg, "thinking_signature", None),
+    )
+    usage = (
+        getattr(last_response, "usage", None)
+        if last_response is not None
+        else getattr(truncated_response, "usage", None)
+    )
+    if not finished:
+        finish_reason = "length"
+    else:
+        finish_reason = "tool_calls" if tool_calls else "stop"
+    return SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=merged,
+            finish_reason=finish_reason,
+        )],
+        usage=usage,
+    )
+
+
+def llm_retry_heartbeat(elapsed: float, total: float) -> None:
+    """LLM 长退避期间的心跳（超过 30 秒的退避才触发，每 30 秒一跳）。
+
+    目的：等几分钟重试的时候，用户别以为 agent 死了。
+    只记 info 日志（进日志文件和轨迹），不弹通知（30 秒一弹会刷屏）。
+
+    参数：
+        elapsed: 已等待秒数
+        total: 预计总共要等多久
+
+    返回：无。
+    """
+    logger.info("LLM 重试退避中：已等待 %.0fs / 预计共 %.0fs", elapsed, total)

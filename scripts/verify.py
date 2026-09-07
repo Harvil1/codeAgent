@@ -1154,6 +1154,19 @@ def check_split_symbol_surface():
     from agent.reflection import trigger_reflection_async as _tra
     if not callable(_tra):
         return _fail("trigger_reflection_async 不可用")
+    # 拆分二期块 A：llm_retry 的五个新自由函数（max_tokens 升级/续写恢复
+    # 四件 + 长退避心跳），agent root 模块级引入防退回惰性
+    from agent.llm_retry import (
+        try_escalate_max_tokens, merge_usage_tokens,
+        recover_output_truncation, merge_continuation_response,
+        llm_retry_heartbeat,
+    )
+    if not all(callable(f) for f in (
+        try_escalate_max_tokens, merge_usage_tokens,
+        recover_output_truncation, merge_continuation_response,
+        llm_retry_heartbeat,
+    )):
+        return _fail("块 A 五自由函数有不可调用者")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
