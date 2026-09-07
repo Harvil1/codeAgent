@@ -1145,6 +1145,15 @@ def check_split_symbol_surface():
         return _fail("LoopExitReason 双导不一致")
     if not callable(_spawn_detached):
         return _fail("_spawn_detached 丢了")
+    # 五个新拆模块全部可独立 import（turn_observer 借助模块级 hoist 由
+    # import agent 传递覆盖，这里显式断言防退回惰性）
+    import agent.ephemeral_inject  # noqa: F401
+    import agent.tool_batch_summary  # noqa: F401
+    import agent.usage_accounting  # noqa: F401
+    import agent.skill_learning.turn_observer  # noqa: F401
+    from agent.reflection import trigger_reflection_async as _tra
+    if not callable(_tra):
+        return _fail("trigger_reflection_async 不可用")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc

@@ -36,7 +36,8 @@ async def maybe_skill_learning(agent, user_message: str) -> None:
     最小簇大小）都从 config 读，不再写死。
     任何异常只打 debug 日志——学习是旁路，绝不影响主对话。
 
-    参数：user_message: 本轮用户消息。返回：无。
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）；
+    user_message: 本轮用户消息。返回：无。
     """
     sl_cfg = agent.config.get("skill_learning", {}) or {}
     if (agent.spawn_depth != 0
@@ -97,7 +98,8 @@ def collect_turn_tool_trace(agent, start_idx: int):
     结果是按原调用顺序回填的，两个列表下标天然对齐；解析失败的条目
     跳过，不让观察器吃坏数据。
 
-    参数：start_idx: 本轮历史的起点下标。
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）；
+    start_idx: 本轮历史的起点下标。
 
     返回：(calls, results) 两个列表。
     """

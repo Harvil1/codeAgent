@@ -348,7 +348,7 @@ def trigger_reflection_async(agent) -> None:
     - 反思看当前会话最近 20 条消息（含本轮问答和中间过程）
     - 节流：任意时刻最多 1 个反思在跑 + 距上次不足 N 轮就跳过
 
-    参数：无。返回：无。
+    参数：agent——AIAgent 实例（原 self，属性留宿主身上）。返回：无。
     """
     import contextvars
     import threading

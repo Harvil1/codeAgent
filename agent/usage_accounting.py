@@ -41,6 +41,7 @@ def record_llm_usage(agent, response, sent_message_count: int = None) -> None:
     拿它做「权威值 + 新消息粗估」的混合计数，比全程粗估准。
 
     参数：
+        agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）
         response: LLM 返回的响应对象（从它的 usage 字段取数）
         sent_message_count: 本次实际发送的消息条数；None 时不记锚点
 

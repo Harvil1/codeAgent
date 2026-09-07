@@ -26,7 +26,6 @@ SessionStore（会话库，JSONL 文件），重开会话能恢复。
 """
 
 import asyncio
-import contextvars
 import json
 import logging
 import os
@@ -47,6 +46,13 @@ from agent.ephemeral_inject import (
     drop_leading_system as _drop_leading_system,
 )
 from agent.prompt_builder import build_system_prompt
+# 轮末技能学习观察二件同款拆出（skill_learning/turn_observer）。这里
+# 特意模块级引入而非主循环内惰性 import：import 方向
+# turn_observer→project_scope→workspace_context 无回边（无循环导入），
+# 模块坏了在 import agent 时当场炸——「学习链路任何异常只打 debug」
+# 的 fail-open 边界收到进程启动口，verify 免费覆盖，主循环也不必每轮
+# 重复 import
+from agent.skill_learning.turn_observer import maybe_skill_learning
 # 批间摘要 + 条件技能激活五件拆到独立模块（行为零变化搬迁）；属性全留
 # AIAgent，自由函数第一参收 agent 实例（原 self）
 from agent.tool_batch_summary import (
@@ -1507,8 +1513,7 @@ class AIAgent:
 
             # === 轮末行为学习观察 + 累积够了就演化成技能 ===
             # fail-open：学习链路任何异常只打 debug 日志，绝不影响主对话返回
-            # 观察二件已拆到 skill_learning/turn_observer，主循环体内惰性导入
-            from agent.skill_learning.turn_observer import maybe_skill_learning
+            # （maybe_skill_learning 在模块顶部 import 区引入，非惰性）
             await maybe_skill_learning(self, user_message)
 
             # 对话级轻量记忆提取（发出去就不管，失败也放行）
@@ -1533,7 +1538,6 @@ class AIAgent:
                 turn_exit_reason = LoopExitReason.MAX_TURNS
             else:
                 turn_exit_reason = LoopExitReason.BUDGET_EXHAUSTED
-        from agent.skill_learning.turn_observer import maybe_skill_learning
         await maybe_skill_learning(self, user_message)
         # 循环退出路径同样推进提取游标（失败也放行）
         self._maybe_auto_extract()

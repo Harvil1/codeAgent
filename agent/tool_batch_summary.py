@@ -30,7 +30,8 @@ def queue_skill_activation(agent, path: str) -> None:
     等组装消息时统一处理——时机正好赶在临时消息队列消费之前，激活
     结果当轮可见。
 
-    参数：path: 工具触碰到的文件路径。返回：无。
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）；
+    path: 工具触碰到的文件路径。返回：无。
     """
     if agent._pending_skill_paths is None:
         agent._pending_skill_paths = []
@@ -45,7 +46,7 @@ def flush_skill_activations(agent) -> None:
     每轮 LLM 调用前来一次；扫描有「修改时间+文件大小」双因子缓存兜底，
     又已从「每工具一次」去重到「每轮一次」——不值得为此改成 async。
 
-    参数：无。返回：无。
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）。返回：无。
     """
     paths, agent._pending_skill_paths = (agent._pending_skill_paths or []), []
     for p in paths:
@@ -63,7 +64,8 @@ def activate_conditional_skills(agent, path) -> None:
     ——发一条临时消息告诉模型这个技能可用了（用 load_skill 取正文），
     会话内只激活一次。出错放行。
 
-    参数：path: 被触碰的文件路径。返回：无。
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）；
+    path: 被触碰的文件路径。返回：无。
     """
     try:
         from agent.skill_commands import find_conditional_skill_matches
@@ -107,6 +109,7 @@ def start_tool_batch_summary(agent, tool_calls, safe_processed, unsafe_processed
     整条链失败放行。
 
     参数：
+        agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）
         tool_calls: 本批工具调用列表
         safe_processed: safe 组的 (调用, 结果) 列表
         unsafe_processed: unsafe 组的 (调用, 结果) 列表
@@ -146,7 +149,8 @@ def start_tool_batch_summary(agent, tool_calls, safe_processed, unsafe_processed
 async def generate_tool_batch_summary(agent, items) -> None:
     """让辅助小模型用一句话总结这批工具干了什么（出错全吞不炸）。
 
-    参数：items: (工具名, 结果片段) 列表。返回：无（结果存到
+    参数：agent: AIAgent 实例（属性读宿主、写经 agent. 前缀）；
+    items: (工具名, 结果片段) 列表。返回：无（结果存到
     agent._pending_tool_batch_summary，下轮注入）。
     """
     try:
