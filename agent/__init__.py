@@ -1213,16 +1213,12 @@ class AIAgent:
         is_pure_thinking = (
             not full_content and not tool_calls_out and bool(reasoning_content)
         )
-        if (
-            (finish_reason == "length" or is_pure_thinking)
-            and self._max_tokens_escalator is not None
-            and not self._max_tokens_escalator.has_escalated
-        ):
-            new_max = self._max_tokens_escalator.escalate()
+        new_max = None
+        if finish_reason == "length" or is_pure_thinking:
             trigger_reason = "纯 thinking（content 空）" if is_pure_thinking else "finish_reason=length"
-            logger.info(
-                "max_tokens 截断（%s），升级到 %d 重试", trigger_reason, new_max
-            )
+            new_max = self._try_escalate_max_tokens(trigger_reason)
+        # 拿到新上限才重试；None = 不该升级/已升过级，沿用截断响应
+        if new_max is not None:
             try:
                 from agent.llm_retry import call_with_retry
                 retried = await call_with_retry(
@@ -1259,25 +1255,7 @@ class AIAgent:
                         pass
                 # 更新 usage：截断那次 + 升级重试这次都真实花过钱，两边加总
                 # （直接覆盖会漏记截断那次的花费）
-                if getattr(retried, "usage", None) is not None:
-                    u = retried.usage
-                    retry_usage = {
-                        "prompt_tokens": getattr(u, "prompt_tokens", 0),
-                        "completion_tokens": getattr(u, "completion_tokens", 0),
-                        "cache_read": (
-                            getattr(u, "cache_read_input_tokens", 0)
-                            or getattr(u, "prompt_cache_hit_tokens", 0)
-                        ),
-                        "cache_creation": (
-                            getattr(u, "cache_creation_input_tokens", 0)
-                            or getattr(u, "prompt_cache_miss_tokens", 0)
-                        ),
-                    }
-                    prev_usage = final_usage if isinstance(final_usage, dict) else {}
-                    final_usage = {
-                        k: (prev_usage.get(k, 0) or 0) + (retry_usage.get(k, 0) or 0)
-                        for k in retry_usage
-                    }
+                final_usage = self._merge_usage_tokens(final_usage, retried)
             except Exception as esc_err:
                 logger.warning(
                     "max_tokens 升级重试失败（沿用截断响应）: %s", esc_err
@@ -2618,11 +2596,11 @@ class AIAgent:
                     heartbeat_cb=self._llm_retry_heartbeat,  # 长退避心跳
                 )
                 # 非流式路径也支持 max_tokens 升级
-                if (detect_length_finish(response)
-                        and self._max_tokens_escalator is not None
-                        and not self._max_tokens_escalator.has_escalated):
-                    new_max = self._max_tokens_escalator.escalate()
-                    logger.info("max_tokens 截断（非流式），升级到 %d 重试", new_max)
+                new_max = None
+                if detect_length_finish(response):
+                    new_max = self._try_escalate_max_tokens("非流式")
+                # 拿到新上限才重试；None = 不该升级/已升过级，沿用截断响应
+                if new_max is not None:
                     try:
                         response = await call_with_retry(
                             self.llm_client,
@@ -2777,6 +2755,66 @@ class AIAgent:
                 "_timestamp": time.time(),
             })
             return None
+
+    def _try_escalate_max_tokens(self, trigger_desc):
+        """max_tokens 截断后的「升级判定」：看能不能调大上限，能就调并打日志。
+
+        大白话：先过两道门——没装升级器（self._max_tokens_escalator 为
+        None）、或本轮已经升过级（防无限套娃）——任一道挡住就返回 None，
+        调用方沿用截断响应。两道门都过了才真正调 escalate() 拿新上限
+        （这步有副作用：标记「已升级」），并打一条 info 日志。
+
+        参数：
+            trigger_desc: 触发原因文案，原样进日志（如「非流式」、
+                「finish_reason=length」、「纯 thinking（content 空）」）
+
+        返回：新的 max_tokens 上限；不该/不能升级时返回 None。
+        """
+        if (self._max_tokens_escalator is None
+                or self._max_tokens_escalator.has_escalated):
+            return None
+        new_max = self._max_tokens_escalator.escalate()
+        logger.info(
+            "max_tokens 截断（%s），升级到 %d 重试", trigger_desc, new_max
+        )
+        return new_max
+
+    @staticmethod
+    def _merge_usage_tokens(final_usage, retried):
+        """把升级重试响应的 usage 逐字段加总进旧账本。
+
+        大白话：截断那次和升级重试这次是两笔真实花费，直接拿新 usage
+        覆盖会漏记前一笔，所以四个字段（prompt/completion/两类缓存）
+        逐项相加——Anthropic 字段优先、DeepSeek 字段兜底，加总顺序与
+        字段名和原内联实现逐字节一致。重试响应没带 usage 就原样返回
+        旧账本（新调用一分钱没记）。
+
+        参数：
+            final_usage: 已有用量 dict（不是 dict 时按空账本处理）
+            retried: 升级重试拿到的响应对象
+
+        返回：加总后的新用量 dict（不原地改旧 dict）。
+        """
+        if getattr(retried, "usage", None) is None:
+            return final_usage
+        u = retried.usage
+        retry_usage = {
+            "prompt_tokens": getattr(u, "prompt_tokens", 0),
+            "completion_tokens": getattr(u, "completion_tokens", 0),
+            "cache_read": (
+                getattr(u, "cache_read_input_tokens", 0)
+                or getattr(u, "prompt_cache_hit_tokens", 0)
+            ),
+            "cache_creation": (
+                getattr(u, "cache_creation_input_tokens", 0)
+                or getattr(u, "prompt_cache_miss_tokens", 0)
+            ),
+        }
+        prev_usage = final_usage if isinstance(final_usage, dict) else {}
+        return {
+            k: (prev_usage.get(k, 0) or 0) + (retry_usage.get(k, 0) or 0)
+            for k in retry_usage
+        }
 
     async def _recover_output_truncation(self, response, messages, tool_schemas):
         """调大上限后仍被截断 → 让模型「从断点接着写」的续写恢复。
