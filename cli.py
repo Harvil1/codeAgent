@@ -3577,26 +3577,28 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         logger.exception("初始化失败")
         return
 
-    # === 启动横幅（自设计机器人头 logo + 版本 + 模型 + 目录）===
+    # === 启动横幅（自设计小猫咪 logo + 版本 + 模型 + 目录）===
     # 大白话：像出租车顶灯——上车先报「哪家公司、什么车型、跑哪条道」。
-    # logo 是本项目自己的小机器人（圆脑袋 ● 眼睛 ▽ 嘴），配色跟输入提示符
-    # 同款青绿（眼睛点缀琥珀）。字符全挑 GBK 可编码的——万一启动时 UTF-8
-    # 切换失败、落回 GBK 控制台也不会变问号。
+    # logo 是本项目自己的小猫（经典 /\_/\ 猫脸：● 眼睛 ▽ 鼻子），猫身
+    # 配色跟输入提示符同款青绿，眼睛和鼻子琥珀点缀。字符全挑 GBK 可
+    # 编码的——万一启动时 UTF-8 切换失败、落回 GBK 控制台也不变问号。
     try:
         from rich.text import Text as _BannerText
         _model_name = ((rt.config.get("model") or {}).get("name")
                        or (rt.config.get("model") or {}).get("model") or "?")
         _cwd = str(getattr(rt, "workspace_cwd", "") or Path.cwd())
-        _head = "bold fg:#00aa88"   # 机身青绿（提示符同款）
-        _eyes = "bold fg:#d97706"   # 眼睛琥珀（点亮一点生气）
+        _cat = "bold fg:#00aa88"    # 猫身青绿（提示符同款）
+        _face = "bold fg:#d97706"   # 眼睛/鼻子琥珀（点亮一点生气）
         _b = _BannerText()
-        _b.append(" ╭───╮   ", style=_head)
+        _b.append(" /\\_/\\    ", style=_cat)
         _b.append(f"CodeAgent v{APP_VERSION}\n", style="bold")
-        _b.append(" │", style=_head)
-        _b.append("● ●", style=_eyes)
-        _b.append("│   ", style=_head)
+        _b.append("( ", style=_cat)
+        _b.append("● ●", style=_face)
+        _b.append(" )   ", style=_cat)
         _b.append(f"{_model_name} · 自学习 AI Agent\n")
-        _b.append(" ╰─▽─╯   ", style=_head)
+        _b.append(" > ", style=_cat)
+        _b.append("▽", style=_face)
+        _b.append(" <    ", style=_cat)
         _b.append(_cwd, style="dim")
         console.print(_b)
         console.print()   # 横幅和第一轮对话之间留一行呼吸
