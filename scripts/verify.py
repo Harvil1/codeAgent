@@ -1405,7 +1405,7 @@ def check_resume_warmup(tmp):
 
     async def _fake_compress(msgs, **kw):
         seen["pre_msgs"] = msgs       # 记下压缩前列表（应与记忆提取同对象）
-        return msgs, True, True       # 假装真做了 L4 摘要压缩
+        return list(msgs), True, True  # 返回新列表（真压缩会换对象），同一性断言才有鉴别力
 
     class _MM:
         def on_pre_compress(self, snapshot_path, messages):
