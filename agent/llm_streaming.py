@@ -60,7 +60,9 @@ async def call_llm_streaming(agent, *, messages, tools):
     # 要「累积至今」的串时就地 join，流正常收尾后统一结账一次定稿
     _content_parts: list[str] = []
     full_content = ""
-    tool_call_buffers: dict[int, dict] = {}  # idx → {id, name, arguments}
+    # idx → {id, name, arguments}；arguments 是片段 list 篮子（同
+    # _content_parts 的攒法），各读点就地 join 取整串
+    tool_call_buffers: dict[int, dict] = {}
     final_usage = None
     finish_reason = "stop"
     reasoning_content = None   # DeepSeek 的思考内容（下次带工具调用回传时要带上）
@@ -121,12 +123,17 @@ async def call_llm_streaming(agent, *, messages, tools):
                     and idx != _last_seen_idx
                     and _last_seen_idx in tool_call_buffers
                 ):
+                    # executor 按 str 消费 arguments（拿去 json.loads），
+                    # list 篮子就地 join 成整串、装进浅拷贝再传——原篮子
+                    # 不动（流循环还要继续往里 append 片段）
+                    _prev = tool_call_buffers[_last_seen_idx]
                     _executor.complete(
-                        _last_seen_idx, tool_call_buffers[_last_seen_idx],
+                        _last_seen_idx,
+                        {**_prev, "arguments": "".join(_prev["arguments"])},
                     )
                 _last_seen_idx = idx
                 buf = tool_call_buffers.setdefault(
-                    idx, {"id": "", "name": "", "arguments": ""}
+                    idx, {"id": "", "name": "", "arguments": []}
                 )
                 tc_id = getattr(tc, "id", None)
                 if tc_id:
@@ -138,7 +145,10 @@ async def call_llm_streaming(agent, *, messages, tools):
                         buf["name"] = fname
                     fargs = getattr(func, "arguments", None)
                     if fargs:
-                        buf["arguments"] += fargs
+                        # 参数片段攒进 list 篮子，读点就地 join——和上方
+                        # 正文 _content_parts 同款：比 += 每次把整串重拷
+                        # 一遍省（工具参数是系统里最大的流式载荷）
+                        buf["arguments"].append(fargs)
                 # 第一次拿到 name 时通知 callback
                 if buf["name"] and not buf.get("_notified"):
                     buf["_notified"] = True
@@ -221,8 +231,11 @@ async def call_llm_streaming(agent, *, messages, tools):
     if _executor is not None:
         try:
             if _last_seen_idx is not None and _last_seen_idx in tool_call_buffers:
+                # 同流循环里的预执行读点：executor 要 str，就地 join 传副本
+                _last = tool_call_buffers[_last_seen_idx]
                 _executor.complete(
-                    _last_seen_idx, tool_call_buffers[_last_seen_idx],
+                    _last_seen_idx,
+                    {**_last, "arguments": "".join(_last["arguments"])},
                 )
             agent._streaming_preset_results = await _executor.collect()
         except Exception as e:
@@ -240,7 +253,9 @@ async def call_llm_streaming(agent, *, messages, tools):
             type="function",
             function=SimpleNamespace(
                 name=buf["name"],
-                arguments=buf["arguments"] or "{}",
+                # 片段篮子就地 join 定稿——join 结果与旧版逐段 += 的
+                # 整串逐字节相同；空篮 join 出 ""，照样落 "{}" 兜底
+                arguments="".join(buf["arguments"]) or "{}",
             ),
         ))
 
