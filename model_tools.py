@@ -250,9 +250,6 @@ async def handle_function_call(
     """
     ensure_tools_discovered()
 
-    # 先修一遍参数类型（LLM 偶尔会把整数传成字符串之类的低级错误）
-    function_args = _coerce_tool_args(function_name, function_args)
-
     # 执行前的钩子
     hooks_enabled = (config or {}).get("hooks", {}).get("enabled", True)
     if hooks_registry and hooks_enabled:
@@ -359,20 +356,6 @@ async def handle_function_call(
             logger.warning("工具输出统一封顶失败（fail-open）: %s", e)
 
     return result
-
-
-def _coerce_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """修正 LLM 传参数时的常见类型错误（整数写成字符串、列表写成单值等；
-    设计上每个工具可登记自己的矫正规则，当前是简化版）。
-
-    参数：
-        name: 工具名（用来查该工具自己的矫正规则）。
-        args: LLM 传来的原始参数。
-
-    返回：矫正后的参数字典（当前版本原样返回）。
-    """
-    # 简化版：暂不做任何矫正
-    return args
 
 
 def get_last_resolved_tool_names() -> List[str]:

@@ -36,25 +36,6 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# 兼容老接口的存根（老函数名，别的模块可能还在 import，留着占位）
-# ---------------------------------------------------------------------------
-
-def is_fts5_available() -> bool:
-    """兼容老接口：查 FTS5 全文搜索扩展是否可用——JSONL 存储用不上，恒返回 False。"""
-    return False
-
-
-def is_trigram_available() -> bool:
-    """兼容老接口：查 trigram 索引是否可用——JSONL 存储用不上，恒返回 False。"""
-    return False
-
-
-def _contains_cjk(s: str) -> bool:
-    """兼容老接口：判断字符串里有没有中日韩字符（原供分词用，现在留着防 import 报错）。"""
-    return any('\u4e00' <= ch <= '\u9fff' for ch in s)
-
-
 # 目录卡片（index.json）去抖写盘阈值：累积 N 条或距上次写盘 T 秒才真正落盘。
 # 卡片只是目录册（消息正文在 .jsonl 里永不丢），落后几条可接受；
 # 每条消息都原子重写整个 index.json 在长会话里是 IO 热点。

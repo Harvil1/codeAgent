@@ -843,17 +843,6 @@ class AIAgent:
             self._system_prompt_built = True
         return "\n\n".join(p for p in (self._stable_prompt, self._context_prompt) if p)
 
-    def _get_volatile_prompt(self) -> str:
-        """每轮现算的易变部分（05）。
-
-        目前是空的（任务状态模型自己用工具查，没有系统级提醒）。
-        留这个入口方便以后扩展；它不进 stable/context 缓存，直接拼在
-        系统提示词末尾。
-
-        参数：无。返回：易变段文本（当前恒为空串）。
-        """
-        return ""
-
     def invalidate_system_prompt(self):
         """把缓存的系统提示词作废，下次调用时重新构建。
 
