@@ -156,7 +156,9 @@ class MemoryManager:
 
         # 第 2 步：调 LLM 做提取
         prompt = _EXTRACTION_PROMPT.format(
-            conversation_text=conversation_text[:8000],  # 掐头防 prompt 过长
+            # 保头截尾——头部正是 L4 即将摘要掉的早期内容，窗口对准将被
+            # 压缩的部分（R11 快照语义后此方向变关键）
+            conversation_text=conversation_text[:8000],
         )
         try:
             response = self._llm_client.chat_completions(

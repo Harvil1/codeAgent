@@ -1228,6 +1228,11 @@ def check_split_symbol_surface():
         return _fail("mcp_client 仍有自建事件循环残留")
     if "loop_host.run_async" not in _src:
         return _fail("WS transport 没走 loop_host")
+    # 主循环 on_pre_compress 快照语义的结构守卫（行为断言在 warmup 侧，
+    # 这里防主循环侧快照被误删——仿 R10 结构守卫手法）
+    import agent as _agent_mod
+    if "pre_compress_msgs = [dict(m) for m in messages]" not in inspect.getsource(_agent_mod):
+        return _fail("主循环 pre_compress_msgs 快照丢失")
     return _ok("拆分符号面契约成立")
 
 
@@ -1316,14 +1321,14 @@ def check_session_field_passthrough(tmp):
     # 「没说过钉不钉」的老行形状，False 是「明确说了不钉」，语义不能混）
     sid2 = store.create_session(title="f", model="t")
     store.append_message(sid2, "user", "x", pinned=False)
-    m3 = store.get_messages(sid2)[0]
+    m3 = store.get_messages(sid2)[-1]  # 取末行与原文锚定对齐，未来追加免疫
     if m3.get("pinned") is not False:
         return _fail(f"显式 pinned=False 没往返: {m3}")
     # 精确往返：直接读 sid2 会话 .jsonl 原文的最后一行，拿它的 timestamp
     # 与 get_messages 透传值逐字符对比——透传链任何一环重新生成/改写
     # 都抓得住（上面的 fromisoformat 断言只防 2023 年前的糊弄值，
-    # now() 重生成出来的新鲜时间它根本抓不住）。sid2 会话只有 m3 这
-    # 一行，原文末行天然就是 m3。
+    # now() 重生成出来的新鲜时间它根本抓不住）。m3 取 [-1] 与原文末行
+    # 同锚，未来往会话追加新行对比也不脱锚。
     raw_last = json.loads(
         (tmp / "passthrough" / f"{sid2}.jsonl")
         .read_text(encoding="utf-8").strip().splitlines()[-1])
@@ -1439,7 +1444,7 @@ def check_resume_warmup(tmp):
 
     async def _fake_compress(msgs, **kw):
         seen["orig"] = msgs           # 压缩函数吃到的原列表对象（别名检测用）
-        seen["pre_msgs"] = [dict(m) for m in msgs]  # 压缩前原貌（内容对照用）
+        seen["expected"] = [dict(m) for m in msgs]  # 压缩前原貌（内容对照用）
         # 模拟时间清理/冻结层就地改 dict（管线的真实行为）：记忆提取若拿
         # 到的是别名或共享 dict 的浅列表，旧工具结果会在这儿被换成占位
         for m in msgs:
@@ -1481,7 +1486,7 @@ def check_resume_warmup(tmp):
     mm_msgs = mm_call[1]
     if mm_msgs is seen.get("orig"):
         return _fail("L4 外围：on_pre_compress 吃到的是别名不是快照（就地改会污染它）")
-    if mm_msgs != seen.get("pre_msgs"):
+    if mm_msgs != seen.get("expected"):
         return _fail("L4 外围：快照与压缩前原貌不一致（浅拷贝失真/被污染）")
     # 断言 4b：surfaced 去重集合被清空
     if surfaced:
