@@ -1294,7 +1294,7 @@ def check_session_append_perf(tmp):
 
 
 def check_session_field_passthrough(tmp):
-    """验证 pinned/timestamp 落库往返：append 带参 → get_messages 带回。"""
+    """验证 pinned/timestamp 落库往返：append 带参 → get_messages 带回（timestamp 再与 JSONL 原文逐字符对比保真）。"""
     from agent.session_store import SessionStore
     store = SessionStore(tmp / "passthrough")
     sid = store.create_session(title="pt", model="t")
@@ -1319,7 +1319,17 @@ def check_session_field_passthrough(tmp):
     m3 = store.get_messages(sid2)[0]
     if m3.get("pinned") is not False:
         return _fail(f"显式 pinned=False 没往返: {m3}")
-    return _ok("pinned/timestamp 往返正常（含真实时刻 + 显式 False）")
+    # 精确往返：直接读 sid2 会话 .jsonl 原文的最后一行，拿它的 timestamp
+    # 与 get_messages 透传值逐字符对比——透传链任何一环重新生成/改写
+    # 都抓得住（上面的 fromisoformat 断言只防 2023 年前的糊弄值，
+    # now() 重生成出来的新鲜时间它根本抓不住）。sid2 会话只有 m3 这
+    # 一行，原文末行天然就是 m3。
+    raw_last = json.loads(
+        (tmp / "passthrough" / f"{sid2}.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()[-1])
+    if raw_last.get("timestamp") != m3.get("timestamp"):
+        return _fail("timestamp 透传不保真：JSONL 原文与 get_messages 不一致")
+    return _ok("pinned/timestamp 往返正常（含真实时刻 + 显式 False + 原文精确对比）")
 
 
 def check_resume_warmup(tmp):
