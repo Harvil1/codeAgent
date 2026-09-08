@@ -50,7 +50,7 @@ from agent.title_generator import maybe_set_title
 from agent.curator import should_run_now, run_curator_review
 from agent.wake_budget import WakeBudget
 from config import load_config
-from constants import get_codeagent_home, skills_dir, sessions_db_path, all_skills_dirs
+from constants import get_codeagent_home, skills_dir, sessions_db_path, all_skills_dirs, APP_VERSION
 from tools.skill_usage import bump_use, load_usage
 from agent.handoff import (
     HandoffStore,
@@ -752,10 +752,11 @@ class RuntimeContext:
                 main_client = None
 
         # === 流式输出回调 ===
-        # config["streaming"]["enabled"] 默认 True（打字机效果：边生成边打印）
+        # config["streaming"]["enabled"] 默认 False（不用打字机：回答整段
+        # 出——claude code 交互节奏：等待期 spinner 转着，回答一次性落屏）
         streaming_cfg = self.config.get("streaming", {})
         stream_callback = None
-        if streaming_cfg.get("enabled", True):
+        if streaming_cfg.get("enabled", False):
             stream_callback = _make_cli_stream_callback()
 
         # 给 memory_manager 注入 LLM 连接（有辅助模型就用辅助的）
@@ -1288,10 +1289,14 @@ def _make_approval_callback(aux_provider=None):
 
 
 def _make_ask_user_bridge():
-    """造 ask_user 工具的 CLI 桥接：AI 想问用户选择题时，由它画面板、收答案。
+    """造 ask_user 工具的 CLI 桥接：AI 问选择题 → 方向键选择器收答案。
 
-    agent 内部的 ask_user 工具不懂终端交互，这个桥接负责把问题渲染成
-    漂亮面板、读用户输入的序号。
+    界面跟 claude code 的 AskUserQuestion 同款：问题 + 选项列表，
+    ↑/↓ 移动 > 光标、Enter 选择、数字直达、Esc 取消；最后一项永远
+    是「Type something.」（自己输入）。多选时空格打勾。
+
+    选择器是方向键交互，必须独占终端——整个提问经 cli_ui 的 input 桥
+    搬进 pt 的 run_in_terminal 通道（主界面挂起、stdin 让出来）。
     bridge(qdata) 返回选中选项的文字列表。
     异常（EOFError/KeyboardInterrupt——输入流关闭/用户按 Ctrl+C）由
     ask_user 的 handler 统一捕获。
@@ -1304,62 +1309,21 @@ def _make_ask_user_bridge():
         options = qdata.get("options") or []
         multi = qdata.get("multi", False)
 
-        n = len(options)
-        lines = [f"[bold]{question}[/bold]", ""]
-        for i, opt in enumerate(options):
-            label = opt.get("label", "")
-            desc = opt.get("description", "")
-            lines.append(
-                f"[cyan]{i + 1}[/cyan]. {label}" + (f" — {desc}" if desc else "")
+        from cli_question import ask_via_selector
+        from cli_ui import run_with_input_bridge
+
+        def _do_ask():
+            return ask_via_selector(
+                question, options, multi,
+                fallback_input=lambda prompt="": console.input(prompt),
             )
-        # 永远给一个自己输入的口子——预设选项不可能穷尽用户的想法
-        lines.append(f"[cyan]{n + 1}[/cyan]. ✍ 其他（自己输入）")
-        console.print(Panel.fit(
-            "\n".join(lines),
-            title="❓ 需要你选择",
-            border_style="cyan",
-        ))
 
-        def _echo(answers):
-            """选完回显一行，让「我选了什么」看得见（紧凑事件行风格）。"""
-            try:
-                if answers:
-                    console.print(f"[dim]❓ 已选：{'、'.join(answers)}[/dim]")
-            except Exception:
-                pass
+        answers = run_with_input_bridge(_do_ask)
 
-        if multi:
-            # 多选：逗号分隔，数字段选选项、文字段算自定义答案（混着用也行）
-            raw = console.input(
-                "[bold]选择序号（逗号分隔，也可直接输入文字）> [/bold] ",
-            ).strip()
-            answers = []
-            for part in raw.replace("，", ",").split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                if part.isdigit() and 1 <= int(part) <= n:
-                    answers.append(options[int(part) - 1]["label"])
-                elif not part.isdigit():
-                    answers.append(part)
-            _echo(answers)
-            return answers
-
-        # 单选：数字选选项；选「其他」的序号或直接输入文字都算自定义答案
-        raw = console.input("[bold]选择序号（或直接输入你的答案）> [/bold] ").strip()
-        if raw.isdigit():
-            idx = int(raw)
-            if 1 <= idx <= n:
-                _echo([options[idx - 1]["label"]])
-                return [options[idx - 1]["label"]]
-            if idx == n + 1:
-                custom = console.input("[bold]请输入你的答案 > [/bold] ").strip()
-                _echo([custom] if custom else [])
-                return [custom] if custom else []
-            _echo([])
-            return []
-        _echo([raw] if raw else [])
-        return [raw] if raw else []
+        # 回显（claude code 同款）：● User answered … + ⎿ 问题 → 答案
+        cli_events.print_style_lines(
+            cli_events.format_ask_user_echo(question, answers))
+        return answers
     return bridge
 
 
@@ -3437,7 +3401,8 @@ def _fmt_turn_duration(seconds: float) -> str:
 def _render_statusline(rt, agent, elapsed_s=None) -> str:
     """拼一行回合收尾摘要（claude code 的 ✻ 行同款），每轮回答后打。
 
-    形如：✻ 用时 1m 57s · 会话 19.1K tok（goal 进行中再补一段）。
+    形如：✻ Cooked for 1m 57s · ↓ 19.1K tok（goal 进行中再补一段）。
+    动词从 cli_live 的动词表随机抽（Cooked/Brewed/Baked…——纯装饰）。
     返回值约定：非空字符串 → 主循环打印它；空串 → 什么都不打。
     任何异常都吞掉返回空串（状态行绝不能把主流程搞挂）。
 
@@ -3456,7 +3421,13 @@ def _render_statusline(rt, agent, elapsed_s=None) -> str:
 
         segs = []
         if elapsed_s is not None:
-            segs.append(f"✻ 用时 {_fmt_turn_duration(elapsed_s)}")
+            try:
+                import cli_live
+                verb = cli_live.pick_finish_verb()
+                dur = cli_live.fmt_elapsed(elapsed_s)
+                segs.append(f"✻ {verb} for {dur}")
+            except Exception:
+                segs.append(f"✻ 用时 {_fmt_turn_duration(elapsed_s)}")
 
         # token 段：优先用实时累加的用量统计（含缓存部分）；
         # 没有就退回 session_total_tokens 老字段（兼容 mock/旧实例）。
@@ -3508,14 +3479,16 @@ def _execute_turn(rt, agent_input: str) -> None:
         response = loop_host.run_turn(rt.agent.run_conversation(agent_input))
     finally:
         rt.turn_active = False
-    # 显示：非流式打 Markdown；流式模式下兜底文案（中断/失败/空响应等
-    # 不走流式回调）必须主动打印，否则用户看到"AI:"后面一片空白
+    # 显示：非流式打 ● 块（markdown 照常渲染、首行贴橙色圆点）；兜底
+    # 文案（中断/失败/空响应）保持黄字提醒，不走 ● 块
     if not getattr(rt.agent, "_stream_callback", None):
-        from rich.markdown import Markdown
-        try:
-            console.print(Markdown(response))
-        except Exception:
-            console.print(response)  # 渲染失败退回纯文本（fail-open）
+        if response and response.startswith(
+            ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+             "[模型只产出了思考过程", "[LLM 返回了空响应")
+        ):
+            console.print(f"[yellow]{response}[/yellow]")
+        else:
+            cli_events.print_assistant_block(response)
     elif response and response.startswith(
         ("[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
          "[模型只产出了思考过程", "[LLM 返回了空响应")
@@ -3525,7 +3498,16 @@ def _execute_turn(rt, agent_input: str) -> None:
         rt.session_store.append_message(
             rt.session_id, "assistant", response,
         )
-    # 每轮回答完打印 ✻ 收尾行（用时/token/goal）。中断/异常路径不打
+    # 本回合任务清单动过 → 收尾在滚动历史里落一份静态快照
+    # （claude code 同款：live 面板回合结束就收起，终态留档在这）
+    try:
+        import cli_live
+        if cli_live.take_tasks_touched():
+            cli_events.print_style_lines(
+                cli_events.format_tasks_static_block())
+    except Exception:
+        pass
+    # 每轮回答完打印 ✻ 收尾行（动词/用时/token/goal）。中断/异常路径不打
     # （用户主动断开就别再追加信息了）——所以本函数由调用方的
     # try/except 包着，异常根本走不到这里。
     try:
@@ -3581,12 +3563,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         n = inject_cli_agents(cli_agents)
         console.print(f"[dim]已从 CLI --agents 注入 {n} 个子代理[/dim]")
 
-    console.print(Panel(
-        "[bold blue]自学习 AI Agent[/bold blue]\n"
-        "输入消息开始对话。[cyan]/help[/cyan] 查看命令，[cyan]/quit[/cyan] 退出。",
-        border_style="blue",
-    ))
-
     try:
         rt = RuntimeContext()
         rt.initialize()
@@ -3596,6 +3572,25 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         console.print(f"[red]初始化失败: {e}[/red]")
         logger.exception("初始化失败")
         return
+
+    # === 启动横幅（claude code 同款：ASCII logo + 版本 + 模型 + 目录）===
+    # 大白话：像出租车顶灯——上车先报「哪家公司、什么车型、跑哪条道」。
+    try:
+        from rich.text import Text as _BannerText
+        _model_name = ((rt.config.get("model") or {}).get("name")
+                       or (rt.config.get("model") or {}).get("model") or "?")
+        _cwd = str(getattr(rt, "workspace_cwd", "") or Path.cwd())
+        _b = _BannerText()
+        _b.append(" ▐▛███▜▌   ", style="bold fg:#d97706")
+        _b.append(f"CodeAgent v{APP_VERSION}\n", style="bold")
+        _b.append("▝▜█████▛▘  ", style="bold fg:#d97706")
+        _b.append(f"{_model_name} · 自学习 AI Agent\n")
+        _b.append("  ▘▘ ▝▝    ")
+        _b.append(_cwd, style="dim")
+        console.print(_b)
+        console.print()   # 横幅和第一轮对话之间留一行呼吸
+    except Exception:
+        pass   # 横幅挂了不挡启动
 
     # 启动时恢复历史会话：只有 -c/--continue 才恢复最近一个；
     # 不带参数就静默开新会话（不再询问、不展示历史清单）
@@ -3886,7 +3881,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     rest_msg or "(执行此技能束中的所有技能)",
                     skills_dir(),
                 )
-                console.print(f"[dim][已触发技能束: {bundle_info['name']}（{len(bundle_info['skills'])} 个技能）][/dim]")
+                cli_events.print_style_lines([
+                    ("", f"● Skill({bundle_info['name']})"),
+                    ("dim", f"  ⎿  Successfully loaded skill bundle "
+                            f"({len(bundle_info['skills'])} skills)"),
+                ])
             # 3. 检查是否触发技能
             elif cmd_name in rt.skill_commands:
                 skill_info = rt.skill_commands[cmd_name]
@@ -3915,7 +3914,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     )
                 # 记一次技能使用（用于统计和推荐）
                 bump_use(skills_dir(), skill_info["name"])
-                console.print(f"[dim][已触发技能: {skill_info['name']}][/dim]")
+                # 触发行走 claude code 风格：● Skill(名字) + ⎿ 加载成功
+                cli_events.print_style_lines(
+                    cli_events.format_skill_lines(skill_info["name"]))
 
             # 3. 保存用户消息到 session
             if rt.session_store and rt.session_id:

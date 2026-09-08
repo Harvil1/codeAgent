@@ -594,6 +594,31 @@ def _run_child(
             except Exception:
                 pass
 
+        # === UI 直播：子代理的工具活动上报给 live 面板（纯展示，fail-open）===
+        # 大白话：子代理在下面干活，屏幕上的树（├─ 描述 · N tool uses）
+        # 靠这里每次工具调用敲一笔。只注册钩子不改执行逻辑，任何异常
+        # 都吞——展示线断了也不许断任务线。
+        _ui_child_key = kwargs.get("ui_child_key")
+        if _ui_child_key:
+            try:
+                import cli_live
+
+                def _ui_on_pre(tool_name, args, **_kw):
+                    try:
+                        from cli_events import summarize_args
+                        cli_live.note_child_tool(
+                            _ui_child_key,
+                            f"{tool_name}({summarize_args(tool_name, args or {})})",
+                        )
+                    except Exception:
+                        pass
+                    return None   # 不拦不改变量——纯旁观
+
+                child.hooks_registry.register_pre_tool_use(
+                    _ui_on_pre, name="cli_live_child")
+            except Exception as e:
+                logger.debug("live 面板钩子注册失败（fail-open）: %s", e)
+
         # === 长任务进行中的进度播报（P1-10）===
         # 用辅助小模型周期性生成「正在做什么」的摘要，推给父代理的
         # stream_callback，让前端不至于干等。辅助模型不可用时降级成心跳。

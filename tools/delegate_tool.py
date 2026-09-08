@@ -409,11 +409,31 @@ def _delegate_sync(
     # box 是线程间传结果的小盒子（普通 dict，主/子线程各写各的 key）
     box: dict = {}
 
+    # live 面板进场（单个子代理：spinner 下挂 ⎿ 当前活动 + 工具计数）。
+    # key 用 tool_call_id 派生（同回合多次委托不撞车）；纯展示 fail-open
+    _ui_key = f"sync-{kwargs.get('tool_call_id') or id(box)}"
+    kwargs["ui_child_key"] = _ui_key
+    try:
+        import cli_live
+        cli_live.agent_begin(_ui_key, goal[:50])
+    except Exception:
+        pass
+
     def _run():
         try:
             box["result"] = _run_child(goal, context, role, **kwargs)
         except Exception as e:  # noqa: BLE001
             box["error"] = e
+        finally:
+            # 收场状态同步给 live 面板（abandon 时线程还活着到不了这里，
+            # 黑板残留的 running 行由回合结束统一清）
+            try:
+                import cli_live
+                cli_live.agent_finish(
+                    _ui_key,
+                    status="failed" if "error" in box else "done")
+            except Exception:
+                pass
 
     thread = threading.Thread(target=_run, daemon=True, name="delegate-sync")
     thread.start()
@@ -685,6 +705,18 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     # 约定只改 value 不增删 key——ticker 线程遍历时就不会撞上字典变更）
     children_state = {}
     _progress_stop = threading.Event()
+    # live 面板进场（claude code 同款 Running N agents 树）：每个子代理
+    # 一行，key 用「子代理-N」——_run_child 的 UI 钩子按同一把 key 上报
+    # 工具活动（纯展示，cli_live 内部全吞异常，绝不挡委托本身）
+    try:
+        import cli_live
+        cli_live.agents_begin([
+            (f"子代理-{i + 1}",
+             (t.get("goal") or t.get("prompt") or "")[:40] or f"task-{i}")
+            for i, t in enumerate(tasks)
+        ])
+    except Exception:
+        pass
     try:
         for i, task in enumerate(tasks):
             goal = task.get("goal", "") or task.get("prompt", "")
@@ -696,6 +728,8 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
             batch_cancel_events.append(task_cancel)
             task_kwargs = dict(kwargs)
             task_kwargs["cancel_event"] = task_cancel
+            # live 面板的 key：子代理的工具活动按它归到自己的树杈上
+            task_kwargs["ui_child_key"] = f"子代理-{i + 1}"
             # 批量任务可各自指定摘要长度（不指定继承整个 subagent 调用的值）
             if task.get("summary_len") is not None:
                 task_kwargs["summary_len"] = task["summary_len"]
@@ -711,12 +745,20 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                 try:
                     if f.cancelled():
                         children_state[_name]["status"] = "cancelled"
+                        _st = "cancelled"
                     elif f.exception() is None:
                         children_state[_name]["status"] = "done"
                         children_state[_name]["summary"] = str(f.result())[:80]
+                        _st = "done"
                     else:
                         children_state[_name]["status"] = "failed"
                         children_state[_name]["summary"] = str(f.exception())[:80]
+                        _st = "failed"
+                    try:
+                        import cli_live
+                        cli_live.agent_finish(_name, status=_st)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             future.add_done_callback(_mark_child_done)

@@ -260,30 +260,30 @@ def format_result_block(tool_name, result_str, *, old_text=None,
     if tool_name == "read_file":
         n = data.get("total_lines")
         if n:
-            return [("dim", f"  ⎿  读取 {n} 行")]
+            return [("dim", f"  ⎿  Read {n} lines")]
         return []
 
     if tool_name == "search_files":
         matches = data.get("matches") or []
         cnt = data.get("match_count", len(matches))
-        out = [("dim", f"  ⎿  找到 {cnt} 处匹配")]
+        out = [("dim", f"  ⎿  Found {cnt} matches")]
         for m in matches[:_BLOCK_BODY_LINES]:
             out.append(("dim",
                         f"     {_cut(m.get('file', '?'), 40)}:{m.get('line', '?')}"
                         f"  {_cut(m.get('content', ''), 50)}"))
         more = cnt - min(len(matches), _BLOCK_BODY_LINES)
         if more > 0:
-            out.append(("dim", f"     … 还有 {more} 处"))
+            out.append(("dim", f"     … +{more} more"))
         return out
 
     if tool_name == "glob":
         matches = data.get("matches") or []
         cnt = data.get("count", len(matches))
-        out = [("dim", f"  ⎿  找到 {cnt} 个文件")]
+        out = [("dim", f"  ⎿  Found {cnt} files")]
         for m in matches[:_BLOCK_BODY_LINES]:
             out.append(("dim", f"     {_cut(str(m), 60)}"))
         if cnt > _BLOCK_BODY_LINES:
-            out.append(("dim", f"     … 还有 {cnt - _BLOCK_BODY_LINES} 个"))
+            out.append(("dim", f"     … +{cnt - _BLOCK_BODY_LINES} more"))
         return out
 
     # 没特判的工具：给一行结果摘要（没有就算了，不打空块）
@@ -298,20 +298,53 @@ def format_result_block(tool_name, result_str, *, old_text=None,
 # ---------------------------------------------------------------------------
 
 def format_subagent_depart(args) -> str:
-    """子代理头行：● Agent(任务摘要) 角色名。"""
-    name = (args or {}).get("subagent_type") or "general-purpose"
-    task = _cut((args or {}).get("prompt") or "", 60)
+    """子代理头行：单个 ● Agent(任务摘要) 角色名；批量 ● Running N agents…。"""
+    args = args or {}
+    tasks = args.get("tasks")
+    if isinstance(tasks, list) and tasks:
+        n = len(tasks)
+        plural = "agents" if n != 1 else "agent"
+        return f"● Running {n} {plural}…"
+    name = args.get("subagent_type") or "general-purpose"
+    task = _cut(args.get("prompt") or "", 60)
     return f"● Agent({task}) {name}" if task else f"● Agent {name}"
 
 
 def format_subagent_done(args, dt, result_str) -> list:
-    """子代理完成块：⎿ Done（耗时）/ 失败给 ✗ + 摘要。"""
+    """子代理完成块：单个 ⎿ Done (耗时)；批量 ● N agents finished + 树。"""
     dur = format_duration(dt)
+    try:
+        data = json.loads(result_str or "{}")
+    except Exception:
+        data = {}
+    # 批量收尾：● N agents finished + 每支一行（描述 · 工具数 · Done/✗）
+    if isinstance(data, dict) and data.get("mode") == "batch":
+        results = data.get("results") or []
+        tasks = (args or {}).get("tasks") or []
+        lines = [("", f"● {len(results)} agents finished")]
+        for i, r in enumerate(results):
+            goal = ""
+            if i < len(tasks):
+                goal = tasks[i].get("goal", "") or tasks[i].get("prompt", "")
+            desc = _cut(goal, 40) or f"task-{r.get('task_index', i)}"
+            try:
+                import cli_live
+                tools = cli_live.agent_tools_count(f"子代理-{i + 1}")
+            except Exception:
+                tools = 0
+            tool_bit = f" · {tools} tool uses" if tools else ""
+            if r.get("success"):
+                lines.append(("dim", f"   ├─ {desc}{tool_bit} · Done"))
+            else:
+                lines.append(("red",
+                              f"   ├─ {desc}{tool_bit} · ✗ "
+                              f"{_cut(r.get('error', ''), 40)}"))
+        return lines
     ok, preview = result_preview(result_str)
     if not ok:
         line = f"  ⎿  ✗ {_cut(preview, 60)}" if preview else "  ⎿  ✗"
         return [("red", line)]
-    return [("dim", f"  ⎿  Done（{dur}）" if dur else "  ⎿  Done")]
+    return [("dim", f"  ⎿  Done ({dur})" if dur else "  ⎿  Done")]
 
 
 def is_async_subagent_result(result_str: str) -> bool:
@@ -359,8 +392,129 @@ def format_task_event(tool_name, result_str) -> list:
         pass
     head = f"● TaskComplete({_cut(subject, 50)})" if subject else "● TaskComplete"
     if done is not None:
-        return [("", head), ("dim", f"  ⎿  完成 {done}/{total}")]
+        return [("", head), ("dim", f"  ⎿  {done}/{total} done")]
     return [("", head)]
+
+
+# ---------------------------------------------------------------------------
+# assistant 正文块 / 技能行 / 提问回显 / 任务静态快照（claude code 同款）
+# ---------------------------------------------------------------------------
+
+# assistant 圆点的 ANSI 颜色（claude code 的 ● 是橙色，醒目不刺眼）
+_BULLET_ANSI = "\x1b[38;5;208m●\x1b[0m"
+
+
+# rich 给 h1 画的 ┏━┓ 全包框边线——标题已降级成粗体段落（见下），
+# 正常不会出现，这里只兜底剥带边框角/竖边的线；**不动** ━── 线
+#（那是 markdown 表格的列分隔，误杀会把表格拍散）
+_RULE_LINE_RE = re.compile(r"^[\s┏┓┗┛┃┳┻╋]+$")
+_HEAD_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+
+
+def render_assistant_ansi(text: str, width: int = 100) -> str:
+    """把 markdown 回答渲染成 claude code 风格的 ● 块（保留 rich 颜色）。
+
+    大白话：先让 rich 在内存里把 markdown 画成带颜色的文本（粗体、
+    表格对齐、代码块底色……），再给第一行贴橙色 ● 、其余行缩进两格
+    ——跟 claude code 的 assistant 消息一个长相。
+
+    两个 claude code 化的处理：
+    1. 标题降级：rich 的 h1 画 ┏━┓ 全包框、h1-h3 居中——先把
+       `# 标题` 换成 `**标题**`（粗体左对齐，claude code 同款）；
+    2. 装饰线剥除：万一还有漏网的 ━── 分隔线，直接删行。
+
+    参数：
+        text: 模型的 markdown 回答
+        width: 渲染宽度（默认取不到就 100）
+
+    返回：渲染后的多行字符串（带 ANSI 色码，末尾无换行符）。
+    """
+    from io import StringIO
+    from rich.console import Console as _MemConsole
+    from rich.markdown import Markdown
+
+    md = _HEAD_RE.sub(r"**\1**", text or "")
+    sio = StringIO()
+    inner = _MemConsole(
+        file=sio, force_terminal=True, color_system="truecolor",
+        width=max(40, width), legacy_windows=False,
+    )
+    inner.print(Markdown(md))
+    raw = (sio.getvalue() or "").rstrip("\n")
+    if not raw:
+        return ""
+    lines = []
+    seen_text = False
+    for ln in raw.splitlines():
+        if _RULE_LINE_RE.match(ln):
+            continue
+        ln = ln.rstrip()
+        if not seen_text:
+            if not ln:
+                continue   # ● 前头的空行丢掉（rich 的块前垫层）
+            lines.append(f"{_BULLET_ANSI} {ln}")
+            seen_text = True
+        else:
+            # 空行就空着（缩进的空行在部分终端留白残影）
+            lines.append(f"  {ln}" if ln.strip() else "")
+    return "\n".join(lines)
+
+
+def print_assistant_block(text: str) -> None:
+    """assistant 正文整块上屏（非流式路径专用）。fail-open。"""
+    try:
+        if not (text or "").strip():
+            return
+        import shutil
+        width = shutil.get_terminal_size((100, 24)).columns
+        from cli_ui import emit_ansi
+        emit_ansi(render_assistant_ansi(text, width) + "\n")
+    except Exception:
+        try:
+            from cli_ui import console
+            console.print(text)
+        except Exception:
+            pass
+
+
+def format_skill_lines(name: str) -> list:
+    """技能触发行：● Skill(名字) + ⎿ Successfully loaded skill。"""
+    return [
+        ("", f"● Skill({name})"),
+        ("dim", "  ⎿  Successfully loaded skill"),
+    ]
+
+
+def format_ask_user_echo(question: str, answers: list) -> list:
+    """提问回答后的回显块：● User answered … + ⎿ 问题 → 答案。"""
+    q = _cut(question or "", 70)
+    a = "、".join(str(x) for x in (answers or [])) or "（未选择）"
+    return [
+        ("", "● User answered Claude's questions:"),
+        ("dim", f"  ⎿  · {q} → {a}"),
+    ]
+
+
+def format_tasks_static_block(width: int = 80) -> list:
+    """回合收尾的任务清单静态快照（滚动历史里留一份终态）。
+
+    长相（claude code 同款）：
+
+        5 tasks (1 done, 4 open)
+        □ 写设计文档+自审+用户审阅
+        ■ 探索项目上下文（派子agent全面扫描）
+
+    空清单返回空列表（没任务就不打）。
+    """
+    try:
+        import cli_live
+        summary = cli_live.tasks_summary()
+        if not summary:
+            return []
+        return ([("dim", f"  {summary}")]
+                + [("dim", t) for _, t in cli_live.tasks_lines(width)])
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +583,9 @@ def reset_pending(rt) -> None:
 
 _SUBAGENT_TOOLS = {"subagent", "delegate_task"}
 _TASK_TOOLS = {"task_create", "task_complete"}
+# 静音工具：界面已有专属呈现（ask_user 的问题面板 + 回答回显），
+# POST 再打一行 ● 头行纯属重复——跳过
+_QUIET_TOOLS = {"ask_user"}
 # 写类工具：POST 画 Write/Update + 带行号 diff（纯 UI 层读文件，
 # 不给核心工具加一个字的负担）
 _WRITE_TOOLS = {"write_file", "str_replace"}
@@ -442,6 +599,21 @@ def _snapshot_write_target(args):
     return str(args.get("path") or args.get("file_path") or "").strip()
 
 
+def print_style_lines(lines) -> None:
+    """把 (style, text) 行列表画上屏（模块级公共出口）。
+
+    rich Text 渲染、不解析 markup——文件内容里带 [ ] 方括号不会被误当
+    富文本标签。cli.py 的回合收尾（任务静态快照）也从这儿走。
+    """
+    from cli_ui import console
+    from rich.text import Text
+    for style, text in lines or []:
+        try:
+            console.print(Text(text, style=style) if style else Text(text))
+        except Exception:
+            pass
+
+
 def install_event_lines(rt) -> None:
     """把两类钩子装到 agent 上（run_interactive 装配区调用一次）。
 
@@ -450,8 +622,6 @@ def install_event_lines(rt) -> None:
     不挂 FAILURE 钩子——POST 对含 error 的结果已打 ✗，
     再挂会一次失败打两行（model_tools 两个钩子都发）。
     """
-    from cli_ui import console
-
     pairer = EventPairer()
     rt._event_pairer = pairer   # 挂到 rt 上：回合开始时 reset_pending 清板用
     rt.event_pending = []
@@ -468,14 +638,8 @@ def install_event_lines(rt) -> None:
             pass
 
     def _print_block(lines) -> None:
-        """把 (style, text) 行列表画上屏（rich Text，不解析 markup——
-        文件内容里带 [ ] 方括号不会被误当成富文本标签）。"""
-        from rich.text import Text
-        for style, text in lines:
-            try:
-                console.print(Text(text, style=style) if style else Text(text))
-            except Exception:
-                pass
+        """把 (style, text) 行列表画上屏（真身在模块级 print_style_lines）。"""
+        print_style_lines(lines)
 
     def _snapshot_old(tool_name, args):
         """PRE 时把要写的文件现状拍下来（读不到/太大就放弃 diff）。"""
@@ -525,6 +689,8 @@ def install_event_lines(rt) -> None:
             args = args or {}
             dt = pairer.pop(tool_name, args)
             _update_pending()
+            if tool_name in _QUIET_TOOLS:
+                return result   # 界面已有专属呈现，事件行免了
             if tool_name in _SUBAGENT_TOOLS:
                 # 后台异步派发立即返回受理回执（子代理还没跑完）——
                 # 只当「已出发」处理，不当「已完成」
@@ -533,6 +699,12 @@ def install_event_lines(rt) -> None:
                 _print_block(format_subagent_done(args, dt, result))
             elif tool_name in _TASK_TOOLS:
                 _print_block(format_task_event(tool_name, result))
+                # 任务清单动了：live 面板（spinner 下的 □/■/√）同步重拉
+                try:
+                    import cli_live
+                    cli_live.refresh_tasks()
+                except Exception:
+                    pass
             else:
                 head = format_tool_line(tool_name, args, dt, result)
                 if tool_name in _WRITE_TOOLS:

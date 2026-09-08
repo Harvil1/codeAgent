@@ -13,6 +13,9 @@
 import os
 from pathlib import Path
 
+# 应用版本号（启动横幅用；跟 pyproject.toml 的 [project].version 保持同步）
+APP_VERSION = "0.1.0"
+
 
 def _default_codeagent_home() -> Path:
     """算出 agent home（数据总目录）的位置。

@@ -28,99 +28,51 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# spinner 动画帧（盲文点阵转圈，一圈 10 帧）
-SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-# 状态栏三档宽度阈值（跟 hermes 学的：窄屏只留最要紧的）
-_TIER_NARROW = 52    # < 52 列：模型 + 计时
-_TIER_MEDIUM = 76    # < 76 列：加 目录/后台/正在跑的工具
-
-
-def _fmt_elapsed(seconds) -> str:
-    """秒数 → 状态栏计时文案（None/未开始返回空串）。"""
-    if not seconds or seconds < 0:
-        return ""
-    return f"{int(seconds)}s"
-
-
-def _spinner_frames() -> list:
-    """动画帧：皮肤声明了就用皮肤的，否则盲文帧（皮肤可换帧不换代码）。"""
-    try:
-        import cli_skin
-        frames = cli_skin.get_active_skin().spinner_frames
-        if frames:
-            return list(frames)
-    except Exception:
-        pass
-    return SPINNER_FRAMES
+# 页脚两档宽度阈值（claude code 风格：窄屏只留模型段）
+_TIER_NARROW = 52    # < 52 列：只有 ⏵⏵ 模型
+_TIER_MEDIUM = 76    # >= 76 列：给按键说明
 
 
 def status_bar_segments(rt, width: int, elapsed_s=None) -> list:
-    """状态栏内容段（纯函数）：按宽度三档过滤，返回段文本列表。
+    """页脚内容段（纯函数）：claude code 风格的底部条。
 
-    大白话：状态栏像行李箱——宽屏全装上，中屏扔掉按键说明书，
-    窄屏只留证件（模型）和手表（计时）。
+    长相：``⏵⏵ {模型} · Ctrl+C 中断 · ctrl+t 任务面板``——
+    按宽度两档过滤：窄屏只留模型，中屏以上给全量按键说明。
 
     参数：
-        rt: RuntimeContext（读 agent.model/workspace_cwd/bg_count/
-            event_pending——全是现有黑板，零新状态）
+        rt: RuntimeContext（读 agent.model/bg_count——现有黑板）
         width: 终端列数
-        elapsed_s: 回合已进行秒数（None=空闲）
+        elapsed_s: 兼容旧签名的保留参数（不再展示计时——计时在 spinner 行）
 
-    返回：str 列表，调用方用 " │ " 拼接。
+    返回：str 列表，调用方用 " · " 拼接。
     """
     segs = []
     try:
         model = getattr(getattr(rt, "agent", None), "model", "") or ""
         if model:
-            segs.append(f"⚡{model}")
+            segs.append(f"⏵⏵ {model}")
+        else:
+            segs.append("⏵⏵ CodeAgent")
     except Exception:
-        pass
+        segs.append("⏵⏵ CodeAgent")
     if width >= _TIER_NARROW:
-        try:
-            cwd = getattr(rt, "workspace_cwd", "") or ""
-            if cwd:
-                tail = str(cwd).replace("\\", "/").rstrip("/").split("/")[-1]
-                segs.append(f"📂{tail}")
-        except Exception:
-            pass
         bg = getattr(rt, "bg_count", None)
         if bg:
             segs.append(f"☂{bg}个后台")
-        pend = getattr(rt, "event_pending", None)
-        if pend:
-            segs.append(f"◐{pend[-1]}")   # 正在跑的工具（最晚出发的）
-    if elapsed_s is not None:
-        t = _fmt_elapsed(elapsed_s)
-        if t:
-            segs.append(t)
     if width >= _TIER_MEDIUM:
-        segs.append("Enter发送 Alt+↵换行")
+        segs.append("Ctrl+C 中断 · ctrl+t 任务面板")
     return segs
 
 
 def spinner_text(frame: int, rt, turn_started_at, now: float) -> str:
     """spinner 行文案（纯函数）：空闲返回空串（行隐藏）。
 
-    参数：
-        frame: 动画帧下标（spinner 线程递增，这里只取模）
-        rt: 读 turn_active / event_pending
-        turn_started_at: 回合开始时刻（time.monotonic 值，None=没在跑）
-        now: 当前时刻（传进来而不是函数内取，方便测试）
-
-    返回：如 "⠋ terminal 3s" / "⠋ 思考中… 3s" / ""（空闲）
+    长相委托给 cli_live（claude code 同款）：``✶ Cooking… (3m 11s · ↓ 17.6k tokens)``。
+    函数保留在这层是为了兼容既有调用方/测试签名。
     """
     try:
-        if not getattr(rt, "turn_active", False):
-            return ""
-        elapsed = (now - turn_started_at) if turn_started_at else 0.0
-        t = _fmt_elapsed(elapsed)
-        pend = getattr(rt, "event_pending", None)
-        frames = _spinner_frames()
-        mark = frames[frame % len(frames)]
-        if pend:
-            return f"{mark} {pend[-1]} {t}".strip()
-        return f"{mark} 思考中… {t}".strip()
+        import cli_live
+        return cli_live.spinner_text(frame, rt, turn_started_at, now)
     except Exception:
         return ""   # 纯视觉，任何异常都当「不显示」
 
@@ -479,6 +431,21 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
         else:
             b.delete_before_cursor()
 
+    @kb.add("c-t")
+    def _ctrl_t(event):
+        # 任务面板开关（claude code 同款 ctrl+t：嫌子代理树/任务清单
+        # 碍眼就藏起来，再按一次放出来——纯视觉，失败就当没按过）
+        try:
+            import cli_live
+            hidden = cli_live.toggle_panel()
+            from cli_ui import console
+            from rich.text import Text
+            console.print(Text(
+                "[任务面板已隐藏]" if hidden else "[任务面板已显示]",
+                style="dim"))
+        except Exception:
+            pass
+
     return kb
 
 
@@ -550,11 +517,8 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
 
         def _status_bar_text():
             try:
-                elapsed = None
-                if getattr(rt, "turn_active", False) and state["turn_started"]:
-                    elapsed = time.monotonic() - state["turn_started"]
-                return " │ ".join(
-                    status_bar_segments(rt, _term_width(), elapsed_s=elapsed)
+                return " · ".join(
+                    status_bar_segments(rt, _term_width())
                 ) or "CodeAgent"
             except Exception:
                 return "CodeAgent"
@@ -563,6 +527,24 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             return spinner_text(
                 state["frame"], rt, state["turn_started"], time.monotonic()
             )
+
+        def _live_text():
+            """live 区内容（spinner 行 + 子代理树/任务清单面板）。
+
+            返回 pt 的 fragment 列表 [(style, text), ...]；空列表 = 整块隐藏
+            （idle 时 live 区整个收起来——任务清单只在回合进行中挂着，
+            回合收尾由 cli_events 落一段静态快照进滚动历史）。
+            """
+            try:
+                head = _spinner_line()
+                if not head:
+                    return []
+                frags = [("", head)]
+                import cli_live
+                frags.extend(cli_live.panel_lines(_term_width()))
+                return frags
+            except Exception:
+                return []
 
         # ---- 输入区：多行 TextArea（历史/补全/灰字提示全挂上）----
         history = (FileHistory(str(history_path))
@@ -590,10 +572,19 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         except Exception:
             pass   # 提示贴不上就裸奔，不挡输入
 
-        # ---- 各层容器（自上而下）----
-        spinner_row = ConditionalContainer(
-            Window(FormattedTextControl(_spinner_line), height=1),
-            filter=Condition(lambda: bool(_spinner_line())),
+        # ---- 各层容器（自上而下：live 区 / ─── / 输入区 / ─── / 页脚）----
+        # live 区 = spinner 行 + 子代理树 + 任务清单（claude code 同款：
+        # 回合进行中挂在输入框上方，回合结束整块收起）
+        live_area = ConditionalContainer(
+            Window(
+                FormattedTextControl(_live_text, show_cursor=False),
+                height=lambda: Dimension(
+                    min=0, max=20,
+                    preferred=max(1, len(_live_text())),
+                ),
+                dont_extend_height=True,
+            ),
+            filter=Condition(lambda: bool(_live_text())),
         )
         separator = Window(
             height=1, char="─", style="class:separator",
@@ -605,13 +596,15 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
 
         _style_base = {
             "prompt": "bold fg:#00aa88",
-            "status-bar": "reverse",
+            "status-bar": "fg:#888888",
             "separator": "fg:#555555",
             "placeholder": "fg:#777777",
+            "live-dim": "fg:#8a8a8a",
         }
         _style_base.update(cli_skin.get_pt_style_overrides())
         app = Application(
-            layout=Layout(HSplit([spinner_row, input_area, separator, status_bar])),
+            layout=Layout(HSplit(
+                [live_area, separator, input_area, separator, status_bar])),
             key_bindings=_build_key_bindings(
                 input_queue, eof_sentinel, interrupt_fn, force_exit_fn),
             output=output,
@@ -664,10 +657,20 @@ def start_spinner_thread(rt, app, stop_event):
                     active = bool(getattr(rt, "turn_active", False))
                     if active and not state["was_active"]:
                         state["turn_started"] = time.monotonic()  # 按秒表
+                        try:
+                            import cli_live
+                            cli_live.turn_started(getattr(rt, "agent", None))
+                        except Exception:
+                            pass
                     elif not active:
                         state["turn_started"] = None              # 归零
+                        try:
+                            import cli_live
+                            cli_live.turn_ended()
+                        except Exception:
+                            pass
                     state["was_active"] = active
-                    state["frame"] = (state["frame"] + 1) % len(_spinner_frames())
+                    state["frame"] = (state["frame"] + 1) % 1000
                 invalidate_throttled(app)
             except Exception:
                 pass   # 动画线程挂了不许连累任何人

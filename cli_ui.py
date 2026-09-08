@@ -54,6 +54,25 @@ def set_active_app(app) -> None:
     _active_app = app
 
 
+def run_with_input_bridge(fn):
+    """把 fn 搬进 pt 的 run_in_terminal 通道执行（跨线程借用终端）。
+
+    大白话：工作线程想直接跟用户终端打交道（比如画方向键选择器），
+    必须先让主界面挂起、把 stdin 让出来——这就是 input 桥的通道。
+    没桥（无界面/直跑）就在原地执行，行为不变。
+
+    参数：fn: () -> 结果
+    返回：fn 的返回值（桥执行失败按原地执行兜底）。
+    """
+    if _input_bridge is not None and \
+            threading.current_thread() is not threading.main_thread():
+        try:
+            return _input_bridge(fn)
+        except Exception as e:
+            logger.warning("input 桥借用失败，原地执行: %s", e)
+    return fn()
+
+
 def emit_ansi(text: str) -> None:
     """ANSI 文本 → 终端打印（全程序唯一打印出口，任何线程都能调）。
 

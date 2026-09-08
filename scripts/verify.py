@@ -1949,7 +1949,7 @@ def check_event_lines():
     if "✗" not in err[0][1] or "exit 1" not in err[0][1]:
         return _fail(f"错误块不对：{err}")
     rd = ce.format_result_block("read_file", '{"total_lines": 135}')
-    if "读取 135 行" not in rd[0][1]:
+    if "Read 135 lines" not in rd[0][1]:
         return _fail(f"read 块不对：{rd}")
     # 带行号 diff：红删绿增 + 截断提示 + 行号必须是整数
     d = ce.build_numbered_diff("a\nb\nc\n", "a\nX\nc\nd\n")
@@ -2029,7 +2029,7 @@ def _gbk_safe(s: str) -> str:
 
 
 def check_status_bar_tiers():
-    """验证状态栏三档宽度：该出现的段出现、不该出现的段不出现。"""
+    """验证页脚两档宽度（claude code 风格底部条）：该出现的段出现。"""
     from types import SimpleNamespace as _NS
     from cli_layout import status_bar_segments
 
@@ -2040,27 +2040,181 @@ def check_status_bar_tiers():
         event_pending=["terminal"],
         turn_active=True,
     )
-    # 窄屏 <52：模型 + 计时；目录/后台/工具/按键提示都不出现
-    segs = status_bar_segments(rt, width=40, elapsed_s=12.0)
-    joined = " │ ".join(segs)
-    if "test-model" not in joined or "12s" not in joined:
-        return _fail(f"窄屏缺模型/计时: {_gbk_safe(joined)}")
-    if "codeAgent" in joined or "后台" in joined or "terminal" in joined:
-        return _fail(f"窄屏不该有目录/后台/工具段: {_gbk_safe(joined)}")
-    # 中屏 <76：目录/后台/工具出现，按键提示还没有
-    segs = status_bar_segments(rt, width=60, elapsed_s=12.0)
-    joined = " │ ".join(segs)
-    for frag in ("test-model", "codeAgent", "后台", "terminal", "12s"):
+    # 窄屏 <52：只有模型段（⏵⏵ test-model）
+    segs = status_bar_segments(rt, width=40)
+    joined = " · ".join(segs)
+    if "test-model" not in joined or "⏵⏵" not in joined:
+        return _fail(f"窄屏缺模型段: {_gbk_safe(joined)}")
+    if "后台" in joined or "ctrl+t" in joined:
+        return _fail(f"窄屏不该有后台/按键段: {_gbk_safe(joined)}")
+    # 中屏 <76：加后台段，还没有按键说明
+    segs = status_bar_segments(rt, width=60)
+    joined = " · ".join(segs)
+    for frag in ("test-model", "后台"):
         if frag not in joined:
             return _fail(f"中屏缺 {frag!r}: {_gbk_safe(joined)}")
-    if "Enter" in joined:
-        return _fail(f"中屏不该有按键提示: {_gbk_safe(joined)}")
-    # 宽屏 >=76：按键提示出现
-    segs = status_bar_segments(rt, width=100, elapsed_s=12.0)
-    joined = " │ ".join(segs)
-    if "Enter" not in joined:
-        return _fail(f"宽屏缺按键提示: {_gbk_safe(joined)}")
-    return _ok("三档宽度内容正确")
+    if "ctrl+t" in joined:
+        return _fail(f"中屏不该有按键说明: {_gbk_safe(joined)}")
+    # 宽屏 >=76：按键说明出现
+    segs = status_bar_segments(rt, width=100)
+    joined = " · ".join(segs)
+    if "ctrl+t" not in joined:
+        return _fail(f"宽屏缺按键说明: {_gbk_safe(joined)}")
+    return _ok("页脚两档宽度内容正确")
+
+
+def check_live_panel():
+    """验证 live 面板：spinner 文案 + 子代理树 + 任务清单 + ctrl+t 开关。"""
+    from types import SimpleNamespace as _NS
+    import cli_live as cl
+    import cli_events as ce
+
+    # spinner：空闲空串；回合中 ✶ 动词… (计时 · ↓ tokens)
+    rt_idle = _NS(turn_active=False)
+    if cl.spinner_text(0, rt_idle, None, 0.0) != "":
+        return _fail("空闲时 spinner 行应为空串")
+    rt_run = _NS(
+        turn_active=True,
+        agent=_NS(_llm_usage_stats={
+            "total_prompt_tokens": 1000, "total_completion_tokens": 500}),
+    )
+    s = cl.spinner_text(3, rt_run, 100.0, 163.0)
+    if "…" not in s or "(1m 3s" not in s or "↓" not in s or "tokens" not in s:
+        return _fail(f"spinner 行长相不对: {s!r}")
+    if cl.fmt_elapsed(45) != "45s" or cl.fmt_elapsed(191) != "3m 11s":
+        return _fail(f"计时格式不对: {cl.fmt_elapsed(45)}/{cl.fmt_elapsed(191)}")
+    if cl.fmt_tokens(17600) != "17.6k":
+        return _fail(f"token 格式不对: {cl.fmt_tokens(17600)}")
+
+    # 批量子代理树：├─/└─ + tool uses + 当前活动
+    cl.agents_begin([("a", "扫描代码"), ("b", "挖上下文")])
+    cl.note_child_tool("a", "read_file(x.py)")
+    cl.note_child_tool("a", "glob(*.py)")
+    cl.note_child_tool("b", "search_files(def foo)")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "├─ 扫描代码 · 2 tool uses" not in joined:
+        return _fail(f"批量树缺第一枝: {joined!r}")
+    if "└─ 挖上下文" not in joined or "glob(*.py)" not in joined:
+        return _fail(f"批量树缺末枝/活动: {joined!r}")
+    cl.agent_finish("a", status="done")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "├─ 扫描代码 · Done" not in joined:
+        return _fail(f"完成枝长相不对: {joined!r}")
+
+    # 单个子代理形态：⎿ 当前活动 + 计数
+    cl.agents_begin([])
+    cl.agent_begin("solo", "实现 Task 1")
+    cl.note_child_tool("solo", "Update(a.py)")
+    cl.note_child_tool("solo", "Bash(pytest)")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "⎿" not in joined or "2 tool uses" not in joined:
+        return _fail(f"单代理形态不对: {joined!r}")
+
+    # 任务清单：□/■/√ + 汇总 + 静态快照块
+    with cl._lock:
+        cl._tasks = [
+            {"subject": "写设计文档", "status": "pending"},
+            {"subject": "探索项目", "status": "in_progress"},
+            {"subject": "澄清问题", "status": "completed"},
+        ]
+    text = "\n".join(t for _, t in cl.tasks_lines(100))
+    for frag in ("□ 写设计文档", "■ 探索项目", "√ 澄清问题"):
+        if frag not in text:
+            return _fail(f"任务清单缺 {frag!r}: {text!r}")
+    if cl.tasks_summary() != "3 tasks (1 done, 1 in progress, 1 open)":
+        return _fail(f"任务汇总不对: {cl.tasks_summary()!r}")
+    static = "\n".join(t for _, t in ce.format_tasks_static_block(100))
+    if "3 tasks (1 done" not in static or "□ 写设计文档" not in static:
+        return _fail(f"静态快照块不对: {static!r}")
+
+    # ctrl+t：藏起来面板空、再按回来
+    cl.toggle_panel()
+    if cl.panel_lines(100) != []:
+        return _fail("ctrl+t 藏面板失效")
+    cl.toggle_panel()
+    if cl.panel_lines(100) == []:
+        return _fail("ctrl+t 恢复面板失效")
+
+    # 收尾清场（不污染其他检查）
+    with cl._lock:
+        cl._tasks = []
+    cl.agents_begin([])
+    return _ok("live 面板（spinner/子代理树/任务清单/开关）正常")
+
+
+def check_assistant_block():
+    """验证 assistant 正文块：● 首行前缀 + 续行缩进 + markdown 渲染。"""
+    import re
+    import cli_events as ce
+    from constants import APP_VERSION
+    if not APP_VERSION:
+        return _fail("APP_VERSION 为空（横幅没版本号可用）")
+    raw = ce.render_assistant_ansi("# 标题\n\n正文段落一", width=80)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    lines = plain.splitlines()
+    if not lines or not lines[0].startswith("● "):
+        return _fail(f"首行缺 ● 前缀: {plain[:60]!r}")
+    if "标题" not in lines[0]:
+        return _fail(f"markdown 标题没渲染出来: {plain[:80]!r}")
+    if not any(ln.startswith("  ") for ln in lines[1:]):
+        return _fail(f"续行缺两格缩进: {plain!r}")
+    # 技能行 / 提问回显 / 批量子代理行
+    skill = ce.format_skill_lines("brainstorming")
+    if skill[0][1] != "● Skill(brainstorming)" \
+            or "Successfully loaded" not in skill[1][1]:
+        return _fail(f"技能行不对: {skill}")
+    echo = ce.format_ask_user_echo("范围怎么定？", ["只做核心包"])
+    if "User answered" not in echo[0][1] or "只做核心包" not in echo[1][1]:
+        return _fail(f"提问回显不对: {echo}")
+    dep = ce.format_subagent_depart({"tasks": [{}, {}]})
+    if dep != "● Running 2 agents…":
+        return _fail(f"批量头行不对: {dep!r}")
+    done = ce.format_subagent_done(
+        {"tasks": [{"goal": "扫描"}, {"goal": "挖"}]}, 5.0,
+        '{"mode": "batch", "results": ['
+        '{"task_index": 0, "success": true},'
+        '{"task_index": 1, "success": false, "error": "x"}]}')
+    dj = "\n".join(t for _, t in done)
+    if "● 2 agents finished" not in dj or "├─ 扫描" not in dj \
+            or "✗" not in dj:
+        return _fail(f"批量收尾树不对: {dj!r}")
+    return _ok("assistant ●块/技能行/回显/批量子代理行正常")
+
+
+def check_question_selector():
+    """验证提问选择器纯函数：光标行/多选勾/序号/降级编号输入。"""
+    import cli_question as cq
+
+    rows = cq.build_option_rows(
+        [{"label": "方案A", "description": "最稳"}], multi=False)
+    if rows[0][0] != "opt" or "方案A" not in rows[0][1]:
+        return _fail(f"选项行不对: {rows}")
+    if len(rows) < 2 or "最稳" not in rows[1][1]:
+        return _fail(f"描述行不对: {rows}")
+
+    text = "".join(t for _, t in cq.render_fragments(
+        [{"label": "A"}, {"label": "B"}], 1, set(), multi=False))
+    if "> 2. B" not in text or "1. A" not in text:
+        return _fail(f"光标行不对: {text!r}")
+
+    mtext = "".join(t for _, t in cq.render_fragments(
+        [{"label": "A"}], 0, {0}, multi=True))
+    if "● A" not in mtext:
+        return _fail(f"多选勾标记不对: {mtext!r}")
+
+    # 降级通道：编号输入（单选取第一个）
+    opts = [{"label": "A"}, {"label": "B"},
+            {"label": "Type something.", "description": "自己输入"}]
+    ans = cq._fallback_number_input("Q?", opts, False, lambda p: "2")
+    if ans != ["B"]:
+        return _fail(f"降级单选不对: {ans}")
+    ans2 = cq._fallback_number_input("Q?", opts, True, lambda p: "1,2")
+    if ans2 != ["A", "B"]:
+        return _fail(f"降级多选不对: {ans2}")
+    ans3 = cq._fallback_number_input("Q?", opts, False, lambda p: "自定义")
+    if ans3 != ["自定义"]:
+        return _fail(f"降级自由输入不对: {ans3}")
+    return _ok("提问选择器（光标/勾选/降级）正常")
 
 
 def check_enter_routing():
@@ -2352,9 +2506,14 @@ def main():
             ("CLI 事件行", check_event_lines),
         ]),
         ("CLI 骨架", [
-            ("状态栏三档", check_status_bar_tiers),
+            ("页脚两档", check_status_bar_tiers),
             ("提交路由", check_enter_routing),
             ("布局构建", check_cli_layout),
+        ]),
+        ("CLI live/正文/提问", [
+            ("live 面板", check_live_panel),
+            ("assistant 块", check_assistant_block),
+            ("提问选择器", check_question_selector),
         ]),
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),
