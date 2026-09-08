@@ -1265,6 +1265,15 @@ def check_split_symbol_surface():
     import agent.permission as _perm
     if _rc.is_readonly_command is not getattr(_perm, "is_readonly_command", None):
         return _fail("readonly_commands re-export 断链")
+    # 拆分三期第二块 T2：LLM 分类辅助拆到 permission_llm——类内 _check_llm_classifier
+    # （热区，留在类内）消费的 5 个符号全走主文件 re-export，跨模块同一对象比对
+    # （源模块定义 vs 主文件 re-export 必须同一对象），风格与 delegate T2/T3 一致
+    import agent.permission_llm as _plm
+    for _name in ("_classify_bash_command", "LLM_DENIAL_MAX_CONSECUTIVE",
+                  "LLM_DENIAL_MAX_TOTAL", "_is_dangerous_whitelist_entry",
+                  "_matches_whitelist"):
+        if getattr(_plm, _name) is not getattr(_perm, _name, None):
+            return _fail(f"permission_llm.{_name} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
