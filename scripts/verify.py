@@ -1225,6 +1225,15 @@ def check_split_symbol_surface():
         call_llm_streaming, discard_partial_stream_state,
     )):
         return _fail("块 B 二自由函数有不可调用者")
+
+    # 拆分三期：delegate 系列模块可独立 import 且主文件 re-export 生效
+    import tools.delegate_result  # noqa: F401
+    # import tools.delegate_setup  # noqa: F401 —— T2 落地后启用，本任务先注释占位，
+    # 只断言已落地模块；T2/T3/T4 各自追加自己的 import 断言行
+    from tools.delegate_tool import _offload_child_result as _ocr
+    import tools.delegate_tool as _dt
+    if _dt._offload_child_result is not _ocr:
+        return _fail("re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
