@@ -3655,6 +3655,11 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             console.print("[red]⚡ 强制退出——正在取消所有子代理和后台任务…[/red]")
         except Exception:
             pass
+        rt._force_exiting = True
+        # 强退窗口里还在收尾的线程（worker/子代理摘要/线程池关停）会
+        # 互相踩出 RuntimeError 噪声——进程马上就没了，日志全静音
+        #（只留这条红字提示，不再刷 traceback 吓人）
+        logging.disable(logging.ERROR)
         _do_turn_interrupt()            # agent.interrupt + 全部取消旗
         # 常驻循环后回合挂在宿主循环上——强退前主动取消，别让它在
         # os._exit 兜底窗口里继续烧 LLM（双击强退语义保持）
@@ -3811,6 +3816,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     # 把取消搬运到 worker 线程后的实际类型，两个都接
                     pass
                 except Exception as e:
+                    if getattr(rt, "_force_exiting", False):
+                        break   # 强退中：线程池已关停的噪声不刷屏，直接离场
                     console.print(f"[red]错误: {e}[/red]")
                     logger.exception("agent 运行错误（后台唤醒轮）")
                 continue
@@ -3981,6 +3988,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 # 把取消搬运到 worker 线程后的实际类型，两个都接
                 pass
             except Exception as e:
+                if getattr(rt, "_force_exiting", False):
+                    break   # 强退中：线程池已关停的噪声不刷屏，直接离场
                 console.print(f"[red]错误: {e}[/red]")
                 logger.exception("agent 运行错误")
 
@@ -4013,7 +4022,19 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         _set_active_app(None)   # 注销 app：之后的打印走直写（不再搬事件循环）
         _input_stop.set()
         _input_q.put(_EOF_SENTINEL)
-        _worker_thread.join(timeout=2.0)
+        try:
+            _worker_thread.join(timeout=2.0)
+        except KeyboardInterrupt:
+            # 收尾窗口里又按 Ctrl+C：此刻 pt 已退、终端回到经典模式，
+            # 信号以裸 KeyboardInterrupt 打进 join——不接住它会掀翻整个
+            # 收尾段（跳过 os._exit 兜底，atexit/线程池/在跑的回合互相
+            # 踩踏，满屏 traceback）。用户想走，就痛快放行：直接硬退。
+            try:
+                console.print("[dim][再次中断，立即强制退出…][/dim]")
+            except Exception:
+                pass
+            import os as _os_mod
+            _os_mod._exit(0)
         if _worker_thread.is_alive():
             # worker 没在宽限期内收工（回合卡死/子代理不退）：
             # 收尾段随时可能被用户再按 Ctrl+C 打断、daemon 线程残留
@@ -4022,7 +4043,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             import os as _os_mod
             _os_mod._exit(0)
 
-    console.print("\n再见！")
+    # 「再见」也可能撞上收尾窗口里的 Ctrl+C——掀不出去了也犯不着炸栈
+    try:
+        console.print("\n再见！")
+    except KeyboardInterrupt:
+        import os as _os_mod
+        _os_mod._exit(0)
 
     # === 退出前清理后台任务 ===
     # 再按一轮所有子代理的取消旗（中断分支已按过；正常退出路径在这里兜底）。
