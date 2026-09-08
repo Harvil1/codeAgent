@@ -1241,6 +1241,16 @@ def check_split_symbol_surface():
         if not callable(getattr(_ds, _fn, None)) \
                 or getattr(_ds, _fn) is not getattr(_dt, _fn, None):
             return _fail(f"delegate_setup.{_fn} 与主文件 re-export 不是同一对象")
+    # 拆分三期 T3：kill 工具簇三件（schema 是 dict 走同对象比对，两个 fn
+    # 加 callable 断言）——跨模块比对风格与 T2 一致
+    import tools.delegate_kill  # noqa: F401 —— T3 落地：kill 工具簇三件
+    import tools.delegate_kill as _dk
+    if _dk.SUBAGENT_KILL_SCHEMA is not getattr(_dt, "SUBAGENT_KILL_SCHEMA", None):
+        return _fail("delegate_kill.SUBAGENT_KILL_SCHEMA 与主文件 re-export 不是同一对象")
+    for _fn in ("_handle_subagent_kill", "_subagent_kill_check_fn"):
+        if not callable(getattr(_dk, _fn, None)) \
+                or getattr(_dk, _fn) is not getattr(_dt, _fn, None):
+            return _fail(f"delegate_kill.{_fn} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
