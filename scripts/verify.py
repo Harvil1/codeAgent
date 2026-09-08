@@ -201,6 +201,8 @@ def check_read_file_default_limit(tmp):
 
     断言键名对齐 handler 真实返回形状：成功 JSON 含 content / total_lines /
     shown_lines（形如 "1-2000"）/ hint（被截断时才有），没有 lines_read 字段。
+    外加两枚负例：显式传 limit、文件没截断，这两种情况都不该带 hint
+    （续读提示只属于「默认 limit 截断了」这一种，乱发会教坏模型瞎续读）。
 
     参数：
         tmp  临时目录 Path，测试文件写在这底下
@@ -225,6 +227,15 @@ def check_read_file_default_limit(tmp):
     d2 = json.loads(r2)
     if "line2499" not in d2.get("content", "") or "line2500" in d2.get("content", ""):
         return _fail(f"显式 limit=2500 行为变了: {str(d2)[:120]}")
+    # 负例一：显式传了 limit 是模型自己点的菜，截断是预期内的，不带 hint
+    if "hint" in d2:
+        return _fail("显式 limit 路径不该带 hint")
+    # 负例二：小文件一口气读完、根本没截断，也没资格带 hint
+    f_small = tmp / "small.txt"
+    f_small.write_text("a\nb\nc\n", encoding="utf-8")
+    r3 = asyncio.run(registry.dispatch("read_file", {"path": str(f_small)}))
+    if "hint" in json.loads(r3):
+        return _fail("未截断时不该带 hint")
     return _ok("read_file 默认 2000 行 + 续读提示正常")
 
 
@@ -1296,7 +1307,19 @@ def check_session_field_passthrough(tmp):
         return _fail(f"timestamp 没透传: {msgs[0]}")
     if "pinned" in msgs[1]:
         return _fail(f"未钉住的消息不该带 pinned: {msgs[1]}")
-    return _ok("pinned/timestamp 往返正常")
+    # timestamp 保真：透传的是原值不是重新生成——解析回 epoch 还比
+    # 2023-11-14 早的话只可能是糊弄值（store 在自己 new 一个假时间）
+    from datetime import datetime as _dt
+    if _dt.fromisoformat(msgs[0]["timestamp"]).timestamp() < 1_700_000_000:
+        return _fail("timestamp 不是真实时间")
+    # 显式 False 往返（契约形状：False 落库透传，与缺键区分——缺键是
+    # 「没说过钉不钉」的老行形状，False 是「明确说了不钉」，语义不能混）
+    sid2 = store.create_session(title="f", model="t")
+    store.append_message(sid2, "user", "x", pinned=False)
+    m3 = store.get_messages(sid2)[0]
+    if m3.get("pinned") is not False:
+        return _fail(f"显式 pinned=False 没往返: {m3}")
+    return _ok("pinned/timestamp 往返正常（含真实时刻 + 显式 False）")
 
 
 def check_resume_warmup(tmp):
@@ -1356,7 +1379,8 @@ def check_resume_warmup(tmp):
         if not isinstance(ts, float) or ts <= 0:
             return _fail(f"_timestamp 没盖回（时间清理层仍哑）: {probe}")
 
-    # 断言 2：大工具结果落盘折成占位（keep_recent 保最近 3 条，8 条至少折 5 条）
+    # 断言 2：大工具结果落盘折成占位（≥1 占位即证明无损层跑过——L2 折叠
+    # 有头尾保留，凑不满 5 是正常）
     n_placeholder = sum(
         1 for m in out
         if m.get("role") == "tool" and "full_at" in str(m.get("content", ""))
@@ -1583,10 +1607,14 @@ def check_time_clear_pointer(tmp):
     fa = _j.loads(ph["content"]).get("full_at")
     if not Path(fa).exists():
         return _fail(f"落盘文件不存在: {fa}")
-    # agent_home=None 退回旧占位（测试兼容路径）
+    # agent_home=None 退回旧占位（测试兼容路径）。旧写法「ch2 and all(...)」
+    # 有个洞：ch2=False（清理压根没触发）时整条也判过——等于没测。强负例
+    # 先把「必须真的清了」钉死，再验占位形状退回了纯文本老占位
     out2, ch2 = time_based_clear_old_tool_results(
         [dict(m) for m in msgs], {})
-    if ch2 and all("[Old tool result content cleared]" != m.get("content") for m in out2[:6]):
+    if not ch2:
+        return _fail("None 路径该正常触发清理")
+    if not any(m.get("content") == "[Old tool result content cleared]" for m in out2):
         return _fail("None 路径没退回旧占位")
     return _ok("时间清理占位带指针")
 
