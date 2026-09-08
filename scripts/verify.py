@@ -1260,6 +1260,11 @@ def check_split_symbol_surface():
     if not callable(getattr(_dc, "_run_child", None)) \
             or _dc._run_child is not getattr(_dt, "_run_child", None):
         return _fail("delegate_child._run_child 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块：permission 四模块
+    import agent.readonly_commands as _rc
+    import agent.permission as _perm
+    if _rc.is_readonly_command is not getattr(_perm, "is_readonly_command", None):
+        return _fail("readonly_commands re-export 断链")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
