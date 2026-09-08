@@ -65,7 +65,8 @@ _PROTECTED_PATHS = [
     "C:\\Program Files",
     "C:\\Program Files (x86)",
 ]
-# 模块加载时预先算好绝对路径(免得每次 safe_path 都重复对 14 条路径做 resolve)
+# 模块加载时预先算好绝对路径(免得每次 safe_path 都重复对 17 条路径做 resolve:
+# 3 密钥目录 + 3 CLI 凭证目录 + 8 Unix 系统目录 + 3 Windows 系统目录)
 _PROTECTED_PATHS_RESOLVED: List[Tuple[Path, str]] = []
 for _p in _PROTECTED_PATHS:
     try:
@@ -370,7 +371,9 @@ def safe_path(
     返回:PermissionResult(含允许与否、原因、给出结论的关卡)。
     """
     # 延迟 import:返回类型 PermissionResult 定义在主文件 agent.permission——
-    # 模块级互相 import 会咬死(循环 import)，按仓库惯例放函数体内延迟拿
+    # 模块级互相 import 会咬死(循环 import)，按仓库惯例放函数体内延迟拿。
+    # 接手者知悉:get_type_hints(safe_path) 会因 PermissionResult 不在本模块
+    # 命名空间而 NameError——当前无消费者,故不做处理
     from agent.permission import PermissionResult
 
     # 可疑路径形态先查(读写都查,查到就拒——防止绕过下面两道检查)

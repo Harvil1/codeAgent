@@ -1263,7 +1263,8 @@ def check_split_symbol_surface():
     # 拆分三期第二块：permission 四模块
     import agent.readonly_commands as _rc
     import agent.permission as _perm
-    if _rc.is_readonly_command is not getattr(_perm, "is_readonly_command", None):
+    # 源侧 getattr 兜底：缺名时干净 _fail，不裸 AttributeError
+    if getattr(_rc, "is_readonly_command", None) is not getattr(_perm, "is_readonly_command", None):
         return _fail("readonly_commands re-export 断链")
     # 拆分三期第二块 T2：LLM 分类辅助拆到 permission_llm——类内 _check_llm_classifier
     # （热区，留在类内）消费的 5 个符号全走主文件 re-export，跨模块同一对象比对
@@ -1272,16 +1273,22 @@ def check_split_symbol_surface():
     for _name in ("_classify_bash_command", "LLM_DENIAL_MAX_CONSECUTIVE",
                   "LLM_DENIAL_MAX_TOTAL", "_is_dangerous_whitelist_entry",
                   "_matches_whitelist"):
-        if getattr(_plm, _name) is not getattr(_perm, _name, None):
+        if getattr(_plm, _name, None) is not getattr(_perm, _name, None):
             return _fail(f"permission_llm.{_name} 与主文件 re-export 不是同一对象")
     # 拆分三期第二块 T3：路径安全簇（簇 C）拆到 path_guard——safe_path 的两处
     # 外部模块级 import（tools/file_operations、tools/glob_tool）与 check_path
     # 类方法调用点全走主文件 re-export；_EXTRA_ALLOWED_ROOTS 随簇走自包含。
-    # 跨模块同一对象比对（源模块定义 vs 主文件 re-export），风格与 T2 一致
+    # 比对扩成簇内全部 9 个 re-export 符号（safe_path/三个 is、check 形态检查/
+    # 白名单四件 + 默认根），全函数走 callable 分流（无常量成员），源侧
+    # getattr 兜底：缺名干净 _fail，不裸 AttributeError
     import agent.path_guard as _pg
-    for _name in ("safe_path", "add_extra_allowed_root"):
-        if not callable(getattr(_pg, _name, None)) \
-                or getattr(_pg, _name) is not getattr(_perm, _name, None):
+    for _name in ("safe_path", "is_protected_path", "is_write_protected_path",
+                  "check_suspicious_path", "add_extra_allowed_root",
+                  "list_extra_allowed_roots", "remove_extra_allowed_root",
+                  "clear_extra_allowed_roots", "default_allowed_roots"):
+        _src_obj = getattr(_pg, _name, None)
+        if not callable(_src_obj) \
+                or _src_obj is not getattr(_perm, _name, None):
             return _fail(f"path_guard.{_name} 与主文件 re-export 不是同一对象")
     # 拆分三期第二块 T4：危险删除与 cd+git 防护（簇 F）拆到 bash_removal_guard
     # ——check() 三处调用点（危险删除/段数上限闸门/cd+git 组合）全走主文件
@@ -1291,10 +1298,10 @@ def check_split_symbol_surface():
     for _name in ("check_dangerous_removal", "is_dangerous_removal_path",
                   "_has_cd_git_combo"):
         if not callable(getattr(_brg, _name, None)) \
-                or getattr(_brg, _name) is not getattr(_perm, _name, None):
+                or getattr(_brg, _name, None) is not getattr(_perm, _name, None):
             return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
     for _name in ("_CMD_SEGMENT_SPLIT_RE", "_MAX_COMPOUND_SEGMENTS"):
-        if getattr(_brg, _name) is not getattr(_perm, _name, None):
+        if getattr(_brg, _name, None) is not getattr(_perm, _name, None):
             return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
