@@ -400,7 +400,7 @@ class SessionStore:
         tool_calls: Optional[list] = None,
         tool_call_id: Optional[str] = None,
         name: Optional[str] = None,
-        pinned: bool = None,
+        pinned: Optional[bool] = None,
     ) -> str:
         """往会话末尾追加一条消息（像在档案袋里再加一张纸条）——主循环每产生一条消息都落盘，崩溃/重启后才能完整恢复对话。
 

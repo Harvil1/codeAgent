@@ -1616,6 +1616,27 @@ def check_time_clear_pointer(tmp):
         return _fail("None 路径该正常触发清理")
     if not any(m.get("content") == "[Old tool result content cleared]" for m in out2):
         return _fail("None 路径没退回旧占位")
+    # 小内容下限：<200 字符的短结果不值得 offload——JSON 占位（~300 字符）
+    # 反而比原文费 token、落盘也没找回价值，应直接退纯 CLEARED_MARK 不落盘。
+    # 构造 8 条 50 字符旧结果 + agent_home：8 条保最近 5 条 → 前 3 条该清，
+    # 清了的必须全是纯占位（一个 full_at 都不该出现）
+    small = [{"role": "system", "content": "s"}]
+    for i in range(8):
+        small.append({"role": "tool", "content": f"S{i}" + "s" * 48,
+                      "tool_call_id": f"stc{i}", "_timestamp": old})
+    small.append({"role": "assistant", "content": "done", "_timestamp": old})
+    out3, ch3 = time_based_clear_old_tool_results(
+        [dict(m) for m in small], {}, agent_home=tmp)
+    if not ch3:
+        return _fail("小内容路径该正常触发清理")
+    marks3 = [
+        m for m in out3
+        if m.get("content") == "[Old tool result content cleared]"
+    ]
+    if len(marks3) != 3:
+        return _fail(f"小内容应清 3 条纯占位（保最近 5 条），实际 {len(marks3)} 条")
+    if any("full_at" in str(m.get("content", "")) for m in out3):
+        return _fail("小内容不该走 offload 落盘（出现了 full_at 占位）")
     return _ok("时间清理占位带指针")
 
 

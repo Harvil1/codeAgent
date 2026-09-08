@@ -174,20 +174,38 @@ def time_based_clear_old_tool_results(
 
         # 保留最后 keep_recent 个，前面的清内容
         to_clear = tool_indices[:-keep_recent] if keep_recent > 0 else tool_indices
+        # 落盘能力循环外一次导入：延迟导入是项目惯例（防模块互相 import
+        # 死锁），但不必每条消息都 import 一遍——Python 有模块缓存也是
+        # 白查一次 sys.modules，提到循环前只导一次；import 失败由外层
+        # fail-open 兜底（原样返回）
+        from agent.output_offload import maybe_offload
         cleared_count = 0
         for i in to_clear:
             content = messages[i].get("content")
             # 幂等：清过的不再计 cleared_count——纯文本占位（CLEARED_MARK）
-            # 和已带 full_at 找回指针的 offload 占位（'"full_at"' 子串是它的
-            # 指纹）都算「已清过」，再跑一遍结果一个字节都不变
-            if not content or content == CLEARED_MARK or '"full_at"' in content:
+            # 和 offload 占位都算「已清过」，再跑一遍结果一个字节都不变。
+            # 指纹用开头前缀 '{"truncated": true'（json.dumps 保 dict 插入
+            # 序、truncated 是首键）而不是裸搜 '"full_at"' 子串——工具输出
+            # 正文里提到 full_at 这个词会误判已清。失败方向安全：占位形态
+            # 万一变了没匹配上，顶多误判「未清过」多清一次（多落一份盘），
+            # 不会漏清
+            if (
+                not content
+                or content == CLEARED_MARK
+                or content.startswith('{"truncated": true')
+            ):
+                continue
+            if len(content) < 200:
+                # 短结果做 JSON 占位（~300 字符）反而比原文费 token，落盘
+                # 也没找回价值——直接退纯占位
+                messages[i]["content"] = CLEARED_MARK
+                cleared_count += 1
                 continue
             # agent_home 在场：清空前先落盘，占位升级成「预览 + full_at 指针」
             # ——旧内容从「半丢失」变「可找回」。threshold=0 = 无视单条
             # 大小强制落盘（时间清理看的是「多久没动」，不看内容长短）
             if agent_home is not None:
                 try:
-                    from agent.output_offload import maybe_offload
                     tcid = str(messages[i].get("tool_call_id") or f"timeclear_{i}")
                     new_content = maybe_offload(
                         content, tool_call_id=tcid, agent_home=agent_home,
@@ -1418,7 +1436,7 @@ async def compress_if_needed(
         authoritative_tokens：真实 token 锚点 (消息条数, 真实输入 token 数)，
           供混合计数用；None 走全量粗估
         session_store：会话库（可选）；L4 开跑前往库里落 [COMPACT_START]
-          事务标记，成功后的 [COMPACT_BOUNDARY]（agent 主类写）当 end 用
+          事务标记，成功后的 [COMPACT_BOUNDARY]（本函数内部落库）当 end 用
         force：True = 发送前预检的强制压缩——L4 触发绕过冷却期
               （上下文已经顶到窗口了，等冷却就是等 PTL），但熔断照守
     返回：(新消息列表, changed, compacted)。
