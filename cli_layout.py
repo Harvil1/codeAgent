@@ -593,23 +593,32 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                 state["frame"], rt, state["turn_started"], time.monotonic()
             )
 
-        def _live_text():
-            """live 区内容（spinner 行 + 子代理树/任务清单面板）。
-
-            返回 pt 的 fragment 列表 [(style, text), ...]；空列表 = 整块隐藏
-            （idle 时 live 区整个收起来——任务清单只在回合进行中挂着，
-            回合收尾由 cli_events 落一段静态快照进滚动历史）。
-            """
+        def _live_lines():
+            """live 区的行列表 [(style, text), ...]（一行一个元素）。"""
             try:
                 head = _spinner_line()
                 if not head:
                     return []
-                frags = [("", head)]
                 import cli_live
-                frags.extend(cli_live.panel_lines(_term_width()))
-                return frags
+                return [("", head)] + cli_live.panel_lines(_term_width())
             except Exception:
                 return []
+
+        def _live_text():
+            """live 区内容（spinner 行 + 子代理树/任务清单面板）。
+
+            返回 pt 的 fragment 列表；**行与行之间必须显式塞 ("", "\\n")**
+            ——pt 的 fragment 是直接拼接的，不塞换行符整块会挤成一行、
+            被终端软换行搅成一锅粥。空列表 = 整块隐藏（idle 时 live 区
+            整个收起——任务清单只在回合进行中挂着，回合收尾由
+            cli_events 落一段静态快照进滚动历史）。
+            """
+            frags = []
+            for i, (style, text) in enumerate(_live_lines()):
+                if i > 0:
+                    frags.append(("", "\n"))
+                frags.append((style, text))
+            return frags
 
         # ---- 输入区：多行 TextArea（历史/补全/灰字提示全挂上）----
         history = (FileHistory(str(history_path))
@@ -650,11 +659,14 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                 FormattedTextControl(_live_text, show_cursor=False),
                 height=lambda: Dimension(
                     min=0, max=20,
-                    preferred=max(1, len(_live_text())),
+                    preferred=max(1, len(_live_lines())),
                 ),
                 dont_extend_height=True,
+                # 禁软换行：行超宽直接裁掉——软换行会让实际行数超过
+                # 高度回调报的数，布局错位、面板撕碎
+                wrap_lines=False,
             ),
-            filter=Condition(lambda: bool(_live_text())),
+            filter=Condition(lambda: bool(_live_lines())),
         )
         separator = Window(
             height=1, char="─", style="class:separator",

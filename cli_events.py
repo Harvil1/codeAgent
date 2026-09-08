@@ -64,8 +64,12 @@ _DIFF_MAX_LINES = 15
 
 
 def _cut(s: str, n: int) -> str:
-    """字符串截断：超长加省略号（事件行一行的信息量守恒）。"""
-    s = str(s).strip()
+    """字符串截断：超长加省略号（事件行一行的信息量守恒）。
+
+    换行/连续空白先折叠成一个空格——LLM 给的任务描述经常是多行的，
+    原样进事件行会把 ● 头行撕成好几行（claude code 的事件行永远一行）。
+    """
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
     return s if len(s) <= n else s[:n] + "…"
 
 

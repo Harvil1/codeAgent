@@ -17,10 +17,25 @@
 
 import logging
 import random
+import re
 import threading
 import time
 
 logger = logging.getLogger(__name__)
+
+
+def _oneline(s, n: int) -> str:
+    """压成单行再截断：换行/连续空白全折叠成一个空格。
+
+    为什么必须：live 面板一行就是一行（高度按行数算）——任务描述里
+    带个真实换行符（LLM 的 goal 经常多行），一行就会裂成多行，面板
+    高度对不上、整块布局撕碎。
+    """
+    try:
+        s = re.sub(r"\s+", " ", str(s or "")).strip()
+    except Exception:
+        s = str(s or "")
+    return s if len(s) <= n else s[:n] + "…"
 
 # ---------------------------------------------------------------------------
 # 动词表（claude code 同款：spinner 一会儿 Cooking 一会儿 Brewing，
@@ -172,8 +187,9 @@ def spinner_text(frame: int, rt, turn_started_at, now: float) -> str:
         if not getattr(rt, "turn_active", False):
             return ""
         elapsed = (now - turn_started_at) if turn_started_at else 0.0
-        # 装饰字符：每 8 帧（0.8s）换一个
-        mark = _SPIN_MARKS[(frame // 8) % len(_SPIN_MARKS)]
+        # 装饰字符：每 2 帧（0.2s）换一格——转得利落才有「在动」的感觉，
+        # 0.8s 一格慢得像卡死
+        mark = _SPIN_MARKS[(frame // 2) % len(_SPIN_MARKS)]
         # 动词到期换新（写全局有锁就锁，锁失败也无所谓——纯视觉）
         global _verb, _verb_at
         try:
@@ -210,7 +226,7 @@ def agents_begin(pairs: list) -> None:
             _agents_order.clear()
             for key, desc in pairs:
                 _agents[str(key)] = {
-                    "desc": str(desc), "status": "running",
+                    "desc": _oneline(desc, 48), "status": "running",
                     "tools": 0, "activity": "",
                 }
                 _agents_order.append(str(key))
@@ -226,7 +242,7 @@ def agent_begin(key, desc) -> None:
             if key not in _agents:
                 _agents_order.append(key)
             _agents[key] = {
-                "desc": str(desc), "status": "running",
+                "desc": _oneline(desc, 48), "status": "running",
                 "tools": 0, "activity": "",
             }
     except Exception:
@@ -259,7 +275,7 @@ def note_child_tool(key, activity: str) -> None:
             if entry is None:
                 return
             entry["tools"] = int(entry.get("tools", 0)) + 1
-            entry["activity"] = str(activity)[:120]
+            entry["activity"] = _oneline(activity, 120)
     except Exception:
         pass
 
@@ -364,9 +380,7 @@ def tasks_lines(width=80) -> list:
         limit = max(20, (width or 80) - 8)
         for t in rows:
             mark = _TASK_MARKS.get(t.get("status", ""), "□")
-            subject = str(t.get("subject", "")).strip()
-            if len(subject) > limit:
-                subject = subject[:limit] + "…"
+            subject = _oneline(t.get("subject", ""), limit)
             style = "dim" if t.get("status") == "completed" else ""
             out.append((style, f"  {mark} {subject}"))
         return out
@@ -409,6 +423,7 @@ def panel_lines(width=80) -> list:
             hidden = _panel_hidden
         if hidden:
             return []
+        w = max(20, width or 80)   # 行宽上限：超了截断，防终端软换行撕面板
         out = []
         # ---- 子代理树 ----
         snap = agents_snapshot()
@@ -417,7 +432,7 @@ def panel_lines(width=80) -> list:
                 # 单个子代理：⎿ 当前活动 + 计数（claude code 单 Agent 形态）
                 _, e = snap[0]
                 acts = e["activity"] or e["desc"]
-                out.append(("class:live-dim", f"  ⎿  {acts}"))
+                out.append(("class:live-dim", f"  ⎿  {acts}"[:w]))
                 if e["tools"] > 1:
                     out.append(("class:live-dim",
                                 f"     {e['tools']} tool uses"))
@@ -431,12 +446,12 @@ def panel_lines(width=80) -> list:
                         "cancelled": " · cancelled",
                     }.get(e["status"], f" · {e['tools']} tool uses")
                     out.append(("class:live-dim",
-                                f"   {branch} {e['desc']}{status_bit}"))
+                                f"   {branch} {e['desc']}{status_bit}"[:w]))
                     activity = e["activity"]
                     if e["status"] == "running" and activity:
                         pipe = "   " if last else "│  "
                         out.append(("class:live-dim",
-                                    f"   {pipe} ⎿  {activity}"))
+                                    f"   {pipe} ⎿  {activity}"[:w]))
         # ---- 任务清单 ----
         rows = tasks_lines(width)
         if rows:

@@ -2111,6 +2111,19 @@ def check_live_panel():
     if "├─ 扫描代码 · Done" not in joined:
         return _fail(f"完成枝长相不对: {joined!r}")
 
+    # 多行描述必须压成单行（面板一行=一行，带 \n 会撕碎布局）；
+    # 行宽超限必须截断（防终端软换行）
+    cl.agents_begin([("k1", "具体任务：\n1. 读 package.json\n2. 摸清构建"),
+                     ("k2", "挖上下文")])
+    rows_nl = cl.panel_lines(100)
+    if any("\n" in t for _, t in rows_nl):
+        return _fail(f"多行描述没压成单行: {rows_nl}")
+    if not any("├─ 具体任务： 1. 读 package.json" in t for _, t in rows_nl):
+        return _fail(f"换行没折叠成空格: {[t for _, t in rows_nl]}")
+    rows_narrow = cl.panel_lines(30)
+    if any(len(t) > 30 for _, t in rows_narrow):
+        return _fail(f"窄屏行没截断: {[t for _, t in rows_narrow]}")
+
     # 单个子代理形态：⎿ 当前活动 + 计数
     cl.agents_begin([])
     cl.agent_begin("solo", "实现 Task 1")
