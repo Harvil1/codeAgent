@@ -1899,10 +1899,20 @@ def check_cli_completer():
         registry_tokens=cc.all_tokens(),
         arg_completers=amap,
         dynamic_tokens_fn=lambda: [],
+        meta_fn=lambda t: (getattr(cc.lookup(t), "summary", "") or ""),
+        # ↑ 真实接法同款：注册表 token → 一句话 summary（菜单右列）
     )
     got = [c.text for c in comp.get_completions(Document("/hel"), CompleteEvent())]
     if "/help" not in got:
         return _fail(f"一级补全没出 /help：{got[:5]}")
+    # display_meta（菜单右列描述）：meta_fn 给了就有——补全菜单才像
+    # claude code 那样「命令 + 一句说明」两列
+    got_meta = [
+        c.display_meta_text for c in comp.get_completions(
+            Document("/hel"), CompleteEvent())
+    ]
+    if not any(m.strip() for m in got_meta):
+        return _fail(f"补全项缺描述（display_meta 全空）：{got_meta[:5]}")
     if not amap:
         return _ok("一级补全正常；二级未实测（暂无命令登记参数补全器）")
     # 二级：逐个验证登记了参数补全器的命令（候选能出才算过——
@@ -2261,8 +2271,19 @@ def check_cli_layout():
         return _fail("build_application 返回 None")
     if app.full_screen:
         return _fail("必须是非全屏模式（full_screen=False）")
+    # 补全菜单浮层必须在（自建 Application 不挂 CompletionsMenu 就永远不弹）
+    from prompt_toolkit.layout import FloatContainer
+    from prompt_toolkit.layout.menus import CompletionsMenu
+    if not isinstance(app.layout.container, FloatContainer):
+        return _fail("布局没挂 FloatContainer（补全菜单没地方弹）")
+    has_menu = any(
+        isinstance(f.content, CompletionsMenu)
+        for f in app.layout.container.floats
+    )
+    if not has_menu:
+        return _fail("浮层里没有 CompletionsMenu（敲 / 不会弹提示）")
     request_app_exit(app)   # app 没在跑也不许炸（内部全吞）
-    return _ok("Application 构建 + 安全退出请求正常")
+    return _ok("Application 构建 + 补全菜单浮层 + 安全退出请求正常")
 
 
 def check_skin_engine():

@@ -163,10 +163,12 @@ class SlashCompleter(_PtCompleter):
     铁律：任何异常都吞掉返回空——补全挂了不能挡住打字。
     """
 
-    def __init__(self, registry_tokens, arg_completers, dynamic_tokens_fn):
+    def __init__(self, registry_tokens, arg_completers, dynamic_tokens_fn,
+                 meta_fn=None):
         self._registry_tokens = list(registry_tokens)   # 含别名
         self._arg_completers = dict(arg_completers)
         self._dynamic_tokens_fn = dynamic_tokens_fn     # () -> 技能/技能束命令名
+        self._meta_fn = meta_fn                          # token -> 一句描述（菜单右列）
 
     def get_completions(self, document, complete_event):
         try:
@@ -185,7 +187,16 @@ class SlashCompleter(_PtCompleter):
                 for t in sorted(tokens):
                     if t.startswith(frag):
                         from prompt_toolkit.completion import Completion
-                        yield Completion(t, start_position=-len(frag))
+                        # display_meta 带一句描述——补全菜单右列显示它
+                        #（claude code 同款：命令 + 说明两列）
+                        meta = ""
+                        if self._meta_fn is not None:
+                            try:
+                                meta = self._meta_fn(t) or ""
+                            except Exception:
+                                meta = ""
+                        yield Completion(t, start_position=-len(frag),
+                                         display_meta=meta)
             else:
                 # 二级：该命令的参数补全（替换正在输入的最后一个词，
                 # 而不是光标处硬塞——/sessions re 选 resume 要变成
@@ -210,6 +221,7 @@ def build_completer(rt):
     """从注册表 + rt 的技能/技能束命令组装补全器。
 
     动态部分用闭包按需现取（技能中途增删也能补全到最新）。
+    meta_fn 给每个 token 配一句描述——补全菜单右列显示（/help 同款信息）。
     """
     import cli_commands as cc
 
@@ -220,10 +232,25 @@ def build_completer(rt):
         except Exception:
             return []
 
+    def token_meta(token):
+        """token → 一句话描述：注册表命令给 summary，技能/技能束给类型标注。"""
+        try:
+            cmd = cc.lookup(token)
+            if cmd is not None:
+                return getattr(cmd, "summary", "") or ""
+            if token in (getattr(rt, "skill_commands", None) or {}):
+                return "技能"
+            if token in (getattr(rt, "bundle_commands", None) or {}):
+                return "技能束"
+        except Exception:
+            pass
+        return ""
+
     return SlashCompleter(
         registry_tokens=cc.all_tokens(),
         arg_completers=cc.arg_completer_map(),
         dynamic_tokens_fn=dynamic_tokens,
+        meta_fn=token_meta,
     )
 
 
@@ -407,6 +434,18 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     def _submit(event):
         b = event.app.current_buffer
         if b.complete_state:
+            # 菜单里有高亮项（↑/↓/Tab 选过）→ Enter 先把它填进输入框
+            #（claude code 同款：回车=采纳建议），下一记 Enter 再提交；
+            # 没高亮就收菜单照常提交
+            idx = b.complete_state.complete_index
+            if idx is not None:
+                try:
+                    b.apply_completion(
+                        b.complete_state.completions[idx])
+                except Exception:
+                    pass
+                b.complete_state = None
+                return
             b.complete_state = None   # 先收补全菜单，下一记 Enter 才提交
         else:
             submit_input(b, input_queue)
@@ -497,8 +536,10 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.history import FileHistory, InMemoryHistory
         from prompt_toolkit.layout import (
-            ConditionalContainer, HSplit, Layout, Window,
+            ConditionalContainer, Float, FloatContainer, HSplit, Layout,
+            Window,
         )
+        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.styles import Style
@@ -629,11 +670,30 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             "separator": "fg:#555555",
             "placeholder": "fg:#777777",
             "live-dim": "fg:#8a8a8a",
+            # 补全菜单（claude code 同款：左列命令、右列描述、高亮项反色）
+            "completion-menu": "bg:#262626 fg:#d8d8d8",
+            "completion-menu.completion": "bg:#262626 fg:#d8d8d8",
+            "completion-menu.completion.current": "bg:#00aa88 fg:#000000",
+            "completion-menu.meta.completion": "bg:#1c1c1c fg:#8a8a8a",
+            "completion-menu.meta.completion.current": "bg:#005f44 fg:#ffffff",
         }
         _style_base.update(cli_skin.get_pt_style_overrides())
+        # 补全菜单浮层：经典 prompt() 自带、自建 Application 必须手动挂——
+        # 不挂这个，补全器算得再多屏幕上也什么都不弹（挂在光标右下，
+        # ↑/↓ 选、Enter 采纳、Esc/继续打字过滤都是 pt 默认键位）
+        body = HSplit(
+            [live_area, separator, input_area, separator, status_bar])
         app = Application(
-            layout=Layout(HSplit(
-                [live_area, separator, input_area, separator, status_bar])),
+            layout=Layout(FloatContainer(
+                content=body,
+                floats=[
+                    Float(
+                        xcursor=True, ycursor=True,
+                        content=CompletionsMenu(
+                            max_height=12, scroll_offset=1),
+                    ),
+                ],
+            )),
             key_bindings=_build_key_bindings(
                 input_queue, eof_sentinel, interrupt_fn, force_exit_fn),
             output=output,
