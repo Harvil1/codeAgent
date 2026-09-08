@@ -123,8 +123,10 @@ def _has_cd_git_combo(command: str) -> bool:
             if saw_cd:
                 return True
     return False
-# Windows del/rd 的斜杠式选项(/s /q);注意别把 /usr 这种真路径也当成选项
-_CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]?$")
+# Windows del/rd 的斜杠式选项(/s /q);注意别把 /usr 这种真路径也当成选项。
+# 第二分支要求恰好一个字母——裸 "/"（0 字母）不是选项，那是 rm -rf / 的
+# 根目标，跳过它等于本层漏拦（R14 终审发现；修复前 ^/[A-Za-z]?$ 的 ? 放走裸 /）
+_CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]$")
 
 
 def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional[str]:

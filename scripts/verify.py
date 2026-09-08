@@ -1312,6 +1312,24 @@ def check_split_symbol_surface():
     return _ok("拆分符号面契约成立")
 
 
+def check_root_path_removal():
+    """验证裸 / 删除目标被危险删除闸门拦截（R14 终审发现的基线 bug）。
+
+    旧 _CMD_FLAG_RE 的 ^/[A-Za-z]?$ 分支把裸 /（0 字母）当 Windows
+    斜杠选项跳过——rm -rf / 在本层漏拦（只剩闸门 0 兜底）。
+    """
+    from agent.bash_removal_guard import check_dangerous_removal
+    r = check_dangerous_removal("rm -rf /")
+    if r is None:
+        return _fail("裸 / 删除目标被当选项跳过（本层漏拦）")
+    if check_dangerous_removal("rm -rf /usr") is None:
+        return _fail("/usr 单级根子路径该拦")
+    # Windows 单字母选项仍跳过（/s /q）——不误伤正常用法
+    if check_dangerous_removal("del /s something.tmp", cwd="D:/tmp") is not None:
+        return _fail("del /s 的 /s 选项被误拦（选项语义回归）")
+    return _ok("裸 / 拦截 + 选项跳过边界正常")
+
+
 def check_anthropic_usage_fields():
     """验证 Anthropic 响应包装后的 usage 带 cache 字段（缓存记账/锚点口径依赖）。"""
     from types import SimpleNamespace as NS
@@ -2269,6 +2287,7 @@ def main():
             ("中断机制", check_interrupt),
             ("事件循环宿主", check_loop_host),
             ("拆分符号面契约", check_split_symbol_surface),
+            ("裸 / 删除拦截", check_root_path_removal),
             ("Anthropic usage 字段", check_anthropic_usage_fields),
         ]),
         ("记忆系统", [
