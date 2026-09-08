@@ -28,7 +28,6 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-
 def _review_handoff(result: str, parent_agent) -> str:
     """交接复审：辅助 LLM 检查子代理要交回来的产出，发现危险内容就在前面贴警告。
 

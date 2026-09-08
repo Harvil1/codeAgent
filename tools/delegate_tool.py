@@ -22,17 +22,13 @@
   - 批量（tasks=[...]）：多个子代理真并行同时跑
 """
 
-import asyncio
-import concurrent.futures
 import json
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from tools.registry import registry
 

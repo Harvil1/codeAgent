@@ -13,11 +13,11 @@ _run_child 是同步/异步/批量三条委托路最终汇聚的「把子代理�
     failed 标记 → _children 划名 → workspace token reset → worktree
     智能清理 → subagent_stop 钩子 → client 关闭；
   - _workspace_cwd 的 contextvars token 手动管理原样（不重新缩进 try 块）；
-  - 函数内 ~15 处延迟 import（agent.AIAgent / subagent_persistence /
+  - 函数内 26 处延迟 import（agent.AIAgent / subagent_persistence /
     agent_defs / fork_messages / mcp_client / progress 等）原样保留，
     不提升到模块顶层；
   - 唯一改写（兄弟跨调允许项）：对 delegate_result（后处理五件）与
-    delegate_setup（三配置函数）的调用改为模块级 import 后同名直调——
+    delegate_setup（两件配置函数）的调用改为模块级 import 后同名直调——
     调用点文本一字未动，名字从 delegate_tool 的 re-export 全局名换成
     本模块的 import（两者本就指向同一函数对象，无环）；
   - 模块顶层不调 registry.register()——注册仍由 delegate_tool 完成；
