@@ -1251,6 +1251,15 @@ def check_split_symbol_surface():
         if not callable(getattr(_dk, _fn, None)) \
                 or getattr(_dk, _fn) is not getattr(_dt, _fn, None):
             return _fail(f"delegate_kill.{_fn} 与主文件 re-export 不是同一对象")
+    # 拆分三期 T4：_run_child 巨无霸拆到 delegate_child——三条链调用点、外部
+    # 延迟 import（hook_exec/workflow_engine/plan_mode_tool）与本文件的
+    # patch("tools.delegate_tool._run_child") 都解析主文件全局名，同一对象
+    # 断言保证 re-export 生效（patch 契约不破）——风格与 T2/T3 一致
+    import tools.delegate_child  # noqa: F401 —— T4 落地：子代理执行心脏
+    import tools.delegate_child as _dc
+    if not callable(getattr(_dc, "_run_child", None)) \
+            or _dc._run_child is not getattr(_dt, "_run_child", None):
+        return _fail("delegate_child._run_child 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
