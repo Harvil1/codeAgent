@@ -1274,6 +1274,15 @@ def check_split_symbol_surface():
                   "_matches_whitelist"):
         if getattr(_plm, _name) is not getattr(_perm, _name, None):
             return _fail(f"permission_llm.{_name} 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块 T3：路径安全簇（簇 C）拆到 path_guard——safe_path 的两处
+    # 外部模块级 import（tools/file_operations、tools/glob_tool）与 check_path
+    # 类方法调用点全走主文件 re-export；_EXTRA_ALLOWED_ROOTS 随簇走自包含。
+    # 跨模块同一对象比对（源模块定义 vs 主文件 re-export），风格与 T2 一致
+    import agent.path_guard as _pg
+    for _name in ("safe_path", "add_extra_allowed_root"):
+        if not callable(getattr(_pg, _name, None)) \
+                or getattr(_pg, _name) is not getattr(_perm, _name, None):
+            return _fail(f"path_guard.{_name} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
