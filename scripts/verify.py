@@ -1384,7 +1384,69 @@ def check_resume_warmup(tmp):
         return _fail("开关关了还在跑压缩")
     if not isinstance(out2[0].get("_timestamp"), float) or "timestamp" in out2[0]:
         return _fail("开关关闭路径的时间戳盖回/剥离坏了")
-    return _ok(f"预热盖回 _timestamp + 折占位 {n_placeholder} 条 + 双键已剥（含开关关闭路径）")
+
+    # L4 外围三件（记忆提取/醒来简报/清 surfaced）：真触发 L4 要真 LLM
+    # 摘要（verify 无 API key 不可达），两招兜底——
+    # 1) 结构守卫（弱断言）：inspect 源码里三符号 + _compacted 分支在场，
+    #    防手滑删掉/改名（改了名但行为还在的话守卫会误报，认了）；
+    # 2) 行为断言（强）：把 compress_if_needed 换成假货（offline 直接返回
+    #    compacted=True），用带假 memory_manager/surfaced/队列的假 agent
+    #    验证三件外围真的发生了（_resume_warmup 是函数内 import，patch
+    #    模块属性即可生效，跑完恢复原函数）。
+    import inspect
+    src = inspect.getsource(_cli._resume_warmup)
+    for sym in ("on_pre_compress", "_surfaced_memory_ids",
+                "_pending_ephemeral_messages", "_compacted"):
+        if sym not in src:
+            return _fail(f"_resume_warmup 源码缺 L4 外围符号 {sym}（结构守卫）")
+
+    import agent.context_pipeline as _cp
+    seen = {}
+
+    async def _fake_compress(msgs, **kw):
+        seen["pre_msgs"] = msgs       # 记下压缩前列表（应与记忆提取同对象）
+        return msgs, True, True       # 假装真做了 L4 摘要压缩
+
+    class _MM:
+        def on_pre_compress(self, snapshot_path, messages):
+            seen["mm"] = (snapshot_path, messages)
+
+    _real_compress = _cp.compress_if_needed
+    try:
+        _cp.compress_if_needed = _fake_compress
+        surfaced = {"m1", "m2"}
+        queue = []
+        rt_l4 = SimpleNamespace(
+            config={"context": {"resume_warmup_enabled": True}},
+            agent=SimpleNamespace(
+                llm_client=None, model="verify-model",
+                memory_manager=_MM(),
+                _surfaced_memory_ids=surfaced,
+                _pending_ephemeral_messages=queue,
+            ),
+            home=tmp, session_id=sid, session_store=store,
+        )
+        conv3 = [dict(m) for m in conv if m.get("role") != "system"]
+        _cli._resume_warmup(rt_l4, conv3)
+    finally:
+        _cp.compress_if_needed = _real_compress
+    # 断言 4a：on_pre_compress 收到的是压缩前消息（snapshot_path=None、
+    # 与假压缩函数吃到的列表同一对象）
+    mm_call = seen.get("mm")
+    if mm_call is None or mm_call[0] is not None \
+            or mm_call[1] is not seen.get("pre_msgs"):
+        return _fail("L4 外围：on_pre_compress 没吃到压缩前消息")
+    # 断言 4b：surfaced 去重集合被清空
+    if surfaced:
+        return _fail(f"L4 外围：_surfaced_memory_ids 没清: {surfaced}")
+    # 断言 4c：醒来简报进了 ephemeral 队列（恰好一条、带 _ephemeral 标记）
+    briefs = [m for m in queue if "post_compress_brief" in str(m.get("content", ""))]
+    if len(briefs) != 1 or not briefs[0].get("_ephemeral"):
+        return _fail(f"L4 外围：醒来简报没进 ephemeral 队列: {queue}")
+    return _ok(
+        f"预热盖回 _timestamp + 折占位 {n_placeholder} 条 + 双键已剥"
+        "（含开关关闭路径）+ L4 外围三件（结构守卫 + 假压缩行为断言）"
+    )
 
 
 def check_msgs_cache_lru(tmp):

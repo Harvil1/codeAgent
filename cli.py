@@ -1910,6 +1910,7 @@ def _resume_warmup(rt, conv: list) -> list:
         # 现场做摘要（比首轮对话中途压更好）；session_state 也用 agent
         # 的记账簿（预热的触发次数计入冷却/熔断，不白拿额度）
         msgs = [{"role": "system", "content": ""}] + conv
+        pre_msgs = msgs  # 压缩前原貌留一份：真触发 L4 时给记忆提取当「遗照」
         msgs, _changed, _compacted = loop_host.run_async(compress_if_needed(
             msgs,
             llm_client=getattr(rt.agent, "llm_client", None),
@@ -1921,6 +1922,41 @@ def _resume_warmup(rt, conv: list) -> list:
             session_id=rt.session_id or "",
             session_store=rt.session_store,
         ))
+        # L4 真压缩触发时，主循环 compacted 分支的三件「外围仪式」在这里
+        # 补齐（形状照抄 agent/__init__.py::_run_context_compression）：
+        # 1) on_pre_compress：趁被摘要掉的旧消息还在（用压缩前 pre_msgs），
+        #    先让记忆管理器捞一把稳定事实——不然这段对话的长期信息随摘要
+        #    蒸发，再也找不回来；
+        # 2) 清 _surfaced_memory_ids：已注入记忆的跨轮去重集合不再挡着，
+        #    压缩后恰恰最需要它们补上下文，重新放行注入；
+        # 3) 往 _pending_ephemeral_messages 塞一条「醒来简报」：恢复后的
+        #    第一次对话组装时模型看到「你刚被压缩过」，不会一脸懵（主循环
+        #    是当场 append 进工作列表——这里在用户开口之前，只能走临时
+        #    队列，首轮被消费、不进正式历史）。三件各自 fail-open：外围
+        #    失败不撤压缩（压缩本身已经省下的 token 不能吐回去）。
+        if _compacted:
+            try:
+                mm = getattr(rt.agent, "memory_manager", None)
+                if mm is not None:
+                    mm.on_pre_compress(None, pre_msgs)
+            except Exception as e:
+                logger.warning("warmup on_pre_compress 失败（fail-open）: %s", e)
+            try:
+                getattr(rt.agent, "_surfaced_memory_ids", set()).clear()
+            except Exception:
+                pass
+            try:
+                rt.agent._pending_ephemeral_messages.append({
+                    "role": "user",
+                    "content": (
+                        "<post_compress_brief>\n你刚经历了上下文压缩（恢复会话"
+                        "预热触发），更早的历史已被总结。身份和 system prompt "
+                        "不变，继续正常对话。\n</post_compress_brief>"
+                    ),
+                    "_ephemeral": True,
+                })
+            except Exception as e:
+                logger.warning("warmup 简报注入失败（fail-open）: %s", e)
         from agent.ephemeral_inject import drop_leading_system
         return [m for m in drop_leading_system(msgs) if not m.get("_ephemeral")]
     except Exception as e:
