@@ -1607,6 +1607,13 @@ def check_time_clear_pointer(tmp):
     fa = _j.loads(ph["content"]).get("full_at")
     if not Path(fa).exists():
         return _fail(f"落盘文件不存在: {fa}")
+    # 幂等双跑：已清占位（前缀指纹 {"truncated": true）再跑一遍必须零变化——
+    # 防 maybe_offload payload 改键序/改名后前缀指纹静默失配（占位被二次
+    # 处理 = 指针套指针），56 项也不报的那种回归
+    out_again, ch_again = time_based_clear_old_tool_results(
+        [dict(m) for m in out], {}, agent_home=tmp)
+    if ch_again or [m.get("content") for m in out_again] != [m.get("content") for m in out]:
+        return _fail("幂等破坏：已清占位被二次处理（前缀指纹失配？）")
     # agent_home=None 退回旧占位（测试兼容路径）。旧写法「ch2 and all(...)」
     # 有个洞：ch2=False（清理压根没触发）时整条也判过——等于没测。强负例
     # 先把「必须真的清了」钉死，再验占位形状退回了纯文本老占位
