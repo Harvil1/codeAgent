@@ -675,12 +675,14 @@ class RuntimeContext:
             # <档位>_API_KEY 这种环境变量通常不存在；再按 base_url 域名 +
             # 常见厂商的环境变量兜底（如默认 DeepSeek 端点 → DEEPSEEK_API_KEY）
             base_url = str(model_cfg.get("base_url") or "").lower()
-            for _host in ("deepseek", "openai", "anthropic", "openrouter"):
+            for _host in ("deepseek", "openai", "anthropic", "openrouter",
+                          "bigmodel", "zhipu"):
                 if _host in base_url:
                     candidates.append(f"{_host.upper()}_API_KEY")
             candidates.extend(
                 ["DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]
+                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+                 "ZHIPUAI_API_KEY", "BIGMODEL_API_KEY"]
             )
             for cand in candidates:
                 if cand and os.environ.get(cand):
@@ -906,12 +908,14 @@ class RuntimeContext:
                 f"{provider}_API_KEY" if provider else None,
             ]
             base_url = str(model_cfg.get("base_url") or "").lower()
-            for _host in ("deepseek", "openai", "anthropic", "openrouter"):
+            for _host in ("deepseek", "openai", "anthropic", "openrouter",
+                          "bigmodel", "zhipu"):
                 if _host in base_url:
                     candidates.append(f"{_host.upper()}_API_KEY")
             candidates.extend(
                 ["DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]
+                 "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+                 "ZHIPUAI_API_KEY", "BIGMODEL_API_KEY"]
             )
             for cand in candidates:
                 if cand and os.environ.get(cand):

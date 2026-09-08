@@ -589,16 +589,19 @@ def load_config(
             }
 
             # 新模式（llm 段）下额外注入 haiku 级轻量模型配置，
-            # delegate_tool（子代理委派工具）要读它
+            # delegate_tool（子代理委派工具）要读它。
+            # format/api_key 跟着 llm 段走——端点换 OpenAI 兼容协议时
+            # 子代理也必须跟着换，否则拿 anthropic 客户端敲 /v4 端点
             llm_cfg = settings.get("llm", {})
             if llm_cfg:
                 haiku_name = settings.get("default_haiku_model", "haiku")
                 haiku_model_name = llm_cfg.get(f"{haiku_name}_model")
                 if haiku_model_name:
                     config["haiku_model"] = {
-                        "format": "anthropic",
+                        "format": llm_cfg.get("format", "anthropic"),
                         "base_url": llm_cfg.get("base_url"),
                         "auth_token": llm_cfg.get("auth_token", ""),
+                        "api_key": llm_cfg.get("api_key", ""),
                         "model": haiku_model_name,
                     }
 

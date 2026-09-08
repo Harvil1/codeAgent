@@ -513,9 +513,16 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
         if model_name:
             return {
                 "name": name,
-                "format": "anthropic",
+                # 协议：端点是哪家就填哪家的格式——anthropic 兼容端点
+                #（如 DeepSeek /anthropic、BigModel /api/anthropic）填
+                # "anthropic"；OpenAI 兼容端点（如 BigModel /api/paas/v4）
+                # 填 "openai"。不填默认 anthropic（老配置全是这种端点）
+                "format": llm_cfg.get("format", "anthropic"),
                 "base_url": llm_cfg.get("base_url"),
                 "auth_token": llm_cfg.get("auth_token", ""),
+                # openai 协议只认 Bearer api_key（x-api-key 那套它不收），
+                # anthropic 协议则优先 auth_token——两把门禁卡分开带
+                "api_key": llm_cfg.get("api_key", ""),
                 "model": model_name,
                 "effort_level": llm_cfg.get("effort_level", ""),
                 "api_timeout_ms": llm_cfg.get("api_timeout_ms"),
@@ -561,9 +568,10 @@ def list_models(settings: Optional[Dict] = None) -> Dict[str, Dict]:
             model_name = llm_cfg.get(f"{tier}_model")
             if model_name:
                 models[tier] = {
-                    "format": "anthropic",
+                    "format": llm_cfg.get("format", "anthropic"),
                     "base_url": llm_cfg.get("base_url"),
                     "auth_token": llm_cfg.get("auth_token", ""),
+                    "api_key": llm_cfg.get("api_key", ""),
                     "model": model_name,
                     "effort_level": llm_cfg.get("effort_level", "") if tier != "haiku" else "",
                 }
