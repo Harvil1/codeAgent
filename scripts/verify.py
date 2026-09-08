@@ -1283,6 +1283,19 @@ def check_split_symbol_surface():
         if not callable(getattr(_pg, _name, None)) \
                 or getattr(_pg, _name) is not getattr(_perm, _name, None):
             return _fail(f"path_guard.{_name} 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块 T4：危险删除与 cd+git 防护（簇 F）拆到 bash_removal_guard
+    # ——check() 三处调用点（危险删除/段数上限闸门/cd+git 组合）全走主文件
+    # re-export；_CMD_SEGMENT_SPLIT_RE 与 _MAX_COMPOUND_SEGMENTS 是段数上限
+    # 闸门直接引用的数据符号（非 callable，走纯同对象比对）。风格与 T2/T3 一致
+    import agent.bash_removal_guard as _brg
+    for _name in ("check_dangerous_removal", "is_dangerous_removal_path",
+                  "_has_cd_git_combo"):
+        if not callable(getattr(_brg, _name, None)) \
+                or getattr(_brg, _name) is not getattr(_perm, _name, None):
+            return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
+    for _name in ("_CMD_SEGMENT_SPLIT_RE", "_MAX_COMPOUND_SEGMENTS"):
+        if getattr(_brg, _name) is not getattr(_perm, _name, None):
+            return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
