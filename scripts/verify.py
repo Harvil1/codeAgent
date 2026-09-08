@@ -1228,12 +1228,19 @@ def check_split_symbol_surface():
 
     # 拆分三期：delegate 系列模块可独立 import 且主文件 re-export 生效
     import tools.delegate_result  # noqa: F401
-    # import tools.delegate_setup  # noqa: F401 —— T2 落地后启用，本任务先注释占位，
-    # 只断言已落地模块；T2/T3/T4 各自追加自己的 import 断言行
-    from tools.delegate_tool import _offload_child_result as _ocr
+    import tools.delegate_setup  # noqa: F401 —— T2 落地：配置纯函数三件
+    # re-export 一致性走跨模块比对（源模块定义 vs 主文件 re-export 必须同一对象）——
+    # 旧写法 from delegate_tool import 之后再跟 delegate_tool 比是自己比自己（恒真）
+    import tools.delegate_result as _dr
+    import tools.delegate_setup as _ds
     import tools.delegate_tool as _dt
-    if _dt._offload_child_result is not _ocr:
-        return _fail("re-export 不是同一对象")
+    if _dr._offload_child_result is not _dt._offload_child_result:
+        return _fail("delegate_result._offload_child_result 与主文件 re-export 不是同一对象")
+    for _fn in ("inline_mcp_spawn_allowed", "_validate_toolset_names",
+                "_delegate_schema_overrides"):
+        if not callable(getattr(_ds, _fn, None)) \
+                or getattr(_ds, _fn) is not getattr(_dt, _fn, None):
+            return _fail(f"delegate_setup.{_fn} 与主文件 re-export 不是同一对象")
     # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
     import inspect
     import agent.mcp_client as _mc
