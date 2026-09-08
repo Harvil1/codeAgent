@@ -1910,7 +1910,9 @@ def _resume_warmup(rt, conv: list) -> list:
         # 现场做摘要（比首轮对话中途压更好）；session_state 也用 agent
         # 的记账簿（预热的触发次数计入冷却/熔断，不白拿额度）
         msgs = [{"role": "system", "content": ""}] + conv
-        pre_msgs = msgs  # 压缩前原貌留一份：真触发 L4 时给记忆提取当「遗照」
+        # 压缩前原貌留一份（浅拷贝）：真触发 L4 时给记忆提取当「遗照」——
+        # 管线就地改 dict，直接存别名会被污染成占位
+        pre_msgs = [dict(m) for m in msgs]
         msgs, _changed, _compacted = loop_host.run_async(compress_if_needed(
             msgs,
             llm_client=getattr(rt.agent, "llm_client", None),

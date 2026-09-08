@@ -1428,8 +1428,15 @@ def check_resume_warmup(tmp):
     seen = {}
 
     async def _fake_compress(msgs, **kw):
-        seen["pre_msgs"] = msgs       # 记下压缩前列表（应与记忆提取同对象）
-        return list(msgs), True, True  # 返回新列表（真压缩会换对象），同一性断言才有鉴别力
+        seen["orig"] = msgs           # 压缩函数吃到的原列表对象（别名检测用）
+        seen["pre_msgs"] = [dict(m) for m in msgs]  # 压缩前原貌（内容对照用）
+        # 模拟时间清理/冻结层就地改 dict（管线的真实行为）：记忆提取若拿
+        # 到的是别名或共享 dict 的浅列表，旧工具结果会在这儿被换成占位
+        for m in msgs:
+            if m.get("role") == "tool":
+                m["content"] = "[polluted]"
+        # 返回新列表（真压缩会换对象），快照断言才有鉴别力
+        return list(msgs), True, True
 
     class _MM:
         def on_pre_compress(self, snapshot_path, messages):
@@ -1454,12 +1461,18 @@ def check_resume_warmup(tmp):
         _cli._resume_warmup(rt_l4, conv3)
     finally:
         _cp.compress_if_needed = _real_compress
-    # 断言 4a：on_pre_compress 收到的是压缩前消息（snapshot_path=None、
-    # 与假压缩函数吃到的列表同一对象）
+    # 断言 4a：on_pre_compress 吃到的是压缩前快照（snapshot_path=None）：
+    # 1) 不是压缩函数吃到的原列表别名——别名会被管线就地改污染；
+    # 2) 内容与压缩前原貌完全一致——浅拷贝不丢内容，也没被假压缩里的
+    #    就地改动波及（共享 dict 的「假快照」在这儿现原形）
     mm_call = seen.get("mm")
-    if mm_call is None or mm_call[0] is not None \
-            or mm_call[1] is not seen.get("pre_msgs"):
+    if mm_call is None or mm_call[0] is not None:
         return _fail("L4 外围：on_pre_compress 没吃到压缩前消息")
+    mm_msgs = mm_call[1]
+    if mm_msgs is seen.get("orig"):
+        return _fail("L4 外围：on_pre_compress 吃到的是别名不是快照（就地改会污染它）")
+    if mm_msgs != seen.get("pre_msgs"):
+        return _fail("L4 外围：快照与压缩前原貌不一致（浅拷贝失真/被污染）")
     # 断言 4b：surfaced 去重集合被清空
     if surfaced:
         return _fail(f"L4 外围：_surfaced_memory_ids 没清: {surfaced}")

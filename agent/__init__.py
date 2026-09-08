@@ -1854,6 +1854,10 @@ class AIAgent:
 
         from agent.context_pipeline import compress_if_needed
         ctx_cfg = self.config.get("context", {})
+        # 压缩前快照（浅拷贝）：on_pre_compress 要的是真原文——管线内部的
+        # 时间清理/冻结层会就地改 dict，直接存别名的话等压缩跑完，旧工具
+        # 结果已被换成占位，记忆提取就白跑了（warmup 同款语义）
+        pre_compress_msgs = [dict(m) for m in messages]
         messages, changed, compacted = await compress_if_needed(
             messages,
             llm_client=self.llm_client,
@@ -1890,7 +1894,7 @@ class AIAgent:
         # 压缩前调记忆管理器提取事实（趁旧消息还在）
         if self.memory_manager:
             try:
-                self.memory_manager.on_pre_compress(None, messages)
+                self.memory_manager.on_pre_compress(None, pre_compress_msgs)
             except Exception as e:
                 logger.warning("on_pre_compress 编排异常: %s", e)
 
