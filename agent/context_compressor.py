@@ -661,6 +661,10 @@ def _get_model_max_tokens(model_name: str) -> int:
     name = model_name.lower()
     if "[1m]" in name or "1m" in name:
         return 1_000_000
+    # GLM-5.3 家族（含 flash）在 OpenAI 端点（paas/v4）裸名就是 1M
+    # 上下文；[1m] 后缀只是 anthropic 兼容端点的开关，OpenAI 端点不认
+    if "glm-5.3" in name:
+        return 1_000_000
     if "v4" in name or "deepseek" in name:
         return 65536
     if "claude-3-5" in name or "sonnet" in name or "haiku" in name:
