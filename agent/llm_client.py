@@ -294,7 +294,8 @@ class OpenAICompatClient(LLMClient):
                 if loop is not None and loop is loop_host.loop:
                     asyncio.create_task(coro)
                 else:
-                    loop_host.run_async(coro)
+                    # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
+                    loop_host.run_async(coro, timeout=30)
         except Exception:
             pass
 
@@ -479,7 +480,8 @@ class AnthropicClient(LLMClient):
                 if loop is not None and loop is loop_host.loop:
                     asyncio.create_task(coro)
                 else:
-                    loop_host.run_async(coro)
+                    # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
+                    loop_host.run_async(coro, timeout=30)
         except Exception:
             pass
 
@@ -602,7 +604,8 @@ class AnthropicClient(LLMClient):
                         tool_buffers[idx] = {
                             "id": getattr(block, "id", ""),
                             "name": getattr(block, "name", ""),
-                            "input_json": "",
+                            # 参数碎片先攒篮子（list），收尾 join 一次成串
+                            "input_json": [],
                         }
                         current_tool_idx = idx
                 elif evt_type == "content_block_delta":
@@ -623,7 +626,7 @@ class AnthropicClient(LLMClient):
                         # 工具参数的 JSON 被切片发来，一片片往篮子里攒
                         partial = getattr(delta, "partial_json", "") or ""
                         if current_tool_idx is not None and partial:
-                            tool_buffers[current_tool_idx]["input_json"] += partial
+                            tool_buffers[current_tool_idx]["input_json"].append(partial)
                 elif evt_type == "content_block_stop":
                     current_tool_idx = None
 
@@ -638,7 +641,9 @@ class AnthropicClient(LLMClient):
                     type="function",
                     function=SimpleNamespace(
                         name=buf["name"],
-                        arguments=buf["input_json"] or "{}",
+                        # 结账：攒的碎片 join 成完整参数串（空篮子 join 出
+                        # 空串，照旧走 or "{}" 兜底）
+                        arguments="".join(buf["input_json"]) or "{}",
                     ),
                 ))
             usage_dict = _extract_anthropic_usage(getattr(final_message, "usage", None))

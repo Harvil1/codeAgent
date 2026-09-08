@@ -55,6 +55,10 @@ async def call_llm_streaming(agent, *, messages, tools):
     返回：拼装好的 OpenAI 兼容响应对象（SimpleNamespace）。
     """
     from types import SimpleNamespace
+    # 正文片段先攒进篮子（list），要用整串时再 join——比字符串 += 每次把
+    # 整串重拷一遍接新尾巴省。full_content 是「结账变量」：回调在循环里
+    # 要「累积至今」的串时就地 join，流正常收尾后统一结账一次定稿
+    _content_parts: list[str] = []
     full_content = ""
     tool_call_buffers: dict[int, dict] = {}  # idx → {id, name, arguments}
     final_usage = None
@@ -91,13 +95,15 @@ async def call_llm_streaming(agent, *, messages, tools):
             # 内容流式
             delta_text = delta.get("content") or ""
             if delta_text:
-                full_content += delta_text
+                _content_parts.append(delta_text)
                 if agent._stream_callback is not None:
                     try:
                         agent._stream_callback({
                             "type": "content",
                             "delta": delta_text,
-                            "accumulated": full_content,
+                            # 累积至今的整串：append 后就地 join，字节与
+                            # 旧版「+= 完直接读」的累积串完全相同
+                            "accumulated": "".join(_content_parts),
                         })
                     except Exception as cb_err:
                         logger.warning(
@@ -207,7 +213,11 @@ async def call_llm_streaming(agent, *, messages, tools):
                 pass
         return response
 
-    # 流正常结束 → 补完最后一个工具的完整化 + 收集预执行结果
+    # 流正常结束：先给正文片段结账（join 成整串，之后的长度判断/最终
+    # 返回读的都是这份定稿；异常路径不走到这——那边直接退非流式重试并
+    # return，半截片段随函数一起扔掉），再补完最后一个工具的完整化 +
+    # 收集预执行结果
+    full_content = "".join(_content_parts)
     if _executor is not None:
         try:
             if _last_seen_idx is not None and _last_seen_idx in tool_call_buffers:

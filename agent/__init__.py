@@ -837,7 +837,7 @@ class AIAgent:
                 omit_project_memory=self.omit_project_memory,
                 output_style_text=style_text,
             )
-            # stable + context 两层缓存；volatile 层每次现取
+            # stable + context 两层缓存
             self._stable_prompt = layers.stable
             self._context_prompt = layers.context
             self._system_prompt_built = True

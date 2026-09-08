@@ -1162,17 +1162,22 @@ def check_loop_host():
     if h2.run_async(_smoke()) != 1:
         return _fail("独立实例基础语义坏了")
     h2.stop()
+    # 两条被拒协程先建对象再交，被拒分支里 close 掉——不然协程没人
+    # await，GC 时打 "never awaited" RuntimeWarning 噪音
+    _rej1 = _smoke()
     try:
-        h2.run_async(_smoke())
+        h2.run_async(_rej1)
         return _fail("stop 后 run_async 没拒绝")
     except RuntimeError:
-        pass
-    bgf = h2.submit(_smoke(), name="verify-stopped")
+        _rej1.close()
+    _rej2 = _smoke()
+    bgf = h2.submit(_rej2, name="verify-stopped")
     try:
         bgf.result(timeout=2)
         return _fail("stop 后 submit 的 future 不该成功")
     except RuntimeError:
-        pass
+        # submit 被拒时协程没被排上（_ensure_started 先炸），close 安全
+        _rej2.close()
     return _ok("loop_host 语义十件套正常（含 timeout 取消与 stop 拒绝）")
 
 
