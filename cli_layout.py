@@ -77,6 +77,26 @@ def spinner_text(frame: int, rt, turn_started_at, now: float) -> str:
         return ""   # 纯视觉，任何异常都当「不显示」
 
 
+def _tighten_next_render(app=None) -> None:
+    """掀掉 renderer 的 last_height 地板，下一帧按内容高度渲染。
+
+    大白话：prompt_toolkit 为了防闪烁，渲染高度只涨不跌（取
+    max(min高度, 上一帧高度, 内容高度)）——回合中 live 面板撑高过、
+    或输入框敲过多行，结束/清空后高度也不回落，多余行全塞给弹性
+    窗口，输入框就赖在 8 行高的大空箱子上下不来。把 _last_screen
+    掏空，下一帧就缩回实际高度。私有属性 + try/except 兜底——
+    pt 版本变了顶多不缩高，绝不炸。
+    """
+    try:
+        if app is None:
+            from prompt_toolkit.application import get_app
+            app = get_app()
+        if app is not None:
+            app.renderer._last_screen = None
+    except Exception:
+        pass
+
+
 def submit_input(buffer, input_queue) -> None:
     """提交小函数（键位回调只是薄壳，逻辑全在这——方便单测）。
 
@@ -94,6 +114,8 @@ def submit_input(buffer, input_queue) -> None:
         # validate_and_handle 会把非空文本记进历史再把框清空
         #（等价于老 PromptSession 按回车的动作）
         buffer.validate_and_handle()
+        # 框清空了 → 渲染高度也跟着回落（多行输入别赖着 8 行高）
+        _tighten_next_render()
     except Exception:
         logger.exception("提交输入失败（这行字丢了，但不许炸输入线程）")
 
@@ -405,6 +427,8 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
         b = event.app.current_buffer
         if b.text:
             b.reset()
+            # 清行后渲染高度回落（多行敲剩的字被清掉，框别赖高）
+            _tighten_next_render(event.app)
             return
         if interrupt_fn is not None and interrupt_fn():
             # 回合进行中：第一击中断本轮；2 秒内第二击强制退出一切
@@ -557,6 +581,11 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                 min=1, max=8,
                 preferred=_estimate_input_height(input_area.text, _term_width()),
             ),
+            # 永不拉伸超过内容行数：非全屏 app 的渲染高度有「只涨不跌」
+            # 的地板（见 _tighten_next_render），弹性窗口会把多余行全吃
+            # 掉——空输入框也会被顶到 max=8 变大空箱子。锁死伸展后，
+            # 高度永远 = 内容行数（初始 1 行，Shift/Alt/Ctrl+↵ 换行随行数长高）
+            dont_extend_height=True,
             prompt=[("class:prompt", f"{prompt_symbol} ")],
             multiline=True,
             wrap_lines=True,
@@ -669,6 +698,10 @@ def start_spinner_thread(rt, app, stop_event):
                             cli_live.turn_ended()
                         except Exception:
                             pass
+                        # 回合结束 live 面板收起 → 渲染高度回落
+                        #（不掀地板的话，面板撑高过的行数会赖着，
+                        # 全塞给输入框把它顶成大空箱子）
+                        _tighten_next_render(app)
                     state["was_active"] = active
                     state["frame"] = (state["frame"] + 1) % 1000
                 invalidate_throttled(app)
