@@ -109,7 +109,8 @@ def result_preview(result_str: str):
     if isinstance(data, dict):
         if data.get("error"):
             return False, _cut(data["error"], 60)
-        for key in ("preview", "output", "content", "text"):
+        # body 是 memory(load) 这类工具的正文键——排在常规键后面兜底
+        for key in ("preview", "output", "content", "text", "body"):
             v = data.get(key)
             if v:
                 return True, _cut(v, 60)

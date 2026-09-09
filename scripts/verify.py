@@ -2468,7 +2468,56 @@ def check_console_bridge():
         cli_ui.set_input_bridge(None)
     if result.get("v") != "answered":
         return _fail(f"input 桥回传异常：{result}")
-    return _ok("print 走 pt 通道 + input 桥正常")
+
+    # 终端让渡协程：真挂起→跑 fn→恢复（假 app 走完整个生命周期）
+    import asyncio as _aio2
+    import inspect as _insp
+
+    class _CM:
+        def __init__(self, log, tag):
+            self._log, self._tag = log, tag
+
+        def __enter__(self):
+            self._log.append(f"enter:{self._tag}")
+            return self
+
+        def __exit__(self, *a):
+            self._log.append(f"exit:{self._tag}")
+            return False
+
+    log = []
+    fake_app = SimpleNamespace(
+        _is_running=True,
+        input=SimpleNamespace(
+            detach=lambda: _CM(log, "detach"),
+            cooked_mode=lambda: _CM(log, "cooked"),
+        ),
+        renderer=SimpleNamespace(
+            erase=lambda: log.append("erase"),
+            reset=lambda: log.append("reset"),
+        ),
+        _redraw=lambda: log.append("redraw"),
+        _request_absolute_cursor_position=lambda: None,
+        output=SimpleNamespace(responds_to_cpr=False),
+    )
+    got = _aio2.run(cli_ui.terminal_handover(fake_app, lambda: "ok"))
+    if got != "ok":
+        return _fail(f"让渡协程没跑 fn / 没回传: {got!r}")
+    # 挂起顺序：先脱离 raw 再擦屏；恢复顺序：先退上下文再重绘
+    for step in ("enter:detach", "enter:cooked", "erase",
+                 "exit:cooked", "exit:detach", "reset", "redraw"):
+        if step not in log:
+            return _fail(f"让渡生命周期缺步骤 {step!r}: {log}")
+    # app 不在跑 → 原地执行不碰界面
+    idle = SimpleNamespace(_is_running=False)
+    if _aio2.run(cli_ui.terminal_handover(idle, lambda: 42)) != 42:
+        return _fail("idle app 原地执行失败")
+    # 回归栏栅：pt 3.0.53 没有的方法名再进源码 = 桥又要塌
+    import cli_layout as _cl
+    for mod in (cli_ui, _cl):
+        if "run_in_terminal_async" in _insp.getsource(mod):
+            return _fail(f"{mod.__name__} 又引用了不存在的 run_in_terminal_async")
+    return _ok("print 桥 + input 桥 + 终端让渡生命周期正常")
 
 
 def check_cc_double_press():

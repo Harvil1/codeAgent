@@ -54,6 +54,68 @@ def set_active_app(app) -> None:
     _active_app = app
 
 
+async def terminal_handover(app, fn):
+    """把 fn 搬进 UI 线程执行，执行期间真正挂起界面（终端让渡给 fn）。
+
+    大白话：工作线程想直接跟用户终端打交道（读按键/画选择器），必须先
+    让 pt 界面收摊（擦屏、退出 raw 模式、停止重绘），fn 干完再重开——
+    不挂起的话 stdin 还被 pt 独占，fn 里的 input() 会永远读不到字。
+
+    为什么不复用 pt 的 in_terminal()：它靠 ContextVar 找 app，而我们是
+    从工作线程跨循环调度过来的，新上下文里 get_app_or_none() 永远是
+    None、界面根本不会挂起；旧代码引用的那个 pt Application 终端让渡
+    方法在 3.0.53 里压根不存在（输入桥从第一天起就是坏的，审批提问一
+    触发就卡死——本函数就是补这个洞）。这里照上游逻辑复刻，但显式收
+    app 实例，不依赖 ContextVar。
+
+    fn 本身的异常原样传播（绝不重跑——提问读一半失败不能再来一遍）；
+    挂起/恢复失败只打 warning，fail-open 原地执行 fn。
+
+    参数：app——pt Application（不在跑就原地执行）；fn——() -> 结果。
+    返回：fn 的返回值。
+    """
+    import asyncio
+
+    if app is None or not getattr(app, "_is_running", False):
+        return fn()
+
+    # ---- 挂起：擦屏 + 停重绘 + 脱离 raw 模式 ----
+    detach_cm = cooked_cm = None
+    try:
+        detach_cm = app.input.detach()
+        detach_cm.__enter__()
+        cooked_cm = app.input.cooked_mode()
+        cooked_cm.__enter__()
+        app.renderer.erase()
+        app._running_in_terminal = True   # pt 靠它停掉周期重绘
+    except Exception as e:
+        for cm in (cooked_cm, detach_cm):
+            if cm is not None:
+                try:
+                    cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+        logger.warning("终端让渡挂起失败，原地执行（界面可能残影）: %s", e)
+        return fn()
+
+    # ---- fn 跑在执行器线程：阻塞读 stdin 不许卡 UI 事件循环 ----
+    try:
+        return await asyncio.to_thread(fn)
+    finally:
+        app._running_in_terminal = False
+        for cm in (cooked_cm, detach_cm):
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:
+                pass
+        try:
+            app.renderer.reset()
+            app._request_absolute_cursor_position()
+            app._redraw()
+        except Exception:
+            pass
+
+
 def run_with_input_bridge(fn):
     """把 fn 搬进 pt 的 run_in_terminal 通道执行（跨线程借用终端）。
 
@@ -108,7 +170,7 @@ def emit_ansi(text: str) -> None:
             return
         import asyncio
         fut = asyncio.run_coroutine_threadsafe(
-            app.run_in_terminal_async(_render), app.loop)
+            terminal_handover(app, _render), app.loop)
         # 等渲染完成再返回：同一个出口排队走，行序天然有保证
         #（不等的话两次打印任务并发，收起/重绘交错会撕行）
         fut.result(timeout=5)

@@ -799,11 +799,14 @@ def request_app_exit(app) -> None:
 
 
 def install_input_bridge(app) -> None:
-    """注册跨线程输入桥：工作线程的提问 → pt 的 run_in_terminal 通道。
+    """注册跨线程输入桥：工作线程的提问 → 终端让渡通道。
 
-    大白话：stdin 被 pt 独占后，工作线程（审批/确认）里的 input() 读
-    不到字。桥把提问函数调度到 UI 线程执行——pt 会先收起界面、把终端
-    还给经典输入，用户答完再恢复界面。app 为 None 时注销桥（直读）。
+    大白话：stdin 被 pt 独占后，工作线程（审批/确认/提问选择器）里的
+    input() 读不到字。桥把提问函数搬进 UI 线程、经 cli_ui.terminal_
+    handover 真正挂起界面（擦屏+退出 raw 模式），终端还给经典输入，
+    用户答完再恢复界面。app 为 None 时注销桥（直读）。
+    注意不走 pt 的 run_in_terminal——那个靠 ContextVar 找 app，跨线程
+    调度过来永远拿 None，界面根本不挂起（详见 terminal_handover 注释）。
     """
     import asyncio
     import cli_ui
@@ -814,7 +817,9 @@ def install_input_bridge(app) -> None:
 
     def _bridge(func):
         future = asyncio.run_coroutine_threadsafe(
-            app.run_in_terminal_async(func), app.loop)
+            cli_ui.terminal_handover(app, func), app.loop)
+        # 不设超时：审批/提问本来就要等用户慢慢想，只阻塞提问的
+        # 工作线程，UI 事件循环照常转（fn 在执行器线程里跑）
         return future.result()
 
     cli_ui.set_input_bridge(_bridge)
