@@ -1952,6 +1952,20 @@ def check_memory_index_in_prompt(tmp):
         if "记忆索引（已有长期记忆清单" not in layers.context \
                 or "用户爱用 pytest" not in layers.context:
             return _fail("system prompt 的 context 层缺记忆索引")
+        # 「用户显式路径永远优先于记忆项目」防御（问 A 项目答 B 项目事故的
+        # 回归栏栅）：索引节、索引头、检索注入头、反思分类规则四处都要在
+        if "永远优先" not in layers.context:
+            return _fail("索引注入缺「用户路径永远优先」防御文案")
+        if "永远优先" not in store.snapshot_for_prompt():
+            return _fail("MEMORY.md 索引头缺防御文案")
+        import agent.memory_injection as _mi
+        import agent.reflection as _refl
+        import inspect as _insp
+        if "永远优先" not in _insp.getsource(_mi):
+            return _fail("检索注入头缺防御文案")
+        if "reference" not in _refl.REFLECTION_PROMPT_TEMPLATE \
+                or "当前工作目录" not in _refl.REFLECTION_PROMPT_TEMPLATE:
+            return _fail("反思模板缺「外部项目档案用 reference」分类规则")
         bare = build_system_prompt_layers(memory_store=None)
         if "记忆索引（已有长期记忆清单" in bare.context:
             return _fail("没传 memory_store 也不该有索引节")

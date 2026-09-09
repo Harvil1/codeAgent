@@ -299,6 +299,9 @@ def build_system_prompt_layers(
                     f"{idx}\n\n"
                     "以上只列标题和一句话钩子；需要细节用 memory 工具按 id "
                     "load，或依赖每轮自动检索注入。"
+                    "⚠️ 索引里出现的项目/路径是**历史信息**——用户当前消息中"
+                    "明确写出的路径或项目名永远优先，不要把记忆里的项目当成"
+                    "用户现在所指的项目。"
                 )
         except Exception as e:
             logger.debug("记忆索引注入失败(可忽略): %s", e)

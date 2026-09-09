@@ -214,7 +214,9 @@ async def build_relevant_memories_message(
             f'<relevant_memories count="{len(lines)}">\n'
             + "\n".join(lines)
             + "\n</relevant_memories>\n"
-            "（以上是按当前问题检索的历史记忆，仅供参考；带 age 标注的引用可能过期）"
+            "（以上是按当前问题检索的历史记忆，仅供参考；带 age 标注的引用可能过期。"
+            "⚠️ 记忆里出现的项目/路径是历史信息——用户当前消息中明确写出的路径或"
+            "项目名永远优先，绝不要把记忆里的项目当成用户现在所指的项目）"
         ),
         "_ephemeral": True,
     }
