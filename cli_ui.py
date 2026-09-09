@@ -139,7 +139,7 @@ def emit_ansi(text: str) -> None:
     """ANSI 文本 → 终端打印（全程序唯一打印出口，任何线程都能调）。
 
     大白话：有 pt 界面在跑时，工作线程的打印必须「搬进 UI 事件循环」执行
-    （run_in_terminal_async 会先收起底部操作台行、打完再重绘）——直接裸写
+    （terminal_handover 会先收起底部操作台行、打完再重绘）——直接裸写
     会把 spinner/状态栏冻进滚动历史。UI 线程自己（主线程）不用搬，pt 的
     print_formatted_text 在 app 上下文里本来就协调好。失败退回直写
     （打印挂了不能断业务）。
