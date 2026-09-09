@@ -64,6 +64,15 @@ get_codeagent_home().mkdir(parents=True, exist_ok=True)
 skills_dir().mkdir(parents=True, exist_ok=True)
 logs_dir().mkdir(parents=True, exist_ok=True)
 
+# 运行日志装配：滚动文件（logs/codeagent.log，INFO 全量、5MB×3 轮换）
+# + 控制台 WARNING 保底。不装的话全项目 logger 都走 stderr 兜底——
+# INFO 全丢、重启即焚，出事只能看屏幕回显（此前 logs/ 一直空着的原因）
+from agent.log_setup import setup_logging
+
+import logging as _logging
+setup_logging(logs_dir())
+_logging.getLogger("main").info("CodeAgent 启动")
+
 # 初始化配置：确保 settings.json 存在（第一次运行会自动生成/迁移旧配置）
 from agent.settings import ensure_default_settings
 ensure_default_settings()

@@ -2520,6 +2520,39 @@ def check_console_bridge():
     return _ok("print 桥 + input 桥 + 终端让渡生命周期正常")
 
 
+def check_logging_setup(tmp):
+    """验证运行日志装配：文件落盘 INFO+、控制台 WARNING 保底、幂等。"""
+    import logging as _lg
+    from agent.log_setup import setup_logging, reset_logging
+
+    reset_logging()   # 干净起点（幂等标记 + root handlers 清空）
+    log_dir = Path(tmp) / "logs"
+    path = setup_logging(log_dir)
+    if not path.exists():
+        return _fail(f"日志文件没建: {path}")
+    # 幂等：再来一次返回同一路径、不重复挂 handler
+    n_handlers = len(_lg.getLogger().handlers)
+    if setup_logging(log_dir) != path or len(_lg.getLogger().handlers) != n_handlers:
+        return _fail("setup_logging 不幂等（重复挂 handler）")
+    # INFO 落文件、WARNING 也落文件
+    _lg.getLogger("verify.log.probe").info("info-应该落盘")
+    _lg.getLogger("verify.log.probe").warning("warn-应该落盘")
+    for h in _lg.getLogger().handlers:
+        h.flush()
+    text = path.read_text(encoding="utf-8")
+    if "info-应该落盘" not in text or "warn-应该落盘" not in text:
+        return _fail(f"INFO/WARNING 没进日志文件: {text[-200:]!r}")
+    # 控制台保底：得有一个 WARNING 级 StreamHandler 在岗
+    has_console = any(
+        isinstance(h, _lg.StreamHandler) and h.level == _lg.WARNING
+        for h in _lg.getLogger().handlers
+    )
+    if not has_console:
+        return _fail("控制台 WARNING 保底 handler 缺失")
+    reset_logging()   # 收摊：后续检查的日志别写进待删的临时目录
+    return _ok("文件日志(INFO/警告落盘)+控制台保底+幂等正常")
+
+
 def check_cc_double_press():
     """验证 Ctrl+C 双击检测：窗口内第二击命中、超时重新计、命中后清零。"""
     from cli_layout import is_double_press
@@ -2592,6 +2625,7 @@ def main():
             ("拆分符号面契约", check_split_symbol_surface),
             ("裸 / 删除拦截", check_root_path_removal),
             ("Anthropic usage 字段", check_anthropic_usage_fields),
+            ("运行日志装配", lambda: check_logging_setup(tmp)),
         ]),
         ("记忆系统", [
             ("memory 工具写入", lambda: check_memory_tool_write(tmp)),

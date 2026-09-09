@@ -197,7 +197,9 @@ def run_reflection(
         ), exempt_from_fence=True)  # 后台线程长活，豁免回合栅栏（见 run_async docstring）
         content = response.choices[0].message.content or ""
     except Exception as e:
-        logger.warning("反思 LLM 调用失败（fail-open）: %s", e)
+        # exc_info=True：Connection error 这类网络病没堆栈等于没查——
+        # 日志文件里得能看到是 connect/read/超时的哪一环断的
+        logger.warning("反思 LLM 调用失败（fail-open）: %s", e, exc_info=True)
         return []
 
     # 解析 JSON（模型常在 JSON 外多说话，先整段试，再抠 [...] 片段）
