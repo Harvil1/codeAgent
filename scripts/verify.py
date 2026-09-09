@@ -1959,13 +1959,14 @@ def check_memory_index_in_prompt(tmp):
         if "永远优先" not in store.snapshot_for_prompt():
             return _fail("MEMORY.md 索引头缺防御文案")
         import agent.memory_injection as _mi
-        import agent.reflection as _refl
         import inspect as _insp
         if "永远优先" not in _insp.getsource(_mi):
             return _fail("检索注入头缺防御文案")
-        if "reference" not in _refl.REFLECTION_PROMPT_TEMPLATE \
-                or "当前工作目录" not in _refl.REFLECTION_PROMPT_TEMPLATE:
-            return _fail("反思模板缺「外部项目档案用 reference」分类规则")
+        # 记忆归属规则（用户拍板）：跟工作目录走——分析外部项目取回的
+        # 技术也是当前工作的一部分，照常落当前项目区，不改类不换区
+        import agent.reflection as _refl
+        if "跟着当前工作目录走" not in _refl.REFLECTION_PROMPT_TEMPLATE:
+            return _fail("反思模板缺「记忆跟工作目录走」归属规则")
         bare = build_system_prompt_layers(memory_store=None)
         if "记忆索引（已有长期记忆清单" in bare.context:
             return _fail("没传 memory_store 也不该有索引节")
