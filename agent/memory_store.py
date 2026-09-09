@@ -612,7 +612,16 @@ class MemoryStore:
             if ln.startswith("## "):
                 head_end = i
                 break
-        self._cached_snapshot = "\n".join(lines[head_end:]) if head_end > 0 else ""
+        # snapshot 顶部压一行防御提示——模型看到的每份索引（system prompt
+        # 常驻注入、检索喂给辅助模型的索引）都以它开头：记忆里的项目路径
+        # 是历史信息，用户当前消息明确写出的路径永远优先
+        #（问 A 项目答 B 项目事故的防线，文件头的同款文案到不了模型，
+        # 必须跟着 snapshot 走）。
+        _warn = ("⚠️ 记忆是历史沉淀——用户当前消息明确写出的路径/项目名"
+                 "永远优先于记忆中出现的项目路径。")
+        self._cached_snapshot = (
+            _warn + "\n\n" + "\n".join(lines[head_end:])
+        ) if head_end > 0 else ""
         self._index_dirty = False
         # 记下本次重建索引用的项目键，
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引
