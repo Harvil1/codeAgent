@@ -619,8 +619,9 @@ class MemoryStore:
     def snapshot_for_prompt(self) -> str:
         """返回截断版索引（最多 200 行 / 25KB，哪个先超按哪个截）。
 
-        只在没有辅助模型（aux_llm）时当兜底做一次性注入用；主路径是
-        检索式临时注入（见 memory_injection.py）。
+        用途：system prompt 常驻注入（prompt_builder 会话级拼一次）——
+        让主对话模型"知道已经有什么记忆"；详情仍走每轮检索式注入
+        （见 memory_injection.py）。
         """
         self._ensure_index_fresh()
         snap = self._cached_snapshot

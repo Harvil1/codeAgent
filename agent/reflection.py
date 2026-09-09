@@ -338,6 +338,29 @@ def apply_reflection(
     return written
 
 
+def _notify_memory_saved(agent, count: int) -> None:
+    """写库回执（claude code 同款 memory-saved 通知的移植）。
+
+    反思在后台线程落库，主对话模型本来毫无感知——不知道写没写成、
+    写了几条。塞一条阅后即焚的临时消息进待注入队列（下一轮组装时
+    消费、不进正式历史），模型就知道「沉淀已落库，检索可召回」。
+    fail-open：队列不在/塞失败都只打 debug，绝不影响反思本身。
+    """
+    try:
+        queue = getattr(agent, "_pending_ephemeral_messages", None)
+        if queue is not None and count > 0:
+            queue.append({
+                "role": "user",
+                "content": (
+                    f"[memory-saved] 后台反思已沉淀 {count} 条新记忆入库"
+                    "（本会话索引不刷新、下个会话注入；当前可经检索召回）"
+                ),
+                "_ephemeral": True,
+            })
+    except Exception as e:
+        logger.debug("memory-saved 回执投递失败（fail-open）: %s", e)
+
+
 def trigger_reflection_async(agent) -> None:
     """后台触发任务级反思（不阻塞最终回答的返回）。
 
@@ -377,12 +400,14 @@ def trigger_reflection_async(agent) -> None:
     def _bg():
         try:
             from agent.reflection import apply_reflection
-            apply_reflection(
+            written = apply_reflection(
                 messages=messages_snapshot,
                 memory_store=store,
                 llm_client=llm_for_reflection,
                 session_id=agent.session_id or "",
             )
+            # 写库回执：告诉主对话「沉淀落库了」（阅后即焚，不进正式历史）
+            _notify_memory_saved(agent, written)
 
             # 批次 C：用户画像更新（每 5 次反思做一次）
             try:

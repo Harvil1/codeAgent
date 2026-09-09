@@ -506,10 +506,6 @@ class AIAgent:
         # goal「踢一脚」每条用户消息最多一次
         # （防连环踢死循环——模型坚持说做完了时，第二次就放行正常收尾）
         self._nudged_this_turn: bool = False
-        # 降级快照只注入一次的标志。
-        # 没有辅助小模型时，主循环降级为注入记忆索引快照；为对齐旧「会话级
-        # 冻结」语义，注入一次后本会话不再重复注入（免得每轮塞同一份索引）
-        self._snapshot_injected: bool = False
 
     def cleanup(self):
         """释放这个 agent 占用的资源（由 CLI 的 RuntimeContext.shutdown 调用）。
@@ -1477,37 +1473,31 @@ class AIAgent:
         常说「继续/好/下一步」，光靠这几个字查记忆没有信号。
         检索是并行预取（先发起任务，组装消息时再等结果）——等待窗口覆盖
         压缩（含 LLM 调用）+ 工具集准备，检索延迟大半被并行吸收。
-        降级链：没有辅助小模型 → 退回注入记忆索引快照（有实例级标志，
-        只注一次，防每轮重复塞同一份索引）。全部 fail-open。
+        没有辅助小模型时不再降级注快照——索引已常驻 system prompt
+        （prompt_builder 会话级拼一次），消息里再注一份纯属重复烧 token。
+        全部 fail-open。
         """
-        # 主代理 only（spawn_depth==0）；快照降级本会话只注入一次
+        # 主代理 only（spawn_depth==0）
         if (self.spawn_depth == 0 and self.memory_store is not None
-                and self._pending_ephemeral_messages is not None):
+                and self.aux_llm_router is not None):
             from agent.memory_injection import (
                 build_relevant_memories_message, build_augmented_query,
-                reset_injection_cache, _fallback_snapshot_message,
+                reset_injection_cache,
             )
             # 每轮开头清缓存（防上一轮的缓存串到这一轮）
             reset_injection_cache()
             try:
-                if self.aux_llm_router is not None:
-                    # 检索路径：并行预取（先不阻塞；组装消息时再等结果）
-                    # 带上「最近在用的工具」降噪 + 已注入过的记忆跨轮去重
-                    self._memory_prefetch_task = asyncio.create_task(
-                        build_relevant_memories_message(
-                            query=build_augmented_query(user_message, self),
-                            memory_store=self.memory_store,
-                            aux_llm_router=self.aux_llm_router,
-                            active_tools=self._recent_active_tools(),
-                            surfaced=self._surfaced_memory_ids,
-                        )
+                # 检索路径：并行预取（先不阻塞；组装消息时再等结果）
+                # 带上「最近在用的工具」降噪 + 已注入过的记忆跨轮去重
+                self._memory_prefetch_task = asyncio.create_task(
+                    build_relevant_memories_message(
+                        query=build_augmented_query(user_message, self),
+                        memory_store=self.memory_store,
+                        aux_llm_router=self.aux_llm_router,
+                        active_tools=self._recent_active_tools(),
+                        surfaced=self._surfaced_memory_ids,
                     )
-                elif not self._snapshot_injected:
-                    # 降级路径：没有辅助模型 → 注入一次快照（本会话仅此一次）
-                    msg = _fallback_snapshot_message(self.memory_store)
-                    if msg is not None:
-                        self._snapshot_injected = True
-                        self._pending_ephemeral_messages.append(msg)
+                )
             except Exception as e:
                 logger.debug("记忆注入 fail-open: %s", e)
 

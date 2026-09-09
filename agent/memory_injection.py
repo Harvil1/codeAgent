@@ -222,32 +222,3 @@ async def build_relevant_memories_message(
     _last_result_var.set(msg)
     _retrieval_stats["injected"] += 1
     return msg
-
-
-def _fallback_snapshot_message(memory_store) -> Optional[dict]:
-    """降级方案：没配辅助模型时，退回把整个记忆索引注入一次。
-
-    主路径（检索式注入）依赖 aux_llm_router；用户没配时靠这个保底，
-    记忆功能不至于整个消失。
-
-    参数：
-    - memory_store：记忆库（提供 snapshot_for_prompt 索引快照）
-
-    返回：ephemeral user 消息 dict（注入当轮后即弃）；任何异常或快照
-    为空返回 None（fail-open）。
-    """
-    try:
-        snap = memory_store.snapshot_for_prompt()
-    except Exception as e:
-        logger.warning("snapshot 降级注入失败: %s", e)
-        return None
-    if not snap or not snap.strip():
-        return None
-    return {
-        "role": "user",
-        "content": (
-            "<memory_index>\n" + snap + "\n</memory_index>\n"
-            "（以上是记忆索引（降级模式），供参考）"
-        ),
-        "_ephemeral": True,
-    }

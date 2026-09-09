@@ -1925,6 +1925,65 @@ def check_cli_completer():
     return _ok("三级补全器两级候选正常")
 
 
+def check_memory_index_in_prompt(tmp):
+    """验证记忆索引常驻注入：system prompt 含索引快照（截断）；反思回执投递。"""
+    import os as _os
+    from agent.memory_store import MemoryStore
+    from agent.prompt_builder import build_system_prompt_layers
+    from agent import reflection as _refl
+
+    # 隔离环境：项目键按 cwd 算，固定到 tmp 下防污染真机项目区
+    _old_cwd = os.getcwd()
+    _os.chdir(tmp)
+    _old_home = _os.environ.get("CODEAGENT_HOME")
+    _os.environ["CODEAGENT_HOME"] = str(tmp)
+    try:
+        store = MemoryStore(codeagent_home=tmp)
+        store.save(name="用户爱用 pytest", description="测试框架是 pytest",
+                   type="user", topic="工具链")
+        store.save(name="提交前跑 verify", description="改完代码先跑 scripts/verify.py",
+                   type="feedback", topic="流程")
+        snap = store.snapshot_for_prompt()
+        if "用户爱用 pytest" not in snap or "提交前跑 verify" not in snap:
+            return _fail(f"索引快照缺条目: {snap[:200]!r}")
+
+        # 注入 system prompt：context 层带索引节；不传 store 不炸也不带
+        layers = build_system_prompt_layers(memory_store=store)
+        if "记忆索引（已有长期记忆清单" not in layers.context \
+                or "用户爱用 pytest" not in layers.context:
+            return _fail("system prompt 的 context 层缺记忆索引")
+        bare = build_system_prompt_layers(memory_store=None)
+        if "记忆索引（已有长期记忆清单" in bare.context:
+            return _fail("没传 memory_store 也不该有索引节")
+
+        # 截断：灌 210 条（每条 1 行）→ 索引超 200 行被截
+        for i in range(210):
+            store.save(name=f"条目{i:03d}", description="x", type="other",
+                       topic="压测")
+        if "超出行数上限" not in store.snapshot_for_prompt():
+            return _fail("索引超 200 行没有截断标记")
+
+        # 反思回执：写库成功 → 临时消息队列出现 [memory-saved]；0 条不打扰
+        fake_agent = SimpleNamespace(_pending_ephemeral_messages=[])
+        _refl._notify_memory_saved(fake_agent, 3)
+        if len(fake_agent._pending_ephemeral_messages) != 1:
+            return _fail("回执没进临时消息队列")
+        notice = fake_agent._pending_ephemeral_messages[0]
+        if "[memory-saved]" not in notice["content"] or "3 条" not in notice["content"] \
+                or notice.get("_ephemeral") is not True:
+            return _fail(f"回执消息长相不对: {notice}")
+        _refl._notify_memory_saved(fake_agent, 0)
+        if len(fake_agent._pending_ephemeral_messages) != 1:
+            return _fail("0 条写入不该发回执")
+        return _ok("索引常驻注入+截断+反思回执正常")
+    finally:
+        _os.chdir(_old_cwd)
+        if _old_home is None:
+            _os.environ.pop("CODEAGENT_HOME", None)
+        else:
+            _os.environ["CODEAGENT_HOME"] = _old_home
+
+
 def check_event_lines():
     """验证事件行渲染器：claude code 风格 ● 头行 + ⎿ 结果块 + 带行号 diff。"""
     import json as _json
@@ -2489,6 +2548,7 @@ def main():
             ("memory 工具写入", lambda: check_memory_tool_write(tmp)),
             ("MEMORY.md 创建", lambda: check_memory_persist(tmp)),
             ("记忆跨实例加载", lambda: check_memory_reload(tmp)),
+            ("索引常驻注入+反思回执", lambda: check_memory_index_in_prompt(tmp)),
         ]),
         ("技能系统", [
             ("/hello 触发", lambda: check_skill_trigger(tmp)),

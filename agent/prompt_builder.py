@@ -171,9 +171,9 @@ def build_system_prompt_layers(
       - volatile：每轮可变（todo / 提醒），不指望命中缓存
 
     参数：
-        memory_store: 记忆仓库对象。不再往 system prompt
-            注入记忆（记忆改成每轮按需检索注入），参数留着只是
-            兼容旧调用，函数里不使用
+        memory_store: 记忆仓库对象。用来读记忆索引快照（snapshot_for_prompt，
+            ≤200 行/25KB）拼进 context 层——会话级一次，中途写新记忆不打穿
+            前缀缓存；详情仍靠每轮检索式注入
         memory_manager: 记忆管理器，能产出扩展记忆块拼进 context 层；没有就不拼
         enabled_toolsets: 当前启用的工具集名字列表（目前本函数未直接使用）
         skills_dir: 技能目录；不传就自动用内置 + 用户两个默认目录
@@ -224,10 +224,12 @@ def build_system_prompt_layers(
         skill_index = _build_skill_index(skills_dir)
         if skill_index:
             context_parts.append(f"## 可用技能\n{skill_index}")
-    # 记忆索引不拼进 system prompt（否则每条新记忆都会让整个前缀缓存
-    # 报废），改成"用完即扔"的临时注入（ephemeral）：每轮按当前问题检索
-    # 相关记忆再注入消息里；没有辅助 LLM 路由时退回开工快照一次性注入。
-    # memory_store 参数只为兼容旧调用签名，不注入任何内容。
+    # 记忆索引走两层（claude code 同款思想）：
+    # 1. system prompt 常驻索引（本函数拼一次，会话内不重建——system
+    #    prompt 本来就是会话级缓存，中途写新记忆不打穿前缀缓存）；
+    # 2. 每轮按当前问题检索相关记忆的 ephemeral 注入（memory_injection）。
+    # 旧顾虑「每条新记忆报废前缀缓存」只在每轮重注的方案下成立，
+    # 会话级一次没有这个问题——所以下面这段真正开始注入索引。
     if memory_manager:
         try:
             ext_block = memory_manager.build_system_prompt()
@@ -282,6 +284,24 @@ def build_system_prompt_layers(
                     logger.warning("读取项目记忆失败 %s: %s", pmd, e)
         except Exception as e:
             logger.debug("项目记忆扫描失败(可忽略): %s", e)
+
+    # 记忆索引常驻注入（claude code 同款：索引放指令链末尾=离用户消息
+    # 最近、注意力权重最高的位置）。只放 name+一句话钩子两层，详情靠
+    # 每轮检索式注入或 memory 工具 load 按需取——索引只让模型"知道
+    # 已经有什么"，不搬正文。会话级拼一次：中途新写的记忆不进本会话
+    # 索引（下个会话才见），换来前缀缓存一份不破。
+    if memory_store is not None:
+        try:
+            idx = memory_store.snapshot_for_prompt()
+            if idx and idx.strip():
+                context_parts.append(
+                    "## 记忆索引（已有长期记忆清单，跨会话沉淀）\n"
+                    f"{idx}\n\n"
+                    "以上只列标题和一句话钩子；需要细节用 memory 工具按 id "
+                    "load，或依赖每轮自动检索注入。"
+                )
+        except Exception as e:
+            logger.debug("记忆索引注入失败(可忽略): %s", e)
 
     if context_files:
         for cf in context_files:
