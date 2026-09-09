@@ -2549,8 +2549,25 @@ def check_logging_setup(tmp):
     )
     if not has_console:
         return _fail("控制台 WARNING 保底 handler 缺失")
+
+    # 线程崩溃钩子：未捕获异常必须落文件（排查问题的命根子）
+    import threading as _th
+    if getattr(_th, "excepthook", None) is None:
+        return _fail("threading.excepthook 没装（线程崩溃会丢）")
+    # 直接调钩子验证落盘：模拟线程炸栈
+    try:
+        raise ValueError("线程崩溃探针")
+    except ValueError:
+        import sys as _sys
+        et, ev, tb = _sys.exc_info()
+        _th.excepthook(_th.ExceptHookArgs((et, ev, tb, None)))
+    for h in _lg.getLogger().handlers:
+        h.flush()
+    text = path.read_text(encoding="utf-8")
+    if "线程崩溃探针" not in text:
+        return _fail("线程崩溃没落日志文件")
     reset_logging()   # 收摊：后续检查的日志别写进待删的临时目录
-    return _ok("文件日志(INFO/警告落盘)+控制台保底+幂等正常")
+    return _ok("文件日志+控制台保底+幂等+线程崩溃钩子正常")
 
 
 def check_readonly_loosening():
