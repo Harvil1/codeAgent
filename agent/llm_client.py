@@ -292,6 +292,8 @@ class OpenAICompatClient(LLMClient):
         except Exception:
             pass
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self._api_key)
+        # 换池也留栈：幻影关池排查线索（谁在什么路径上 reset 的）
+        logger.info("reset_client 已换池（%s）", self.model, stack_info=True)
 
     def close(self) -> None:
         """尽力释放底层 SDK 的 HTTP 连接池（同步版，agent.cleanup() 调）。
@@ -302,20 +304,32 @@ class OpenAICompatClient(LLMClient):
         （run_async 阻塞等结果，等于原来的 asyncio.run，但协程落在
         常驻循环上，连接池不会绑到用完即弃的临时循环）。关不上也不
         报错——打扫失败不该影响正事。
+
+        带调用栈的 INFO 日志：close/reset 期间曾出现「幻影关池者」
+        （有人把在用的池子关了，受害者只看到 client has been closed），
+        栈日志让下一次发生时能直接从 codeagent.log 认出是谁关的。
         """
         try:
             coro = self.client.close()
             if asyncio.iscoroutine(coro):
+                logger.info("关闭 LLM 连接池（%s）", self.model,
+                            stack_info=True)
                 from agent.loop_host import loop_host
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
-                if loop is not None and loop is loop_host.loop:
-                    asyncio.create_task(coro)
-                else:
-                    # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
-                    loop_host.run_async(coro, timeout=30)
+                try:
+                    if loop is not None and loop is loop_host.loop:
+                        task = asyncio.create_task(coro)
+                        self._close_task = task   # 强引用防 GC 蒸发
+                    else:
+                        # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
+                        loop_host.run_async(coro, timeout=30)
+                except Exception:
+                    # 退出窗口 loop 已停、协程排不进去——coro.close() 消毒，
+                    # 不然解释器收尾要甩「coroutine never awaited」警告
+                    coro.close()
         except Exception:
             pass
 
@@ -516,20 +530,32 @@ class AnthropicClient(LLMClient):
         （run_async 阻塞等结果，等于原来的 asyncio.run，但协程落在
         常驻循环上，连接池不会绑到用完即弃的临时循环）。关不上也不
         报错——打扫失败不该影响正事。
+
+        带调用栈的 INFO 日志：close/reset 期间曾出现「幻影关池者」
+        （有人把在用的池子关了，受害者只看到 client has been closed），
+        栈日志让下一次发生时能直接从 codeagent.log 认出是谁关的。
         """
         try:
             coro = self.client.close()
             if asyncio.iscoroutine(coro):
+                logger.info("关闭 LLM 连接池（%s）", self.model,
+                            stack_info=True)
                 from agent.loop_host import loop_host
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
-                if loop is not None and loop is loop_host.loop:
-                    asyncio.create_task(coro)
-                else:
-                    # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
-                    loop_host.run_async(coro, timeout=30)
+                try:
+                    if loop is not None and loop is loop_host.loop:
+                        task = asyncio.create_task(coro)
+                        self._close_task = task   # 强引用防 GC 蒸发
+                    else:
+                        # 有界关池：卡死 30 秒后放弃，daemon 退出兜底仍在
+                        loop_host.run_async(coro, timeout=30)
+                except Exception:
+                    # 退出窗口 loop 已停、协程排不进去——coro.close() 消毒，
+                    # 不然解释器收尾要甩「coroutine never awaited」警告
+                    coro.close()
         except Exception:
             pass
 
