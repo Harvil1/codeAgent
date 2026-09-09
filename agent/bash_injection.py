@@ -519,7 +519,20 @@ def _check_quoted_flag_obfuscation(command: str, base: str) -> Optional[str]:
                 content.append(command[j])
                 j += 1
             if j < n and _QUOTED_FLAG_CONTENT_RE.match("".join(content)):
-                return "引号内 flag 形态（\"-x\" / '--flag'）"
+                # 豁免：echo/printf 段里的引号参数是纯文本——
+                # `echo "---core---"` 这种分隔线写法日常到不能再日常，
+                # 引号剥不剥都不产生执行面。按命中位置反查所属段的动词，
+                # `ls "-rf"` 这类照拦不误。
+                seg = command[max(
+                    command.rfind(op, 0, i)
+                    for op in ("&&", "||", ";", "|", "&", "\n", "\r")
+                ):]
+                verb = seg.lstrip(" &|;\t\r\n").split(" ")[0]
+                verb = verb.split("=")[-1].lower()
+                if verb not in ("echo", "printf"):
+                    return "引号内 flag 形态（\"-x\" / '--flag'）"
+                i = j   # 跳过整个引号串继续扫
+                continue
         i += 1
     return None
 
@@ -621,9 +634,21 @@ def check_injection_surface(command: str) -> Optional[str]:
     if _PROC_ENVIRON_RE.search(command):
         return "访问 /proc/*/environ（环境变量泄露面）"
 
-    # 命令替换 / 进程替换 / zsh 展开（用 with_dq 视图：单引号内不展开）
+    # 命令替换 / 进程替换 / zsh 展开（用 with_dq 视图：单引号内不展开）。
+    # 豁免口：$() 的内层命令本身只读（如 wc -l $(find dir -name '*.py')）
+    # ——find 不带 -exec/-delete 就藏不住任何执行面，拦它只会让探查类
+    # 任务连环弹审批。反引号/进程替换/嵌套不豁免（readonly_commands
+    # 的 substitutions_all_readonly 对这些一律 False）。
+    _ro_sub = False
+    try:
+        from agent.readonly_commands import substitutions_all_readonly
+        _ro_sub = substitutions_all_readonly(command)
+    except Exception:
+        _ro_sub = False
     for pattern, desc in _SUBSTITUTION_PATTERNS:
         if pattern.search(with_dq):
+            if _ro_sub:
+                continue
             return desc
 
     # 未转义反引号（with_dq 视图）

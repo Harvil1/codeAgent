@@ -114,6 +114,10 @@ TERMINAL_SCHEMA = {
     "description": (
         "执行 shell 命令并返回输出。用于运行脚本、安装包、"
         "操作文件系统、管理进程等。命令在指定工作目录执行。"
+        "注意 shell 环境：Windows 上走 cmd.exe（PATH 里有 git-bash 的 "
+        "Unix 工具，ls/cat/head/grep/find/wc 可用）；PowerShell 动词"
+        "（Get-Content/Get-ChildItem 等）不可用——读文件用 cat，"
+        "数行数用 cat x | wc -l，别试 PowerShell 写法。"
     ),
     "parameters": {
         "type": "object",

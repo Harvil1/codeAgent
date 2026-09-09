@@ -138,11 +138,16 @@ def run_with_input_bridge(fn):
 def emit_ansi(text: str) -> None:
     """ANSI 文本 → 终端打印（全程序唯一打印出口，任何线程都能调）。
 
-    大白话：有 pt 界面在跑时，工作线程的打印必须「搬进 UI 事件循环」执行
-    （terminal_handover 会先收起底部操作台行、打完再重绘）——直接裸写
-    会把 spinner/状态栏冻进滚动历史。UI 线程自己（主线程）不用搬，pt 的
-    print_formatted_text 在 app 上下文里本来就协调好。失败退回直写
-    （打印挂了不能断业务）。
+    大白话：工作线程直接写就行——main.py 用 patch_stdout 把 sys.stdout
+    包成了代理，它会把跨线程的写「搬进 UI 事件循环 + 正确挂起/恢复界面」
+    （代理在 loop 线程上下文里跑，ContextVar 认得出 app，这套收放是
+    对的）。我们 print_formatted_text 写的就是这个被代理的 sys.stdout。
+
+    教训（别走回头路）：曾经在这里用 terminal_handover 手动「挂起→打→
+    重绘」，结果在 mintty/winpty 下每打一行就往滚动历史泄漏一份界面
+    快照（重绘定位靠 CPR，winpty 层不可靠）——界面满屏重影。打印走
+    patch_stdout 代理才是正路；terminal_handover 只留给输入桥（审批
+    提问要真正接管 stdin，没有替代品，泄漏一份快照可接受）。
     """
     def _render():
         try:
@@ -155,27 +160,7 @@ def emit_ansi(text: str) -> None:
             except Exception:
                 pass
 
-    app = _active_app
-    if app is None:
-        _render()
-        return
-    try:
-        import threading
-        # 主线程就是 UI 线程（app.run 在主线程跑）——不用搬，直接打
-        if threading.current_thread() is threading.main_thread():
-            _render()
-            return
-        if getattr(app, "is_done", True):
-            _render()   # 界面正在退出——直写，别再排队
-            return
-        import asyncio
-        fut = asyncio.run_coroutine_threadsafe(
-            terminal_handover(app, _render), app.loop)
-        # 等渲染完成再返回：同一个出口排队走，行序天然有保证
-        #（不等的话两次打印任务并发，收起/重绘交错会撕行）
-        fut.result(timeout=5)
-    except Exception:
-        _render()
+    _render()
 
 
 class BridgeConsole(Console):

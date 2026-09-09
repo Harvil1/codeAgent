@@ -816,10 +816,23 @@ def install_input_bridge(app) -> None:
         return
 
     def _bridge(func):
-        future = asyncio.run_coroutine_threadsafe(
-            cli_ui.terminal_handover(app, func), app.loop)
+        # 界面在退出（强退/EOF 收摊）→ 终端已回经典模式，原地问就行；
+        # 别再排协程——app.loop 那会儿可能已经停了，排进去的协程永远
+        # 不跑（还会冒「coroutine never awaited」警告），提问线程干等
+        try:
+            if getattr(app, "is_done", True):
+                return func()
+            future = asyncio.run_coroutine_threadsafe(
+                cli_ui.terminal_handover(app, func), app.loop)
+        except Exception as e:
+            # 排队失败 = 协程从没跑过 = func 一次都没执行——原地补跑
+            # （此时终端多半已不在 raw 模式，直读可行）
+            cli_ui.logger.warning("输入桥排队失败，原地执行: %s", e)
+            return func()
         # 不设超时：审批/提问本来就要等用户慢慢想，只阻塞提问的
-        # 工作线程，UI 事件循环照常转（fn 在执行器线程里跑）
+        # 工作线程，UI 事件循环照常转（fn 在执行器线程里跑）。
+        # 注意：能走到这说明调度成功——func 的异常经 future 原样抛回，
+        # 绝不能在这接住重跑（提问读一半失败不能再来一遍）
         return future.result()
 
     cli_ui.set_input_bridge(_bridge)

@@ -52,6 +52,8 @@ _READONLY_PREFIXES = frozenset({
     # 系统信息(env 不进表:env VAR=x cmd 这种写法能执行任意命令)
     "whoami", "hostname", "uname", "date", "printenv", "echo",
     "id", "systeminfo", "tasklist",
+    # 纯文本过滤器(不写文件;写形态靠重定向拦截,这里只收本身无副作用的)
+    "sort", "uniq", "printf",
 })
 
 # 只读段里禁止出现的参数(出现就说明它其实是写操作,比如 find -delete)
@@ -74,6 +76,23 @@ _SUBSHELL_RE = re.compile(r"\$\(|`")
 # 正则层也得单独拦一道
 _PROCSUB_RE = re.compile(r"[<>]\(")
 _REDIRECT_RE = re.compile(r"(?:^|\s|\d)>{1,2}(?:&\d+)?")
+
+# 无害重定向：丢到 /dev/null（或并流 2>&1）不写任何真实文件。
+# 大白话：`ls xx 2>/dev/null` 只是"报错别吵"，不该因为这个丢掉只读
+# 资格进审批——用户会被 `ls` 弹审批弹到怀疑人生。
+_SAFE_REDIRECT_RE = re.compile(r"(?:^|\s)[012]?>(?:\s*/dev/null|&1)(?=\s|$)")
+
+
+def _neutralize_safe_redirects(command: str) -> str:
+    """把无害重定向（>/dev/null、2>&1）从命令里抹掉再判只读。
+
+    只抹「目标确凿无害」的形态：/dev/null 和并流 &1；重定向到任何
+    真实路径（哪怕是相对路径）都原样保留、照旧拦。
+    """
+    try:
+        return _SAFE_REDIRECT_RE.sub(" ", command)
+    except Exception:
+        return command
 
 
 def _is_readonly_segment(seg: str) -> bool:
@@ -136,7 +155,69 @@ def _tokens_readonly(tokens: List[str]) -> bool:
     return False
 
 
-def _is_readonly_command(command: str) -> bool:
+def _replace_readonly_substitutions(command: str, _depth: int = 0):
+    """把「内容本身只读」的 $() 替换折算成占位词 ROSUB。
+
+    大白话：`wc -l $(find dir -name '*.py')` 里的 $(find …) 只要
+    find 不带 -exec/-delete 这类写形态，它替换出来的只会是文件名列表
+    ——藏不住任何执行面，没必要当注入面拦下进审批。
+
+    规则（保守优先）：
+    - 出现反引号 / 进程替换 <() >() / 嵌套 $() / 括号不平衡 → 返回
+      None（整条不豁免，按老路全拦）；
+    - 每个 $() 的内层命令递归过 _is_readonly_command，有一个不只读
+      → None；
+    - 全部只读 → 返回替换后的字符串（没有可替换的就原样返回）。
+    """
+    if _depth > 2 or "`" in command or _PROCSUB_RE.search(command):
+        return None
+    out = []
+    i = 0
+    found = False
+    n = len(command)
+    while i < n:
+        if command.startswith("$(", i):
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if command.startswith("$(", j):
+                    depth += 1
+                    j += 2
+                elif command[j] == "(":
+                    depth += 1
+                    j += 1
+                elif command[j] == ")":
+                    depth -= 1
+                    j += 1
+                else:
+                    j += 1
+            if depth != 0:
+                return None   # 括号不平衡 → 看不懂的东西不豁免
+            inner = command[i + 2:j - 1]
+            if not _is_readonly_command(inner, _depth + 1):
+                return None   # 内层不只读（如 $(curl …)）→ 整条不豁免
+            out.append("ROSUB")
+            found = True
+            i = j
+        else:
+            out.append(command[i])
+            i += 1
+    return "".join(out) if found else command
+
+
+def substitutions_all_readonly(command: str) -> bool:
+    """命令里的 $() 替换是否全部只读（注入面闸门的豁免口）。
+
+    反引号/进程替换/嵌套形态一律返回 False（不豁免，维持全拦）。
+    """
+    try:
+        replaced = _replace_readonly_substitutions(command.strip())
+        return replaced is not None and "$(" not in replaced
+    except Exception:
+        return False
+
+
+def _is_readonly_command(command: str, _depth: int = 0) -> bool:
     """判断整条命令是否只读(正则判定 + AST 兜底)。
 
     干什么:复合命令(含 && / || / ; / | / $() / 反引号)必须**每一段**
@@ -158,6 +239,16 @@ def _is_readonly_command(command: str) -> bool:
     """
     if not command or not command.strip():
         return False
+    command = command.strip()
+    # 无害重定向（>/dev/null、2>&1）先抹掉——不写文件，不该丢只读资格
+    command = _neutralize_safe_redirects(command)
+    # 深度 0 时先把「内容只读」的 $() 折算成 ROSUB 占位词再判——
+    # 折算不动（None：反引号/嵌套/内层不只读）就按原样走老路，
+    # 下面的 has_sub_form 拦截照旧（保守面一点不松）
+    if _depth == 0:
+        replaced = _replace_readonly_substitutions(command)
+        if replaced is not None:
+            command = replaced
     # 含替换形态($() 反引号 <() >())的命令不许走正则快速通道直通——必须
     # 交 AST 裁决(引号里的字面 $() AST 能分清;`cat <(ls)` 这类形态一旦
     # 免审直通就是 Critical 级放行)

@@ -28,6 +28,23 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
+
+def _is_client_closed_error(exc: BaseException) -> bool:
+    """顺异常链找「client has been closed」（httpx 连接池已被 close）。
+
+    reset_client 换池/收尾关池和并发调用之间有个竞态窗口：拿到旧池
+    引用的调用方会在 await 处撞上这个错。顺着 __cause__/__context__
+    链找（openai SDK 会把 httpx 的 RuntimeError 包好几层）。
+    """
+    cur = exc
+    hops = 0
+    while cur is not None and hops < 8:
+        if "client has been closed" in str(cur):
+            return True
+        cur = cur.__cause__ or cur.__context__
+        hops += 1
+    return False
+
 # 流式「看门狗」的默认空闲超时（90 秒）。
 # 看门狗 = 盯着流式输出，太久没新数据就认为卡死并中止。
 DEFAULT_STREAM_IDLE_TIMEOUT = 90.0
@@ -266,7 +283,10 @@ class OpenAICompatClient(LLMClient):
             try:
                 loop = _aio.get_running_loop()
                 if loop is not None:
-                    loop.create_task(self.client.close())  # noqa
+                    # 强引用必须自己存：asyncio 对 task 只持弱引用，
+                    # 没人引用的 fire-and-forget task 可能被 GC 中途蒸发
+                    # （关一半的池子状态更诡异）
+                    self._old_close_task = loop.create_task(self.client.close())
             except RuntimeError:
                 pass
         except Exception:
@@ -311,12 +331,26 @@ class OpenAICompatClient(LLMClient):
         # 带上 model=xxx。但模型名已经是本 client 的属性，这里再收一次
         # 同名参数，SDK 会报「model 参数传了两遍」。所以先扔掉外来的。
         kwargs.pop("model", None)
-        return await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools if tools else None,
-            **kwargs,
-        )
+        try:
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools if tools else None,
+                **kwargs,
+            )
+        except Exception as e:
+            if not _is_client_closed_error(e):
+                raise
+            # 连接池已被关闭（reset_client/收尾的竞态窗口正好撞上）——
+            # 重建一次重试，别让一次竞态炸掉整轮调用（反思/主对话都遭过）
+            logger.warning("LLM client 已关闭（竞态窗口），重建后重试一次")
+            self.reset_client()
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools if tools else None,
+                **kwargs,
+            )
 
     async def chat_completions_stream(self, messages, *, tools=None, **kwargs):
         """真流式调用：开 stream=True，一段一段收 chunk。
@@ -333,14 +367,28 @@ class OpenAICompatClient(LLMClient):
         """
         # 同上：扔掉外来的 model，防止同名参数传两遍
         kwargs.pop("model", None)
-        stream = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools if tools else None,
-            stream=True,
-            stream_options={"include_usage": True},
-            **kwargs,
-        )
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools if tools else None,
+                stream=True,
+                stream_options={"include_usage": True},
+                **kwargs,
+            )
+        except Exception as e:
+            if not _is_client_closed_error(e):
+                raise
+            logger.warning("LLM client 已关闭（竞态窗口），重建后重试一次")
+            self.reset_client()
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools if tools else None,
+                stream=True,
+                stream_options={"include_usage": True},
+                **kwargs,
+            )
         # 流式看门狗：90 秒没等到新 chunk 就中止流
         async for chunk in _iterate_with_watchdog(
             stream,
