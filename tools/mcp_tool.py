@@ -301,7 +301,112 @@ def initialize_mcp(approval_callback=None) -> int:
             # 内联 server 不在这里连接（等 spawn 时临时连）——审批只管放行名单
             if inline_approved:
                 logger.info("项目 agent 内联 MCP 已批准: %s", sorted(inline_approved))
+
+        # 插件自带的 MCP server（.mcp.json）：用户主动 /plugin install
+        # 装的 = 明确授权，直接连，不再走审批。与用户级同名的跳过
+        # （用户手写的配置优先级最高，跟项目级同款规则）。
+        try:
+            plugin_servers = collect_plugin_mcp_servers()
+        except Exception as e:
+            logger.warning("插件 MCP 扫描失败（跳过）: %s", e)
+            plugin_servers = {}
+        plugin_wanted = {
+            conn: info["cfg"] for conn, info in plugin_servers.items()
+            if conn not in user_cfg
+        }
+        if plugin_wanted:
+            connect_servers_and_register(plugin_wanted)
+
         return register_mcp_tools(manager)
     except Exception as e:
         logger.warning("MCP 初始化失败: %s", e)
         return 0
+
+
+def collect_plugin_mcp_servers() -> Dict[str, dict]:
+    """扫所有已启用插件根下的 .mcp.json，汇总插件要连的 MCP server。
+
+    只看「已启用」的插件（清单 enabled 字段，判法和
+    constants.all_skills_dirs 一致）；官方 claude code 布局
+    （.claude-plugin/plugin.json）也认。
+
+    官方插件配置里常用 ${CLAUDE_PLUGIN_ROOT} 指插件自己目录——这里
+    替换成实际路径（只支持这一个变量，别的原样保留）。
+
+    返回 {连接名: {"plugin": 插件名, "cfg": server配置, "dir": 插件目录}}。
+    连接名默认用 server 本名；两个插件撞名时后扫的改成
+    <插件名>_<server>（扫描按名字排序，结果确定）。
+    """
+    from constants import plugins_dir
+    import json as _json
+
+    root = plugins_dir()
+    out: Dict[str, dict] = {}
+    if not root.exists():
+        return out
+    for pdir in sorted(root.iterdir()):
+        if not pdir.is_dir() or pdir.name == "marketplaces":
+            continue
+        mf = pdir / "plugin.json"
+        if not mf.exists():
+            mf = pdir / ".claude-plugin" / "plugin.json"
+        if not mf.exists():
+            continue
+        try:
+            data = _json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not data.get("enabled", True):
+            continue
+        mcp_file = pdir / ".mcp.json"
+        if not mcp_file.exists():
+            continue
+        try:
+            servers = _json.loads(
+                mcp_file.read_text(encoding="utf-8")
+            ).get("mcpServers", {})
+        except Exception as e:
+            logger.warning("插件 %s 的 .mcp.json 读坏（跳过）: %s", pdir.name, e)
+            continue
+        if not isinstance(servers, dict):
+            continue
+        for sname, cfg in servers.items():
+            if not isinstance(cfg, dict):
+                continue
+            # ${CLAUDE_PLUGIN_ROOT} → 插件实际路径（command/args 里都换）
+            cfg = _json.loads(_json.dumps(cfg))  # 深拷贝，别改插件原文件的内容
+            token = "${CLAUDE_PLUGIN_ROOT}"
+            for key in ("command",):
+                if isinstance(cfg.get(key), str):
+                    cfg[key] = cfg[key].replace(token, str(pdir))
+            if isinstance(cfg.get("args"), list):
+                cfg["args"] = [
+                    a.replace(token, str(pdir)) if isinstance(a, str) else a
+                    for a in cfg["args"]
+                ]
+            conn = sname if sname not in out else f"{pdir.name}_{sname}"
+            out[conn] = {"plugin": pdir.name, "cfg": cfg, "dir": pdir}
+    return out
+
+
+def connect_servers_and_register(servers: Dict[str, dict]) -> int:
+    """连接一批 MCP server 并登记它们的工具（插件接线用，逐个 fail-open）。
+
+    参数：
+        servers：{连接名: server配置}（collect_plugin_mcp_servers 产出的
+                 cfg 那份形状）
+
+    返回：
+        成功登记的工具数。单个 server 连不上只记日志跳过，不连累别的。
+    """
+    manager = get_mcp_manager()
+    connected: list = []
+    for name, cfg in servers.items():
+        try:
+            manager.connect_one(name, cfg)
+            connected.append(name)
+        except Exception as e:
+            logger.warning("MCP server %s 连接失败（跳过）: %s", name, e)
+    if not connected:
+        return 0
+    return register_mcp_tools(manager, servers=connected)

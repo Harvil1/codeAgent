@@ -33,6 +33,12 @@ source 的写法（官方四型全支持）：相对路径（市场仓库里的�
 git 地址（字符串 URL / {"url": ...}）、GitHub 简写（{"repo": "o/r"}）、
 git-subdir（{"url", "path", "ref"?}——克隆整个仓库后取 path 子目录）。
 
+**插件 MCP 接线**：插件根下带 .mcp.json 的（官方 MCP 类插件长这样），
+装上/启用即自动连接其 MCP server 并登记工具（装 = 授权连接，对标
+官方「插件启用即启动」）；卸载/停用即断开（工具靠 check_fn 自动下架）。
+启动时 initialize_mcp 也会扫一遍已启用插件补连线。与用户级
+.mcp.json 同名的跳过——用户手写的优先级最高。
+
 **内置市场**：config.plugins.builtin_marketplaces 默认带着官方
 claude-plugins-official——首次 /plugin market 浏览时自动拉取（开箱
 即用）；用户 remove 过的不会复活（记号文件防僵尸）；地址可以在
@@ -166,6 +172,66 @@ def _refresh_skills(rt) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 插件 MCP 接线：带 .mcp.json 的插件装上即连（对标官方「插件启用即启动」）
+# ---------------------------------------------------------------------------
+
+def _wire_plugin_mcp(plugin_name: str) -> None:
+    """把指定插件自带的 MCP server 连上并登记工具（装/启用后调）。
+
+    优先级规则跟启动时一致：与用户级 .mcp.json 同名的跳过（用户手写
+    的最大）；已经在连的同名不抢（connect_one 本身幂等，这里显式跳过
+    是为了不做重复登记）。连不上只记日志——插件装好了不能因为一个
+    server 起不来就报失败。
+    """
+    try:
+        from agent.mcp_client import load_mcp_config, get_mcp_manager
+        from tools.mcp_tool import (
+            collect_plugin_mcp_servers, connect_servers_and_register,
+        )
+        user_cfg = load_mcp_config()
+        clients = getattr(get_mcp_manager(), "_clients", {}) or {}
+        wanted = {}
+        for conn, info in collect_plugin_mcp_servers().items():
+            if info["plugin"] != plugin_name:
+                continue
+            if conn in user_cfg or conn in clients:
+                continue
+            wanted[conn] = info["cfg"]
+        if not wanted:
+            return
+        n = connect_servers_and_register(wanted)
+        console.print(
+            f"[green]插件 {plugin_name} 的 MCP server 已接线[/green]"
+            f"（{len(wanted)} 个 server，登记 {n} 个工具）"
+        )
+    except Exception as e:
+        logger.warning("插件 %s 的 MCP 接线失败（重启后会再试）: %s", plugin_name, e)
+
+
+def _unwire_plugin_mcp(plugin_name: str) -> None:
+    """断开指定插件名下的 MCP server（卸载/停用前调）。
+
+    必须在插件目录/清单还在盘上时调——连接名是扫 .mcp.json 算出来的，
+    先删后断就找不到归属了。断开后工具不用手动反注册：注册时带的
+    check_fn（server 连着才出场）会自动把它们藏掉。
+    """
+    try:
+        from agent.mcp_client import get_mcp_manager
+        from tools.mcp_tool import collect_plugin_mcp_servers
+        manager = get_mcp_manager()
+        for conn, info in collect_plugin_mcp_servers().items():
+            if info["plugin"] != plugin_name:
+                continue
+            try:
+                if manager.disconnect_one(conn):
+                    console.print(f"[dim]MCP server {conn} 已断开（工具随之下架）[/dim]")
+            except Exception as e:
+                logger.debug("断开插件 MCP %s 失败（重启后自然干净）: %s", conn, e)
+    except Exception as e:
+        logger.debug("插件 %s 的 MCP 拆线检查失败: %s", plugin_name, e)
+
+
+# ---------------------------------------------------------------------------
 # 安装核心（本地目录 / git / 市场 各条路最终都汇到「复制一个目录」）
 # ---------------------------------------------------------------------------
 
@@ -216,6 +282,8 @@ def _install_dir(src_root: Path) -> str | None:
             "[yellow]注意：这个插件没有 skills/<技能名>/SKILL.md，"
             "装了也不会新增技能命令[/yellow]"
         )
+    # 插件自带 MCP server 的当场接线（装 = 授权连接）
+    _wire_plugin_mcp(name)
     return name
 
 
@@ -793,6 +861,7 @@ def _cmd_uninstall(name: str) -> None:
     if answer not in ("y", "yes"):
         console.print("已取消")
         return
+    _unwire_plugin_mcp(name)   # 先拆 MCP 线（目录还在才能算出归属）
     _rmtree_force(path)
     console.print(f"[green]插件 {name} 已卸载[/green]（{path}）")
 
@@ -802,12 +871,18 @@ def _cmd_set_enabled(name: str, enabled: bool) -> None:
     path = _resolve_installed(name)
     if path is None:
         return
+    if not enabled:
+        # 停用前先拆 MCP 线——清单还是 enabled 时才能算出连接归属
+        _unwire_plugin_mcp(name)
     manifest = _load_manifest(path)
     if not manifest:
         # 清单读坏了（或手删了）：造个最小清单把名字保住
         manifest = {"name": name}
     manifest["enabled"] = enabled
     _save_manifest(path, manifest)
+    if enabled:
+        # 启用后接线（清单已置 enabled，扫描能认到它）
+        _wire_plugin_mcp(name)
     console.print(
         f"[green]插件 {name} 已{'启用' if enabled else '停用'}[/green]"
         + ("" if enabled else "[dim]（技能命令下轮生效或重启）[/dim]")
