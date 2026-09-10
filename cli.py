@@ -1074,6 +1074,9 @@ class RuntimeContext:
         msgs = self.session_store.get_messages(session_id)
         # 对话历史不含 system 消息（system 由 prompt_builder 现场生成）
         conv = [m for m in msgs if m.get("role") != "system"]
+        # 重放用全量档案（用户规矩：看到什么恢复什么）——必须在
+        # 压缩边界裁剪**之前**留一份，AI 的上下文裁剪归裁剪
+        raw_for_replay = list(conv)
         # 按最后一次压缩的边界裁掉更早的旧消息
         #（会话库只追加不删改，不裁的话会载入全部旧历史；
         # 旧会话没有边界标记就保守全量载入）
@@ -1134,16 +1137,13 @@ class RuntimeContext:
             f"{' · '.join(bits)}）][/green]"
         )
 
-        # 尾部预览：最后一条你说的 + 最后一条 AI 说的（各截 300 字）
-        tail = []
-        for role in ("user", "assistant"):
-            for m in reversed(msgs):
-                if m.get("role") == role and (m.get("content") or "").strip():
-                    tail.append(m)
-                    break
-        if tail:
-            _print_message_list(tail, char_limit=300,
-                                header="上下文尾部预览：")
+        # 完整重放对话流长相（看到什么恢复什么）：● 头行/⎿ 结果块/
+        # 子代理行都按当时的格式重画。重放失败不拦恢复本身（fail-open）
+        try:
+            from cli_events import replay_session_transcript
+            replay_session_transcript(raw_for_replay)
+        except Exception as e:
+            logger.warning("会话重放失败（恢复本身不受影响）: %s", e)
 
         return True
 

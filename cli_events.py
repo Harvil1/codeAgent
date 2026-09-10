@@ -619,6 +619,61 @@ def print_style_lines(lines) -> None:
             pass
 
 
+def replay_session_transcript(msgs) -> None:
+    """把存档消息**完整重放**成对话流长相——恢复会话时用。
+
+    用户定的规矩：恢复的就是对话里看到的——所以重放走和实时渲染
+    **同一套**格式化函数（● 头行 / ⎿ 结果块 / 子代理出发与完成行），
+    长相和当时一模一样，不是摘要。
+
+    消息形态（会话库存档）：
+    - user：正文（内部注入的 <xxx> 标签消息当时看不见，重放也跳过）
+    - assistant：tool_calls（可能带）+ 文字正文（可能带）
+    - tool：name + tool_call_id + 结果 JSON 字符串
+    """
+    pending: dict = {}   # tool_call_id -> (工具名, args)——结果行找名字用
+    for m in msgs or []:
+        try:
+            role = m.get("role")
+            content = (m.get("content") or "").strip()
+            if role == "user":
+                if content and not content.startswith("<"):
+                    print_style_lines([("", f"你: {content}")])
+            elif role == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    try:
+                        tc_id = tc.get("id")
+                        fn = tc.get("function", {})
+                        name = fn.get("name") or "?"
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except Exception:
+                            args = {}
+                    except Exception:
+                        continue
+                    if tc_id:
+                        pending[tc_id] = (name, args)
+                    if name in _SUBAGENT_TOOLS:
+                        head = format_subagent_depart(args)
+                    else:
+                        head = format_tool_line(name, args)
+                    print_style_lines([("", head)])
+                if content:
+                    print_style_lines([("", content)])
+            elif role == "tool":
+                name = m.get("name") or "tool"
+                tc_args = pending.get(m.get("tool_call_id"), (None, None))[1]
+                if name in _SUBAGENT_TOOLS:
+                    print_style_lines(
+                        format_subagent_done(tc_args or {}, None,
+                                             m.get("content") or ""))
+                else:
+                    print_style_lines(
+                        format_result_block(name, m.get("content") or ""))
+        except Exception:
+            continue   # 单条重放坏了跳过，不许连累整段
+
+
 def install_event_lines(rt) -> None:
     """把两类钩子装到 agent 上（run_interactive 装配区调用一次）。
 
