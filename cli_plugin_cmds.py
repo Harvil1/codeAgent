@@ -73,6 +73,12 @@ logger = logging.getLogger(__name__)
 # owner/repo 简写的识别正则：两段、只含字母数字点横杠下划线
 _OWNER_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
+# 上一次 /plugins 打印的序号表 [(市场名, 条目dict), ...]，给
+# 「/plugin install <序号>」当索引用——进程内会话状态，重启即清。
+# 为什么要有它：序号比长插件名好敲（42crunch-api-security-testing
+# 谁也不想手打）。
+_last_pick_table: list = []
+
 
 # ---------------------------------------------------------------------------
 # 小工具：插件清单 / 已装列表
@@ -334,50 +340,105 @@ def _git_origin(dir_path: Path) -> str | None:
     return None
 
 
-def _cmd_install(source: str) -> None:
-    """/plugin install <来源>：装一个插件。
+def _install_market_entry(market_name: str, entry: dict) -> None:
+    """按（市场名, 目录册条目）解析来源并安装（序号/裸名/带市场名共用）。"""
+    mkt_dir = next(
+        (d for mn, _c, d in _iter_marketplaces() if mn == market_name),
+        None,
+    )
+    if mkt_dir is None:
+        return
+    resolved = _resolve_entry_source(mkt_dir, entry)
+    if resolved is None:
+        return
+    _install_resolved(resolved)
 
-    来源四种写法：
+
+def _cmd_install(source: str) -> None:
+    """/plugin install <来源>：装插件，一次可以装多个（空格隔开）。
+
+    每个来源的写法：
+    - 序号：3 —— 查上次 /plugins 打印的序号表（比敲长名字省事）
+    - 名字@市场：demo@my-plugins —— 指明从哪个市场装
+    - 名字：demo —— 在所有市场里找，唯一命中才装；重名会列出候选
     - 本地路径：./my-plugin（目录里要有 plugin.json）
     - git 地址：https://gitee.com/xxx/plugin.git（任意 git 托管都行）
     - owner/repo 简写：anthropics/claude-code → 按 GitHub 处理
-    - 名字@市场：demo@my-plugins → 从已添加的市场目录册里找着装
     """
-    source = source.strip().strip('"').strip("'")
-    if not source:
+    toks = source.strip().strip('"').strip("'").split()
+    if not toks:
         console.print(
-            "[red]用法：/plugin install <本地目录 | git地址 | owner/repo | 名字@市场>[/red]"
+            "[red]用法：/plugin install <序号 | 名字 | 名字@市场 | "
+            "本地目录 | git地址 | owner/repo>（多个空格隔开）[/red]"
         )
         return
+    if len(toks) > 1:
+        # 多来源语法优先：逐个装（所以本地路径带空格的场景不支持）
+        for t in toks:
+            _cmd_install(t)
+        return
+    src = toks[0]
 
-    # ---- 市场引用：名字@市场 → 从目录册解析出真实来源再走统一安装 ----
-    if "@" in source and "://" not in source and not source.startswith("git@"):
-        name, _, market = source.partition("@")
+    # ---- 序号：上次 /plugins 表格的行号 ----
+    if src.isdigit():
+        i = int(src)
+        if 1 <= i <= len(_last_pick_table):
+            market_name, entry = _last_pick_table[i - 1]
+            _install_market_entry(market_name, entry)
+        else:
+            console.print(
+                f"[red]序号 {src} 不在上次列表里[/red]"
+                "（先 /plugins 看表；重启后序号表会清空）"
+            )
+        return
+
+    # ---- 名字@市场：目录册解析后统一安装 ----
+    if "@" in src and "://" not in src and not src.startswith("git@"):
+        name, _, market = src.partition("@")
         resolved = _resolve_market_source(name.strip(), market.strip())
         if resolved is None:
             return
         _install_resolved(resolved)
         return
 
-    tmp_dir = None
-    try:
-        if "://" in source or source.startswith("git@"):
-            src_root, tmp_dir = _clone_to_temp(source)
-        elif _OWNER_REPO_RE.match(source):
-            src_root, tmp_dir = _clone_to_temp(
-                f"https://github.com/{source}.git"
-            )
-        else:
-            src_root = Path(source).expanduser().resolve()
-            if not src_root.is_dir():
-                console.print(f"[red]目录不存在：{src_root}[/red]")
-                return
-        _install_dir(src_root)
-    except RuntimeError as e:
-        console.print(f"[red]安装失败：{e}[/red]")
-    finally:
-        if tmp_dir is not None:
-            _rmtree_force(tmp_dir, ignore_errors=True)
+    # ---- 本地路径 / git 地址 / owner-repo ----
+    if "://" in src or src.startswith("git@") or _OWNER_REPO_RE.match(src) \
+            or Path(src).expanduser().is_dir():
+        tmp_dir = None
+        try:
+            if "://" in src or src.startswith("git@"):
+                src_root, tmp_dir = _clone_to_temp(src)
+            elif _OWNER_REPO_RE.match(src):
+                src_root, tmp_dir = _clone_to_temp(
+                    f"https://github.com/{src}.git"
+                )
+            else:
+                src_root = Path(src).expanduser().resolve()
+                if not src_root.is_dir():
+                    console.print(f"[red]目录不存在：{src_root}[/red]")
+                    return
+            _install_dir(src_root)
+        except RuntimeError as e:
+            console.print(f"[red]安装失败：{e}[/red]")
+        finally:
+            if tmp_dir is not None:
+                _rmtree_force(tmp_dir, ignore_errors=True)
+        return
+
+    # ---- 裸名字：在所有市场里找 ----
+    hits = [(m, e) for m, e in _iter_market_entries() if e["name"] == src]
+    if not hits:
+        console.print(
+            f"[red]不认得这个来源：{src}[/red]"
+            "（本地目录不存在、也不是市场里的插件名；/plugins 看看目录）"
+        )
+        return
+    if len(hits) > 1:
+        console.print(f"[yellow]「{src}」在多个市场都有，写明哪个：[/yellow]")
+        for m, _e in hits:
+            console.print(f"  {src}@{m}")
+        return
+    _install_market_entry(hits[0][0], hits[0][1])
 
 
 # ---------------------------------------------------------------------------
@@ -772,18 +833,19 @@ def _cmd_market_remove(name: str) -> None:
     console.print(f"[green]市场 {name} 已移除[/green]（{target}）")
 
 
-def _cmd_market_pick(rt) -> None:
-    """市场浏览 + 选号安装（列表式，不走浮窗选择器）。
+def _cmd_market_pick(rt, keyword: str = "") -> None:
+    """市场浏览（纯打印，零交互输入——彻底不碰终端让渡/浮窗）。
 
-    交互三步，全部留在对话流里（表格进滚动历史，用完不消失）：
-      1. 输入关键字过滤（名字/描述模糊匹配，回车 = 全部）——官方市场
-         近 300 个条目，不过滤表格太长
-      2. 打印带序号的表格（插件名/市场/描述/已装标记）
-      3. 输入序号或名字安装，多个用空格隔开（也能写 名字@市场）；q 取消
+    只做一件事：按关键字过滤条目 → 打印带序号的表格 → 提示怎么装。
+    安装是**下一条斜杠命令**（/plugin install <序号或名字>），在主
+    输入框里敲——整个流程没有任何一步要挂起主界面，表格也留在滚动
+    历史里不消失。序号表存进 _last_pick_table 供 install 查。
 
-    为什么不用方向键选择器：那个要独占终端（挂起主界面），主界面被
-    藏起来、选完整块消失不留痕——观感就是「浮窗一闪而过」。
+    参数：
+        rt：RuntimeContext（本流程不改技能，留着签名统一）
+        keyword：过滤关键字（空 = 全部）
     """
+    global _last_pick_table
     entries = _iter_market_entries()
     if not entries:
         console.print(
@@ -792,27 +854,20 @@ def _cmd_market_pick(rt) -> None:
         )
         return
 
-    # ---- 1. 关键字过滤 ----
-    kw = console.input(
-        "[bold]输入关键字过滤（名字/描述，回车=全部，q 退出） >[/bold] "
-    ).strip()
-    if kw.lower() in ("q", "quit", "exit"):
-        return
-    kw_l = kw.lower()
+    kw_l = (keyword or "").strip().lower()
     shown = [
         (m, e) for m, e in entries
         if not kw_l or kw_l in e["name"].lower()
         or kw_l in str(e.get("description", "") or "").lower()
     ]
     if not shown:
-        console.print(f"[yellow]没有匹配「{kw}」的插件[/yellow]")
+        console.print(f"[yellow]没有匹配「{keyword}」的插件[/yellow]")
         return
 
-    # ---- 2. 序号表格 ----
     installed = {n for n, _mf, _d in _iter_installed()}
     title = f"市场插件（{len(shown)} 条"
-    if kw:
-        title += f"，过滤「{kw}」"
+    if kw_l:
+        title += f"，过滤「{keyword.strip()}」"
     title += "）"
     table = Table(title=title)
     table.add_column("序号", justify="right", style="cyan")
@@ -827,41 +882,12 @@ def _cmd_market_pick(rt) -> None:
             "[green]已装[/green]" if e["name"] in installed else "",
         )
     console.print(table)
-
-    # ---- 3. 选号/选名安装 ----
-    pick = console.input(
-        "[bold]输入序号或名字安装（多个空格隔开，q 取消） >[/bold] "
-    ).strip()
-    if not pick or pick.lower() in ("q", "quit", "exit"):
-        return
-
-    mkts = {mn: d for mn, _c, d in _iter_marketplaces()}
-    for tok in pick.split():
-        target = None
-        if tok.isdigit() and 1 <= int(tok) <= len(shown):
-            target = shown[int(tok) - 1]
-        else:
-            # 名字 或 名字@市场
-            name, _, market = tok.partition("@")
-            hits = [
-                (m, e) for m, e in shown
-                if e["name"] == name and (not market or m == market)
-            ] or [
-                (m, e) for m, e in entries
-                if e["name"] == name and (not market or m == market)
-            ]
-            if not hits:
-                console.print(f"[red]没找到：{tok}[/red]")
-                continue
-            target = hits[0]
-        market_name, entry = target
-        mkt_dir = mkts.get(market_name)
-        if mkt_dir is None:
-            continue
-        resolved = _resolve_entry_source(mkt_dir, entry)
-        if resolved is None:
-            continue
-        _install_resolved(resolved)
+    # 序号表留给 /plugin install <序号> 查
+    _last_pick_table = shown
+    console.print(
+        "[dim]安装：/plugin install <序号或名字>（多个空格隔开，"
+        "如 /plugin install 1 3）；过滤重看：/plugins <关键字>[/dim]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1041,10 +1067,9 @@ def _handle_plugin_command(args: str, rt) -> bool:
                 else:
                     _cmd_market_remove(mrest)
             else:
-                console.print(
-                    f"[red]未知市场子命令：{msub}[/red]\n"
-                    "可用：add, list, update, remove（不带参数 = 打开挑选器）"
-                )
+                # 不认识的词不当错误：当过滤关键字直接浏览
+                # （/plugin market design = 过滤含 design 的插件）
+                _cmd_market_pick(rt, rest.strip())
         elif sub == "uninstall":
             if not rest:
                 console.print("[red]用法：/plugin uninstall <名字>[/red]")
@@ -1098,15 +1123,15 @@ def cmd_plugin(args: str, rt) -> bool:
 
 
 @slash_command(
-    name="/plugins", category="插件", usage="/plugins",
-    summary="逛插件市场：关键字过滤 + 序号选装（内置官方市场开箱即用）",
+    name="/plugins", category="插件", usage="/plugins [关键字]",
+    summary="逛插件市场：打印序号表格（可按关键字过滤），再用 /plugin install <序号> 装",
 )
 def cmd_plugins_browse(args: str, rt) -> bool:
-    # 直达市场挑选（和 /plugin market 同一条路）；确保内置市场在场
+    # 直达市场浏览（和 /plugin market 同一条路）；确保内置市场在场。
+    # 纯打印零输入——不挂起主界面、不弹任何悬浮窗；安装走下一条命令
     try:
         _ensure_builtin_marketplaces()
-        _cmd_market_pick(rt)
-        _refresh_skills(rt)
+        _cmd_market_pick(rt, args.strip())
     except Exception as e:
         console.print(f"[red]逛市场失败：{e}[/red]")
         logger.warning("/plugins 失败: %s", e, exc_info=True)
