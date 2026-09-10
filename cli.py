@@ -989,6 +989,9 @@ class RuntimeContext:
                                     "curator fallback client 关闭失败"
                                     "（fail-open）: %s", e
                                 )
+                    # 审查顺利跑完才报完毕（中途抛异常会被下面的
+                    # except 接住跳过这行，不会谎报"完毕"）
+                    console.print("[dim]整理技能库完毕[/dim]")
             except Exception as e:
                 logger.debug("curator 触发失败: %s", e)
 
