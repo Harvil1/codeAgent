@@ -357,6 +357,12 @@ def _term_width() -> int:
         return 80
 
 
+def _clip_plain(s: str, n: int) -> str:
+    """纯文本截断：超长加省略号（补全候选一行一条，不许折行）。"""
+    s = str(s or "")
+    return s if len(s) <= n else s[: max(0, n - 1)] + "…"
+
+
 def _estimate_input_height(text: str, width: int) -> int:
     """估算输入框该占几行（hermes 同款思路的简化版）。
 
@@ -454,6 +460,34 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     def _newline(event):
         event.app.current_buffer.insert_text("\n")
 
+    # ---- 补全候选环选（内联候选区没有 pt 菜单的默认 ↑↓/Tab 键位，自补）----
+    # 候选区开着：↑/↓ 环选、Tab 选下一个；没开：↑/↓ 照旧移光标、
+    # Tab 开出候选列表（不高亮，光看；再按 Tab 才开始选）
+
+    @kb.add("up")
+    def _up(event):
+        b = event.app.current_buffer
+        if b.complete_state and b.complete_state.completions:
+            b.complete_previous()
+        else:
+            b.cursor_up()
+
+    @kb.add("down")
+    def _down(event):
+        b = event.app.current_buffer
+        if b.complete_state and b.complete_state.completions:
+            b.complete_next()
+        else:
+            b.cursor_down()
+
+    @kb.add("tab")
+    def _tab(event):
+        b = event.app.current_buffer
+        if b.complete_state and b.complete_state.completions:
+            b.complete_next()
+        elif b.completer is not None:
+            b.start_completion(select_first=False)
+
     if sys.platform == "win32":
         # Windows Terminal 把 Ctrl+Enter 发成裸 LF（c-j）——绑成换行，
         # 用户按 Ctrl+↵ 就是想要换行而不是提交（POSIX 的坑块③再统一处理）
@@ -536,10 +570,8 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.history import FileHistory, InMemoryHistory
         from prompt_toolkit.layout import (
-            ConditionalContainer, Float, FloatContainer, HSplit, Layout,
-            Window,
+            ConditionalContainer, HSplit, Layout, Window,
         )
-        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.styles import Style
@@ -651,6 +683,59 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         except Exception:
             pass   # 提示贴不上就裸奔，不挡输入
 
+        # ---- 补全候选区（内联区块，不悬浮）----
+        # 为什么不用 pt 的 CompletionsMenu 浮层：浮层叠在内容上、
+        # 消失不留痕，观感就是「悬浮窗一闪而过」。改成布局里的普通
+        # 区块——立在输入框正上方，像任务面板一样落地，出现/收起
+        # 都推着版面走，不遮任何字。
+        def _completion_lines():
+            """当前补全状态里的候选列表 [(style, text), ...]（纯函数）。"""
+            try:
+                cs = input_area.buffer.complete_state
+                if not cs or not cs.completions:
+                    return []
+                lines = []
+                idx = cs.complete_index   # Tab/↑↓ 环选到的下标（None=未选）
+                shown = list(cs.completions[:8])
+                for i, c in enumerate(shown):
+                    cur = (i == idx)
+                    mark = "▶ " if cur else "  "
+                    label = getattr(c, "display_text", None) or c.text
+                    meta = getattr(c, "display_meta_text", "") or ""
+                    one = f"{mark}{label}" + (f"  {meta}" if meta else "")
+                    lines.append((
+                        "class:hint-current" if cur else "class:hint-dim",
+                        _clip_plain(one, _term_width()),
+                    ))
+                total = len(cs.completions)
+                if total > 8:
+                    lines.append((
+                        "class:hint-dim",
+                        f"  … +{total - 8} 条（继续输入可过滤）",
+                    ))
+                return lines
+            except Exception:
+                return []
+
+        completions_area = ConditionalContainer(
+            Window(
+                FormattedTextControl(
+                    lambda: [frag for line in _completion_lines()
+                             for frag in (line, ("", "\n"))][:-1] or [],
+                    show_cursor=False,
+                ),
+                height=lambda: Dimension(
+                    min=0, max=9,
+                    preferred=len(_completion_lines()),
+                ),
+                dont_extend_height=True,
+                wrap_lines=False,
+            ),
+            filter=Condition(lambda: bool(_completion_lines())),
+        )
+        # 挂到 app 上给 verify 检查用（内联候选区必须在场——浮层版已废）
+        app_probe_completions_area = completions_area
+
         # ---- 各层容器（自上而下：live 区 / ─── / 输入区 / ─── / 页脚）----
         # live 区 = spinner 行 + 子代理树 + 任务清单（claude code 同款：
         # 回合进行中挂在输入框上方，回合结束整块收起）
@@ -682,30 +767,19 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             "separator": "fg:#555555",
             "placeholder": "fg:#777777",
             "live-dim": "fg:#8a8a8a",
-            # 补全菜单（claude code 同款：左列命令、右列描述、高亮项反色）
-            "completion-menu": "bg:#262626 fg:#d8d8d8",
-            "completion-menu.completion": "bg:#262626 fg:#d8d8d8",
-            "completion-menu.completion.current": "bg:#00aa88 fg:#000000",
-            "completion-menu.meta.completion": "bg:#1c1c1c fg:#8a8a8a",
-            "completion-menu.meta.completion.current": "bg:#005f44 fg:#ffffff",
+            # 补全候选区（内联区块版：暗字列表 + 选中项高亮）
+            "hint-dim": "fg:#8a8a8a",
+            "hint-current": "fg:#00aa88 bold",
         }
         _style_base.update(cli_skin.get_pt_style_overrides())
-        # 补全菜单浮层：经典 prompt() 自带、自建 Application 必须手动挂——
-        # 不挂这个，补全器算得再多屏幕上也什么都不弹（挂在光标右下，
-        # ↑/↓ 选、Enter 采纳、Esc/继续打字过滤都是 pt 默认键位）
+        # 布局自上而下：live 区 / ─── / 补全候选区 / 输入区 / ─── / 页脚。
+        # 补全候选区不是浮层——是普通区块，出现时把输入框往下推，
+        # 不叠在任何内容上面（用户反馈：浮层观感是「悬浮窗」，不要）
         body = HSplit(
-            [live_area, separator, input_area, separator, status_bar])
+            [live_area, separator, completions_area, input_area,
+             separator, status_bar])
         app = Application(
-            layout=Layout(FloatContainer(
-                content=body,
-                floats=[
-                    Float(
-                        xcursor=True, ycursor=True,
-                        content=CompletionsMenu(
-                            max_height=12, scroll_offset=1),
-                    ),
-                ],
-            )),
+            layout=Layout(body),
             key_bindings=_build_key_bindings(
                 input_queue, eof_sentinel, interrupt_fn, force_exit_fn),
             output=output,
@@ -716,6 +790,7 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         )
         # 把状态黑板挂到 app 上：spinner 线程要读写它（翻帧/记回合起点）
         app._codeagent_ui_state = state
+        app._codeagent_completions_area = app_probe_completions_area
         return app
     except Exception as e:
         logger.error("Application 创建失败，界面降级为 console.input: %s", e)

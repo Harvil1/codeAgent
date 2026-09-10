@@ -2358,19 +2358,17 @@ def check_cli_layout():
         return _fail("build_application 返回 None")
     if app.full_screen:
         return _fail("必须是非全屏模式（full_screen=False）")
-    # 补全菜单浮层必须在（自建 Application 不挂 CompletionsMenu 就永远不弹）
+    # 补全候选区必须是内联区块（不能是 FloatContainer 浮层——用户
+    # 反馈悬浮窗观感差，2026-09-10 起改为布局内的普通区块）
     from prompt_toolkit.layout import FloatContainer
-    from prompt_toolkit.layout.menus import CompletionsMenu
-    if not isinstance(app.layout.container, FloatContainer):
-        return _fail("布局没挂 FloatContainer（补全菜单没地方弹）")
-    has_menu = any(
-        isinstance(f.content, CompletionsMenu)
-        for f in app.layout.container.floats
-    )
-    if not has_menu:
-        return _fail("浮层里没有 CompletionsMenu（敲 / 不会弹提示）")
+    from prompt_toolkit.layout.containers import ConditionalContainer
+    if isinstance(app.layout.container, FloatContainer):
+        return _fail("布局还在用 FloatContainer 浮层（补全应为内联区块）")
+    area = getattr(app, "_codeagent_completions_area", None)
+    if area is None or not isinstance(area, ConditionalContainer):
+        return _fail("内联补全候选区缺失（app._codeagent_completions_area）")
     request_app_exit(app)   # app 没在跑也不许炸（内部全吞）
-    return _ok("Application 构建 + 补全菜单浮层 + 安全退出请求正常")
+    return _ok("Application 构建 + 内联补全候选区 + 安全退出请求正常")
 
 
 def check_skin_engine():
