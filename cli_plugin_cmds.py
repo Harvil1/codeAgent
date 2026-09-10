@@ -773,11 +773,16 @@ def _cmd_market_remove(name: str) -> None:
 
 
 def _cmd_market_pick(rt) -> None:
-    """/plugin market：打开挑选器——浏览所有已添加市场里的插件，勾选安装。
+    """市场浏览 + 选号安装（列表式，不走浮窗选择器）。
 
-    界面是项目统一的方向键选择器（↑↓ 移动、空格勾选、Enter 确认、
-    Esc 取消）；选择器要独占终端，经 cli_ui 的 input 桥搬进 pt 通道。
-    最后一项「Type something.」敲字 = 按 名字@市场 直接装。
+    交互三步，全部留在对话流里（表格进滚动历史，用完不消失）：
+      1. 输入关键字过滤（名字/描述模糊匹配，回车 = 全部）——官方市场
+         近 300 个条目，不过滤表格太长
+      2. 打印带序号的表格（插件名/市场/描述/已装标记）
+      3. 输入序号或名字安装，多个用空格隔开（也能写 名字@市场）；q 取消
+
+    为什么不用方向键选择器：那个要独占终端（挂起主界面），主界面被
+    藏起来、选完整块消失不留痕——观感就是「浮窗一闪而过」。
     """
     entries = _iter_market_entries()
     if not entries:
@@ -787,47 +792,70 @@ def _cmd_market_pick(rt) -> None:
         )
         return
 
-    # 造选项：label 唯一（重名时带市场名后缀），description 带 描述·市场
-    label_map: dict = {}
-    name_count: dict = {}
-    for _m, e in entries:
-        name_count[e["name"]] = name_count.get(e["name"], 0) + 1
-    for market_name, e in entries:
-        label = e["name"]
-        if name_count[label] > 1:
-            label = f"{label}（{market_name}）"
-        label_map[label] = (market_name, e)
-    options = []
-    for label, (market_name, e) in sorted(label_map.items()):
-        desc = str(e.get("description", "") or "")[:80]
-        options.append(
-            {"label": label, "description": f"{desc} · 来自 {market_name}"}
+    # ---- 1. 关键字过滤 ----
+    kw = console.input(
+        "[bold]输入关键字过滤（名字/描述，回车=全部，q 退出） >[/bold] "
+    ).strip()
+    if kw.lower() in ("q", "quit", "exit"):
+        return
+    kw_l = kw.lower()
+    shown = [
+        (m, e) for m, e in entries
+        if not kw_l or kw_l in e["name"].lower()
+        or kw_l in str(e.get("description", "") or "").lower()
+    ]
+    if not shown:
+        console.print(f"[yellow]没有匹配「{kw}」的插件[/yellow]")
+        return
+
+    # ---- 2. 序号表格 ----
+    installed = {n for n, _mf, _d in _iter_installed()}
+    title = f"市场插件（{len(shown)} 条"
+    if kw:
+        title += f"，过滤「{kw}」"
+    title += "）"
+    table = Table(title=title)
+    table.add_column("序号", justify="right", style="cyan")
+    table.add_column("插件")
+    table.add_column("市场")
+    table.add_column("描述")
+    table.add_column("状态")
+    for i, (m, e) in enumerate(shown, 1):
+        desc = str(e.get("description", "") or "")[:52]
+        table.add_row(
+            str(i), e["name"], m, desc,
+            "[green]已装[/green]" if e["name"] in installed else "",
         )
+    console.print(table)
 
-    from cli_question import ask_via_selector
-    from cli_ui import run_with_input_bridge
+    # ---- 3. 选号/选名安装 ----
+    pick = console.input(
+        "[bold]输入序号或名字安装（多个空格隔开，q 取消） >[/bold] "
+    ).strip()
+    if not pick or pick.lower() in ("q", "quit", "exit"):
+        return
 
-    def _do_ask():
-        return ask_via_selector(
-            "选择要安装的插件（空格勾选，Enter 安装，Esc 取消）",
-            options, True,          # multi=True：一次挑几个都行
-            fallback_input=lambda prompt="": console.input(prompt),
-        )
-
-    answers = run_with_input_bridge(_do_ask)
-    if not answers:
-        return  # 取消（或什么都没选）
-
-    for label in answers:
-        if label not in label_map:
-            # 用户走「Type something.」敲的字：当 名字@市场 或直接来源装
-            _cmd_install(label)
-            continue
-        market_name, entry = label_map[label]
-        mkt_dir = next(
-            (d for mn, _c, d in _iter_marketplaces() if mn == market_name),
-            None,
-        )
+    mkts = {mn: d for mn, _c, d in _iter_marketplaces()}
+    for tok in pick.split():
+        target = None
+        if tok.isdigit() and 1 <= int(tok) <= len(shown):
+            target = shown[int(tok) - 1]
+        else:
+            # 名字 或 名字@市场
+            name, _, market = tok.partition("@")
+            hits = [
+                (m, e) for m, e in shown
+                if e["name"] == name and (not market or m == market)
+            ] or [
+                (m, e) for m, e in entries
+                if e["name"] == name and (not market or m == market)
+            ]
+            if not hits:
+                console.print(f"[red]没找到：{tok}[/red]")
+                continue
+            target = hits[0]
+        market_name, entry = target
+        mkt_dir = mkts.get(market_name)
         if mkt_dir is None:
             continue
         resolved = _resolve_entry_source(mkt_dir, entry)
@@ -1056,8 +1084,7 @@ def _handle_plugin_command(args: str, rt) -> bool:
 @slash_command(
     name="/plugin", category="插件",
     usage="/plugin [list|install|uninstall|enable|disable|create|market]",
-    summary="插件管理：市场挑选安装/启停/脚手架",
-    aliases=["/plugins"],
+    summary="插件管理（看已装/启停/卸载）；/plugins 逛市场装新的",
     arg_completer=lambda text: [
         s for s in (
             "list", "install ", "uninstall ", "enable ", "disable ",
@@ -1068,3 +1095,19 @@ def _handle_plugin_command(args: str, rt) -> bool:
 )
 def cmd_plugin(args: str, rt) -> bool:
     return _handle_plugin_command(args, rt)
+
+
+@slash_command(
+    name="/plugins", category="插件", usage="/plugins",
+    summary="逛插件市场：关键字过滤 + 序号选装（内置官方市场开箱即用）",
+)
+def cmd_plugins_browse(args: str, rt) -> bool:
+    # 直达市场挑选（和 /plugin market 同一条路）；确保内置市场在场
+    try:
+        _ensure_builtin_marketplaces()
+        _cmd_market_pick(rt)
+        _refresh_skills(rt)
+    except Exception as e:
+        console.print(f"[red]逛市场失败：{e}[/red]")
+        logger.warning("/plugins 失败: %s", e, exc_info=True)
+    return True
