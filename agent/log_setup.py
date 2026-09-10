@@ -11,6 +11,8 @@ WARNING+ 到 stderr、INFO 全丢、重启即焚）。结果就是 logs/ 目录�
    （够回溯几轮长会话，又不至于把磁盘吃穿）；
 2. StreamHandler(stderr)：WARNING+ 照旧上屏——装了文件 handler 后
    lastResort 自动退位，不加这个控制台就再也看不见报错了。
+   REPL 界面在跑时改走 cli_ui 的安全打印出口（不跟界面帧叠字，
+   见 _ReplSafeStreamHandler）。
 """
 
 import logging
@@ -25,6 +27,36 @@ _FORMAT = "%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s"
 
 # 幂等标记：装配过就记住日志文件路径，重复调用直接返回
 _configured_path: Optional[Path] = None
+
+
+class _ReplSafeStreamHandler(logging.StreamHandler):
+    """控制台 WARNING 保底的「不搅花界面」版。
+
+    为什么要有它：原生 StreamHandler(stderr) 直接裸写终端字节。REPL
+    （prompt_toolkit 界面）在跑时持续重绘输入框/状态栏，后台线程
+    （memory-curator 等）这时候裸写 stderr，日志行就会和界面帧叠在
+    同几行上——用户看到的是半行日志混着半行状态栏的花屏「报错」。
+
+    改法：界面在跑（cli_ui._active_app 已注册）就改走 cli_ui.emit_ansi
+    ——那是全程序统一的安全打印出口，经 patch_stdout 代理搬进 UI
+    事件循环，输出会干净地排在界面帧上方。没界面在跑（独立 CLI、
+    脚本、测试）时保持原生 stderr 直写，stderr 语义原样不变。
+
+    仍是 StreamHandler 子类：verify 的「控制台 WARNING 保底」检查
+    （isinstance(h, StreamHandler)）照旧通过。
+    """
+
+    def emit(self, record):
+        # 桥可用且界面在跑 → 走安全出口；任何一步不行都退回原生直写
+        try:
+            import cli_ui
+            if cli_ui._active_app is not None:
+                from cli_ui import emit_ansi
+                emit_ansi(self.format(record) + "\n")
+                return
+        except Exception:
+            pass  # 桥不可用（import 失败等）：退回原生 stderr
+        logging.StreamHandler.emit(self, record)
 
 
 def _resolve_level(default: int = logging.INFO) -> int:
@@ -105,7 +137,7 @@ def setup_logging(logs_dir, *, level: Optional[int] = None) -> Path:
     file_handler.setLevel(level)
     file_handler.setFormatter(fmt)
 
-    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler = _ReplSafeStreamHandler(sys.stderr)
     console_handler.setLevel(logging.WARNING)
     console_handler.setFormatter(fmt)
 
