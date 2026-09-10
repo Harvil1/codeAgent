@@ -689,15 +689,37 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         # 区块——立在输入框正上方，像任务面板一样落地，出现/收起
         # 都推着版面走，不遮任何字。
         def _completion_lines():
-            """当前补全状态里的候选列表 [(style, text), ...]（纯函数）。"""
+            """当前补全状态里的候选列表 [(style, text), ...]（纯函数）。
+
+            可滚动：窗口固定露 8 行，↑↓/Tab 环选到哪行窗口就跟到哪行
+            （窗口位置由选中下标直接推导，不存状态——选中项永远可见，
+            环选到尾部会自动往下滚）。窗口外还有候选时上下给指示行，
+            全部候选都能翻到，不是只看前几条。
+            """
             try:
                 cs = input_area.buffer.complete_state
                 if not cs or not cs.completions:
                     return []
-                lines = []
+                comps = cs.completions
+                total = len(comps)
+                visible = 8
                 idx = cs.complete_index   # Tab/↑↓ 环选到的下标（None=未选）
-                shown = list(cs.completions[:8])
-                for i, c in enumerate(shown):
+                # 窗口起点：选中项落在窗口最后一行（往下翻）或顶部
+                #（往上翻回首页），未选中时从 0 开始
+                if idx is None:
+                    scroll = 0
+                else:
+                    scroll = max(0, idx - visible + 1) if idx >= visible else 0
+                lo, hi = scroll, min(scroll + visible, total)
+
+                lines = []
+                if lo > 0:
+                    lines.append((
+                        "class:hint-dim",
+                        f"  ▲ … 上方还有 {lo} 条（↑ 继续翻）",
+                    ))
+                for i in range(lo, hi):
+                    c = comps[i]
                     cur = (i == idx)
                     mark = "▶ " if cur else "  "
                     label = getattr(c, "display_text", None) or c.text
@@ -707,11 +729,10 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                         "class:hint-current" if cur else "class:hint-dim",
                         _clip_plain(one, _term_width()),
                     ))
-                total = len(cs.completions)
-                if total > 8:
+                if hi < total:
                     lines.append((
                         "class:hint-dim",
-                        f"  … +{total - 8} 条（继续输入可过滤）",
+                        f"  ▼ … 下方还有 {total - hi} 条（↓ 继续翻）",
                     ))
                 return lines
             except Exception:
@@ -725,7 +746,7 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                     show_cursor=False,
                 ),
                 height=lambda: Dimension(
-                    min=0, max=9,
+                    min=0, max=10,   # 8 条候选 + 上下最多两条滚动指示行
                     preferred=len(_completion_lines()),
                 ),
                 dont_extend_height=True,
