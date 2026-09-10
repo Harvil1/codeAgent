@@ -674,12 +674,28 @@ def install_event_lines(rt) -> None:
         except Exception:
             return None
 
+    def _running_label(tool_name, args) -> str:
+        """运行中标签：● 头行去掉子弹点（live 面板自己画会闪的 ●）。"""
+        try:
+            head = format_tool_line(tool_name, args or {})
+            return head[2:] if head.startswith("● ") else head
+        except Exception:
+            return tool_name
+
     def _on_pre(tool_name, args, **_kw):
         """记起点 + 子代理 ● 头行 + 写类工具旧内容快照。异常全吞。"""
         try:
             args = args or {}
             pairer.record(tool_name, args)
             _update_pending()
+            # 运行中入栈：live 面板顶部出一条 ● 闪烁的动画行，
+            # POST 出栈、静态 ● 事件行落进对话流（两边不重不漏）
+            try:
+                import cli_live
+                cli_live.running_tool_start(
+                    _running_label(tool_name, args))
+            except Exception:
+                pass
             if tool_name in _SUBAGENT_TOOLS:
                 _print_block([("", format_subagent_depart(args))])
             elif tool_name in _WRITE_TOOLS:
@@ -692,6 +708,13 @@ def install_event_lines(rt) -> None:
         """打 ● 头行 + ⎿ 结果块。POST 是流水线——最后原样 return result。"""
         try:
             args = args or {}
+            # 先出栈（哪怕下面按静默工具提前 return，动画行也不能赖着）
+            try:
+                import cli_live
+                cli_live.running_tool_end(
+                    _running_label(tool_name, args))
+            except Exception:
+                pass
             dt = pairer.pop(tool_name, args)
             _update_pending()
             if tool_name in _QUIET_TOOLS:

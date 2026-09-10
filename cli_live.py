@@ -268,6 +268,9 @@ def note_child_tool(key, activity: str) -> None:
     """子代理每调一次工具上报一次：计数 +1、活动行更新。
 
     activity 形如 ``read_file(D:/x.py)``（调用方拼好）。
+    除了面板上的「当前活动」，还往对话流里记一笔缩进行——用户要的
+    「Agent 运行过程记录在 Agent 行下面」：子代理头行（● Agent(...)）
+    是 PRE 时就打好的，这里每次工具调用往下补一行 ⎿，过程留痕。
     """
     try:
         with _lock:
@@ -276,8 +279,70 @@ def note_child_tool(key, activity: str) -> None:
                 return
             entry["tools"] = int(entry.get("tools", 0)) + 1
             entry["activity"] = _oneline(activity, 120)
+        # 对话流留痕（fail-open：打印线断了不碰任务线）
+        try:
+            from cli_events import print_style_lines
+            print_style_lines(
+                [("dim", f"  ⎿  {_oneline(activity, 110)}")])
+        except Exception:
+            pass
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 运行中工具黑板：PRE 入栈、POST 出栈，live 面板顶部画动画行
+# （● 闪烁 = 字符 ●◐◑○ 随时间轮换，0.1s 一换——spinner 线程本来就
+#  在这个节拍上重绘，白蹭）
+# ---------------------------------------------------------------------------
+
+_running_tools: list = []          # 受 _lock 保护：["Name(摘要)", ...]
+_SPIN_FRAMES = "●◐◑○"
+
+
+def running_tool_start(label: str) -> None:
+    """一个工具开始跑：入栈（label 由 cli_events 拼好「Name(摘要)」）。"""
+    try:
+        with _lock:
+            _running_tools.append(str(label or "?"))
+    except Exception:
+        pass
+
+
+def running_tool_end(label: str) -> None:
+    """工具跑完：出栈（先精确匹配，兜底按前缀删第一个同名）。"""
+    try:
+        with _lock:
+            name = str(label or "?")
+            if name in _running_tools:
+                _running_tools.remove(name)
+                return
+            base = name.split("(")[0]
+            for i, x in enumerate(_running_tools):
+                if x == base or x.split("(")[0] == base:
+                    del _running_tools[i]
+                    return
+    except Exception:
+        pass
+
+
+def running_tool_lines(width=80) -> list:
+    """运行中工具的动画行（panel_lines 顶部用）。
+
+    帧号从墙上时钟推（monotonic×10 取模）——不存状态，重绘到哪算哪；
+    spinner 线程 0.1s 一拍刷帧，● 就「闪」起来了。
+    """
+    try:
+        with _lock:
+            items = list(_running_tools)
+        if not items:
+            return []
+        import time as _t
+        frame = _SPIN_FRAMES[int(_t.monotonic() * 10) % len(_SPIN_FRAMES)]
+        w = max(20, width or 80)
+        return [("class:live-dim", f"  {frame} {x}"[:w]) for x in items[:4]]
+    except Exception:
+        return []
 
 
 def agent_finish(key, status="done") -> None:
@@ -425,6 +490,8 @@ def panel_lines(width=80) -> list:
             return []
         w = max(20, width or 80)   # 行宽上限：超了截断，防终端软换行撕面板
         out = []
+        # ---- 运行中工具（● 闪烁动画行，工具跑完 POST 出栈自动消失）----
+        out.extend(running_tool_lines(width))
         # ---- 子代理树 ----
         snap = agents_snapshot()
         if snap:
