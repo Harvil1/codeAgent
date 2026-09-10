@@ -626,12 +626,19 @@ def replay_session_transcript(msgs) -> None:
     **同一套**格式化函数（● 头行 / ⎿ 结果块 / 子代理出发与完成行），
     长相和当时一模一样，不是摘要。
 
-    消息形态（会话库存档）：
-    - user：正文（内部注入的 <xxx> 标签消息当时看不见，重放也跳过）
-    - assistant：tool_calls（可能带）+ 文字正文（可能带）
-    - tool：name + tool_call_id + 结果 JSON 字符串
+    关键：**配对渲染**。档案里并行工具批的结果消息排在下一条
+    assistant 之后，逐条按档案顺序打会让 ⎿ 结果块掉队到几轮 AI
+    文字后面（读者对不上号）。所以先扫一遍把结果按 tool_call_id
+    建表，打每个 ● 头行时立刻贴上它的 ⎿——批内永远成对，
+    AI 文字永远整块在前（和实时渲染一致）。
     """
-    pending: dict = {}   # tool_call_id -> (工具名, args)——结果行找名字用
+    # ---- 预扫描：tool_call_id → (工具名, 结果文本) ----
+    results: dict = {}
+    for m in msgs or []:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            results[m["tool_call_id"]] = (
+                m.get("name") or "tool", m.get("content") or "")
+
     for m in msgs or []:
         try:
             role = m.get("role")
@@ -640,6 +647,9 @@ def replay_session_transcript(msgs) -> None:
                 if content and not content.startswith("<"):
                     print_style_lines([("", f"你: {content}")])
             elif role == "assistant":
+                # AI 的「说一句再去干活」整块在前（glm 的话都在调用前）
+                if content:
+                    print_style_lines([("", content)])
                 for tc in m.get("tool_calls") or []:
                     try:
                         tc_id = tc.get("id")
@@ -651,25 +661,25 @@ def replay_session_transcript(msgs) -> None:
                             args = {}
                     except Exception:
                         continue
-                    if tc_id:
-                        pending[tc_id] = (name, args)
+                    # 头行（子代理走出发行 / 普通 ● 行）
                     if name in _SUBAGENT_TOOLS:
                         head = format_subagent_depart(args)
                     else:
                         head = format_tool_line(name, args)
-                    print_style_lines([("", head)])
-                if content:
-                    print_style_lines([("", content)])
-            elif role == "tool":
-                name = m.get("name") or "tool"
-                tc_args = pending.get(m.get("tool_call_id"), (None, None))[1]
-                if name in _SUBAGENT_TOOLS:
-                    print_style_lines(
-                        format_subagent_done(tc_args or {}, None,
-                                             m.get("content") or ""))
-                else:
-                    print_style_lines(
-                        format_result_block(name, m.get("content") or ""))
+                    # 结果块：从预扫描表里取，● 和 ⎿ 立刻成对
+                    r_name, r_content = results.get(tc_id, (None, None))
+                    if name in _SUBAGENT_TOOLS:
+                        block = format_subagent_done(args, None, r_content or "") \
+                            if r_content is not None else []
+                        print_style_lines([("", head)] + block)
+                    elif r_content is not None:
+                        print_style_lines(
+                            [("", head)]
+                            + format_result_block(r_name, r_content))
+                    else:
+                        # 结果没存档（被中断的调用）：只出头行
+                        print_style_lines([("", head)])
+            # role == "tool" 的消息在配对渲染里已消费，不再单独打
         except Exception:
             continue   # 单条重放坏了跳过，不许连累整段
 
