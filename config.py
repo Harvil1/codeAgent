@@ -259,14 +259,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 插件：外挂包裹（带 plugin.json 的目录，第一版内容=技能），/plugin 管理
     "plugins": {
         # 内置市场：开箱即用——首次 /plugins 浏览时自动添加。
-        # 第一名是**仓库内置的本地市场**（离线可用、插件已适配本项目
-        # 工具名）；第二名是官方市场的自建镜像（Gitee，已适配本项目，
-        # 直接改它就能给所有装机发新插件；也可在 settings.json 换 url）
+        # 用官方市场的自建 Gitee 镜像（已适配本项目工具名，国内秒拉；
+        # 直接改那个仓库就能给所有装机发新插件；settings.json 可换 url）
         "builtin_marketplaces": [
-            {
-                "name": "builtin-adapted",
-                "path": "builtin_marketplace",
-            },
             {
                 "name": "claude-plugins-official",
                 "url": "https://gitee.com/hong-wei-h/code-agent-plugin-official.git",

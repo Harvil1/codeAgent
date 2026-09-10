@@ -572,7 +572,6 @@ def _builtin_marketplace_defs() -> list:
     except Exception as e:
         logger.debug("读内置市场配置失败，用代码兜底: %s", e)
     return [
-        {"name": "builtin-adapted", "path": "builtin_marketplace"},
         {
             "name": "claude-plugins-official",
             "url": "https://gitee.com/hong-wei-h/code-agent-plugin-official.git",
