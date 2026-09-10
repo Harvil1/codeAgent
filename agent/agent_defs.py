@@ -148,20 +148,57 @@ def _parse_one(skill_md: Path) -> Optional[AgentDefinition]:
         return None
 
 
+def _plugin_agents_dirs() -> list:
+    """已启用插件带的子代理定义目录列表（<插件>/agents/）。
+
+    装插件（/plugin install）= 用户主动引入，agents/ 跟着 skills 一起
+    生效（对标 claude code 插件带 agents）。清单判启用的逻辑跟
+    constants.all_skills_dirs 同款；读挂了返回空列表（fail-open）。
+    """
+    try:
+        import json as _json
+        from constants import plugins_dir
+        root = plugins_dir()
+        if not root.exists():
+            return []
+        out = []
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name == "marketplaces":
+                continue
+            mf = d / "plugin.json"
+            if not mf.exists():
+                mf = d / ".claude-plugin" / "plugin.json"
+            if not mf.exists():
+                continue
+            try:
+                data = _json.loads(mf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if data.get("enabled", True) and (d / "agents").is_dir():
+                out.append(d / "agents")
+        return out
+    except Exception:
+        return []
+
+
 def scan_agent_defs() -> Dict[str, AgentDefinition]:
-    """把四个来源的子代理定义全扫一遍，合并成一份总表。
+    """把五个来源的子代理定义全扫一遍，合并成一份总表。
 
     同名冲突时后扫的覆盖先扫的。优先级（低 → 高）：
       1. 内置（agent/builtin_agents/，随代码分发）
-      2. 用户级（~/.codeAgent/agents/，跨项目个人配置）
-      3. CLI 注入（启动命令 --agents '{json}'）
-      4. 项目级（<cwd>/.codeAgent/agents/，跟仓库走，团队共享）
+      2. 插件（已启用插件的 agents/，/plugin install 装进来的）
+      3. 用户级（~/.codeAgent/agents/，跨项目个人配置）
+      4. CLI 注入（启动命令 --agents '{json}'）
+      5. 项目级（<cwd>/.codeAgent/agents/，跟仓库走，团队共享）
 
     返回：
         {子代理名: AgentDefinition} 字典。
     """
     defs: Dict[str, AgentDefinition] = {}
-    for d, _src in [(_builtin_agents_dir(), "builtin"), (_user_agents_dir(), "user")]:
+    sources = [(_builtin_agents_dir(), "builtin")]
+    sources += [(d, "plugin") for d in _plugin_agents_dirs()]
+    sources.append((_user_agents_dir(), "user"))
+    for d, _src in sources:
         if not d.exists():
             continue
         for md in sorted(d.glob("*.md")):
