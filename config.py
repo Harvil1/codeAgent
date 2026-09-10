@@ -258,10 +258,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
     # 插件：外挂包裹（带 plugin.json 的目录，第一版内容=技能），/plugin 管理
     "plugins": {
-        # 内置市场：开箱即用——首次 /plugin market 浏览时自动拉取，
-        # 之后 /plugin market update 照常刷新。官方市场在 GitHub，
-        # 拉不动可以在 settings.json 里把 url 换成镜像地址
+        # 内置市场：开箱即用——首次 /plugins 浏览时自动添加。
+        # 第一名是**仓库内置的本地市场**（离线可用、插件已适配本项目
+        # 工具名）；第二名是 claude code 官方市场（GitHub，拉不动只
+        # 跳过不报错，可在 settings.json 把 url 换成镜像）
         "builtin_marketplaces": [
+            {
+                "name": "builtin-adapted",
+                "path": "builtin_marketplace",
+            },
             {
                 "name": "claude-plugins-official",
                 "url": "https://github.com/anthropics/claude-plugins-official.git",

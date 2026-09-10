@@ -202,6 +202,30 @@ def _check_fn_cached(fn: Callable) -> bool:
 # 注册表本体
 # ---------------------------------------------------------------------------
 
+# claude code 工具名 → 本项目等价工具名（dispatch 层的别名兜底）。
+# 为什么要有：官方市场装来的技能正文里常写着「用 TodoWrite 建任务」
+# 这类 CC 工具名；模型照着调时，这层别名让它落到本项目等价工具上，
+# 而不是「未知工具」报错。只在原名不存在时才映射，绝不遮蔽真工具。
+_CC_TOOL_ALIASES = {
+    "Bash": "terminal",
+    "Read": "read_file",
+    "Write": "write_file",
+    "Edit": "str_replace",
+    "Update": "str_replace",
+    "Grep": "search_files",
+    "Glob": "glob",
+    "WebFetch": "web_fetch",
+    "TodoWrite": "task_create",
+    "Task": "delegate_task",
+    "Agent": "delegate_task",
+    "AskUserQuestion": "ask_user",
+    "NotebookEdit": "notebook_edit",
+    "Skill": "load_skill",
+    "EnterPlanMode": "plan_mode_v2_dispatch",
+    "ExitPlanMode": "exit_plan_mode",
+}
+
+
 class ToolRegistry:
     """工具注册表本体：所有工具的说明书（schema）和干活函数（handler）都收在这里。
 
@@ -310,6 +334,9 @@ class ToolRegistry:
         返回：JSON 字符串——成功是工具自己的结果，失败是
             {"error": ..., "error_type": ...} 格式的错误。
         """
+        # CC 工具名别名兜底（见 _CC_TOOL_ALIASES 注释）：原名不存在才映射
+        if name not in self._tools:
+            name = _CC_TOOL_ALIASES.get(name, name)
         with self._lock:
             entry = self._tools.get(name)
 

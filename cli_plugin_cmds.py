@@ -256,6 +256,60 @@ def _find_plugin_root(root: Path) -> Path | None:
     return None
 
 
+# CC 工具名适配的两张表（安装外来插件时改写 .md 用）——跟
+# tools/registry.py 的 _CC_TOOL_ALIASES 同一套映射
+_CC_UNIQUE_TOKENS = {   # 全词替换安全（本语料里只会是工具名）
+    "TodoWrite": "task_create",
+    "WebFetch": "web_fetch",
+    "AskUserQuestion": "ask_user",
+    "NotebookEdit": "notebook_edit",
+    "EnterPlanMode": "plan_mode_v2_dispatch",
+    "ExitPlanMode": "exit_plan_mode",
+}
+_CC_CONTEXT_TOOLS = {   # 有歧义（也是普通英文词）：只换明确工具语境
+    "Task": "delegate_task", "Agent": "delegate_task",
+    "Read": "read_file", "Write": "write_file",
+    "Edit": "str_replace", "Update": "str_replace",
+    "Grep": "search_files", "Glob": "glob",
+    "Bash": "terminal", "Skill": "load_skill",
+}
+
+
+def _adapt_cc_plugin_md(plugin_dir) -> int:
+    """把外来插件 .md 里的 claude code 专属写法改成本项目的。
+
+    三类替换：
+    1. 产品名：Claude Code→CodeAgent、CLAUDE.md→CODEAGENT.md（全词安全）
+    2. 独特工具名（TodoWrite 等 CamelCase 独此一家）：全词替换
+    3. 歧义工具名（Task/Read/Write 也是普通英文词）：只换 `反引号包裹`
+       和 "X tool" 两种明确指工具的语境——"Write design doc" 这种
+       普通动词句不动
+    返回替换总处数（0 = 本来就适配/没有此类写法）。
+    """
+    total = 0
+    for md in Path(plugin_dir).rglob("*.md"):
+        try:
+            t = md.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        orig = t
+        t = t.replace("Claude Code", "CodeAgent")
+        t = t.replace("CLAUDE.md", "CODEAGENT.md")
+        for cc, ours in _CC_UNIQUE_TOKENS.items():
+            total += len(re.findall(rf"\b{cc}\b", t))
+            t = re.sub(rf"\b{cc}\b", ours, t)
+        for cc, ours in _CC_CONTEXT_TOOLS.items():
+            n1 = t.count(f"`{cc}`")
+            t = t.replace(f"`{cc}`", f"`{ours}`")
+            pat = rf"\b{cc} tool\b"
+            n2 = len(re.findall(pat, t))
+            t = re.sub(pat, f"{ours} tool", t)
+            total += n1 + n2
+        if t != orig:
+            md.write_text(t, encoding="utf-8")
+    return total
+
+
 def _install_dir(src_root: Path) -> str | None:
     """把一个「已经是插件目录」的来源装进 plugins/，返回插件名。
 
@@ -277,6 +331,18 @@ def _install_dir(src_root: Path) -> str | None:
     if is_update:
         _rmtree_force(target)
     shutil.copytree(plugin_root, target, ignore=shutil.ignore_patterns(".git"))
+
+    # 外来插件（claude code 生态）的 .md 自动适配：工具名/产品名改写
+    # 成本项目的（已适配的插件 0 命中，无副作用）
+    try:
+        n_adapt = _adapt_cc_plugin_md(target)
+        if n_adapt:
+            console.print(
+                f"[dim]已适配 {n_adapt} 处 claude code 专属写法"
+                "（工具名/文档名 → 本项目对应）[/dim]"
+            )
+    except Exception as e:
+        logger.debug("CC 适配改写失败（不影响安装）: %s", e)
 
     n = _count_skills(target)
     console.print(
@@ -479,9 +545,12 @@ def _rmtree_force(path, ignore_errors: bool = False) -> None:
 def _builtin_marketplace_defs() -> list:
     """读内置市场清单（config.plugins.builtin_marketplaces）。
 
-    默认值在 config.py::DEFAULT_CONFIG（官方市场）；用户可以在
-    settings.json 里覆盖（比如把 GitHub 地址换成镜像）。
-    配置读不到时用代码里这份兜底——保证极端情况下官方市场仍开箱即用。
+    默认值在 config.py::DEFAULT_CONFIG：第一名是仓库内置的本地市场
+    （path 条目，离线可用），第二名是 claude code 官方市场（url 条目，
+    GitHub）。用户可以在 settings.json 里覆盖（比如换镜像地址）。
+    配置读不到时用代码里这份兜底——保证极端情况下开箱即用。
+
+    返回：[{"name", "url"} 或 {"name", "path"}]，顺序即优先级。
     """
     try:
         from config import load_config
@@ -490,18 +559,25 @@ def _builtin_marketplace_defs() -> list:
         )
         if isinstance(defs, list) and defs:
             out = [
-                {"name": str(d.get("name") or ""), "url": str(d.get("url") or "")}
+                {
+                    "name": str(d.get("name") or ""),
+                    **({"url": str(d.get("url"))} if d.get("url") else {}),
+                    **({"path": str(d.get("path"))} if d.get("path") else {}),
+                }
                 for d in defs
-                if isinstance(d, dict) and d.get("url")
+                if isinstance(d, dict) and (d.get("url") or d.get("path"))
             ]
             if out:
                 return out
     except Exception as e:
         logger.debug("读内置市场配置失败，用代码兜底: %s", e)
-    return [{
-        "name": "claude-plugins-official",
-        "url": "https://github.com/anthropics/claude-plugins-official.git",
-    }]
+    return [
+        {"name": "builtin-adapted", "path": "builtin_marketplace"},
+        {
+            "name": "claude-plugins-official",
+            "url": "https://github.com/anthropics/claude-plugins-official.git",
+        },
+    ]
 
 
 def _removed_marker(name: str) -> Path:
@@ -510,25 +586,38 @@ def _removed_marker(name: str) -> Path:
 
 
 def _ensure_builtin_marketplaces() -> None:
-    """把内置市场补齐：还没添加过的自动拉取（失败不吵，fail-open）。
+    """把内置市场补齐：还没添加过的自动添加（失败不吵，fail-open）。
 
-    开箱即用语义：新用户第一次 /plugin market 浏览就能看到官方市场
-    的插件，不用先手动 add。网络拉不动只提示一句，用户仍可以
-    /plugin market add 换镜像或加自己的市场。
+    开箱即用语义：新用户第一次 /plugins 浏览就能看到市场——本地
+    内置市场（离线必成）打底，官方 GitHub 市场做补充（拉不动只
+    跳过一行提示，不挡本地市场）。path 条目按项目根解析（随仓库
+    走的目录）；url 条目走 git 克隆。
     用户主动 remove 过的（有记号）不再复活——尊重用户的删除。
     """
     try:
         existing = {n for n, _c, _d in _iter_marketplaces()}
+        from constants import project_root
         for d in _builtin_marketplace_defs():
-            name = _sanitize_name(d["name"])
+            name = _sanitize_name(d.get("name") or "")
             if not name or name in existing:
                 continue
             if _removed_marker(name).exists():
                 continue
-            console.print(f"[dim]首次使用：拉取内置市场 {name}...[/dim]")
-            _cmd_market_add(d["url"])
+            if d.get("path"):
+                # 本地市场：仓库里的目录，复制即添加（无网络需求）
+                src = Path(d["path"])
+                if not src.is_absolute():
+                    src = project_root() / src
+                if not src.is_dir():
+                    logger.warning("内置本地市场目录不存在: %s", src)
+                    continue
+                console.print(f"[dim]首次使用：装载内置市场 {name}...[/dim]")
+                _cmd_market_add(str(src))
+            elif d.get("url"):
+                console.print(f"[dim]首次使用：拉取内置市场 {name}...[/dim]")
+                _cmd_market_add(d["url"])
     except Exception as e:
-        logger.warning("内置市场拉取失败（fail-open）: %s", e)
+        logger.warning("内置市场添加失败（fail-open）: %s", e)
 
 
 def _read_catalog(mkt_dir: Path) -> dict | None:
