@@ -102,6 +102,7 @@ from cli_diag_cmds import (  # noqa: F401（回导入：测试/内部引用兼�
     _show_usage,
     _show_stats,
 )
+from cli_plugin_cmds import _handle_plugin_command  # noqa: F401（回导入同上）
 
 
 # ---------------------------------------------------------------------------
