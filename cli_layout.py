@@ -204,14 +204,34 @@ class SlashCompleter(_PtCompleter):
                 fn = self._arg_completers.get(parts[0])
                 if fn:
                     from prompt_toolkit.completion import Completion
-                    frag = text[len(parts[0]):].lstrip().split()[-1] if \
-                        text[len(parts[0]):].lstrip().split() else ""
-                    for cand in fn(text) or []:
+                    # 正在补的词 = 命令后最后一个词；行尾是空格时补的是
+                    # 「下一个新词」（frag 为空，不过滤——全量候选让
+                    # 用户翻着看）
+                    rest = text[len(parts[0]):].lstrip()
+                    rest_words = rest.split()
+                    if not rest_words or text.endswith(" "):
+                        frag = ""
+                    else:
+                        frag = rest_words[-1]
+                    # 兼容两种签名：老的单参 fn(frag)——拿最后那个词；
+                    # 新的双参 fn(frag, 全文)——能看上下文（比如
+                    # /plugin install 补市场名、/plugin disable 补已装名）。
+                    # 老实说：以前这里传的是全文，单参补全器拿 "/plugin x"
+                    # 当前缀过滤永远滤空——等于从没生效过，这次捎带修活。
+                    try:
+                        cands = fn(frag, text)
+                    except TypeError:
+                        cands = fn(frag)
+                    for cand in cands or []:
+                        meta = ""
+                        if isinstance(cand, (tuple, list)) and len(cand) == 2:
+                            cand, meta = cand[0], cand[1]
                         if frag and not str(cand).startswith(frag):
                             continue  # 前缀不匹配的候选不出（对齐一级行为）
                         yield Completion(
                             str(cand),
                             start_position=-len(frag) if frag else 0,
+                            display_meta=str(meta),
                         )
         except Exception:
             return

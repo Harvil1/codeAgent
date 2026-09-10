@@ -1106,17 +1106,57 @@ def _handle_plugin_command(args: str, rt) -> bool:
     return True
 
 
+def _plugin_arg_completer(frag: str, full_text: str = "") -> list:
+    """/plugin 的参数补全：看已敲的子命令决定补什么（配合内联候选区上下滚选）。
+
+    - 还没敲子命令 → 补子命令（带一句描述）
+    - install → 补市场里的插件（名字@市场 + 描述）——边打字边过滤，
+      ↑↓/Tab 环选、Enter 采纳，等于「市场也用滚动选装」
+    - uninstall/enable/disable → 补已装插件名
+    """
+    toks = (full_text or "").split()
+    frag = frag or ""
+    try:
+        # 算「正在补的是第几个词」：行尾空格 = 补下一个新词，
+        # 否则 = 正在敲的最后一个词。位置 1 是子命令，位置 2 起
+        # 才轮到各子命令自己的参数
+        if (full_text or "").endswith(" "):
+            pos = len(toks)
+        else:
+            pos = len(toks) - 1
+        level = toks[1] if (pos >= 2 and len(toks) > 1) else "sub"
+
+        if level == "sub":
+            subs = [
+                ("list", "看已装插件"), ("install", "装插件（可补市场里的名字）"),
+                ("uninstall", "卸载"), ("enable", "启用"), ("disable", "停用"),
+                ("create", "搓插件骨架"), ("market", "市场管理"),
+            ]
+            return [(s, d) for s, d in subs if s.startswith(frag)]
+        if level == "install":
+            entries = sorted(
+                _iter_market_entries(), key=lambda x: x[1]["name"],
+            )
+            return [
+                (f"{e['name']}@{m}",
+                 str(e.get("description", "") or "")[:60])
+                for m, e in entries
+            ]
+        if level in ("uninstall", "enable", "disable"):
+            return [
+                (n, str(mf.get("description", "") or "")[:60])
+                for n, mf, _d in _iter_installed()
+            ]
+    except Exception:
+        pass  # 补全挂了不能挡打字
+    return []
+
+
 @slash_command(
     name="/plugin", category="插件",
     usage="/plugin [list|install|uninstall|enable|disable|create|market]",
     summary="插件管理（看已装/启停/卸载）；/plugins 逛市场装新的",
-    arg_completer=lambda text: [
-        s for s in (
-            "list", "install ", "uninstall ", "enable ", "disable ",
-            "create ", "market ", "market add ", "market list ",
-            "market update ", "market remove ",
-        ) if s.startswith(text)
-    ],
+    arg_completer=_plugin_arg_completer,
 )
 def cmd_plugin(args: str, rt) -> bool:
     return _handle_plugin_command(args, rt)
