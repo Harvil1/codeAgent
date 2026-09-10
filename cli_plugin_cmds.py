@@ -575,7 +575,7 @@ def _builtin_marketplace_defs() -> list:
         {"name": "builtin-adapted", "path": "builtin_marketplace"},
         {
             "name": "claude-plugins-official",
-            "url": "https://github.com/anthropics/claude-plugins-official.git",
+            "url": "https://gitee.com/hong-wei-h/code-agent-plugin-official.git",
         },
     ]
 

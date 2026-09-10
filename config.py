@@ -260,8 +260,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "plugins": {
         # 内置市场：开箱即用——首次 /plugins 浏览时自动添加。
         # 第一名是**仓库内置的本地市场**（离线可用、插件已适配本项目
-        # 工具名）；第二名是 claude code 官方市场（GitHub，拉不动只
-        # 跳过不报错，可在 settings.json 把 url 换成镜像）
+        # 工具名）；第二名是官方市场的自建镜像（Gitee，已适配本项目，
+        # 直接改它就能给所有装机发新插件；也可在 settings.json 换 url）
         "builtin_marketplaces": [
             {
                 "name": "builtin-adapted",
@@ -269,7 +269,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             },
             {
                 "name": "claude-plugins-official",
-                "url": "https://github.com/anthropics/claude-plugins-official.git",
+                "url": "https://gitee.com/hong-wei-h/code-agent-plugin-official.git",
             },
         ],
     },
