@@ -121,6 +121,187 @@ def submit_input(buffer, input_queue) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 内联浏览器：/plugin、/plugins 的滚动选择界面（不浮窗、不抢终端）
+#
+# 大白话：像超市货架——列表立在输入框上方（版面普通区块），↑↓ 滚动、
+# Enter 确认、Esc 返回/退出。Enter 的「动作」不是当场干重活，而是把
+# 一条内部命令塞回 input_queue，由工作线程慢慢执行（安装要联网克隆，
+# 卡 UI 线程会冻住整个界面）。
+# ---------------------------------------------------------------------------
+
+_BROWSER_VISIBLE = 8   # 每屏露几行（跟补全候选区同款窗口）
+
+_browser_state = {
+    "active": False,
+    "title": "",
+    "items": [],        # [{"label","meta","cmd"/"open","danger","confirm_msg"}]
+    "cursor": 0,
+    "hint": "",
+    "back": None,       # 上一级的状态快照（Esc 返回用；None=没有上级）
+    "armed": -1,        # 危险项第一次 Enter 记下标（再按才执行）
+    "queue": None,      # input_queue（build_application 时接上）
+}
+
+
+def browser_open(title, items, hint="", replace=False):
+    """打开（或替换）内联浏览器列表（命令处理器在工作线程里调）。
+
+    参数：
+        title：标题行文字
+        items：条目列表，每项 dict：
+            label      显示名（必填）
+            meta       右侧灰色描述（可选）
+            cmd        Enter 时塞进队列的命令串（与 open 二选一）
+            open       Enter 时当场调的函数（必须轻——只做列表切换，
+                       重活自己塞 cmd 给工作线程；与 cmd 二选一）
+            danger     True = 第一次 Enter 只亮确认提示，再按才执行
+            confirm_msg 危险项的确认提示文字
+        hint：底部操作提示（不填用默认）
+        replace：True = 不留返回栈（清掉 back）
+    """
+    # 返回栈：浏览器已开着且不是 replace → 先拍当前状态当「上一级」；
+    # 没开着（第一次打开）或 replace → 没有上级
+    prev = None
+    if _browser_state.get("active") and not replace:
+        prev = {k: _browser_state.get(k) for k in
+                ("title", "items", "hint", "back")}
+    _browser_state.update({
+        "active": True, "title": str(title or ""),
+        "items": list(items or []), "cursor": 0,
+        "hint": hint or "↑↓ 滚动选择 · Enter 确认 · Esc 返回/退出",
+        "armed": -1, "back": prev,
+    })
+    _browser_invalidate()
+
+
+def browser_close(replace_with=None):
+    """关掉浏览器；给了 replace_with（状态快照）就恢复成那份（Esc 返回上级）。"""
+    if replace_with is not None:
+        _browser_state.update(replace_with)
+        _browser_state["cursor"] = 0
+        _browser_state["armed"] = -1
+        _browser_state["active"] = True
+    else:
+        _browser_state["active"] = False
+        _browser_state["back"] = None
+    _browser_invalidate()
+
+
+def browser_is_active() -> bool:
+    """浏览器开着吗（键位路由用）。"""
+    return bool(_browser_state.get("active"))
+
+
+def _browser_invalidate():
+    """尽快刷一帧（浏览器开着时任何状态变化都调它）。"""
+    try:
+        app = None
+        import cli_ui
+        app = getattr(cli_ui, "_active_app", None)
+        if app is not None:
+            app.invalidate()
+    except Exception:
+        pass   # 纯视觉，刷不上等下一拍
+
+
+def _browser_window():
+    """(起始, 结束) 可见窗口——跟补全候选区同款：窗口追着光标滚。"""
+    total = len(_browser_state["items"])
+    cur = _browser_state["cursor"]
+    if cur < _BROWSER_VISIBLE:
+        lo = 0
+    else:
+        lo = cur - _BROWSER_VISIBLE + 1
+    return lo, min(lo + _BROWSER_VISIBLE, total)
+
+
+def _browser_lines():
+    """浏览器区块的行列表 [(style, text), ...]（纯函数，渲染用）。"""
+    try:
+        if not _browser_state.get("active"):
+            return []
+        lines = [("class:browser-title", _browser_state.get("title") or "")]
+        lo, hi = _browser_window()
+        if lo > 0:
+            lines.append(("class:hint-dim",
+                          f"  ▲ … 上方还有 {lo} 条（↑ 继续翻）"))
+        for i in range(lo, hi):
+            it = _browser_state["items"][i]
+            cur = (i == _browser_state["cursor"])
+            mark = "▶ " if cur else "  "
+            meta = it.get("meta", "")
+            one = f"{mark}{it.get('label', '')}" + (f"  {meta}" if meta else "")
+            lines.append((
+                "class:hint-current" if cur else "class:hint-dim",
+                _clip_plain(one, _term_width()),
+            ))
+        total = len(_browser_state["items"])
+        if hi < total:
+            lines.append(("class:hint-dim",
+                          f"  ▼ … 下方还有 {total - hi} 条（↓ 继续翻）"))
+        if _browser_state.get("armed", -1) >= 0:
+            it = _browser_state["items"][_browser_state["armed"]]
+            lines.append((
+                "class:browser-warn",
+                f"  ⚠ {it.get('confirm_msg', '再按 Enter 确认，Esc 取消')}",
+            ))
+        lines.append(("class:hint-dim", f"  {_browser_state.get('hint', '')}"))
+        return lines
+    except Exception:
+        return []
+
+
+def _browser_move(delta: int):
+    """光标移动（清确认态）；到边就停。"""
+    total = len(_browser_state["items"])
+    if total <= 0:
+        return
+    cur = _browser_state["cursor"] + delta
+    _browser_state["cursor"] = max(0, min(total - 1, cur))
+    _browser_state["armed"] = -1
+    _browser_invalidate()
+
+
+def _browser_enter(buffer):
+    """浏览器里按了 Enter：危险项二次确认；普通项执行动作。
+
+    动作分两种：item["open"] 当场调（只做列表切换这类轻活）；
+    item["cmd"] 塞进 input_queue 由工作线程干（安装/卸载这种重活）。
+    输入框里有字时不走浏览器——把浏览器收掉，让 Enter 照常提交
+    （用户边看列表边打命令的场合）。
+    """
+    st = _browser_state
+    if buffer is not None and getattr(buffer, "text", "").strip():
+        browser_close()          # 输入框有字：收列表，Enter 走正常提交
+        return False             # False = 这记 Enter 不消费，让提交逻辑跑
+    idx = st.get("cursor", 0)
+    items = st.get("items") or []
+    if not (0 <= idx < len(items)):
+        return True
+    it = items[idx]
+    if it.get("danger") and st.get("armed", -1) != idx:
+        st["armed"] = idx        # 第一次 Enter：亮确认提示
+        _browser_invalidate()
+        return True
+    # 执行动作。open 型（进入下一级列表）要在「还开着」时调——
+    # browser_open 靠这个拍下当前状态当返回栈（Esc 才能回上一级）
+    opener = it.get("open")
+    if callable(opener):
+        try:
+            opener()
+        except Exception:
+            logger.exception("浏览器 open 回调失败")
+            browser_close()
+        return True
+    browser_close()
+    cmd = it.get("cmd")
+    q = st.get("queue")
+    if cmd and q is not None:
+        q.put(str(cmd))
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 补全器 + 中断判断器（原 cli_input.py 迁入——老降级界面已删，
 # 这两个零件是新旧界面共用的中立件，归到界面总仓 cli_layout）
 # ---------------------------------------------------------------------------
@@ -459,6 +640,11 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     @kb.add("enter")
     def _submit(event):
         b = event.app.current_buffer
+        # 内联浏览器开着：Enter 是「确认选中」（输入框有字则收列表走正常提交）
+        if browser_is_active():
+            if not _browser_enter(b):
+                submit_input(b, input_queue)
+            return
         if b.complete_state:
             # 菜单里有高亮项（↑/↓/Tab 选过）→ Enter 先把它填进输入框
             #（claude code 同款：回车=采纳建议），下一记 Enter 再提交；
@@ -480,12 +666,26 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     def _newline(event):
         event.app.current_buffer.insert_text("\n")
 
+    @kb.add("escape")
+    def _esc(event):
+        # 浏览器开着：Esc = 返回上级（有快照）或整体关闭
+        if browser_is_active():
+            back = _browser_state.get("back")
+            browser_close(replace_with=back)
+            return
+        # 没开浏览器：顺手收掉补全候选区（有开才收）
+        b = event.app.current_buffer
+        if b.complete_state:
+            b.complete_state = None
+
     # ---- 补全候选环选（内联候选区没有 pt 菜单的默认 ↑↓/Tab 键位，自补）----
-    # 候选区开着：↑/↓ 环选、Tab 选下一个；没开：↑/↓ 照旧移光标、
-    # Tab 开出候选列表（不高亮，光看；再按 Tab 才开始选）
+    # 优先级：浏览器开着归浏览器 → 候选区开着环选 → 默认（移光标/开头列表）
 
     @kb.add("up")
     def _up(event):
+        if browser_is_active():
+            _browser_move(-1)
+            return
         b = event.app.current_buffer
         if b.complete_state and b.complete_state.completions:
             b.complete_previous()
@@ -494,6 +694,9 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
 
     @kb.add("down")
     def _down(event):
+        if browser_is_active():
+            _browser_move(1)
+            return
         b = event.app.current_buffer
         if b.complete_state and b.complete_state.completions:
             b.complete_next()
@@ -502,6 +705,9 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
 
     @kb.add("tab")
     def _tab(event):
+        if browser_is_active():
+            _browser_move(1)   # 浏览器开着：Tab 当「下一条」用
+            return
         b = event.app.current_buffer
         if b.complete_state and b.complete_state.completions:
             b.complete_next()
@@ -777,6 +983,30 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
         # 挂到 app 上给 verify 检查用（内联候选区必须在场——浮层版已废）
         app_probe_completions_area = completions_area
 
+        # ---- 内联浏览器区（/plugin、/plugins 的滚动选择列表）----
+        # 也是普通区块：立在输入框上方，开/关由 _browser_state 驱动
+        def _browser_frags():
+            lines = _browser_lines()
+            return [frag for line in lines
+                    for frag in (line, ("", "\n"))][:-1] or []
+
+        browser_area = ConditionalContainer(
+            Window(
+                FormattedTextControl(_browser_frags, show_cursor=False),
+                height=lambda: Dimension(
+                    min=0, max=14,   # 标题+8条+上下指示+确认行+提示行
+                    preferred=len(_browser_lines()),
+                ),
+                dont_extend_height=True,
+                wrap_lines=False,
+            ),
+            filter=Condition(lambda: bool(_browser_lines())),
+        )
+
+        # 浏览器 Enter 动作要用的命令队列接上（None=测试环境没队列）
+        if input_queue is not None:
+            _browser_state["queue"] = input_queue
+
         # ---- 各层容器（自上而下：live 区 / ─── / 输入区 / ─── / 页脚）----
         # live 区 = spinner 行 + 子代理树 + 任务清单（claude code 同款：
         # 回合进行中挂在输入框上方，回合结束整块收起）
@@ -811,14 +1041,17 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
             # 补全候选区（内联区块版：暗字列表 + 选中项高亮）
             "hint-dim": "fg:#8a8a8a",
             "hint-current": "fg:#00aa88 bold",
+            # 内联浏览器（/plugin、/plugins 滚动选择）
+            "browser-title": "bold fg:#d8d8d8",
+            "browser-warn": "fg:#d0d000",
         }
         _style_base.update(cli_skin.get_pt_style_overrides())
-        # 布局自上而下：live 区 / ─── / 补全候选区 / 输入区 / ─── / 页脚。
-        # 补全候选区不是浮层——是普通区块，出现时把输入框往下推，
-        # 不叠在任何内容上面（用户反馈：浮层观感是「悬浮窗」，不要）
+        # 布局自上而下：live 区 / ─── / 浏览器区 / 补全候选区 / 输入区 /
+        # ─── / 页脚。浏览器和候选区都不是浮层——是普通区块，出现时把
+        # 输入框往下推，不叠在任何内容上面（用户反馈：悬浮观感不要）
         body = HSplit(
-            [live_area, separator, completions_area, input_area,
-             separator, status_bar])
+            [live_area, separator, browser_area, completions_area,
+             input_area, separator, status_bar])
         app = Application(
             layout=Layout(body),
             key_bindings=_build_key_bindings(

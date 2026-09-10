@@ -903,6 +903,19 @@ def _resolve_installed(name: str) -> Path | None:
     return None
 
 
+def _do_uninstall(name: str) -> None:
+    """卸载的核心动作（不带 y/N——命令行走 y/N，浏览器走二次 Enter）。"""
+    path = next(
+        (p for n, _m, p in _iter_installed() if n == name), None,
+    )
+    if path is None:
+        console.print(f"[red]没找到插件：{name}（/plugin 看看名字）[/red]")
+        return
+    _unwire_plugin_mcp(name)   # 先拆 MCP 线（目录还在才能算出归属）
+    _rmtree_force(path)
+    console.print(f"[green]插件 {name} 已卸载[/green]（{path}）")
+
+
 def _cmd_uninstall(name: str) -> None:
     """/plugin uninstall <名字>：删掉插件目录（删前问一句）。"""
     path = _resolve_installed(name)
@@ -915,9 +928,7 @@ def _cmd_uninstall(name: str) -> None:
     if answer not in ("y", "yes"):
         console.print("已取消")
         return
-    _unwire_plugin_mcp(name)   # 先拆 MCP 线（目录还在才能算出归属）
-    _rmtree_force(path)
-    console.print(f"[green]插件 {name} 已卸载[/green]（{path}）")
+    _do_uninstall(name)
 
 
 def _cmd_set_enabled(name: str, enabled: bool) -> None:
@@ -984,6 +995,89 @@ def _cmd_create(name: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 内联浏览器入口：/plugin 滚动管理已装；/plugins 先选市场再滚选安装
+# ---------------------------------------------------------------------------
+
+def _open_installed_browser() -> None:
+    """/plugin：内联浏览器滚动查看已装插件（Enter 两次 = 卸载）。
+
+    列表是 cli_layout 的内联浏览器（普通区块不悬浮）：↑↓ 滚动、
+    Enter 第一次亮确认、第二次把卸载命令塞给工作线程执行。
+    """
+    import cli_layout
+    items = _iter_installed()
+    if not items:
+        console.print(
+            f"[yellow]还没有安装任何插件[/yellow]（目录 {plugins_dir()} 为空）\n"
+            "[dim]/plugins 逛市场挑着装，或 /plugin create <名字> 搓一个[/dim]"
+        )
+        return
+    entries = []
+    for name, mf, path in items:
+        state = "启用" if mf.get("enabled", True) else "停用"
+        desc = str(mf.get("description", "") or "")[:36]
+        meta = f"v{mf.get('version', '?')} · {state} · {_count_skills(path)}技能"
+        if desc:
+            meta += f" · {desc}"
+        entries.append({
+            "label": name, "meta": meta,
+            "danger": True,
+            "confirm_msg": f"再按 Enter 卸载 {name}（Esc 取消）",
+            "cmd": f"/plugin __uninstall_now {name}",
+        })
+    cli_layout.browser_open("已安装插件（Enter 两次 = 卸载）", entries,
+                            replace=True)
+
+
+def _open_market_browser() -> None:
+    """/plugins：第一级选市场（Enter 进入），第二级滚选插件安装。
+
+    两级列表都走内联浏览器；Esc 从插件级返回市场级、再按退出。
+    """
+    import cli_layout
+    _ensure_builtin_marketplaces()
+    mkts = _iter_marketplaces()
+    if not mkts:
+        console.print(
+            "[yellow]还没有可用的市场[/yellow]——"
+            "/plugin market add <git地址> 添加一个"
+        )
+        return
+    items = []
+    for name, catalog, _dir in mkts:
+        n = len(catalog.get("plugins", []))
+        items.append({
+            "label": name, "meta": f"{n} 个插件",
+            # open 回调当场切到第二级（闭包锁住市场名）
+            "open": (lambda nm=name: _open_market_plugins_browser(nm)),
+        })
+    cli_layout.browser_open("选择市场（Enter 进入，Esc 退出）", items,
+                            replace=True)
+
+
+def _open_market_plugins_browser(market_name: str) -> None:
+    """市场浏览器的第二级：某个市场里的插件列表（Enter 安装）。"""
+    import cli_layout
+    entries = [(m, e) for m, e in _iter_market_entries() if m == market_name]
+    if not entries:
+        console.print(f"[yellow]市场 {market_name} 里没有条目[/yellow]")
+        return
+    installed = {n for n, _mf, _d in _iter_installed()}
+    items = []
+    for m, e in entries:
+        tag = "已装 · " if e["name"] in installed else ""
+        desc = tag + str(e.get("description", "") or "")[:40]
+        items.append({
+            "label": e["name"], "meta": desc,
+            "cmd": f"/plugin install {e['name']}@{m}",
+        })
+    # 不带 replace：browser_open 会把市场级列表拍成返回栈（Esc 回得去）
+    cli_layout.browser_open(
+        f"市场 {market_name}（Enter 安装，Esc 返回市场列表）", items,
+    )
+
+
 def _cmd_list() -> None:
     """/plugin 或 /plugin list：表格展示所有已安装插件。"""
     items = _iter_installed()
@@ -1029,7 +1123,8 @@ def _handle_plugin_command(args: str, rt) -> bool:
     """
     parts = args.strip().split()
     if not parts:
-        _cmd_list()
+        # /plugin 裸命令：滚动浏览器管理已装插件（Enter 两次 = 卸载）
+        _open_installed_browser()
         return True
 
     sub = parts[0].lower()
@@ -1038,6 +1133,10 @@ def _handle_plugin_command(args: str, rt) -> bool:
     try:
         if sub in ("list", "ls"):
             _cmd_list()
+        elif sub == "__uninstall_now":
+            # 内部命令：浏览器里二次 Enter 已确认的卸载（不再问 y/N）
+            if rest:
+                _do_uninstall(rest)
         elif sub == "install":
             _cmd_install(rest)
         elif sub == "market" or sub == "marketplace":
@@ -1100,7 +1199,8 @@ def _handle_plugin_command(args: str, rt) -> bool:
     market_touched = (
         sub in ("market", "marketplace") and market_first not in ("", "list")
     )
-    if sub in ("install", "uninstall", "enable", "disable", "create") \
+    if sub in ("install", "uninstall", "__uninstall_now",
+               "enable", "disable", "create") \
             or market_touched:
         _refresh_skills(rt)
     return True
@@ -1163,15 +1263,14 @@ def cmd_plugin(args: str, rt) -> bool:
 
 
 @slash_command(
-    name="/plugins", category="插件", usage="/plugins [关键字]",
-    summary="逛插件市场：打印序号表格（可按关键字过滤），再用 /plugin install <序号> 装",
+    name="/plugins", category="插件", usage="/plugins",
+    summary="逛插件市场：先选市场（Enter 进入），再滚动选插件安装",
 )
 def cmd_plugins_browse(args: str, rt) -> bool:
-    # 直达市场浏览（和 /plugin market 同一条路）；确保内置市场在场。
-    # 纯打印零输入——不挂起主界面、不弹任何悬浮窗；安装走下一条命令
+    # 两级内联浏览器：第一级选市场、第二级滚选插件；Enter 安装的动作
+    # 塞回命令队列由工作线程执行（克隆是网络活，不卡 UI）
     try:
-        _ensure_builtin_marketplaces()
-        _cmd_market_pick(rt, args.strip())
+        _open_market_browser()
     except Exception as e:
         console.print(f"[red]逛市场失败：{e}[/red]")
         logger.warning("/plugins 失败: %s", e, exc_info=True)
