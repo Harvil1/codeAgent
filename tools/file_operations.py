@@ -68,26 +68,59 @@ def _read_range_key(offset: int, limit) -> str:
     return f"{offset}:{limit if limit is not None else 'all'}"
 
 
-def _read_seen_invalidate(path) -> None:
-    """自己改了文件后，把该文件的"读过去重"记账划掉。
-
-    刚写完的文件内容肯定变了，去重缓存必须立刻失效，否则下次读会被
-    误判成"文件没变"而不返回内容。
-
-    参数：
-        path: 刚被写过的文件路径。
-
-    返回：无。出错也静默（去重是锦上添花，不能因为它炸掉写入）。
-    """
-    try:
-        _READ_SEEN.pop(str(Path(path).resolve()), None)
-    except Exception:
-        pass
-
-
 def reset_read_seen() -> None:
     """清空读过去重的记账本。测试专用（每个测试要干净起点）。"""
     _READ_SEEN.clear()
+
+
+def _was_recently_read(path) -> bool:
+    """「先读后编」闸门的判据：本会话读过这个文件、且读之后没被改过。
+
+    读过去重记账本（_READ_SEEN）里存着读时的 (mtime_ns, size) 指纹——
+    现在对得上 = 读的是最新内容；对不上（外部改过）或压根没读过 =
+    不许直接编辑，先 read_file（对标 claude code 的 Edit 闸门
+    "File must be read first"，防模型凭想象盲改）。
+    """
+    try:
+        key = str(Path(path).resolve())
+        rec = _READ_SEEN.get(key)
+        if not rec:
+            return False
+        st = Path(path).stat()
+        return rec.get("sig") == (st.st_mtime_ns, st.st_size)
+    except Exception:
+        return False
+
+
+def _must_read_first_error() -> str:
+    """闸门错误的标准返回（str_replace 和 write_file 共用同一句词）。"""
+    return json.dumps({
+        "error": (
+            "File must be read first——本会话还没 read_file 过这个文件"
+            "（或读之后文件已被外部改动），先读再编辑"
+        ),
+        "error_type": "must_read_first",
+    }, ensure_ascii=False)
+
+
+def _read_seen_refresh(path) -> None:
+    """自己刚写完这个文件：把读记账刷新成「写完后的最新指纹」。
+
+    为什么不是简单删掉（老 _read_seen_invalidate 的做法）：删了的话
+    连续第二次编辑会被「先读后编」闸门拦住；而刚写完的内容是我们
+    自己写的、一清二楚——直接记新指纹，连续编辑不用重读
+    （对标 claude code：Edit 完可以接着 Edit，不用夹一次 Read）。
+    """
+    try:
+        key = str(Path(path).resolve())
+        _READ_SEEN.pop(key, None)
+        st = Path(path).stat()
+        _READ_SEEN[key] = {"sig": (st.st_mtime_ns, st.st_size), "ranges": {}}
+        _READ_SEEN.move_to_end(key)
+        while len(_READ_SEEN) > _READ_SEEN_LIMIT:
+            _READ_SEEN.popitem(last=False)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +469,12 @@ def _handle_write_file(args: dict, **kwargs) -> str:
 
     path = Path(path_str).expanduser()
 
+    # 先读后编闸门（对标 claude code）：覆盖**已有**文件要先读过
+    #（新建文件不需要——没读过也不存在盲改）。追加模式同样要求
+    #（ blindly append 也是盲改）
+    if path.exists() and not _was_recently_read(path):
+        return _must_read_first_error()
+
     # 写前指纹校验（只在覆盖模式 + 调用方传了 expected_hash 时做）
     if expected_hash and not append and path.exists():
         try:
@@ -471,7 +510,7 @@ def _handle_write_file(args: dict, **kwargs) -> str:
             atomic_write_text(path, content)
 
         _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-        _read_seen_invalidate(path)  # 刚写过，读去重缓存立刻作废
+        _read_seen_refresh(path)  # 刚写过，读去重缓存立刻作废
         _trigger_file_changed(path, "append" if append else "write", kwargs)  # 广播"文件变了"事件
 
         return json.dumps({
@@ -795,6 +834,10 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
     if not path.is_file():
         return json.dumps({"error": f"不是文件: {path}"}, ensure_ascii=False)
 
+    # 先读后编闸门（对标 claude code）：没读过不许改，防凭想象盲改
+    if not _was_recently_read(path):
+        return _must_read_first_error()
+
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -842,7 +885,7 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-    _read_seen_invalidate(path)  # 刚改过，读去重缓存立刻作废
+    _read_seen_refresh(path)  # 刚改过，读去重缓存立刻作废
     _trigger_file_changed(path, "edit", kwargs)  # 广播"文件变了"事件
 
     return json.dumps({
