@@ -349,22 +349,6 @@ def _print_message_list(msgs, *, char_limit: int = 300, header: Optional[str] = 
         elif role == "assistant":
             console.print(f"[bold green]AI:[/bold green] {content}")
     console.print()
-def _show_history_messages(rt: RuntimeContext, limit: int = 6):
-    """恢复会话后，把最近几条消息回放给用户看——不然恢复了什么心里没数。
-
-    参数：
-        rt：RuntimeContext（取 session_store 和 session_id）
-        limit：最多回放几条（默认 6）
-
-    返回：
-        无
-    """
-    if not rt.session_store or not rt.session_id:
-        return
-    msgs = rt.session_store.get_messages(rt.session_id, limit=limit)
-    if not msgs:
-        return
-    _print_message_list(msgs, char_limit=300, header=f"最近 {len(msgs)} 条历史消息：")
 def _auto_resume_last(rt: RuntimeContext):
     """命令行带 -c/--continue 时用：跳过询问，直接恢复最近一个有消息的会话。
 
@@ -387,9 +371,9 @@ def _auto_resume_last(rt: RuntimeContext):
         return
 
     last = history[0]
+    # 恢复 + 概览回显都在 resume_session 里做（分类报数 + 尾部预览）；
+    # 这里不再重复回放（曾经两处各打一遍，屏上出现两份「最近 N 条」）
     _resume_and_cleanup_empty(rt, last["id"])
-    # 恢复完把最近的消息回放出来，让用户看到接上了什么
-    _show_history_messages(rt)
 
 
 # ---------------------------------------------------------------------------

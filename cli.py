@@ -75,7 +75,6 @@ from cli_session_cmds import (  # noqa: F401（回导入：测试/内部引用�
     _search_sessions,
     _auto_resume_last,
     _handle_resume_command,
-    _show_history_messages,
     _print_message_list,
 )
 from cli_skill_memory_cmds import (  # noqa: F401（回导入：测试/内部引用兼容）
@@ -1120,15 +1119,31 @@ class RuntimeContext:
             self.checkpoint_mgr = None
 
         title = info.get("title") or "(无标题)"
+        # 概览行：分类报数——你几条、AI 几条、工具过程几条，一眼确认
+        # 上下文全在（以前只回放最后几条 AI 文字，30 条会话看着像
+        # 3 条，用户以为「好多没恢复」；工具消息是 AI 记忆的一部分，
+        # 数出来才安心）
+        n_user = sum(1 for m in msgs if m.get("role") == "user")
+        n_ai = sum(1 for m in msgs if m.get("role") == "assistant")
+        n_tool = sum(1 for m in msgs if m.get("role") == "tool")
+        bits = [f"你 {n_user}", f"AI {n_ai}"]
+        if n_tool:
+            bits.append(f"工具 {n_tool}")
         console.print(
-            f"[green][已恢复会话: {title}（{len(msgs)} 条消息）][/green]"
+            f"[green][已恢复会话: {title}（{len(msgs)} 条消息："
+            f"{' · '.join(bits)}）][/green]"
         )
 
-        # 显示最近几条消息让用户想起上下文（不显示 tool 消息——太碎了）
-        recent = [m for m in msgs[-6:]
-                  if (m.get("content") or "").strip() and m.get("role") != "tool"]
-        if recent:
-            _print_message_list(recent, char_limit=300, header=f"最近 {len(recent)} 条历史消息：")
+        # 尾部预览：最后一条你说的 + 最后一条 AI 说的（各截 300 字）
+        tail = []
+        for role in ("user", "assistant"):
+            for m in reversed(msgs):
+                if m.get("role") == role and (m.get("content") or "").strip():
+                    tail.append(m)
+                    break
+        if tail:
+            _print_message_list(tail, char_limit=300,
+                                header="上下文尾部预览：")
 
         return True
 
