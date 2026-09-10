@@ -354,6 +354,77 @@ def _handle_status_cli(args: str, rt) -> bool:
         table.add_row(label, value)
     console.print(table)
     return True
+
+
+def _handle_mcp_cli(args: str, rt) -> bool:
+    """/mcp 命令：详细查看 MCP 外部工具的连接状态。
+
+    /status 里那行 MCP 只有一句「连没连」的摘要；本命令展开成一张表，
+    每个 server 一行：用的哪种传输（stdio=本机子进程 / http / sse /
+    websocket）、连接状态、注册进来的工具数量。工具数按
+    mcp__<server>__ 前缀从工具登记表里数——登记表是启动时的静态
+    快照，不用现场再惊动一遍 server（省得断线的 server 把命令卡住）。
+
+    表格底下再按 server 折行列出工具名清单，方便对着界面上
+    ● mcp__xxx__yyy 事件行反查「这是谁家的工具」。
+
+    参数：
+        args：命令参数（本命令不使用）
+        rt：RuntimeContext（本命令不依赖它，留着统一签名）
+
+    返回：
+        bool —— True 表示命令已处理
+    """
+    from agent.mcp_client import get_mcp_manager
+    from tools.registry import registry
+
+    clients = dict(getattr(get_mcp_manager(), "_clients", {}) or {})
+    if not clients:
+        console.print(
+            "[yellow]没有已注册的 MCP server[/yellow]——"
+            "配置 .mcp.json（项目根目录或全局）并重启后才会连接"
+        )
+        return True
+
+    # 工具名按 server 分桶：mcp__<server>__<tool> 拆三段取中间那段
+    tools_by_server: dict = {}
+    for full_name in registry.list_all():
+        if full_name.startswith("mcp__"):
+            parts = full_name.split("__", 2)
+            if len(parts) == 3:
+                tools_by_server.setdefault(parts[1], []).append(parts[2])
+
+    transport_map = {
+        "StdioTransport": "stdio（子进程）",
+        "HTTPTransport": "http",
+        "SSETransport": "sse",
+        "WebSocketTransport": "websocket",
+    }
+
+    table = Table(title="MCP 连接状态")
+    table.add_column("server", style="cyan")
+    table.add_column("传输")
+    table.add_column("状态")
+    table.add_column("工具数", justify="right")
+    for name, client in sorted(clients.items()):
+        ok = bool(getattr(client, "is_connected", False))
+        transport = transport_map.get(
+            type(getattr(client, "_transport", None)).__name__, "?"
+        )
+        table.add_row(
+            name,
+            transport,
+            "[green]已连接[/green]" if ok else "[red]断开[/red]",
+            str(len(tools_by_server.get(name, []))),
+        )
+    console.print(table)
+
+    # 工具名清单（dim 小字，一行一个 server）
+    for name in sorted(clients.keys()):
+        tool_names = tools_by_server.get(name, [])
+        if tool_names:
+            console.print(f"[dim]  {name}: {'  '.join(sorted(tool_names))}[/dim]")
+    return True
 def _handle_doctor_cli(args: str, rt) -> bool:
     """/doctor 命令：给环境做 6 项体检，帮用户定位"为什么跑不起来"。
 
@@ -661,6 +732,12 @@ def cmd_doctor(args: str, rt) -> bool:
                summary="状态一览（模型/goal/MCP/工具数）")
 def cmd_status(args: str, rt) -> bool:
     return _handle_status_cli(args, rt)
+
+
+@slash_command(name="/mcp", category="诊断", usage="/mcp",
+               summary="MCP 连接状态与工具清单（/status 里 MCP 行的详细版）")
+def cmd_mcp(args: str, rt) -> bool:
+    return _handle_mcp_cli(args, rt)
 
 
 @slash_command(name="/trace", category="诊断",
