@@ -256,6 +256,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "file_attachment_max_chars": 8000,
     },
 
+    # 插件：外挂包裹（带 plugin.json 的目录，第一版内容=技能），/plugin 管理
+    "plugins": {
+        # 内置市场：开箱即用——首次 /plugin market 浏览时自动拉取，
+        # 之后 /plugin market update 照常刷新。官方市场在 GitHub，
+        # 拉不动可以在 settings.json 里把 url 换成镜像地址
+        "builtin_marketplaces": [
+            {
+                "name": "claude-plugins-official",
+                "url": "https://github.com/anthropics/claude-plugins-official.git",
+            },
+        ],
+    },
+
     # 技能管理员（curator，跟记忆管理员是两套）：定期整理技能库
     "curator": {
         "enabled": True,

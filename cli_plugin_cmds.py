@@ -29,8 +29,14 @@
         {"name": "remote", "source": {"repo": "owner/repo"}, "description": "..."}
       ] }
 
-source 两种写法：相对路径（市场仓库里的目录）或 git 地址
-（字符串 URL / {"repo": "owner/repo"} / {"url": "..."}）。
+source 的写法（官方四型全支持）：相对路径（市场仓库里的目录）、
+git 地址（字符串 URL / {"url": ...}）、GitHub 简写（{"repo": "o/r"}）、
+git-subdir（{"url", "path", "ref"?}——克隆整个仓库后取 path 子目录）。
+
+**内置市场**：config.plugins.builtin_marketplaces 默认带着官方
+claude-plugins-official——首次 /plugin market 浏览时自动拉取（开箱
+即用）；用户 remove 过的不会复活（记号文件防僵尸）；地址可以在
+settings.json 覆盖（GitHub 拉不动换镜像）。
 
 市场本体克隆在 ~/.codeAgent/plugins/marketplaces/<名>/ 下——注意它和
 插件同住 plugins/，但根下没有 plugin.json，不会被误认成插件。
@@ -66,15 +72,26 @@ _OWNER_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 # 小工具：插件清单 / 已装列表
 # ---------------------------------------------------------------------------
 
-def _manifest_path(plugin_path: Path) -> Path:
-    """插件清单文件的路径（<插件目录>/plugin.json）。"""
-    return Path(plugin_path) / "plugin.json"
+def _find_manifest(plugin_path: Path) -> Path | None:
+    """找插件清单文件，返回真实路径；没有返回 None。
+
+    认两个位置（兼容官方 claude code 插件布局）：
+    - <插件目录>/plugin.json                     （本项目约定）
+    - <插件目录>/.claude-plugin/plugin.json      （官方布局）
+    """
+    for cand in (
+        Path(plugin_path) / "plugin.json",
+        Path(plugin_path) / ".claude-plugin" / "plugin.json",
+    ):
+        if cand.exists():
+            return cand
+    return None
 
 
 def _load_manifest(plugin_path: Path) -> dict:
     """读插件清单；不存在或读坏返回空 dict（fail-open，列表时不炸）。"""
-    mp = _manifest_path(plugin_path)
-    if not mp.exists():
+    mp = _find_manifest(plugin_path)
+    if mp is None:
         return {}
     try:
         return json.loads(mp.read_text(encoding="utf-8"))
@@ -84,11 +101,15 @@ def _load_manifest(plugin_path: Path) -> dict:
 
 
 def _save_manifest(plugin_path: Path, data: dict) -> None:
-    """把清单写回去（原子写：先写临时文件再改名，断电不会写坏）。"""
+    """把清单写回去（原子写：先写临时文件再改名，断电不会写坏）。
+
+    写回「找到的那份」清单——官方布局的插件改 enabled 就落在
+    .claude-plugin/plugin.json 里，不另造文件；一份清单不管在哪都只有一份。
+    """
     from agent.atomic_io import atomic_write_text
+    mp = _find_manifest(plugin_path) or (Path(plugin_path) / "plugin.json")
     atomic_write_text(
-        _manifest_path(plugin_path),
-        json.dumps(data, ensure_ascii=False, indent=2),
+        mp, json.dumps(data, ensure_ascii=False, indent=2),
     )
 
 
@@ -105,7 +126,7 @@ def _iter_installed() -> list:
     for d in sorted(root.iterdir()):
         if not d.is_dir() or d.name == "marketplaces":
             continue
-        if _manifest_path(d).exists():
+        if _find_manifest(d) is not None:
             out.append((d.name, _load_manifest(d), d))
     return out
 
@@ -149,14 +170,14 @@ def _refresh_skills(rt) -> None:
 # ---------------------------------------------------------------------------
 
 def _find_plugin_root(root: Path) -> Path | None:
-    """在来源目录里找插件根：优先根上的 plugin.json；
-    没有就看一级子目录里是否恰好一个带 plugin.json 的（常见「仓库里
-    套插件目录」布局）；都找不到返回 None。"""
-    if _manifest_path(root).exists():
+    """在来源目录里找插件根：优先根上的清单（plugin.json 或
+    .claude-plugin/plugin.json）；没有就看一级子目录里是否恰好一个带
+    清单的（常见「仓库里套插件目录」布局）；都找不到返回 None。"""
+    if _find_manifest(root) is not None:
         return root
     candidates = [
         d for d in root.iterdir()
-        if d.is_dir() and _manifest_path(d).exists()
+        if d.is_dir() and _find_manifest(d) is not None
     ]
     if len(candidates) == 1:
         return candidates[0]
@@ -182,7 +203,7 @@ def _install_dir(src_root: Path) -> str | None:
     target.parent.mkdir(parents=True, exist_ok=True)
     is_update = target.exists()
     if is_update:
-        shutil.rmtree(target)
+        _rmtree_force(target)
     shutil.copytree(plugin_root, target, ignore=shutil.ignore_patterns(".git"))
 
     n = _count_skills(target)
@@ -198,26 +219,32 @@ def _install_dir(src_root: Path) -> str | None:
     return name
 
 
-def _clone_to_temp(url: str):
+def _clone_to_temp(url: str, ref: str | None = None):
     """把 git 仓库浅克隆到临时目录，返回 (克隆目录, 临时目录)。
 
+    ref 是官方目录册里的版本钉子（分支/标签名）——给了就按那个版
+    本克隆（--branch），没给用默认分支。sha 钉子需要整仓 fetch，第
+    一版不支持（忽略）。
     返回临时目录是为了让调用方用完删掉（clone 深度 1，省流量）。
     克隆失败抛 RuntimeError（由上层兜底成友好提示）。
     """
     tmp = Path(tempfile.mkdtemp(prefix="codeagent-plugin-"))
     try:
+        cmd = ["git", "clone", "--depth", "1"]
+        if ref:
+            cmd += ["--branch", ref]
         result = subprocess.run(
-            ["git", "clone", "--depth", "1", url, str(tmp / "repo")],
+            cmd + [url, str(tmp / "repo")],
             capture_output=True, text=True, timeout=120,
         )
     except FileNotFoundError:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree_force(tmp, ignore_errors=True)
         raise RuntimeError("本机没有 git 命令，没法从远程安装")
     except subprocess.TimeoutExpired:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree_force(tmp, ignore_errors=True)
         raise RuntimeError("git clone 超时（120 秒）")
     if result.returncode != 0:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree_force(tmp, ignore_errors=True)
         raise RuntimeError(
             f"git clone 失败：{(result.stderr or '').strip()[:200]}"
         )
@@ -255,18 +282,14 @@ def _cmd_install(source: str) -> None:
         )
         return
 
-    # ---- 市场引用：名字@市场 → 从目录册解析出真实来源再走通用安装 ----
+    # ---- 市场引用：名字@市场 → 从目录册解析出真实来源再走统一安装 ----
     if "@" in source and "://" not in source and not source.startswith("git@"):
         name, _, market = source.partition("@")
         resolved = _resolve_market_source(name.strip(), market.strip())
         if resolved is None:
             return
-        source_kind, source_value = resolved
-        if source_kind == "local":
-            _install_dir(Path(source_value))
-            return
-        # git 来源：落到下面的通用克隆路径
-        source = source_value
+        _install_resolved(resolved)
+        return
 
     tmp_dir = None
     try:
@@ -286,7 +309,7 @@ def _cmd_install(source: str) -> None:
         console.print(f"[red]安装失败：{e}[/red]")
     finally:
         if tmp_dir is not None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _rmtree_force(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +319,87 @@ def _cmd_install(source: str) -> None:
 def _marketplaces_root() -> Path:
     """市场目录册们住的目录：~/.codeAgent/plugins/marketplaces/。"""
     return plugins_dir() / "marketplaces"
+
+
+def _rmtree_force(path, ignore_errors: bool = False) -> None:
+    """删目录（Windows 加固版）。
+
+    git 克隆里的 pack 文件（.git/objects/pack/*）带只读位，普通
+    shutil.rmtree 会 PermissionError「拒绝访问」——先扫一遍去掉只读
+    位再删，就稳了。不存在的路径直接跳过。
+    ignore_errors 语义同 shutil.rmtree：删失败也不抛（临时目录收尾用）。
+    """
+    p = Path(path)
+    if not p.exists():
+        return
+    import os
+    import stat
+    if os.name == "nt":
+        for f in p.rglob("*"):
+            try:
+                os.chmod(f, stat.S_IWRITE)
+            except OSError:
+                pass  # 个别文件改不了位也没关系，rmtree 再试
+    shutil.rmtree(p, ignore_errors=ignore_errors)
+
+
+# ---------------------------------------------------------------------------
+# 内置市场：开箱即用（官方 claude code 插件市场）
+# ---------------------------------------------------------------------------
+
+def _builtin_marketplace_defs() -> list:
+    """读内置市场清单（config.plugins.builtin_marketplaces）。
+
+    默认值在 config.py::DEFAULT_CONFIG（官方市场）；用户可以在
+    settings.json 里覆盖（比如把 GitHub 地址换成镜像）。
+    配置读不到时用代码里这份兜底——保证极端情况下官方市场仍开箱即用。
+    """
+    try:
+        from config import load_config
+        defs = (load_config().get("plugins", {}) or {}).get(
+            "builtin_marketplaces"
+        )
+        if isinstance(defs, list) and defs:
+            out = [
+                {"name": str(d.get("name") or ""), "url": str(d.get("url") or "")}
+                for d in defs
+                if isinstance(d, dict) and d.get("url")
+            ]
+            if out:
+                return out
+    except Exception as e:
+        logger.debug("读内置市场配置失败，用代码兜底: %s", e)
+    return [{
+        "name": "claude-plugins-official",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+    }]
+
+
+def _removed_marker(name: str) -> Path:
+    """「用户删过这个市场」的记号文件路径（防内置市场删了又复活）。"""
+    return _marketplaces_root() / f".removed-{name}"
+
+
+def _ensure_builtin_marketplaces() -> None:
+    """把内置市场补齐：还没添加过的自动拉取（失败不吵，fail-open）。
+
+    开箱即用语义：新用户第一次 /plugin market 浏览就能看到官方市场
+    的插件，不用先手动 add。网络拉不动只提示一句，用户仍可以
+    /plugin market add 换镜像或加自己的市场。
+    用户主动 remove 过的（有记号）不再复活——尊重用户的删除。
+    """
+    try:
+        existing = {n for n, _c, _d in _iter_marketplaces()}
+        for d in _builtin_marketplace_defs():
+            name = _sanitize_name(d["name"])
+            if not name or name in existing:
+                continue
+            if _removed_marker(name).exists():
+                continue
+            console.print(f"[dim]首次使用：拉取内置市场 {name}...[/dim]")
+            _cmd_market_add(d["url"])
+    except Exception as e:
+        logger.warning("内置市场拉取失败（fail-open）: %s", e)
 
 
 def _read_catalog(mkt_dir: Path) -> dict | None:
@@ -356,33 +460,67 @@ def _iter_market_entries() -> list:
 
 
 def _resolve_entry_source(mkt_dir: Path, entry: dict):
-    """把目录册条目的 source 翻译成统一来源。
+    """把目录册条目的 source 翻译成统一来源（官方四型全支持）。
 
-    支持三种写法（官方字段的子集）：
-    - 字符串相对路径 "./plugins/demo" → ("local", 市场目录里的绝对路径)
-    - 字符串 git 地址 → ("git", url)
-    - dict：{"repo": "owner/repo"} → GitHub；{"url": "..."} → git 地址
+    返回四元组 (kind, url或路径, 子目录, ref)：
+    - ("local", 市场里的绝对路径, None, None)   字符串相对路径（或绝对路径）
+    - ("git", url, None, None)                  字符串 git 地址 / {"url": ...}
+    - ("git", url, None, None)                  {"repo": "owner/repo"} → GitHub
+    - ("git-subdir", url, path, ref?)           {"source": "git-subdir",
+                                                 "url", "path", "ref"?}——
+                                                 克隆整个仓库后取 path 子目录
     认不出的打印原因返回 None。
     """
     src = entry.get("source")
     if isinstance(src, str):
         if "://" in src or src.startswith("git@"):
-            return ("git", src)
+            return ("git", src, None, None)
         # 相对路径：相对市场目录解析（也兼容写绝对路径的）
         p = Path(src)
         if not p.is_absolute():
             p = Path(mkt_dir) / p
-        return ("local", str(p))
+        return ("local", str(p), None, None)
     if isinstance(src, dict):
         if src.get("repo"):
-            return ("git", f"https://github.com/{src['repo']}.git")
-        if src.get("url"):
-            return ("git", str(src["url"]))
+            return ("git", f"https://github.com/{src['repo']}.git", None, None)
+        url = src.get("url")
+        if url and src.get("path"):
+            return (
+                "git-subdir", str(url), str(src["path"]),
+                str(src.get("ref") or "") or None,
+            )
+        if url:
+            return ("git", str(url), None, None)
     console.print(
         f"[red]条目 {entry.get('name')} 的 source 认不出：{src!r}[/red]"
-        "（支持：相对路径 / git 地址 / {{repo|url}}）"
+        "（支持：相对路径 / git 地址 / {{repo|url}} / git-subdir）"
     )
     return None
+
+
+def _install_resolved(resolved) -> None:
+    """按 _resolve_entry_source 的结果统一安装（三条路汇到一处）。
+
+    local：直接装目录；git：克隆整个仓库装；git-subdir：克隆整个
+    仓库后取指定子目录装（子目录才是插件本体）。
+    """
+    kind, value = resolved[0], resolved[1]
+    subdir = resolved[2] if len(resolved) > 2 else None
+    ref = resolved[3] if len(resolved) > 3 else None
+    if kind == "local":
+        _install_dir(Path(value))
+        return
+    tmp_dir = None
+    try:
+        src_root, tmp_dir = _clone_to_temp(value, ref=ref)
+        if subdir:
+            src_root = src_root / subdir
+        _install_dir(src_root)
+    except RuntimeError as e:
+        console.print(f"[red]安装失败：{e}[/red]")
+    finally:
+        if tmp_dir is not None:
+            _rmtree_force(tmp_dir, ignore_errors=True)
 
 
 def _resolve_market_source(name: str, market: str):
@@ -392,11 +530,15 @@ def _resolve_market_source(name: str, market: str):
     """
     all_entries = _iter_market_entries()
     if not all_entries:
-        console.print(
-            "[red]还没有添加任何市场[/red]——先 /plugin market add <git地址>"
-            "，再 /plugin market 挑选安装"
-        )
-        return None
+        # 一个市场都没有：先把内置市场补齐再试一次（官方市场开箱即用）
+        _ensure_builtin_marketplaces()
+        all_entries = _iter_market_entries()
+        if not all_entries:
+            console.print(
+                "[red]还没有可用的市场[/red]——/plugin market add <git地址>"
+                "添加（镜像或私有仓库都行），再 /plugin install 名字@市场"
+            )
+            return None
 
     candidates = [
         (m, e) for m, e in all_entries
@@ -457,8 +599,17 @@ def _cmd_market_add(source: str) -> None:
         target = _marketplaces_root() / name
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(mkt_root, target, ignore=shutil.ignore_patterns(".git"))
+            _rmtree_force(target)
+        if tmp_dir is not None:
+            # git 来源：整个克隆搬过来（.git 留着）——market update
+            # 靠它记住远程地址，剥了就没法刷新了
+            shutil.move(str(mkt_root), str(target))
+        else:
+            shutil.copytree(
+                mkt_root, target, ignore=shutil.ignore_patterns(".git"),
+            )
+        # 重新添加 = 用户改主意了：清掉「删过」记号，内置市场恢复自动补齐
+        _removed_marker(name).unlink(missing_ok=True)
         console.print(
             f"[green]市场 {name} 已添加[/green]（{target}，"
             f"收录 {len(catalog.get('plugins', []))} 个插件）\n"
@@ -468,7 +619,7 @@ def _cmd_market_add(source: str) -> None:
         console.print(f"[red]添加市场失败：{e}[/red]")
     finally:
         if tmp_dir is not None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _rmtree_force(tmp_dir, ignore_errors=True)
 
 
 def _cmd_market_list() -> None:
@@ -518,8 +669,9 @@ def _cmd_market_update(name: str) -> None:
         tmp_dir = None
         try:
             fresh, tmp_dir = _clone_to_temp(url)
-            shutil.rmtree(mkt_dir)
-            shutil.copytree(fresh, mkt_dir, ignore=shutil.ignore_patterns(".git"))
+            _rmtree_force(mkt_dir)
+            # 整克隆搬过来（.git 留着，下次 update 还要靠它找远程）
+            shutil.move(str(fresh), str(mkt_dir))
             catalog = _read_catalog(mkt_dir)
             console.print(
                 f"[green]市场 {mkt_name} 已刷新[/green]"
@@ -529,7 +681,7 @@ def _cmd_market_update(name: str) -> None:
             console.print(f"[red]刷新 {mkt_name} 失败：{e}[/red]")
         finally:
             if tmp_dir is not None:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                _rmtree_force(tmp_dir, ignore_errors=True)
 
 
 def _cmd_market_remove(name: str) -> None:
@@ -545,7 +697,10 @@ def _cmd_market_remove(name: str) -> None:
     if answer not in ("y", "yes"):
         console.print("已取消")
         return
-    shutil.rmtree(target)
+    _rmtree_force(target)
+    # 落一个「删过」记号：内置市场不会再自动复活（想恢复 = 重新 add）
+    _marketplaces_root().mkdir(parents=True, exist_ok=True)
+    _removed_marker(name).write_text("removed", encoding="utf-8")
     console.print(f"[green]市场 {name} 已移除[/green]（{target}）")
 
 
@@ -610,19 +765,7 @@ def _cmd_market_pick(rt) -> None:
         resolved = _resolve_entry_source(mkt_dir, entry)
         if resolved is None:
             continue
-        kind, value = resolved
-        if kind == "local":
-            _install_dir(Path(value))
-        else:
-            tmp_dir = None
-            try:
-                src_root, tmp_dir = _clone_to_temp(value)
-                _install_dir(src_root)
-            except RuntimeError as err:
-                console.print(f"[red]安装 {label} 失败：{err}[/red]")
-            finally:
-                if tmp_dir is not None:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+        _install_resolved(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +793,7 @@ def _cmd_uninstall(name: str) -> None:
     if answer not in ("y", "yes"):
         console.print("已取消")
         return
-    shutil.rmtree(path)
+    _rmtree_force(path)
     console.print(f"[green]插件 {name} 已卸载[/green]（{path}）")
 
 
@@ -773,6 +916,11 @@ def _handle_plugin_command(args: str, rt) -> bool:
             mparts = rest.strip().split()
             msub = mparts[0].lower() if mparts else ""
             mrest = " ".join(mparts[1:])
+            if msub in ("", "browse", "pick", "list"):
+                # 浏览/列表前先把内置市场补齐（官方市场开箱即用；
+                # 用户删过的不复活，见 _ensure_builtin_marketplaces）
+                if msub != "list" or not _iter_marketplaces():
+                    _ensure_builtin_marketplaces()
             if msub in ("", "browse", "pick"):
                 _cmd_market_pick(rt)
             elif msub == "add":

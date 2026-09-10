@@ -112,7 +112,12 @@ def all_skills_dirs() -> list:
         for plugin_dir in sorted(plugins_root.iterdir()):
             if not plugin_dir.is_dir():
                 continue
+            # 清单认两个位置：根下 plugin.json（本项目约定）或
+            # .claude-plugin/plugin.json（官方 claude code 插件布局，
+            # 从官方市场装的插件长这样）
             manifest = plugin_dir / "plugin.json"
+            if not manifest.exists():
+                manifest = plugin_dir / ".claude-plugin" / "plugin.json"
             if not manifest.exists():
                 continue
             try:
