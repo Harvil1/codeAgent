@@ -2260,9 +2260,17 @@ def check_assistant_block():
     if skill[0][1] != "● Skill(brainstorming)" \
             or "Successfully loaded" not in skill[1][1]:
         return _fail(f"技能行不对: {skill}")
-    echo = ce.format_ask_user_echo("范围怎么定？", ["只做核心包"])
+    echo = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}])
     if "User answered" not in echo[0][1] or "只做核心包" not in echo[1][1]:
-        return _fail(f"提问回显不对: {echo}")
+        return _fail(f"批量回显不对: {echo}")
+    cecho = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}], chat="我想先聊聊")
+    if "chat" not in cecho[0][1] or "我想先聊聊" not in cecho[1][1] \
+            or "只做核心包" not in cecho[2][1]:
+        return _fail(f"chat 回显不对: {cecho}")
     dep = ce.format_subagent_depart({"tasks": [{}, {}]})
     if dep != "● Running 2 agents…":
         return _fail(f"批量头行不对: {dep!r}")
@@ -2317,6 +2325,16 @@ def check_ask_user_tool_layer():
         two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_chat_bridge)))
     if out.get("chat") != "我想先聊聊" or len(out.get("answers") or []) != 1:
         return _fail(f"chat 协议不对: {out}")
+
+    # 老格式桥接返回（裸 list）→ 包成 answers[0] 且带传入的问题文本
+    def fake_list_bridge(qdata):
+        return ["方案A"]
+
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_list_bridge)))
+    got = (out.get("answers") or [{}])[0]
+    if got.get("answers") != ["方案A"] or got.get("question") != "Q1":
+        return _fail(f"老格式 list 返回不对: {out}")
 
     def fake_cancel_bridge(qdata):
         return {"answers": [], "chat": None, "cancelled": True}

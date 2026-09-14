@@ -1312,45 +1312,36 @@ def _make_approval_callback(aux_provider=None):
 
 
 def _make_ask_user_bridge():
-    """造 ask_user 工具的 CLI 桥接：AI 问选择题 → 方向键选择器收答案。
+    """造 ask_user 工具的 CLI 桥接：AI 问一批选择题 → 逐题放 CC 同款面板。
 
-    界面跟 claude code 的 AskUserQuestion 同款：问题 + 选项列表，
-    ↑/↓ 移动 > 光标、Enter 选择、数字直达、Esc 取消；最后两项固定
-    「Type something. / Chat about this」（自己输入/自由对话）。
-    多选时空格打勾。
+    界面跟 claude code 的 AskUserQuestion 同款：顶部问题标签行显示
+    进度，每题选项 + 行内自填（Type something.光标落上直接打字）+
+    多选 Submit 行 + Chat about this（退出问卷用自己的话聊）。
 
-    选择器是方向键交互，必须独占终端——整个提问经 cli_ui 的 input 桥
-    搬进 pt 的 run_in_terminal 通道（主界面挂起、stdin 让出来）。
-    bridge(qdata) 返回 {"answers": [...], "chat": bool}。
-    异常（EOFError/KeyboardInterrupt——输入流关闭/用户按 Ctrl+C）由
-    ask_user 的 handler 统一捕获。
-
-    参数：无。
-    返回：桥接函数 bridge(qdata)。
+    bridge(qdata) 把整批 questions 交给 cli_question.ask_via_selector
+    （经 cli_ui 的 input 桥独占终端），返回
+    {"answers": [...], "chat": str|None, "cancelled": bool}；
+    答完打一条汇总回显。
     """
     def bridge(qdata):
-        question = qdata.get("question", "")
-        options = qdata.get("options") or []
-        multi = qdata.get("multi", False)
-        header = qdata.get("header", "")
+        questions = qdata.get("questions") or []
 
         from cli_question import ask_via_selector
         from cli_ui import run_with_input_bridge
 
         def _do_ask():
             return ask_via_selector(
-                question, options, multi, header=header,
+                questions,
                 fallback_input=lambda prompt="": console.input(prompt),
             )
 
-        result = run_with_input_bridge(_do_ask)
-        # 面板也可能异常降级成 dict/None，双保险取 answers
-        answers = (result.get("answers", []) if isinstance(result, dict)
-                   else list(result or []))
-        # 回显（claude code 同款）：● User answered … + ⎿ 问题 → 答案
+        result = run_with_input_bridge(_do_ask) or {}
+        answers = result.get("answers") or []
+        chat = result.get("chat")
+        # 汇总回显：答完一条打总账；转对话时头行换掉
         cli_events.print_style_lines(
-            cli_events.format_ask_user_echo(question, answers))
-        return result if isinstance(result, dict) else {"answers": answers}
+            cli_events.format_ask_user_echo_batch(answers, chat))
+        return result
     return bridge
 
 

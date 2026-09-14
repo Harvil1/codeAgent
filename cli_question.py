@@ -402,7 +402,8 @@ def run_selector(question, header, options, multi=False, chips=None):
     @kb.add("c-g", eager=True)
     def _cg(event):
         # 记事本编辑：内容填进自填行，用户过目后自己回车提交
-        initial = _custom_text() if state["cursor"] == idx["custom"] else ""
+        # （草稿总是带上——非自填行按 c-g 也不该把已打的稿清掉）
+        initial = _custom_text()
         text = edit_in_notepad(initial)
         if text is None:
             return
@@ -436,7 +437,8 @@ def run_selector(question, header, options, multi=False, chips=None):
         style = "class:q-selected" if on else "class:q-opt"
         frags = [(style, ("> " if on else "  ") + f"{idx['custom'] + 1}. ")]
         if multi:
-            frags.append((style, "[x] " if custom_buf.text else "[ ] "))
+            frags.append((style, "[x] " if custom_buf.text.strip()
+                          else "[ ] "))
         if not custom_buf.text:
             frags.append(("class:q-desc", "Type something."))
         return frags

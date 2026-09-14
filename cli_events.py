@@ -490,14 +490,27 @@ def format_skill_lines(name: str) -> list:
     ]
 
 
-def format_ask_user_echo(question: str, answers: list) -> list:
-    """提问回答后的回显块：● User answered … + ⎿ 问题 → 答案。"""
-    q = _cut(question or "", 70)
-    a = "、".join(str(x) for x in (answers or [])) or "（未选择）"
-    return [
-        ("", "● User answered Claude's questions:"),
-        ("dim", f"  ⎿  · {q} → {a}"),
-    ]
+def format_ask_user_echo_batch(answers: list, chat: str = None) -> list:
+    """批量提问的汇总回显：一条头行 + 每问一行 ⎿ Q → A。
+
+    大白话：一份问卷答完，打一条「用户答完了」+ 每道题的答案一行行列着；
+    用户要是选了转对话（Chat about this），头行换成「用户想聊聊」，
+    对话文本放第一行，已答部分跟在后面。
+
+    参数：
+        answers: [{"question", "answers", "multi"}, ...]
+        chat: 用户转对话时输入的文本（None=正常答完）
+    """
+    if chat:
+        lines = [("", "● User wants to chat about this:"),
+                 ("dim", f"  ⎿  {chat}")]
+    else:
+        lines = [("", "● User answered Claude's questions:")]
+    for a in answers or []:
+        q = _cut(a.get("question", ""), 70)
+        ans = "、".join(str(x) for x in (a.get("answers") or [])) or "（未选择）"
+        lines.append(("dim", f"  ⎿  · {q} → {ans}"))
+    return lines
 
 
 def format_tasks_static_block(width: int = 80) -> list:

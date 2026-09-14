@@ -153,9 +153,10 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
     返回：JSON 字符串。正常 {"answers": [{"question","answers","multi"}...]}
     （用户转对话时多 "chat" 文本键）；取消/无桥接层/参数不合法返回对应 error。
     """
-    # ---- 参数归一化：questions 数组优先，老单问字段包成一项 ----
+    # ---- 参数归一化：questions 数组优先（空列表也算新格式，
+    # 落进「1-4 个」检查），老单问字段包成一项 ----
     raw_qs = args.get("questions")
-    if isinstance(raw_qs, list) and raw_qs:
+    if isinstance(raw_qs, list):
         questions = raw_qs
     else:
         questions = [{
@@ -218,8 +219,13 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
                 "error": "用户中断提问",
                 "error_type": "user_interrupt",
             }, ensure_ascii=False)
-        payload = {"answers": [dict(a) for a in (result.get("answers") or [])]}
-        chat = (result.get("chat") or "").strip()
+        payload = {"answers": []}
+        for a in (result.get("answers") or []):
+            # 类型护栏：桥接层给的非 dict 条目直接丢掉，别裸抛 TypeError
+            if isinstance(a, dict):
+                payload["answers"].append(dict(a))
+        chat = result.get("chat")
+        chat = chat.strip() if isinstance(chat, str) else ""
         if chat:
             payload["chat"] = chat
         return json.dumps(payload, ensure_ascii=False)
