@@ -2312,39 +2312,65 @@ def check_ask_user_tool_layer():
 
 
 def check_question_selector():
-    """验证提问选择器纯函数：光标行/多选勾/序号/降级编号输入。"""
+    """验证提问面板纯函数：CJK 宽度/换行/布局/光标/勾选框/提示栏/记事本兜底。"""
     import cli_question as cq
 
-    rows = cq.build_option_rows(
-        [{"label": "方案A", "description": "最稳"}], multi=False)
-    if rows[0][0] != "opt" or "方案A" not in rows[0][1]:
-        return _fail(f"选项行不对: {rows}")
-    if len(rows) < 2 or "最稳" not in rows[1][1]:
-        return _fail(f"描述行不对: {rows}")
+    # CJK 宽度：一个汉字算 2 列，半角算 1 列
+    if cq._visual_width("价格页") != 6 or cq._visual_width("ab") != 2:
+        return _fail(f"CJK 宽度计算不对: {cq._visual_width('价格页')}")
+    # 换行：8 列装不下 5 个汉字（10 列），必须拆行且每行不超宽、不劈半个字
+    lines = cq.wrap_cjk("价格页面就是门面", 8)
+    if len(lines) < 2 or any(cq._visual_width(ln) > 8 for ln in lines):
+        return _fail(f"换行不对: {lines}")
+    if "".join(lines) != "价格页面就是门面":
+        return _fail(f"换行丢字: {lines}")
 
+    opts = [
+        {"label": "价格页（推荐）",
+         "description": "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"},
+        {"label": "首页底部"},
+        {"label": "Type something.", "special": "type"},
+        {"label": "Chat about this", "special": "chat"},
+    ]
     text = "".join(t for _, t in cq.render_fragments(
-        [{"label": "A"}, {"label": "B"}], 1, set(), multi=False))
-    if "> 2. B" not in text or "1. A" not in text:
-        return _fail(f"光标行不对: {text!r}")
+        "FAQ 常见问题板块加在哪里？", "FAQ 位置", opts,
+        cursor=3, checked={0}, multi=True, width=80))
+    for needle in ("─" * 10, " [x] FAQ 位置", "FAQ 常见问题板块加在哪里？",
+                   "> 4. Chat about this", "  1. [x] 价格页（推荐）",
+                   "  3. Type something.", "space to toggle",
+                   "ctrl+g to edit in Notepad"):
+        if needle not in text:
+            return _fail(f"多选布局缺 {needle!r}: {text[:200]!r}")
+    # 长描述必须被换行拆开（80 列装不下 40+ 个汉字一行到底）
+    whole = "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"
+    if whole in text:
+        return _fail("长描述没换行")
 
-    mtext = "".join(t for _, t in cq.render_fragments(
-        [{"label": "A"}], 0, {0}, multi=True))
-    if "● A" not in mtext:
-        return _fail(f"多选勾标记不对: {mtext!r}")
+    # 单选：header 无勾选框、选项无 [ ]、光标照常
+    stext = "".join(t for _, t in cq.render_fragments(
+        "问", "标题", [{"label": "A", "description": "甲"}],
+        cursor=0, checked=set(), multi=False, width=80))
+    if " [ ] 标题" in stext or " [x] 标题" in stext or " 标题" not in stext:
+        return _fail(f"单选 header 不该有勾选框: {stext[:80]!r}")
+    if "[ ]" in stext or "> 1. A" not in stext:
+        return _fail(f"单选选项不该有勾选框/光标行不对: {stext[:120]!r}")
 
-    # 降级通道：编号输入（单选取第一个）
-    opts = [{"label": "A"}, {"label": "B"},
-            {"label": "Type something.", "description": "自己输入"}]
-    ans = cq._fallback_number_input("Q?", opts, False, lambda p: "2")
-    if ans != ["B"]:
-        return _fail(f"降级单选不对: {ans}")
-    ans2 = cq._fallback_number_input("Q?", opts, True, lambda p: "1,2")
-    if ans2 != ["A", "B"]:
-        return _fail(f"降级多选不对: {ans2}")
-    ans3 = cq._fallback_number_input("Q?", opts, False, lambda p: "自定义")
-    if ans3 != ["自定义"]:
-        return _fail(f"降级自由输入不对: {ans3}")
-    return _ok("提问选择器（光标/勾选/降级）正常")
+    # 多选无勾选时 header 是空框
+    etext = "".join(t for _, t in cq.render_fragments(
+        "问", "标题", opts, cursor=0, checked=set(), multi=True, width=80))
+    if " [ ] 标题" not in etext:
+        return _fail(f"多选空勾 header 应为 [ ]: {etext[:80]!r}")
+
+    # 提示栏两态
+    if "space to toggle" not in cq.hint_text(True):
+        return _fail("多选提示栏缺 space")
+    if "Esc 返回" not in cq.hint_text(False, mode="input"):
+        return _fail("输入态提示栏不对")
+
+    # 记事本兜底：编辑器不存在时返回 None 不抛异常（fail-open）
+    if cq.edit_in_notepad(initial="", editor="不存在的编辑器xyz.exe") is not None:
+        return _fail("记事本起不来该返回 None")
+    return _ok("提问面板布局/换行/提示栏/记事本兜底正常")
 
 
 def check_enter_routing():
