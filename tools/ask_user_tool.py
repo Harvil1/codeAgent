@@ -177,7 +177,7 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
                 "error_type": "bridge_error",
                 "question": question,
             }, ensure_ascii=False)
-        # bridge 返回值认两种格式：老 list（纯答案）／新 dict（带 chat 栰记）
+        # bridge 返回值认两种格式：老 list（纯答案）／新 dict（带 chat 标记）
         if isinstance(result, dict):
             answers = [str(a) for a in (result.get("answers") or [])]
             chat = bool(result.get("chat"))
