@@ -2346,84 +2346,79 @@ def check_ask_user_tool_layer():
 
 
 def check_question_selector():
-    """验证提问面板纯函数：CJK 宽度/换行/布局/光标/勾选框/提示栏/记事本兜底。"""
+    """验证提问面板 v2 纯函数：布局/chips/自填行/Submit/Chat 行/提示栏/降级。"""
     import cli_question as cq
 
-    # CJK 宽度：一个汉字算 2 列，半角算 1 列
+    # CJK 宽度 + 换行（承 v1）
     if cq._visual_width("价格页") != 6 or cq._visual_width("ab") != 2:
-        return _fail(f"CJK 宽度计算不对: {cq._visual_width('价格页')}")
-    # 换行：8 列装不下 5 个汉字（10 列），必须拆行且每行不超宽、不劈半个字
+        return _fail("CJK 宽度计算不对")
     lines = cq.wrap_cjk("价格页面就是门面", 8)
-    if len(lines) < 2 or any(cq._visual_width(ln) > 8 for ln in lines):
+    if len(lines) < 2 or "".join(lines) != "价格页面就是门面" \
+            or any(cq._visual_width(ln) > 8 for ln in lines):
         return _fail(f"换行不对: {lines}")
-    if "".join(lines) != "价格页面就是门面":
-        return _fail(f"换行丢字: {lines}")
 
-    opts = [
-        {"label": "价格页（推荐）",
-         "description": "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"},
-        {"label": "首页底部"},
-        {"label": "Type something.", "special": "type"},
-        {"label": "Chat about this", "special": "chat"},
-    ]
+    opts = [{"label": "价格页（推荐）",
+             "description": "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"},
+            {"label": "首页底部"}]
+    # 单选：自填行占位、Chat 行在分隔线下、无 Submit
     text = "".join(t for _, t in cq.render_fragments(
-        "FAQ 常见问题板块加在哪里？", "FAQ 位置", opts,
-        cursor=3, checked={0}, multi=True, width=80))
-    for needle in ("─" * 10, " [x] FAQ 位置", "FAQ 常见问题板块加在哪里？",
-                   "> 4. Chat about this", "  1. [x] 价格页（推荐）",
-                   "  3. Type something.", "space to toggle",
+        "FAQ 常见问题板块加在哪里？", "FAQ 位置", opts, cursor=2,
+        checked=set(), multi=False, width=80))
+    whole = "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"
+    for needle in ("─" * 10, " FAQ 位置", "> 3. Type something.",
+                   "  4. Chat about this", "Enter to select",
                    "ctrl+g to edit in Notepad"):
         if needle not in text:
-            return _fail(f"多选布局缺 {needle!r}: {text[:200]!r}")
-    # 长描述必须被换行拆开（80 列装不下 40+ 个汉字一行到底）
-    whole = "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"
+            return _fail(f"单选布局缺 {needle!r}: {text[:200]!r}")
     if whole in text:
         return _fail("长描述没换行")
+    if "✓ Submit" in text:
+        return _fail("单选不该有 Submit 行")
 
-    # 单选：header 无勾选框、选项无 [ ]、光标照常
-    stext = "".join(t for _, t in cq.render_fragments(
-        "问", "标题", [{"label": "A", "description": "甲"}],
-        cursor=0, checked=set(), multi=False, width=80))
-    if " [ ] 标题" in stext or " [x] 标题" in stext or " 标题" not in stext:
-        return _fail(f"单选 header 不该有勾选框: {stext[:80]!r}")
-    if "[ ]" in stext or "> 1. A" not in stext:
-        return _fail(f"单选选项不该有勾选框/光标行不对: {stext[:120]!r}")
+    # 多选：选项勾选框 + Submit 行 + chips 进度行 + header 勾选框
+    mtext = "".join(t for _, t in cq.render_fragments(
+        "你对哪些方面感兴趣？", "兴趣领域", opts, cursor=0, checked={0},
+        multi=True, width=80,
+        chips=[("任务方向", True), ("兴趣领域", False)]))
+    for needle in (" [x] 任务方向  [ ] 兴趣领域", " [x] 兴趣领域",
+                   "> 1. [x] 价格页（推荐）", "  2. [ ] 首页底部",
+                   "  3. [ ] Type something.", "✓ Submit",
+                   "Chat about this", "Enter/Space to toggle"):
+        if needle not in mtext:
+            return _fail(f"多选布局缺 {needle!r}: {mtext[:300]!r}")
 
-    # 多选无勾选时 header 是空框
-    etext = "".join(t for _, t in cq.render_fragments(
-        "问", "标题", opts, cursor=0, checked=set(), multi=True, width=80))
-    if " [ ] 标题" not in etext:
-        return _fail(f"多选空勾 header 应为 [ ]: {etext[:80]!r}")
+    # 自填行有字：多选算勾上、显示文本
+    ctext = "".join(t for _, t in cq.render_fragments(
+        "问", "标题", opts, cursor=2, checked=set(), multi=True,
+        width=80, custom_text="自填的选项"))
+    if "[x] 自填的选项" not in ctext or "Type something" in ctext:
+        return _fail(f"自填行有字该显示 [x] 自填的选项: {ctext[:200]!r}")
 
-    # 提示栏两态
-    if "space to toggle" not in cq.hint_text(True):
-        return _fail("多选提示栏缺 space")
-    if "Esc 返回" not in cq.hint_text(False, mode="input"):
-        return _fail("输入态提示栏不对")
+    # 提示栏状态：自填聚焦版
+    if "Esc to clear" not in cq.hint_text(True, custom_focused=True):
+        return _fail("自填聚焦提示栏不对")
 
-    # 降级通道：dict 返回 + chat 标记 + 自由输入 + 多选
+    # 降级通道：编号输入新返回形状
     def _canned(*replies):
         it = iter(replies)
         return lambda prompt="": next(it)
 
-    fopts = [{"label": "A"}, {"label": "B"},
-             {"label": "Type something.", "special": "type"},
-             {"label": "Chat about this", "special": "chat"}]
-    fres = cq._fallback_number_input("问", fopts, False,
-                                     _canned("4", "聊聊再定"))
-    if fres != {"answers": ["聊聊再定"], "chat": True}:
-        return _fail(f"降级 chat 语义不对: {fres}")
-    fres = cq._fallback_number_input("问", fopts, True, _canned("1, 2"))
-    if fres != {"answers": ["A", "B"], "chat": False}:
+    fres = cq._fallback_number_input(
+        "问", opts, False, _canned("4", "聊聊再定"))
+    if fres != {"answers": [], "cancelled": False, "chat": True}:
+        return _fail(f"降级 chat 不对: {fres}")
+    fres = cq._fallback_number_input("问", opts, True, _canned("1, 2"))
+    if fres != {"answers": ["价格页（推荐）", "首页底部"],
+                "cancelled": False, "chat": False}:
         return _fail(f"降级多选不对: {fres}")
-    fres = cq._fallback_number_input("问", fopts, False, _canned("自定义文本"))
-    if fres != {"answers": ["自定义文本"], "chat": False}:
-        return _fail(f"降级自由输入不对: {fres}")
+    fres = cq._fallback_number_input("问", opts, False, _canned("自定义文本"))
+    if fres != {"answers": ["自定义文本"], "cancelled": False, "chat": False}:
+        return _fail(f"降级自填不对: {fres}")
 
     # 记事本兜底：编辑器不存在时返回 None 不抛异常（fail-open）
     if cq.edit_in_notepad(initial="", editor="不存在的编辑器xyz.exe") is not None:
         return _fail("记事本起不来该返回 None")
-    return _ok("提问面板布局/换行/提示栏/记事本兜底正常")
+    return _ok("提问面板 v2 布局/自填/Submit/chips/降级正常")
 
 
 def check_enter_routing():

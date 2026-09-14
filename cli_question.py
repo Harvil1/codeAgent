@@ -1,30 +1,34 @@
-"""ask_user 的提问面板——claude code 的 AskUserQuestion 同款界面。
+"""ask_user 的提问面板——claude code 的 AskUserQuestion 同款界面（v2）。
 
-大白话：AI 想问用户选择题，就画一块这样的面板（1:1 复刻 claude code）：
+大白话：AI 问用户选择题，画一块和 claude code 一样的面板：
 
-  ───────────────────────────（终端全宽分隔线）
-   [ ] FAQ 位置              ← 短标题；多选画勾选框，有勾选变 [x]
+  ─────────────────────────────（终端全宽分隔线）
+   [x] 任务方向  [ ] 兴趣领域     ← 问题标签行：这批问题答到哪了（>1 问才显示）
+   [ ] FAQ 位置                ← 当前题短标题；多选画勾选框（勾过变 [x]）
                               （空行）
-  FAQ 常见问题板块加在哪里？   ← 问题正文
+  FAQ 常见问题板块加在哪里？       ← 问题正文
                               （空行）
     1. 价格页（推荐）
        转化决策点，问题围绕免费额度……   ← 描述按终端宽度换行
-    5. Type something.         ← 自定义输入
-  ───────────────────────────（第二条分隔线）
-  > 6. Chat about this         ← 自由对话逃生项，永远最后；> 是光标
-                              （空行）
-  Enter to select · ↑/↓ to navigate · ctrl+g to edit in Notepad · Esc to cancel
+  > 2. Type something▌          ← 行内输入行！光标落上直接打字（打字替换占位符）
+    3. ✓ Submit                  ← 多选才有：统一提交行
+  ─────────────────────────────（分隔线）
+    4. Chat about this           ← 不想选？退出问卷用自己的话聊（claude code 的
+                                    「中止问卷转对话」）
+  Enter/Space to select · ↑/↓ to navigate · ctrl+g to edit in Notepad · Esc to cancel
 
-多选：选项前画 [ ]/[x]，空格切换，提示栏多一句 space to toggle。
-选中 Type something./Chat about this 后面板不退，底部变输入行直接打字
-（Enter 提交、Esc 返回）；ctrl+g 拉记事本写长答案。
+交互（对齐 claude code 实测行为）：
+  - 自填行（Type something.）就是个行内输入框：光标移上去直接敲键盘输入，
+    占位符让位给正文；行聚焦时数字键当文本敲、Esc 先清稿再取消。
+  - 单选：选项上回车/空格即选定；自填行有字回车即提交自填。
+  - 多选：选项上回车/空格=勾选；自填行打字自动算作已选；
+    Submit 行统一提交，一个没勾又没自填时 Submit 无效。
+  - Chat about this：回车退出面板，直接在命令行输入想说的话
+    （已答过的题保留在汇总里）。
+  - ctrl+g：拉记事本写长答案，保存关闭后内容填进自填行。
 
-运行环境：这个面板跑在 cli_ui 的 input 桥里（pt 的 run_in_terminal
-通道）——主界面先收起来、终端还给经典模式，这里再用一个临时的小
-prompt_toolkit Application 画面板；答完退出，主界面恢复。
-
-fail-open 铁律：任何异常都往「降级为老式编号输入」走——提问通道
-断了不能把 AI 的提问吞了；记事本起不来只返回 None，不阻断。
+运行环境：面板跑在 cli_ui 的 input 桥里（pt 的 run_in_terminal 通道）。
+fail-open 铁律：面板炸了降级为老式编号输入；记事本起不来只返回 None。
 """
 
 import logging
@@ -35,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 纯函数：宽度/换行/布局文本拼装（可单测，不碰终端）
+# 纯函数：宽度/换行/提示栏/行号（可单测，不碰终端）
 # ---------------------------------------------------------------------------
 
 def _visual_width(s: str) -> int:
@@ -53,11 +57,6 @@ def wrap_cjk(text: str, width: int) -> list:
 
     大白话：像排版工一样，一行塞满就另起一行，汉字这种"宽家伙"
     整个搬下去，不会劈成乱码。
-
-    参数：
-        text: 原文（strip 后处理）
-        width: 目标行宽（显示列数）
-    返回：行列表；空文本返回 []。
     """
     text = str(text or "").strip()
     if not text:
@@ -80,37 +79,35 @@ def wrap_cjk(text: str, width: int) -> list:
     return lines
 
 
-def hint_text(multi: bool, mode: str = "list") -> str:
-    """底部提示栏文案：选项态（单/多选）和输入态三种。"""
-    if mode == "input":
-        return "Enter 提交 · Esc 返回 · ctrl+g 记事本编辑"
+def hint_text(multi: bool, custom_focused: bool = False) -> str:
+    """底部提示栏文案：单选/多选/自填行聚焦三种状态。"""
+    if custom_focused:
+        return "Enter to submit · Esc to clear · ctrl+g to edit in Notepad"
     if multi:
-        return ("Enter to select · ↑/↓ to navigate · space to toggle"
+        return ("Enter/Space to toggle · ↑/↓ to navigate · Submit 提交"
                 " · ctrl+g to edit in Notepad · Esc to cancel")
     return ("Enter to select · ↑/↓ to navigate"
             " · ctrl+g to edit in Notepad · Esc to cancel")
 
 
-def render_fragments(question, header, options, cursor, checked, multi,
-                     width=80, with_hint=True):
-    """整幅提问面板的 pt 片段列表（纯函数，可单测）。
+def row_indices(n_options: int, multi: bool) -> dict:
+    """行号表：普通选项 0..N-1、自填行 N、(多选)Submit N+1、Chat 永远最后。
 
-    布局 1:1 复刻 claude code 的 AskUserQuestion（见模块头图示）。
-    options 最后两项约定为 special=="type" / "chat"（ask_via_selector
-    自动追加），special=="chat" 前画第二条分隔线；special 项不画
-    勾选框、不挂描述。
+    大白话：整块面板的可选行从上到下编了号，数字直达键按这个对号入座。
+    """
+    custom_i = n_options
+    submit_i = n_options + 1 if multi else None
+    chat_i = n_options + (2 if multi else 1)
+    return {"custom": custom_i, "submit": submit_i, "chat": chat_i,
+            "total": chat_i + 1}
 
-    参数：
-        question: 问题正文（多行原样）
-        header: 短标题（空串则不画标题行）
-        options: [{label, description?, special?}, ...]
-        cursor: 光标所在下标（> 标记 + 高亮）
-        checked: 多选已勾选项下标集合
-        multi: 是否多选
-        width: 面板宽度（分隔线长度/换行宽度）
-        with_hint: True 带底部提示栏（单测整幅用）；
-            False 不带（交互态由外层 hint Window 动态画）
-    返回：[(style, text), ...] pt 片段。
+
+def build_above(question, header, options, cursor, checked, multi,
+                width=80, chips=None):
+    """面板上半部片段：分隔线 + (多问时)问题标签行 + 标题 + 问题 + 普通选项。
+
+    自填行不在这里——交互层用真输入框画它（见 run_selector）；
+    静态整幅渲染走 render_fragments（自填行画占位文本版）。
     """
     frags = []
     divider = "─" * max(10, width)
@@ -120,6 +117,13 @@ def render_fragments(question, header, options, cursor, checked, multi,
         frags.append(("", "\n"))
 
     _row("class:q-divider", divider)
+    if chips:
+        # 问题标签行：已答 [x]（亮），未答 [ ]（暗）——像进度打卡。
+        # 每个 chip 自带前后各一格空隙，相邻两个正好隔 2 格（CC 同款）
+        for label, answered in chips:
+            style = "class:q-chip-done" if answered else "class:q-chip"
+            frags.append((style, f" [{'x' if answered else ' '}] {label} "))
+        frags.append(("", "\n"))
     if header:
         if multi:
             box = "x" if checked else " "
@@ -130,16 +134,12 @@ def render_fragments(question, header, options, cursor, checked, multi,
     for ln in (question or "").splitlines() or [""]:
         _row("class:q-title", ln)
     _row("", "")
-
     for i, opt in enumerate(options or []):
-        special = opt.get("special")
-        if special == "chat":
-            _row("class:q-divider", divider)
         selected = (i == cursor)
         style = "class:q-selected" if selected else "class:q-opt"
         mark = "> " if selected else "  "
         prefix = f"{mark}{i + 1}. "
-        if multi and not special:
+        if multi:
             prefix += "[x] " if i in checked else "[ ] "
         label_lines = wrap_cjk(opt.get("label", ""),
                                width - _visual_width(prefix))
@@ -148,13 +148,81 @@ def render_fragments(question, header, options, cursor, checked, multi,
         for cont in label_lines[1:]:
             _row(style, f"{pad}{cont}")
         desc = opt.get("description") or ""
-        if not special and desc:
+        if desc:
             for dl in wrap_cjk(desc, width - 5):
                 _row("class:q-desc", f"     {dl}")
+    return frags
 
+
+def custom_row_fragments(idx: int, cursor_on: bool, multi: bool,
+                         custom_text: str = "") -> list:
+    """自填行（Type something.）的静态片段——占位/有字两态。
+
+    交互层用「前缀窗 + 真输入窗」画同一行（前缀窗占位符在空稿时显示，
+    见 run_selector._prefix_frags）；本函数给 render_fragments（纯函数
+    整幅渲染）和单测用，两处长相保持一致。
+    """
+    mark = "> " if cursor_on else "  "
+    prefix = f"{mark}{idx + 1}. "
+    if multi:
+        prefix += "[x] " if custom_text.strip() else "[ ] "
+    if custom_text:
+        body = custom_text + ("▌" if cursor_on else "")
+        style = "class:q-selected" if cursor_on else "class:q-opt"
+    else:
+        body = "Type something."
+        style = "class:q-desc"
+    return [(style, prefix + body), ("", "\n")]
+
+
+def build_below(n_options, cursor, checked, multi, custom_text,
+                width=80, with_hint=True, custom_focused=False):
+    """面板下半部片段：自填行之后的一切——(多选)Submit 行、分隔线、
+    Chat about this 行、空行、提示栏。"""
+    frags = []
+    divider = "─" * max(10, width)
+    idx = row_indices(n_options, multi)
+
+    def _row(style, text):
+        frags.append((style, text))
+        frags.append(("", "\n"))
+
+    if multi:
+        i = idx["submit"]
+        selected = (cursor == i)
+        mark = "> " if selected else "  "
+        style = "class:q-selected" if selected else "class:q-desc"
+        _row(style, f"{mark}{i + 1}. ✓ Submit")
+    _row("class:q-divider", divider)
+    i = idx["chat"]
+    selected = (cursor == i)
+    mark = "> " if selected else "  "
+    style = "class:q-selected" if selected else "class:q-opt"
+    _row(style, f"{mark}{i + 1}. Chat about this")
     _row("", "")
     if with_hint:
-        _row("class:q-hint", hint_text(multi))
+        _row("class:q-hint", hint_text(multi, custom_focused))
+    return frags
+
+
+def render_fragments(question, header, options, cursor, checked, multi,
+                     width=80, chips=None, custom_text="",
+                     custom_focused=False):
+    """整幅面板静态片段（自填行画占位文本版）——verify/降级展示用。
+
+    参数：
+        chips: [(标签, 是否已答), ...] 多问时的进度标签行；单问传 None 不画
+        custom_text: 自填行已有文字（多选时有字算勾上）
+        custom_focused: 光标是否在自填行（影响提示栏文案）
+    """
+    frags = list(build_above(question, header, options, cursor, checked,
+                             multi, width=width, chips=chips))
+    idx = row_indices(len(options or []), multi)
+    frags.extend(custom_row_fragments(
+        idx["custom"], cursor == idx["custom"], multi, custom_text))
+    frags.extend(build_below(len(options or []), cursor, checked, multi,
+                             custom_text, width=width,
+                             custom_focused=custom_focused))
     return frags
 
 
@@ -168,12 +236,8 @@ def edit_in_notepad(initial: str = "", editor: str = None):
     大白话流程：临时写个 txt → 拉起记事本、堵着等用户改完关窗口 →
     读回内容当答案。好比让用户去隔壁房间写板书，写完拍回来。
 
-    参数：
-        initial: 预填文本（输入态把草稿带进去）
-        editor: 编辑器命令（测试注入用；默认 notepad.exe）
     返回：用户保存的文本（strip 过，空文本算没写返回 None）；
-        任何一步出问题（记事本没起来/文件读不回）也返回 None——
-        fail-open，绝不抛异常阻断提问。
+        任何一步出问题也返回 None——fail-open，绝不抛异常阻断提问。
     """
     import os
     import subprocess
@@ -207,49 +271,46 @@ def edit_in_notepad(initial: str = "", editor: str = None):
 
 
 # ---------------------------------------------------------------------------
-# 交互主体：临时 pt Application
+# 交互主体：临时 pt Application（一问一面板）
 # ---------------------------------------------------------------------------
 
-def run_selector(question, header, options, multi=False):
-    """画 claude code 同款提问面板，返回 (result, cancelled)。
+def run_selector(question, header, options, multi=False, chips=None):
+    """画一问的 CC 同款面板（自填行是行内真输入框）。
 
-    键位：↑/↓ 移光标、1-9 直达、Enter 选定（多选=提交勾选）、空格勾选、
-    Esc/Ctrl+C 取消、ctrl+g 记事本；选中 Type something./Chat about this
-    后进输入态（面板底部变输入行，Enter 提交、Esc 返回列表）。
+    键位：↑/↓ 移光标（光标落到自填行时焦点给输入框、直接打字）、
+    1-9 直达、Enter 选项=选/勾、空格同 Enter（选项上）、
+    多选 Submit 行统一提交、Esc 先清自填稿再取消、ctrl+g 记事本
+    （内容填进自填行）、Chat about this 转对话。
 
     参数：
-        question: 问题正文（多行原样展示）
-        header: 短标题（空串不画标题行）
-        options: 调用方已追加 special=="type"/"chat" 两个固定项
-        multi: True 多选；False 单选
+        question/header/options/multi: 这一问的内容（options 只有普通选项，
+            自填/Submit/Chat 行由本函数按行号表自动画）
+        chips: 多问时的进度标签行（单问传 None）
 
-    返回：
-        (result: dict, cancelled: bool)
-        - 正常: ({"answers": [标签或用户文本], "chat": bool}, False)
-        - 取消: ({}, True)
-        - pt 不可用/渲染炸了: 抛异常给上层降级（老式编号输入）
+    返回：{"answers": [选项label或自填文本], "cancelled": bool, "chat": bool}
+        chat=True 表示用户选了 Chat about this（answers 为空）；
+        cancelled=True 表示 Esc/Ctrl+C 取消。
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import (ConditionalContainer, HSplit, Layout,
-                                       VSplit, Window)
+    from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
     from prompt_toolkit.layout.controls import BufferControl
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style
 
-    state = {"cursor": 0, "checked": set(), "mode": "list",
-             "input_target": "type", "done": False,
-             "result": None, "cancelled": False}
-    input_buf = Buffer(multiline=False)
-    in_list = Condition(lambda: state["mode"] == "list")
+    idx = row_indices(len(options or []), multi)
+    state = {"cursor": 0, "checked": set(), "done": False, "result": None}
+    custom_buf = Buffer(multiline=False)
+    custom_focused = Condition(lambda: state["cursor"] == idx["custom"])
 
     kb = KeyBindings()
 
-    def _finish(result, cancelled=False):
-        state["result"] = result
-        state["cancelled"] = cancelled
+    def _finish(answers=None, cancelled=False, chat=False):
+        state["result"] = {"answers": answers or [], "cancelled": cancelled,
+                           "chat": chat}
         state["done"] = True
         try:
             from prompt_toolkit.application import get_app
@@ -257,147 +318,148 @@ def run_selector(question, header, options, multi=False):
         except Exception:
             pass
 
-    def _submit_custom(text, chat):
-        """把一段自由文本当答案提交（Type something/Chat/记事本共用）。"""
-        text = (text or "").strip()
-        if not text:
-            return
-        _finish({"answers": [text], "chat": bool(chat)})
+    def _custom_text():
+        return custom_buf.text.strip()
 
-    def _focus(win):
+    def _submit_multi():
+        labels = [options[j]["label"] for j in sorted(state["checked"])]
+        text = _custom_text()
+        if text:
+            labels.append(text)   # 自填打字自动算作已选（CC 同款）
+        _finish(labels)
+
+    def _sync_focus():
+        # 光标落在自填行 → 焦点给真输入框（打字进 Buffer）；
+        # 移开 → 焦点还回上半窗（文本窗无按键绑定，全靠 app 级绑定）
         try:
             from prompt_toolkit.application import get_app
+            win = (custom_field_window
+                   if state["cursor"] == idx["custom"] else above_window)
             get_app().layout.focus(win)
         except Exception:
             pass
 
-    def _enter_input_mode(target):
-        state["mode"] = "input"
-        state["input_target"] = target
-        _focus(input_field_window)
+    def _move(delta):
+        state["cursor"] = (state["cursor"] + delta) % max(1, idx["total"])
+        _sync_focus()
 
-    def _enter_list_action():
-        if not options:
-            _finish({}, cancelled=True)
-            return
-        i = state["cursor"]
-        opt = options[i]
-        special = opt.get("special")
-        if special in ("type", "chat"):
-            _enter_input_mode(special)
-            return
-        if multi:
-            # 多选 Enter = 提交已勾选项（一个没勾就先勾上当前项提交）
-            if not state["checked"]:
-                state["checked"].add(i)
-            _finish({"answers": [options[j]["label"]
-                                 for j in sorted(state["checked"])],
-                     "chat": False})
-        else:
-            _finish({"answers": [opt["label"]], "chat": False})
-
-    # enter 用 eager：抢在输入框控件自己的 enter 绑定之前拿到键，
-    # 否则单行 Buffer 的 enter 会被控件吞掉（插换行/触发 accept），
-    # 面板就关不掉也提交不了
-    @kb.add("enter", eager=True)
-    def _enter(event):
-        if state["mode"] == "input":
-            _submit_custom(input_buf.text, state["input_target"] == "chat")
-        else:
-            _enter_list_action()
-
-    @kb.add("up", filter=in_list)
-    def _up(event):
-        state["cursor"] = (state["cursor"] - 1) % max(1, len(options))
-
-    @kb.add("down", filter=in_list)
-    def _down(event):
-        state["cursor"] = (state["cursor"] + 1) % max(1, len(options))
-
-    @kb.add("space", filter=in_list)
-    def _space(event):
-        if multi and options and not options[state["cursor"]].get("special"):
-            i = state["cursor"]
-            if i in state["checked"]:
-                state["checked"].discard(i)
-            else:
-                state["checked"].add(i)
-
-    @kb.add("escape", eager=True)
-    def _esc(event):
-        if state["mode"] == "input":
-            state["mode"] = "list"
-            _focus(list_window)
-        else:
-            _finish({}, cancelled=True)
-
-    @kb.add("c-c")
-    def _cc(event):
-        _finish({}, cancelled=True)
-
-    @kb.add("c-g", eager=True)
-    def _cg(event):
-        # 记事本编辑：输入态带草稿进去，回来续写；列表态直接当自定义答案
-        initial = input_buf.text if state["mode"] == "input" else ""
-        text = edit_in_notepad(initial)
-        if text is None:
-            return
-        if state["mode"] == "input":
-            from prompt_toolkit.document import Document
-            input_buf.document = Document(text, len(text))
-        else:
-            _submit_custom(text, chat=False)
-
-    # 数字直达：1-9（多选=打勾，单选=立即选定；special 项=进输入态）
-    for digit in range(1, 10):
-        @kb.add(str(digit), filter=in_list)
-        def _pick(event, _d=digit):
-            if _d > len(options):
-                return
-            i = _d - 1
-            special = options[i].get("special")
-            if special in ("type", "chat"):
-                state["cursor"] = i
-                _enter_input_mode(special)
-                return
+    def _act_row(i):
+        """对第 i 行执行「回车动作」：选项=选/勾，自填=提交（单选）或跳
+        Submit（多选），Submit=统一提交，Chat=转对话。"""
+        if i < len(options):
             if multi:
-                state["cursor"] = i
                 if i in state["checked"]:
                     state["checked"].discard(i)
                 else:
                     state["checked"].add(i)
             else:
-                _finish({"answers": [options[i]["label"]], "chat": False})
+                _finish([options[i]["label"]])
+        elif i == idx["custom"]:
+            text = _custom_text()
+            if not text:
+                return  # 空自填不提交（CC 同款）
+            if multi:
+                state["cursor"] = idx["submit"]  # 打过字自动算已选，跳去 Submit
+                _sync_focus()
+            else:
+                _finish([text])
+        elif multi and i == idx["submit"]:
+            if state["checked"] or _custom_text():
+                _submit_multi()   # 空选空填时 Submit 无效（CC 同款）
+        elif i == idx["chat"]:
+            _finish(chat=True)
 
-    # ---- 布局：面板主体 + 输入行（输入态才出现）+ 提示栏 ----
-    list_window = Window(
+    # enter 用 eager：抢在输入框控件自己的 enter 绑定之前拿到键
+    @kb.add("enter", eager=True)
+    def _enter(event):
+        _act_row(state["cursor"])
+
+    @kb.add("up")
+    def _up(event):
+        _move(-1)
+
+    @kb.add("down")
+    def _down(event):
+        _move(1)
+
+    # 空格：自填行聚焦时不绑（落给输入框打空格），其余行=回车动作
+    @kb.add("space", filter=~custom_focused)
+    def _space(event):
+        if state["cursor"] < len(options):
+            _act_row(state["cursor"])
+
+    @kb.add("escape", eager=True)
+    def _esc(event):
+        if state["cursor"] == idx["custom"] and custom_buf.text:
+            custom_buf.reset()   # 先清自填稿，再按一次 Esc 才取消（CC 同款）
+            return
+        _finish(cancelled=True)
+
+    @kb.add("c-c")
+    def _cc(event):
+        _finish(cancelled=True)
+
+    @kb.add("c-g", eager=True)
+    def _cg(event):
+        # 记事本编辑：内容填进自填行，用户过目后自己回车提交
+        initial = _custom_text() if state["cursor"] == idx["custom"] else ""
+        text = edit_in_notepad(initial)
+        if text is None:
+            return
+        custom_buf.document = Document(text, len(text))
+        state["cursor"] = idx["custom"]
+        _sync_focus()
+
+    # 数字直达：自填行聚焦时不绑（数字当文本敲进输入框，CC 同款）
+    for digit in range(1, 10):
+        @kb.add(str(digit), filter=~custom_focused)
+        def _pick(event, _d=digit):
+            if _d <= idx["total"]:
+                _act_row(_d - 1)
+
+    # ---- 布局：上半窗 + 自填行（前缀窗 + 真输入窗）+ 下半窗 ----
+    above_window = Window(
         FormattedTextControl(
-            lambda: render_fragments(
+            lambda: build_above(
                 question, header, options, state["cursor"],
                 state["checked"], multi,
                 width=shutil.get_terminal_size((80, 24)).columns,
-                with_hint=False),
+                chips=chips),
             show_cursor=False),
         dont_extend_height=True)
 
-    input_field_window = Window(BufferControl(buffer=input_buf),
-                                wrap_lines=True)
-    input_row = ConditionalContainer(
-        VSplit([
-            Window(FormattedTextControl(lambda: "> "), width=2,
-                   dont_extend_width=True),
-            input_field_window,
-        ]),
-        filter=Condition(lambda: state["mode"] == "input"))
+    def _prefix_frags():
+        # 自填行前缀：序号 + (多选勾选框) + 空稿时的占位提示语。
+        # 占位符画在前缀窗里——输入框一有字它就让位（窗宽自动收缩），
+        # 这就是「提示语变输入」的实现窍门。
+        on = state["cursor"] == idx["custom"]
+        style = "class:q-selected" if on else "class:q-opt"
+        frags = [(style, ("> " if on else "  ") + f"{idx['custom'] + 1}. ")]
+        if multi:
+            frags.append((style, "[x] " if custom_buf.text else "[ ] "))
+        if not custom_buf.text:
+            frags.append(("class:q-desc", "Type something."))
+        return frags
 
-    hint_window = Window(
+    custom_prefix_window = Window(
+        FormattedTextControl(_prefix_frags),
+        dont_extend_width=True, dont_extend_height=True)
+    custom_field_window = Window(BufferControl(buffer=custom_buf),
+                                 wrap_lines=True, dont_extend_height=True)
+    custom_row = VSplit([custom_prefix_window, custom_field_window])
+
+    below_window = Window(
         FormattedTextControl(
-            lambda: hint_text(multi, state["mode"]),
+            lambda: build_below(
+                len(options), state["cursor"], state["checked"], multi,
+                custom_buf.text,
+                width=shutil.get_terminal_size((80, 24)).columns,
+                custom_focused=(state["cursor"] == idx["custom"])),
             show_cursor=False),
         dont_extend_height=True)
 
     app = Application(
-        layout=Layout(HSplit([list_window, input_row, hint_window])),
+        layout=Layout(HSplit([above_window, custom_row, below_window])),
         key_bindings=kb,
         style=Style.from_dict({
             "q-title": "bold",
@@ -406,6 +468,8 @@ def run_selector(question, header, options, multi=False):
             "q-opt": "",
             "q-desc": "fg:#777777",
             "q-divider": "fg:#555555",
+            "q-chip": "fg:#777777",
+            "q-chip-done": "fg:#00aa88",
             "q-hint": "fg:#777777",
         }),
         full_screen=False,
@@ -415,8 +479,7 @@ def run_selector(question, header, options, multi=False):
     # 循环在转——app.run() 内部的 asyncio.run 会当场炸「cannot be
     # called from a running event loop」。新线程自带新循环，互不打架；
     # 主界面此刻已挂起（不读 stdin），stdin 让给面板，答完还回来。
-    # 线程里的异常带回主线程重抛（ask_via_selector 接住走降级）——
-    # 不然线程静默死掉、用户看着提问没反应。
+    # 线程里的异常带回主线程重抛（ask_via_selector 接住走降级）。
     import threading
     _err = {}
 
@@ -431,80 +494,114 @@ def run_selector(question, header, options, multi=False):
     _th.join()
     if "e" in _err:
         raise _err["e"]
-
-    if state["cancelled"]:
-        return {}, True
-    return state["result"] or {}, False
+    return state["result"] or {"answers": [], "cancelled": True,
+                               "chat": False}
 
 
 # ---------------------------------------------------------------------------
-# 组合入口：面板 + 降级（cli.py 的桥接函数调这个）
+# 组合入口：一批问题逐个放面板 + 降级（cli.py 的桥接函数调这个）
 # ---------------------------------------------------------------------------
 
-def ask_via_selector(question, options, multi, header="",
-                     fallback_input=None):
-    """完整提问流程：先试方向键面板，炸了退回 fallback_input 编号输入。
+def ask_via_selector(questions, fallback_input=None):
+    """整批问题逐个放面板（顶部标签行显示进度），答完汇总返回。
+
+    大白话：一份问卷有几道题，就一题一题放面板让用户作答；顶部标签
+    行显示答到哪了；中途选 Chat about this 就地转对话（已答的保留）。
 
     参数：
-        question/options/multi: 同 run_selector（options 不用带 special 项，
-            本函数自动追加 Type something./Chat about this）
-        header: 短标题（空串自动截问题前 12 字兜底）
-        fallback_input: fn(prompt) -> str，降级用的老式输入
-            （cli.py 传 console.input 的包装）
+        questions: [{question, header?, options, multi?}, ...]（1-4 问）
+        fallback_input: fn(prompt) -> str，降级/Chat 追问用的老式输入
 
-    返回：{"answers": [str], "chat": bool}（answers 空 = 用户取消）。
+    返回：{"answers": [{"question", "answers", "multi"}...],
+          "chat": str|None, "cancelled": bool}
     """
-    opts = [dict(o) for o in (options or [])]
-    opts.append({"label": "Type something.", "special": "type"})
-    opts.append({"label": "Chat about this", "special": "chat"})
-    short_header = ((header or "").strip() or (question or "").strip())[:12]
-    try:
-        result, cancelled = run_selector(question, short_header, opts, multi)
-        if cancelled:
-            return {"answers": [], "chat": False}
-        return result or {"answers": [], "chat": False}
-    except Exception as e:
-        # 面板起不来（无头/终端不支持）——降级老式编号输入
-        logger.debug("方向键提问面板不可用，降级编号输入: %s", e)
-        return _fallback_number_input(question, opts, multi, fallback_input)
+    qs = []
+    for q in questions or []:
+        question = (q.get("question") or "").strip()
+        if not question:
+            continue
+        qs.append({
+            "question": question,
+            "header": ((q.get("header") or "").strip() or question[:12])[:12],
+            "options": [dict(o) for o in (q.get("options") or [])],
+            "multi": bool(q.get("multi", False)),
+        })
+    results = []
+
+    def _chat_flow():
+        """用户选了 Chat about this：退出问卷，命令行追问想说的话。"""
+        text = ""
+        try:
+            text = ((fallback_input("用自己的话聊聊（Enter 发送，空=取消）> ")
+                     if fallback_input else "") or "").strip()
+        except (EOFError, KeyboardInterrupt):
+            text = ""
+        return {"answers": results, "chat": text or None,
+                "cancelled": not text}
+
+    for i, q in enumerate(qs):
+        chips = ([(qq["header"], j < i) for j, qq in enumerate(qs)]
+                 if len(qs) > 1 else None)
+        try:
+            res = run_selector(q["question"], q["header"], q["options"],
+                               q["multi"], chips=chips)
+        except Exception as e:
+            # 面板起不来（无头/终端不支持）——降级老式编号输入
+            logger.debug("方向键提问面板不可用，降级编号输入: %s", e)
+            res = _fallback_number_input(q["question"], q["options"],
+                                         q["multi"], fallback_input)
+        if res.get("cancelled"):
+            return {"answers": results, "chat": None, "cancelled": True}
+        if res.get("chat"):
+            return _chat_flow()
+        results.append({"question": q["question"],
+                        "answers": res.get("answers") or [],
+                        "multi": q["multi"]})
+    return {"answers": results, "chat": None, "cancelled": False}
 
 
 def _fallback_number_input(question, options, multi, fallback_input) -> dict:
-    """老式降级：打印选项 + 敲序号（面板画不出来时的保底通道）。"""
+    """老式降级：打印选项 + 敲序号（面板画不出来时的保底通道）。
+
+    返回与 run_selector 同款 dict（chat=True 时由 ask_via_selector 追问文本）。
+    """
+    n = len(options)
+    idx = row_indices(n, multi)
     lines = [question, ""]
     for i, opt in enumerate(options):
         label = opt.get("label", "")
         desc = opt.get("description") or ""
         lines.append(f"{i + 1}. {label}" + (f" — {desc}" if desc else ""))
-    lines.append("（输序号可选多项逗号分隔；直接输入文字=自定义答案）")
+    lines.append(f"{idx['custom'] + 1}. Type something.（直接输文字=自填）")
+    if multi:
+        lines.append(f"{idx['submit'] + 1}. ✓ Submit")
+    lines.append(f"{idx['chat'] + 1}. Chat about this")
+    lines.append("（多选逗号分隔）")
     try:
         from cli_ui import emit_ansi
         emit_ansi("\n".join(lines) + "\n")
     except Exception:
         pass
-    raw = ((fallback_input("选择/输入 > ") if fallback_input else "")
-           or "").strip()
+    try:
+        raw = ((fallback_input("选择/输入 > ") if fallback_input else "")
+               or "").strip()
+    except (EOFError, KeyboardInterrupt):
+        return {"answers": [], "cancelled": True, "chat": False}
     answers = []
     chat = False
-    n = len(options)
     for part in raw.replace("，", ",").split(","):
         part = part.strip()
         if not part:
             continue
-        if part.isdigit() and 1 <= int(part) <= n:
+        if part.isdigit() and 1 <= int(part) <= idx["total"]:
             i = int(part) - 1
-            special = options[i].get("special")
-            if special:
-                # special 项也走自由输入；选 Chat about this 记 chat 标记
-                custom = ((fallback_input("请输入你的答案 > ")
-                           if fallback_input else "") or "").strip()
-                if custom:
-                    answers.append(custom)
-                    chat = (special == "chat")
-            else:
+            if i < n:
                 answers.append(options[i]["label"])
+            elif i == idx["chat"]:
+                chat = True
+            # 自填/Submit 行的序号没有独立意义（自填走输文字），跳过
         elif not part.isdigit():
             answers.append(part)
     if not multi:
         answers = answers[:1]
-    return {"answers": answers, "chat": chat}
+    return {"answers": answers, "cancelled": False, "chat": chat}
