@@ -2262,15 +2262,28 @@ def check_assistant_block():
         return _fail(f"技能行不对: {skill}")
     echo = ce.format_ask_user_echo_batch(
         [{"question": "范围怎么定？", "answers": ["只做核心包"],
-          "multi": False}])
+          "multi": False}], width=80)
     if "User answered" not in echo[0][1] or "只做核心包" not in echo[1][1]:
         return _fail(f"批量回显不对: {echo}")
     cecho = ce.format_ask_user_echo_batch(
         [{"question": "范围怎么定？", "answers": ["只做核心包"],
-          "multi": False}], chat="我想先聊聊")
+          "multi": False}], chat="我想先聊聊", width=80)
     if "chat" not in cecho[0][1] or "我想先聊聊" not in cecho[1][1] \
             or "只做核心包" not in cecho[2][1]:
         return _fail(f"chat 回显不对: {cecho}")
+    # 长问题：CC 同款悬挂缩进——全文不砍字、续行缩进 5 格、答案跟末行
+    longq = "阈值错位修复要不要连 token 估算一起修？" * 6
+    lecho = ce.format_ask_user_echo_batch(
+        [{"question": longq, "answers": ["一起修"], "multi": False}],
+        width=60)
+    lbody = [t for _, t in lecho[1:]]
+    if not any(ln.startswith("     ") for ln in lbody[1:]):
+        return _fail(f"长问题续行缺悬挂缩进: {lbody}")
+    if not (longq[:10] in lbody[0]
+            and lbody[-1].rstrip().endswith("一起修")):
+        return _fail(f"长问题全文/答案位置不对: {lbody}")
+    if "…" in "".join(lbody):
+        return _fail(f"长问题被截断: {lbody}")
     dep = ce.format_subagent_depart({"tasks": [{}, {}]})
     if dep != "● Running 2 agents…":
         return _fail(f"批量头行不对: {dep!r}")
