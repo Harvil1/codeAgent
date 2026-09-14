@@ -170,11 +170,17 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
                           ensure_ascii=False)
     norm = []
     for q in questions:
+        if not isinstance(q, dict):
+            return json.dumps({"error": "questions 每项需为对象"},
+                              ensure_ascii=False)
         q = q or {}
         question = (q.get("question") or "").strip()
         options = q.get("options") or []
         if not question:
             return json.dumps({"error": "question 不能为空"},
+                              ensure_ascii=False)
+        if not all(isinstance(o, dict) for o in options):
+            return json.dumps({"error": "options 每项需为对象"},
                               ensure_ascii=False)
         if len(options) < 2:
             return json.dumps({"error": "options 至少要 2 个"},
@@ -231,7 +237,7 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
         return json.dumps(payload, ensure_ascii=False)
     if isinstance(result, str):
         # 防呆：裸字符串按字符迭代会拆成单字列表，包一层
-        result = [result]
+        result = [result] if result.strip() else []
     answers = [str(a) for a in (result or [])]
     return json.dumps({"answers": [{"question": norm[0]["question"],
                                     "answers": answers,
