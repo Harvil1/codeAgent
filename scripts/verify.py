@@ -2278,6 +2278,39 @@ def check_assistant_block():
     return _ok("assistant ●块/技能行/回显/批量子代理行正常")
 
 
+def check_ask_user_tool_layer():
+    """验证 ask_user 工具层：header 透传 + bridge 返回 list/dict 双认 + chat 标记。"""
+    import json as _json
+    import types
+
+    import tools.ask_user_tool as aut
+
+    captured = {}
+
+    def fake_list_bridge(qdata):
+        captured.update(qdata)
+        return ["方案A"]
+
+    out = _json.loads(aut._handle_ask_user(
+        {"question": "选哪个？", "options": [{"label": "方案A"}, {"label": "B"}],
+         "multi": False, "header": "范围"},
+        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_list_bridge)))
+    if out.get("answers") != ["方案A"] or "chat" in out:
+        return _fail(f"list 格式返回不对: {out}")
+    if captured.get("header") != "范围":
+        return _fail(f"header 没透传进 qdata: {captured}")
+
+    def fake_dict_bridge(qdata):
+        return {"answers": ["我想先聊聊"], "chat": True}
+
+    out = _json.loads(aut._handle_ask_user(
+        {"question": "选哪个？", "options": [{"label": "A"}, {"label": "B"}]},
+        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_dict_bridge)))
+    if out.get("answers") != ["我想先聊聊"] or out.get("chat") is not True:
+        return _fail(f"dict 格式/chat 标记不对: {out}")
+    return _ok("ask_user 工具层 header/chat 协议正常")
+
+
 def check_question_selector():
     """验证提问选择器纯函数：光标行/多选勾/序号/降级编号输入。"""
     import cli_question as cq
@@ -2805,6 +2838,7 @@ def main():
             ("live 面板", check_live_panel),
             ("assistant 块", check_assistant_block),
             ("提问选择器", check_question_selector),
+            ("提问工具层", check_ask_user_tool_layer),
         ]),
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),

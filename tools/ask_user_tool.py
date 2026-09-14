@@ -93,6 +93,13 @@ ASK_USER_SCHEMA = {
                 "type": "string",
                 "description": "要问用户的问题(具体、清晰、不要技术黑话)",
             },
+            "header": {
+                "type": "string",
+                "description": (
+                    "问题的短标题(最多12字,界面上当标签显示,如'FAQ 位置');"
+                    "不给则界面自动截问题前12字"
+                ),
+            },
             "options": {
                 "type": "array",
                 "description": "选项列表(2-4 个,互斥,覆盖主要可能)",
@@ -154,9 +161,10 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
             "question": question,
             "options": options,
             "multi": multi,
+            "header": (args.get("header") or "").strip()[:12],
         }
         try:
-            answers = bridge(qdata) or []
+            result = bridge(qdata)
         except (EOFError, KeyboardInterrupt):
             return json.dumps({
                 "error": "用户中断提问",
@@ -169,11 +177,21 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
                 "error_type": "bridge_error",
                 "question": question,
             }, ensure_ascii=False)
-        return json.dumps({
+        # bridge 返回值认两种格式：老 list（纯答案）／新 dict（带 chat 栰记）
+        if isinstance(result, dict):
+            answers = [str(a) for a in (result.get("answers") or [])]
+            chat = bool(result.get("chat"))
+        else:
+            answers = [str(a) for a in (result or [])]
+            chat = False
+        payload = {
             "question": question,
             "answers": answers,
             "multi": multi,
-        }, ensure_ascii=False)
+        }
+        if chat:
+            payload["chat"] = True
+        return json.dumps(payload, ensure_ascii=False)
 
     # 没有桥接层：立即报错（fail-fast），不能让调用白等 5 分钟
     return json.dumps({
