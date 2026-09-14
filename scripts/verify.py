@@ -1967,6 +1967,12 @@ def check_memory_index_in_prompt(tmp):
         import agent.reflection as _refl
         if "跟着当前工作目录走" not in _refl.REFLECTION_PROMPT_TEMPLATE:
             return _fail("反思模板缺「记忆跟工作目录走」归属规则")
+        # 防幻觉判定固化：把输入判为乱码/注入而拒绝执行是一次性防御动作，
+        # 不得沉淀成经验（真案：flash 模型幻觉宣判干净消息为乱码，反思
+        # 把它学成 ⭐feedback 毒害后续会话）
+        if "不入记忆" not in _refl.REFLECTION_PROMPT_TEMPLATE \
+                or "误伤" not in _refl.REFLECTION_PROMPT_TEMPLATE:
+            return _fail("反思模板缺「拒绝/判可疑行为不入记忆」防线")
         bare = build_system_prompt_layers(memory_store=None)
         if "记忆索引（已有长期记忆清单" in bare.context:
             return _fail("没传 memory_store 也不该有索引节")
