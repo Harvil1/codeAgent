@@ -215,11 +215,13 @@ async def retrieve_relevant(
     return picked[:max_results]
 
 
-# 索引行里记忆 ID 的形状：括号包着的 {topic}#{短id}（如 (proj#abc123)）。
-# 注意真实索引（memory_store._entry_link 生成）括号里是 markdown 链接路径
-# （.memory/{topic}.jsonl#{短id} 或 .memory/projects/{键}/{topic}.jsonl#{短id}），
-# 所以抠出来后还要过一道 _normalize_index_id 裁成裸 ID。
-_ID_IN_LINE = re.compile(r"\(([^()\s#]+#[^()\s]+)\)")
+# 索引行里记忆 ID 的形状：真实索引（memory_store._entry_link 生成）括号里
+# 是 markdown 链接路径（.memory/{topic}.jsonl#{短id} 或
+# .memory/projects/{键}/{topic}.jsonl#{短id}），所以正则锚定 ".jsonl#"——
+# 只认这种链接形态，索引行正文里随手写的 (v2#dev) 之类的括号对不会被
+# 误当成记忆 ID（误配了兜底会选中它，get() 落空、该轮 0 注入）。
+# 抠出来后还要过一道 _normalize_index_id 裁成裸 ID。
+_ID_IN_LINE = re.compile(r"\(([^()\s]*\.jsonl#[^()\s]+)\)")
 
 
 def _normalize_index_id(inner: str) -> str:
@@ -248,12 +250,27 @@ def _iter_index_ids(index_text: str) -> List[str]:
 
 
 def _query_tokens(query: str) -> List[str]:
-    """把检索 query 拆成小写词（按空白/常见标点切，丢单字噪声）。"""
-    return [
-        t.lower() for t in re.split(
-            r"[\s,.;:!?，。；：！？/\\|()（）\[\]【】]+", query or "")
-        if len(t) >= 2
-    ]
+    """把检索 query 拆成小写词（按空白/常见标点切，丢单字噪声）。
+
+    中文 2-gram 兜底：中文没空格，整句「怎么配置缓存」切成 1 个长
+    token 后做子串匹配基本必 miss——中文用户在 aux LLM 挂掉时
+    兜底检索等于瘫痪。所以对含 CJK 字符的 token 追加两两组合的
+    2-gram（原 token 保留）：「怎么配置缓存」→ 原 token +
+    ["怎么","么配","配置","置缓","缓存"]，短粒度的子词就能命中
+    索引行了。打分用的，重复无所谓、不严格去重。
+    """
+    tokens = []
+    for t in re.split(
+            r"[\s,.;:!?，。；：！？/\\|()（）\[\]【】]+", query or ""):
+        if len(t) < 2:
+            continue
+        t = t.lower()
+        tokens.append(t)
+        # 含 CJK 的 token 追加 2-gram 切分（纯英文/数字 token 不动）
+        cjk = re.findall(r"[\u4e00-\u9fff]", t)
+        if len(cjk) >= 2:
+            tokens.extend(cjk[i] + cjk[i + 1] for i in range(len(cjk) - 1))
+    return tokens
 
 
 def keyword_fallback_ids(

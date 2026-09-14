@@ -180,6 +180,7 @@ def _run_memory_curator_once(memory_dir, *, config: dict, store=None) -> None:
             if factory is not None:
                 review_report = run_memory_review(
                     memory_dir, agent_factory=factory, config=config,
+                    store=store,
                 )
                 review_summary = (
                     f"第 1 阶段: {counts}; "

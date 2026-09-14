@@ -48,7 +48,7 @@ def build_augmented_query(user_message: str, agent) -> str:
     参数：
         user_message：当前用户消息原文
         agent：AIAgent 实例（读 _recent_read_files / conversation_history /
-               codeagent_home）
+               codeAgent_home——注意大小写，AIAgent 的属性就是大写 A）
     返回：增强后的 query（长度由下游 retrieve_relevant 的 query[:1000]
           统一截断，这里不另设上限）。
     """
@@ -62,7 +62,7 @@ def build_augmented_query(user_message: str, agent) -> str:
         pass
     # 信号 2：进行中任务（第 1 条；无 home 不碰全局 store）
     try:
-        home = getattr(agent, "codeagent_home", None)
+        home = getattr(agent, "codeAgent_home", None)
         if home:
             from agent.task_store import get_task_store
             in_progress = get_task_store(home).list_all(status="in_progress") or []

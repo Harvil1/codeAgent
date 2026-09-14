@@ -283,17 +283,22 @@ MEMORY_REVIEW_PROMPT_TEMPLATE = """你是后台记忆库管理员。下面是同
 """
 
 
-def collect_review_candidates(memory_dir: Path) -> Dict[str, List]:
+def collect_review_candidates(memory_dir: Path, *, store=None) -> Dict[str, List]:
     """收集所有 state=active 的记忆，按 type 分桶。
 
     只保留有 2 条以上的桶——单独一条不可能和自己重复/矛盾。
 
     参数：
     - memory_dir：记忆目录
+    - store：MemoryStore 实例（不传就现建一个）。REPL 后台跑 review 时
+      必须传主实例——MemoryStore 的锁是实例级的 threading.Lock，自建
+      实例等于各拿各的锁，几十秒的 review 期间和主循环并发写同一个
+      topic.jsonl 会丢更新
     返回：{类型名: [记忆条目, ...]}
     """
-    from agent.memory_store import MemoryStore
-    store = MemoryStore(codeagent_home=Path(memory_dir).parent)
+    if store is None:
+        from agent.memory_store import MemoryStore
+        store = MemoryStore(codeagent_home=Path(memory_dir).parent)
     all_entries = store.list_all()
     buckets: Dict[str, List] = {}
     for entry in all_entries:
@@ -460,6 +465,7 @@ def run_memory_review(
     dry_run: bool = False,
     max_batch_size: int = 30,
     config: Optional[Dict] = None,
+    store=None,
 ) -> Dict:
     """第 2 阶段主入口：调 LLM 做记忆合并 + 矛盾检测。
 
@@ -479,6 +485,9 @@ def run_memory_review(
       - llm_review_enabled = False → 跳过整个第 2 阶段（不造 agent，省成本）
       - max_batch_size → 覆盖默认 30
       配置缺这一节时按默认跑。
+    - store：主 agent 的 MemoryStore 实例（可选）。REPL 后台跑 review
+      时必须传——锁是实例级的，自建实例和主循环并发写同 topic 文件
+      会丢更新；不传（curator_cli 独立进程）保持现状自建
     返回：报告 dict（dry_run / buckets_reviewed（实际跑过 LLM 的批数）/
       candidates_found（候选总数）/ executed_actions / errors）。
     """
@@ -502,7 +511,7 @@ def run_memory_review(
 
     # dry_run 短路：不造 agent，不花 LLM 的钱
     if dry_run:
-        buckets = collect_review_candidates(memory_dir)
+        buckets = collect_review_candidates(memory_dir, store=store)
         return {
             "dry_run": True,
             "buckets_reviewed": 0,
@@ -511,9 +520,11 @@ def run_memory_review(
             "errors": 0,
         }
 
-    buckets = collect_review_candidates(memory_dir)
-    from agent.memory_store import MemoryStore
-    store = MemoryStore(codeagent_home=memory_dir.parent)
+    buckets = collect_review_candidates(memory_dir, store=store)
+    if store is None:
+        # 没传主实例才自建（独立进程场景）；传了就用同一把锁防并发丢写
+        from agent.memory_store import MemoryStore
+        store = MemoryStore(codeagent_home=memory_dir.parent)
 
     total_actions = 0
     errors = 0

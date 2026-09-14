@@ -873,11 +873,14 @@ def check_delegate_offload(tmp):
 def check_memory_retrieval_fallback():
     """验证记忆检索兜底：关键词匹配 + ID 纠错（aux LLM 单点时的保底）。"""
     from agent.memory_retriever import keyword_fallback_ids, correct_memory_id
+    # 索引行用真实链接格式（.memory/{topic}.jsonl#{uid}）——_ID_IN_LINE
+    # 锚定 .jsonl#，不认裸 (topic#uid) 写法；主题名按链接裁剪后应还原出
+    # 与旧裸写法相同的 ID（proj#abc123 等），断言保持不变
     index_text = (
         "## 项目记忆\n"
-        "- [project] codeagent 压缩策略 (proj#abc123): L4 分层压缩\n"
-        "- [user] 用户偏好中文回复 (user#def456): 保姆语言\n"
-        "- [reference] gitee 仓库地址 (ref#xyz789): https://gitee.com/x\n"
+        "- [project] codeagent 压缩策略 (.memory/proj.jsonl#abc123): L4 分层压缩\n"
+        "- [user] 用户偏好中文回复 (.memory/user.jsonl#def456): 保姆语言\n"
+        "- [reference] gitee 仓库地址 (.memory/ref.jsonl#xyz789): https://gitee.com/x\n"
     )
     ids = keyword_fallback_ids("压缩策略 怎么配置", index_text, max_results=2)
     if "proj#abc123" not in ids:
@@ -909,6 +912,16 @@ def check_memory_retrieval_fallback():
     fixed3 = correct_memory_id("reference#xyz78", real_index)
     if fixed3 != "reference#xyz789":
         return _fail(f"真实链接格式前缀纠错失败: {fixed3}")
+    # 中文 2-gram 兜底：整句中文（无空格）能拆出子词命中索引行
+    from agent import memory_retriever as mr
+    toks = mr._query_tokens("怎么配置缓存")
+    if "缓存" not in toks or "配置" not in toks:
+        return _fail(f"中文兜底没出 2-gram: {toks[:8]}")
+    # 假 ID 不误配：索引行正文里 (v2#dev) 不该被当记忆 ID
+    line = "- [某条](.memory/general.jsonl#abc123) — 说明 (v2#dev) 备注"
+    ids = mr._ID_IN_LINE.findall(line)
+    if ("v2#dev") in ids or not any("abc123" in i for i in ids):
+        return _fail(f"ID 正则误配: {ids}")
     return _ok("关键词兜底 + ID 纠错正常")
 
 
@@ -919,9 +932,10 @@ def check_memory_injection_wiring():
 
     class _FakeStore:
         def full_index_text_with_age(self):
+            # 链接格式（真实索引长相）——裁剪后还原出 proj#abc123 裸 ID
             return (
-                "- [project] codeagent 压缩策略 (proj#abc123): L4 分层压缩\n"
-                "- [user] 用户偏好 (user#def456): 中文回复\n"
+                "- [project] codeagent 压缩策略 (.memory/proj.jsonl#abc123): L4 分层压缩\n"
+                "- [user] 用户偏好 (.memory/user.jsonl#def456): 中文回复\n"
             )
 
         def get(self, mid):
@@ -938,9 +952,8 @@ def check_memory_injection_wiring():
 
     mi.reset_injection_cache()
     before = dict(mi._retrieval_stats)
-    # 注意：query 得带分隔符（空格）——_query_tokens 按空白/标点切词、
-    # 不做 CJK 分词，整串"压缩策略怎么配置"会成一个无法命中索引行的
-    # 长 token（brief 原文无空格，此处按意图修正为可分词写法）
+    # query 带空格照常可分；无空格的连续中文现在靠 2-gram 兜底
+    # （见 check_memory_retrieval_fallback 的 2-gram 断言）
     msg = _aio.run(mi.build_relevant_memories_message(
         query="压缩策略 怎么配置",
         memory_store=_FakeStore(),

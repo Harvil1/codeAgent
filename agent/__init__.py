@@ -1690,10 +1690,14 @@ class AIAgent:
 
         # === 消费待注入临时队列（goal continue 的注入口）===
         # 主循环要继续 goal 时把临时消息塞进这个队列（不进正式历史），
-        # 本轮组装时取出消费并清空——模型看得到，但不污染持久化
-        if self._pending_ephemeral_messages:
-            messages.extend(self._pending_ephemeral_messages)
-            self._pending_ephemeral_messages = []
+        # 本轮组装时取出消费并清空——模型看得到，但不污染持久化。
+        # 先换后取（原子性消灭窗口）：旧写法「先 extend 再置空」中间
+        # 若后台线程（如 memory-saved 回执）append 了新消息，会被
+        # 置空整表换新时无声丢掉；先把整表换成空表再消费旧表，
+        # 后来的 append 落进新表，下轮再取，谁都不丢
+        queue = self._pending_ephemeral_messages
+        self._pending_ephemeral_messages = []
+        messages.extend(queue)
 
         # === 批间摘要注入（上一批工具调用的一句话总结，临时消息）===
         # 由后台辅助模型任务生成（工具分发末尾发出去就不管），这里消费并
@@ -1790,7 +1794,7 @@ class AIAgent:
             from agent.scratchpad import scratchpad_dir
             sp = scratchpad_dir(
                 getattr(self, "session_id", "") or "default",
-                getattr(self, "codeagent_home", None),
+                getattr(self, "codeAgent_home", None),
             )
             messages.append({
                 "role": "user",
