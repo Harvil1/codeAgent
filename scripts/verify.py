@@ -2308,6 +2308,15 @@ def check_ask_user_tool_layer():
         agent_ref=types.SimpleNamespace(ask_user_bridge=fake_dict_bridge)))
     if out.get("answers") != ["我想先聊聊"] or out.get("chat") is not True:
         return _fail(f"dict 格式/chat 标记不对: {out}")
+
+    def fake_str_bridge(qdata):
+        return "方案B"
+
+    out = _json.loads(aut._handle_ask_user(
+        {"question": "选哪个？", "options": [{"label": "A"}, {"label": "B"}]},
+        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_str_bridge)))
+    if out.get("answers") != ["方案B"] or "chat" in out:
+        return _fail(f"裸字符串返回不对: {out}")
     return _ok("ask_user 工具层 header/chat 协议正常")
 
 
