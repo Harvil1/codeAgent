@@ -2367,6 +2367,25 @@ def check_question_selector():
     if "Esc 返回" not in cq.hint_text(False, mode="input"):
         return _fail("输入态提示栏不对")
 
+    # 降级通道：dict 返回 + chat 标记 + 自由输入 + 多选
+    def _canned(*replies):
+        it = iter(replies)
+        return lambda prompt="": next(it)
+
+    fopts = [{"label": "A"}, {"label": "B"},
+             {"label": "Type something.", "special": "type"},
+             {"label": "Chat about this", "special": "chat"}]
+    fres = cq._fallback_number_input("问", fopts, False,
+                                     _canned("4", "聊聊再定"))
+    if fres != {"answers": ["聊聊再定"], "chat": True}:
+        return _fail(f"降级 chat 语义不对: {fres}")
+    fres = cq._fallback_number_input("问", fopts, True, _canned("1, 2"))
+    if fres != {"answers": ["A", "B"], "chat": False}:
+        return _fail(f"降级多选不对: {fres}")
+    fres = cq._fallback_number_input("问", fopts, False, _canned("自定义文本"))
+    if fres != {"answers": ["自定义文本"], "chat": False}:
+        return _fail(f"降级自由输入不对: {fres}")
+
     # 记事本兜底：编辑器不存在时返回 None 不抛异常（fail-open）
     if cq.edit_in_notepad(initial="", editor="不存在的编辑器xyz.exe") is not None:
         return _fail("记事本起不来该返回 None")
