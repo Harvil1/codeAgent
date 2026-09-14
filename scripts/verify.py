@@ -2014,6 +2014,37 @@ def check_memory_index_in_prompt(tmp):
         _refl._notify_memory_saved(fake_agent, 0)
         if len(fake_agent._pending_ephemeral_messages) != 1:
             return _fail("0 条写入不该发回执")
+
+        # 中文主题不坍缩：两个不同中文主题必须落两个文件、互不覆盖
+        # （旧清洗规则把中文全变 "-"，全都挤进同一个 "--.jsonl" 互踩）
+        store.save(name="主题A条目", description="d1", type="user", topic="偏好")
+        store.save(name="主题A条目", description="d2", type="user", topic="反馈")
+        snap3 = store.full_index_text()
+        if snap3.count("主题A条目") != 2 or "d2" not in snap3:
+            return _fail(f"中文主题坍缩互相覆盖: {snap3[:200]!r}")
+
+        # source 粘滞：self 条目被同名 save 不升档（防自学习经验被写成"用户确认"戴 ⭐）
+        store.save(name="粘滞测试", description="v1", type="feedback",
+                   topic="流程", source="self")
+        store.save(name="粘滞测试", description="v2", type="feedback",
+                   topic="流程")  # 默认 user，不该顶掉原条目的 self
+        # 注意用 full_index_text（不截断）：上面灌过 210 条，截断版 snapshot 里
+        # 排在"压测"后面的主题根本挤不进前 200 行
+        snap4 = store.full_index_text()
+        line4 = next((ln for ln in snap4.splitlines() if "粘滞测试" in ln), "")
+        if not line4 or "⭐" in line4:
+            return _fail(f"self 条目被同名 save 升档成 ⭐: {line4!r}")
+
+        # 读失败不投毒缓存：写一个 GBK 文件再读——读失败返回空列表但绝不进缓存
+        # （投毒后果：假空缓存被当新鲜，同主题任何重写 = 整文件物理清空）
+        bad_topic = "坏行测试"
+        bad_path = store._topic_path(bad_topic)
+        bad_path.write_bytes("中文但gbk编码".encode("gbk"))
+        if store._read_topic_rows(bad_topic) != []:
+            return _fail("GBK 坏文件该返回空列表")
+        # _rows_cache 的键是 (分区目录字符串, 主题)——全局区分目录是空串
+        if any(k[1] == bad_topic for k in store._rows_cache):
+            return _fail("读失败后不该把空列表缓存（投毒）")
         return _ok("索引常驻注入+截断+反思回执正常")
     finally:
         _os.chdir(_old_cwd)

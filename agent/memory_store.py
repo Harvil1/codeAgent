@@ -218,6 +218,10 @@ class MemoryStore:
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引。
         # 初始为 None，第一次 _rebuild_index() 会填上实际值。
         self._index_built_key: Optional[str] = None
+        # 上次重建索引时 MEMORY.md 的 (mtime, size)——外部进程（curator 等）
+        # 直接改写索引文件时本实例没有任何脏标记，只有比对这俩才能发现。
+        # 初始为 None，_rebuild_index() 落盘后会记下当时的 stat。
+        self._index_built_stat: Optional[tuple] = None
         # 启动时把老格式（一条记忆一个 .md）搬家到主题 jsonl
         self._migrate_legacy_if_any()
         self._rebuild_index()
@@ -258,7 +262,18 @@ class MemoryStore:
         - topic：主题名
         - zone_dir：分区目录（None=全局区）
         """
-        safe = re.sub(r"[^a-zA-Z0-9_-]", "-", (topic or "general"))
+        # 只清洗文件系统的非法字符和空白（Windows 禁用字符 + 控制符 + 空白），
+        # 保留中文等 Unicode：旧规则把所有非 ASCII 都换成 "-"，中文主题全坍缩进
+        # 同一个 "--.jsonl"（「偏好」「反馈」落同一文件，跨主题同名 upsert
+        # 互相覆盖）。存量 "--.jsonl" 不受影响——"--" 按本规则清洗仍是 "--"，
+        # 按原文件名继续可读。
+        safe = re.sub(r'[\\/:*?"<>|\x00-\x1f\s]+', "-", (topic or "general"))
+        # 清洗后为空（topic 全是非法字符/空白）或正好是 "."/".." 时兜底：
+        # ".." 有路径语义（上一级目录），绝不能拿来当文件名
+        if not safe or safe in (".", ".."):
+            safe = "general"
+        # 截 80 字符防超长文件名（Windows 全路径上限 260，给目录留足余量）
+        safe = safe[:80]
         return self._zone_base_dir(zone_dir) / f"{safe}.jsonl"
 
     def _topic_mtime(self, topic: str, *, zone_dir: Optional[Path] = None) -> tuple:
@@ -282,8 +297,9 @@ class MemoryStore:
     ) -> List[dict]:
         """读一个主题文件的全部行（带内存缓存；缓存失效才真读一次盘）。
 
-        返回的是缓存里那个 list 本身——调用方（在锁内）直接改它，改动会同步
-        反映到缓存，这是故意的（save/update 就是就地改 rows 再整体写回）。
+        返回缓存里那个 list 本身（读命中时）。写路径的纪律是"构造新行副本/新
+        列表 → 先写盘 → 成功后才动缓存"（见 save/update），所以正常流程没人
+        就地改这份 list。整文件读失败时返回空列表且不写缓存（防投毒，见下）。
         别的实例改了文件（修改时间变了）会自动重新读盘。
 
         参数：
@@ -296,7 +312,7 @@ class MemoryStore:
         if cached is not None and cached[0] == mtime:
             return cached[1]
         path = self._topic_path(topic, zone_dir=zone_dir)
-        rows = []
+        rows: List[dict] = []
         if path.exists():
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -310,8 +326,21 @@ class MemoryStore:
                         continue
                     if isinstance(row, dict):
                         rows.append(row)
+            except UnicodeDecodeError as e:
+                # Windows 高发事故：文件被记事本之类的外部工具改成 ANSI/GBK 编码，
+                # 专门给一条提示方便一眼定位（不走这条分支就只报笼统的读失败）
+                logger.warning(
+                    "读 topic 文件 %s 失败：内容不是 UTF-8"
+                    "（疑似被外部工具改成 ANSI/GBK 编码）: %s", path, e,
+                )
+                # 整文件读失败：直接返回空列表，绝不写缓存！
+                # mtime 没变，假"空缓存"会一直被当成新鲜数据——之后该主题任何
+                # update/delete 按空缓存整文件重写，等于把整个主题物理清空
+                return rows
             except Exception as e:
                 logger.warning("读 topic 文件失败 %s: %s", path, e)
+                # 同上：读失败不写缓存（防投毒），下次读再试盘
+                return rows
         self._rows_cache[key] = (mtime, rows)
         return rows
 
@@ -339,7 +368,11 @@ class MemoryStore:
     def _append_topic_row(
         self, topic: str, row: dict, *, zone_dir: Optional[Path] = None,
     ) -> None:
-        """新建记忆的专用快路径：缓存里追加 + 文件末尾追加，不用重写整个文件。
+        """新建记忆的专用快路径：文件末尾追加 + 缓存同步，不用重写整个文件。
+
+        追加失败向上抛异常（调用方的 try/except 或 fail-open 上层会接住），
+        绝不能吞掉异常还把没落盘的行塞进缓存——那会让缓存和磁盘永久背离
+        （缓存说有、磁盘没有，mtime 没变还一直被当成新鲜）。
 
         参数：
         - topic：主题名
@@ -349,13 +382,15 @@ class MemoryStore:
         if zone_dir is not None:
             zone_dir.mkdir(parents=True, exist_ok=True)
         rows = self._read_topic_rows(topic, zone_dir=zone_dir)  # 先读一次，保证缓存已加载
-        rows.append(row)
         path = self._topic_path(topic, zone_dir=zone_dir)
+        # 先落盘：成功之后才动内存（rows 追加 + 缓存刷新）；失败抛出去，内存一行未动
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception as e:
-            logger.warning("append topic 行失败 %s: %s", path, e)
+            logger.error("append topic 行失败 %s: %s（向上抛，缓存未动）", path, e)
+            raise
+        rows.append(row)
         key = self._cache_key(zone_dir, topic)
         self._rows_cache[key] = (self._topic_mtime(topic, zone_dir=zone_dir), rows)
 
@@ -647,6 +682,8 @@ class MemoryStore:
         # 记下本次重建索引用的项目键，
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引
         self._index_built_key = self._current_project_key_safe()
+        # 记下刚写完的索引文件 stat，当作"外部改写检测"的基准值
+        self._index_built_stat = self._stat_index_file()
 
     def snapshot_for_prompt(self) -> str:
         """返回截断版索引（最多 200 行 / 25KB，哪个先超按哪个截）。
@@ -662,8 +699,16 @@ class MemoryStore:
             snap = "\n".join(lines[:_INDEX_MAX_LINES]) + (
                 "\n... [记忆索引超出行数上限，其余按需检索]"
             )
-        if len(snap) > _INDEX_MAX_BYTES:
-            snap = snap[:_INDEX_MAX_BYTES] + "\n... [记忆索引超出字节上限，其余按需检索]"
+        # "25KB" 按 UTF-8 实际字节数算：中文一字 3 字节，len(字符串) 数的是
+        # 字符数会严重低估（2.5 万个汉字实际 75KB）。按字节切一刀再解码回来，
+        # 内容部分天然不超预算（尾部切半个多字节字符由 errors="ignore" 丢掉，
+        # 相当于截完再校验一次字节的兜底）；尾上那行提示本身几十字节不另算
+        raw = snap.encode("utf-8")
+        if len(raw) > _INDEX_MAX_BYTES:
+            snap = (
+                raw[:_INDEX_MAX_BYTES].decode("utf-8", errors="ignore")
+                + "\n... [记忆索引超出字节上限，其余按需检索]"
+            )
         return snap
 
     def full_index_text(self) -> str:
@@ -683,7 +728,11 @@ class MemoryStore:
             return ""
         now = datetime.now(timezone.utc)
         link_age: dict = {}
-        for e in self._scan_all_entries():
+        # 扫库必须拿锁（对齐 list_all/get 的锁纪律）——_scan_all_entries 会读
+        # _rows_cache 和主题文件，并发写线程正改到一半时扫出来的是半拉子状态
+        with self._lock:
+            entries = self._scan_all_entries()
+        for e in entries:
             if e.state == "archived":
                 continue
             try:
@@ -706,19 +755,53 @@ class MemoryStore:
         """写路径调用：给索引盖个"待重建"的章（不马上重建，防止批量写入时反复全量重建、开销翻着倍涨）。"""
         self._index_dirty = True
 
-    def _ensure_index_fresh(self) -> None:
-        """读路径调用：发现索引"脏了"或切换了项目目录才重建（惰性）。线程安全（拿锁）。
+    def _stat_index_file(self) -> Optional[tuple]:
+        """拿 MEMORY.md 索引文件的 (mtime, size)，给 _ensure_index_fresh 比对外部改写用。
 
-        除了脏标记，还要比对当前项目键（存在 self._index_built_key，重建时记下），
-        键变了也要重建。场景：同一个实例把工作目录切到另一个项目（没有新写入），
-        snapshot 也应该显示新项目的记忆。
+        stat 失败（文件不存在/没权限）返回 None——调用方把 None 当"拿不到、
+        跳过这层比对"处理，不影响其余判定。
         """
+        try:
+            st = self._index_path.stat()
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return None
+
+    def _ensure_index_fresh(self) -> None:
+        """读路径调用：发现索引"脏了"、切换了项目目录、索引文件被外部进程改写过才重建（惰性）。线程安全（拿锁）。
+
+        三种重建触发条件：
+        1. 脏标记（本实例写过后还没重建）
+        2. 项目键变了（存在 self._index_built_key，重建时记下）——同一个实例
+           把工作目录切到另一个项目（没有新写入），snapshot 也该显示新项目的记忆
+        3. MEMORY.md 的 (mtime, size) 和上次重建后记下的基准不一样——外部进程
+           （curator 等）直接改写索引文件时本实例没有任何脏标记，只有 stat
+           能发现；stat 拿不到（文件被删等）就跳过这层比对
+        """
+
+        def _external_changed() -> bool:
+            """索引文件是否被外部动过（stat 拿不到或没有基准时返回 False 不误报）。"""
+            stat = self._stat_index_file()
+            return (
+                stat is not None
+                and self._index_built_stat is not None
+                and stat != self._index_built_stat
+            )
+
         current_key = self._current_project_key_safe()
-        if self._index_dirty or current_key != self._index_built_key:
+        if (
+            self._index_dirty
+            or current_key != self._index_built_key
+            or _external_changed()
+        ):
             with self._lock:
                 # 双重检查：拿到锁后再确认一次（防止多个线程抢着重复重建）
                 current_key = self._current_project_key_safe()
-                if self._index_dirty or current_key != self._index_built_key:
+                if (
+                    self._index_dirty
+                    or current_key != self._index_built_key
+                    or _external_changed()
+                ):
                     self._rebuild_index()
 
     def build_index_text(self) -> str:
@@ -859,16 +942,25 @@ class MemoryStore:
                 None,
             )
             if existing is not None:
-                # 写入即维护：同主题同名 → 更新而不是新建
-                existing.update({
+                # 写入即维护：同主题同名 → 更新而不是新建。
+                # 顺序有讲究：先构造新行副本/新列表 → 写盘 → 成功后才动缓存
+                # （_write_topic_rows 落盘成功会同步缓存）。若像过去那样就地改
+                # 缓存行再写盘，写盘一旦抛异常：缓存已带新值而磁盘 mtime 没变，
+                # 脏缓存会被当成"新鲜"的——缓存与磁盘从此永久背离。
+                new_row = dict(existing)
+                new_row.update({
                     "description": description, "type": type, "body": body,
                     "summary": summary, "confidence": confidence,
                     "expected_valid_days": expected_valid_days,
                     "source_session_id": source_session_id,
-                    "source": source,
+                    # 出处粘滞：原条目已有 source 优先——self（自学习）条目不因
+                    # 同名 save 被静默升档成 user（防反思写的经验被覆写成
+                    # "用户确认"，戴上不该戴的 ⭐ 顶格注入）
+                    "source": existing.get("source") or source,
                     "updated_at": _now_iso(),
                 })
-                self._write_topic_rows(topic, rows, zone_dir=zone_dir)
+                new_rows = [new_row if r is existing else r for r in rows]
+                self._write_topic_rows(topic, new_rows, zone_dir=zone_dir)
                 self._mark_index_dirty()
                 return f"{topic}#{existing['id']}"
 
@@ -905,6 +997,7 @@ class MemoryStore:
         expected_valid_days: Optional[int] = None,
         source_session_id: Optional[str] = None,
         state: Optional[str] = None,
+        touch_updated_at: bool = True,
     ) -> MemoryEntry:
         """更新一条记忆的部分字段。id 不存在抛 KeyError。
 
@@ -921,6 +1014,9 @@ class MemoryStore:
         - name/description/type/body/summary：内容字段，传 None 表示不改
         - confidence/expected_valid_days/source_session_id：元信息字段，None 不改
         - state：状态（active/stale），None 不改
+        - touch_updated_at：False 时即使内容变了也不刷新 updated_at——
+          反思"推翻旧记忆"（supersedes 改写正文）时用：被否定的旧记忆不该
+          因为被改写而看起来"最新"，否则索引排序里它反而压过新经验
         """
         if type is not None and type not in VALID_TYPES:
             raise ValueError(f"type 必须是 {VALID_TYPES} 之一")
@@ -939,36 +1035,41 @@ class MemoryStore:
             if located is None:
                 raise KeyError(f"memory not found: {memory_id}")
             zone_dir, rows, target, _i = located
+            # 顺序有讲究：先在新副本上改 → 写盘 → 成功后才动缓存（_write_topic_rows
+            # 落盘成功会同步缓存）。若就地改缓存行再写盘，写盘抛异常时缓存已带
+            # 新值而磁盘 mtime 没变，脏缓存会被当成"新鲜"的——与磁盘永久背离
+            new_target = dict(target)
             if name is not None:
-                target["name"] = name
+                new_target["name"] = name
             if description is not None:
-                target["description"] = description
+                new_target["description"] = description
             if type is not None:
-                target["type"] = type
+                new_target["type"] = type
             if body is not None:
-                target["body"] = body
+                new_target["body"] = body
             if summary is not None:
-                target["summary"] = summary
+                new_target["summary"] = summary
             if confidence is not None:
-                target["confidence"] = confidence
+                new_target["confidence"] = confidence
             if expected_valid_days is not None:
-                target["expected_valid_days"] = expected_valid_days
+                new_target["expected_valid_days"] = expected_valid_days
             if source_session_id is not None:
-                target["source_session_id"] = source_session_id
+                new_target["source_session_id"] = source_session_id
             if state is not None:
-                target["state"] = state
+                new_target["state"] = state
             # 只有内容字段真的变了才刷新 updated_at（只改 state 不刷新，
             # 理由见上面 docstring——curator 年龄判定按内容年龄算，防 stale↔active 反复翻转）
             content_changed = any(v is not None for v in (
                 name, description, type, body, summary,
                 confidence, expected_valid_days, source_session_id,
             ))
-            if content_changed:
-                target["updated_at"] = _now_iso()
+            if content_changed and touch_updated_at:
+                new_target["updated_at"] = _now_iso()
             # 写回原分区（即使改了 type 也写回条目所在的原分区——不支持跨区搬家）
-            self._write_topic_rows(topic, rows, zone_dir=zone_dir)
+            new_rows = [new_target if r is target else r for r in rows]
+            self._write_topic_rows(topic, new_rows, zone_dir=zone_dir)
             self._mark_index_dirty()
-            return self._row_to_entry(topic, target)
+            return self._row_to_entry(topic, new_target)
 
     def delete(self, memory_id: str) -> bool:
         """软删除：先把条目副本存进 .archive/，再从主题文件里移除。
