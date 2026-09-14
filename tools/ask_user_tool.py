@@ -82,127 +82,155 @@ ASK_USER_SCHEMA = {
     "name": "ask_user",
     "toolset": "core",
     "description": (
-        "向用户提问(单选/多选)。用于 plan 模式确认方向、澄清需求、头脑风暴方案选择。"
-        "不要用于简单 yes/no(那种直接在回复里问即可)。"
-        "问题要具体,options 要互斥且覆盖主要可能(2-4 个)。"
+        "向用户提问(单选/多选/自填)。相关的几个问题(1-4个)应一次调用问完,"
+        "用户逐题作答后你拿到全部答案汇总。用于 plan 模式确认方向、澄清需求、"
+        "头脑风暴方案选择。不要用于简单 yes/no(那种直接在回复里问即可)。"
+        "每个问题要具体,options 要互斥且覆盖主要可能(2-4 个)。"
+        "用户始终可以自填选项(Type something)或选择转对话(Chat about this)。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "question": {
-                "type": "string",
-                "description": "要问用户的问题(具体、清晰、不要技术黑话)",
-            },
-            "header": {
-                "type": "string",
-                "description": (
-                    "问题的短标题(最多12字,界面上当标签显示,如'FAQ 位置');"
-                    "不给则界面自动截问题前12字"
-                ),
-            },
-            "options": {
+            "questions": {
                 "type": "array",
-                "description": "选项列表(2-4 个,互斥,覆盖主要可能)",
+                "minItems": 1,
+                "maxItems": 4,
+                "description": "问题列表(1-4 个,相关的几个问题一次问完)",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "label": {"type": "string", "description": "选项标签(1-5 字简短)"},
-                        "description": {"type": "string", "description": "选项说明(为什么选这个/影响)"},
+                        "question": {
+                            "type": "string",
+                            "description": "问题文本(具体、清晰、不要技术黑话)",
+                        },
+                        "header": {
+                            "type": "string",
+                            "description": (
+                                "问题的短标题(最多12字,界面上当标签显示,"
+                                "如'FAQ 位置');不给则界面自动截问题前12字"
+                            ),
+                        },
+                        "options": {
+                            "type": "array",
+                            "description": "选项列表(2-4 个,互斥,覆盖主要可能)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string",
+                                              "description": "选项标签(1-5 字简短)"},
+                                    "description": {"type": "string",
+                                                    "description": "选项说明(为什么选这个/影响)"},
+                                },
+                                "required": ["label"],
+                            },
+                        },
+                        "multi": {
+                            "type": "boolean",
+                            "description": "是否多选(默认 false 单选)",
+                        },
                     },
-                    "required": ["label"],
+                    "required": ["question", "options"],
                 },
             },
-            "multi": {
-                "type": "boolean",
-                "description": "是否多选(默认 false 单选)",
-                "default": False,
-            },
         },
-        "required": ["question", "options"],
+        "required": ["questions"],
     },
 }
 
 
 def _handle_ask_user(args: dict, **kwargs) -> str:
-    """把问题转交给界面（桥接层）等用户作答，返回答案 JSON。
+    """批量问题经桥接层（agent.ask_user_bridge）问用户，返回汇总 JSON。
 
-    优先用注入的桥接层（agent.ask_user_bridge：CLI 是命令行问答，GUI 是
-    HTTP 接口）。没配桥接层就立刻报错返回，绝不傻等 5 分钟。
+    大白话流程：把 1-4 个问题打包成 qdata 交给桥接层（CLI 是命令行
+    面板），用户逐题作答（或自填/转对话/取消），桥接层交回汇总结果，
+    本函数转成 JSON 给模型。老的单问字段（question/options/multi/header）
+    也认——包成一项问题处理，协议升级不摔旧调用方。
 
     参数：
-    - args：工具参数字典。question 是问题文本；options 是选项列表
-      （每项含 label 简短标签和可选 description 说明）；multi 控制单选/多选。
-    - kwargs：运行时注入的命名上下文，本函数只用到 agent_ref
-      （AIAgent 主实例，从它身上找 ask_user_bridge 桥接层）。
+        args：{"questions": [...]} 或老格式 {"question", "options", ...}
+        kwargs：运行时注入，本函数只用到 agent_ref（找 ask_user_bridge）
 
-    返回：JSON 字符串，含用户选的 answers；用户中断/无桥接层/参数不合法
-    时返回对应 error。
-
-    注意：没接桥接层的话，这个工具一被调用就干等 300 秒，
-    界面看起来像死机。所以没桥接层就秒回错误（fail-fast）。
+    返回：JSON 字符串。正常 {"answers": [{"question","answers","multi"}...]}
+    （用户转对话时多 "chat" 文本键）；取消/无桥接层/参数不合法返回对应 error。
     """
-    question = (args.get("question") or "").strip()
-    options = args.get("options") or []
-    multi = bool(args.get("multi", False))
-
-    if not question:
-        return json.dumps({"error": "question 不能为空"}, ensure_ascii=False)
-    if not options or len(options) < 2:
-        return json.dumps({"error": "options 至少要 2 个"}, ensure_ascii=False)
+    # ---- 参数归一化：questions 数组优先，老单问字段包成一项 ----
+    raw_qs = args.get("questions")
+    if isinstance(raw_qs, list) and raw_qs:
+        questions = raw_qs
+    else:
+        questions = [{
+            "question": args.get("question"),
+            "header": args.get("header"),
+            "options": args.get("options"),
+            "multi": args.get("multi", False),
+        }]
+    if not (1 <= len(questions) <= 4):
+        return json.dumps({"error": "questions 需要 1-4 个问题"},
+                          ensure_ascii=False)
+    norm = []
+    for q in questions:
+        q = q or {}
+        question = (q.get("question") or "").strip()
+        options = q.get("options") or []
+        if not question:
+            return json.dumps({"error": "question 不能为空"},
+                              ensure_ascii=False)
+        if len(options) < 2:
+            return json.dumps({"error": "options 至少要 2 个"},
+                              ensure_ascii=False)
+        norm.append({
+            "question": question,
+            "header": (q.get("header") or "").strip()[:12],
+            "options": options,
+            "multi": bool(q.get("multi", False)),
+        })
 
     agent_ref = kwargs.get("agent_ref")
     bridge = (
         getattr(agent_ref, "ask_user_bridge", None)
         if agent_ref is not None else None
     )
-    if callable(bridge):
-        qdata = {
-            "id": uuid.uuid4().hex[:12],
-            "question": question,
-            "options": options,
-            "multi": multi,
-            "header": (args.get("header") or "").strip()[:12],
-        }
-        try:
-            result = bridge(qdata)
-        except (EOFError, KeyboardInterrupt):
+    if not callable(bridge):
+        # 没有桥接层：立即报错（fail-fast），不能让调用白等
+        return json.dumps({
+            "error": "ask_user 无可用桥接层（CLI/GUI 未注入 ask_user_bridge），无法向用户提问",
+            "error_type": "no_bridge",
+        }, ensure_ascii=False)
+
+    qdata = {"id": uuid.uuid4().hex[:12], "questions": norm}
+    try:
+        result = bridge(qdata)
+    except (EOFError, KeyboardInterrupt):
+        return json.dumps({
+            "error": "用户中断提问",
+            "error_type": "user_interrupt",
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "error": f"ask_user 桥接层异常: {e}",
+            "error_type": "bridge_error",
+        }, ensure_ascii=False)
+
+    # ---- 返回值归一化：dict=新协议；list/str=老单问格式兼容 ----
+    if isinstance(result, dict):
+        if result.get("cancelled"):
             return json.dumps({
                 "error": "用户中断提问",
                 "error_type": "user_interrupt",
-                "question": question,
             }, ensure_ascii=False)
-        except Exception as e:
-            return json.dumps({
-                "error": f"ask_user 桥接层异常: {e}",
-                "error_type": "bridge_error",
-                "question": question,
-            }, ensure_ascii=False)
-        # bridge 返回值认三种格式：老 list（纯答案）／新 dict（带 chat 标记）／裸字符串（防呆）
-        if isinstance(result, dict):
-            answers = [str(a) for a in (result.get("answers") or [])]
-            chat = bool(result.get("chat"))
-        elif isinstance(result, str):
-            # 防呆：裸字符串按字符迭代会拆成单字列表，包一层
-            answers = [result] if result.strip() else []
-            chat = False
-        else:
-            answers = [str(a) for a in (result or [])]
-            chat = False
-        payload = {
-            "question": question,
-            "answers": answers,
-            "multi": multi,
-        }
+        payload = {"answers": [dict(a) for a in (result.get("answers") or [])]}
+        chat = (result.get("chat") or "").strip()
         if chat:
-            payload["chat"] = True
+            payload["chat"] = chat
         return json.dumps(payload, ensure_ascii=False)
-
-    # 没有桥接层：立即报错（fail-fast），不能让调用白等 5 分钟
-    return json.dumps({
-        "error": "ask_user 无可用桥接层（CLI/GUI 未注入 ask_user_bridge），无法向用户提问",
-        "error_type": "no_bridge",
-        "question": question,
-    }, ensure_ascii=False)
+    if isinstance(result, str):
+        # 防呆：裸字符串按字符迭代会拆成单字列表，包一层
+        result = [result]
+    answers = [str(a) for a in (result or [])]
+    return json.dumps({"answers": [{"question": norm[0]["question"],
+                                    "answers": answers,
+                                    "multi": norm[0]["multi"]}]},
+                      ensure_ascii=False)
 
 
 # import 本模块时顺手把工具登记进中央注册表（项目惯例：工具文件顶层自注册）

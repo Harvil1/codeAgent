@@ -2279,7 +2279,7 @@ def check_assistant_block():
 
 
 def check_ask_user_tool_layer():
-    """验证 ask_user 工具层：header 透传 + bridge 返回 list/dict 双认 + chat 标记。"""
+    """验证 ask_user 工具层 v2：questions 归一化 + 批量/chat/取消协议 + 老格式兼容。"""
     import json as _json
     import types
 
@@ -2287,37 +2287,62 @@ def check_ask_user_tool_layer():
 
     captured = {}
 
-    def fake_list_bridge(qdata):
+    def fake_bridge(qdata):
         captured.update(qdata)
-        return ["方案A"]
+        return {"answers": [
+                    {"question": "Q1", "answers": ["A1"], "multi": False},
+                    {"question": "Q2", "answers": ["x", "y"], "multi": True},
+                ],
+                "chat": None, "cancelled": False}
+
+    two = {"questions": [
+        {"question": "Q1", "options": [{"label": "A1"}, {"label": "B1"}]},
+        {"question": "Q2", "options": [{"label": "x"}, {"label": "y"}],
+         "multi": True},
+    ]}
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    if len(out.get("answers") or []) != 2 or "chat" in out:
+        return _fail(f"批量返回不对: {out}")
+    qs = captured.get("questions") or []
+    if len(qs) != 2 or any(len(q.get("options", [])) < 2 for q in qs):
+        return _fail(f"questions 没归一化透传: {qs}")
+
+    def fake_chat_bridge(qdata):
+        return {"answers": [{"question": "Q1", "answers": ["A1"],
+                             "multi": False}],
+                "chat": "我想先聊聊", "cancelled": False}
 
     out = _json.loads(aut._handle_ask_user(
-        {"question": "选哪个？", "options": [{"label": "方案A"}, {"label": "B"}],
-         "multi": False, "header": "范围"},
-        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_list_bridge)))
-    if out.get("answers") != ["方案A"] or "chat" in out:
-        return _fail(f"list 格式返回不对: {out}")
-    if captured.get("header") != "范围":
-        return _fail(f"header 没透传进 qdata: {captured}")
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_chat_bridge)))
+    if out.get("chat") != "我想先聊聊" or len(out.get("answers") or []) != 1:
+        return _fail(f"chat 协议不对: {out}")
 
-    def fake_dict_bridge(qdata):
-        return {"answers": ["我想先聊聊"], "chat": True}
+    def fake_cancel_bridge(qdata):
+        return {"answers": [], "chat": None, "cancelled": True}
 
     out = _json.loads(aut._handle_ask_user(
-        {"question": "选哪个？", "options": [{"label": "A"}, {"label": "B"}]},
-        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_dict_bridge)))
-    if out.get("answers") != ["我想先聊聊"] or out.get("chat") is not True:
-        return _fail(f"dict 格式/chat 标记不对: {out}")
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_cancel_bridge)))
+    if out.get("error_type") != "user_interrupt":
+        return _fail(f"取消协议不对: {out}")
 
-    def fake_str_bridge(qdata):
-        return "方案B"
-
+    # 老单问字段兼容 → 包成 questions[0]
     out = _json.loads(aut._handle_ask_user(
-        {"question": "选哪个？", "options": [{"label": "A"}, {"label": "B"}]},
-        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_str_bridge)))
-    if out.get("answers") != ["方案B"] or "chat" in out:
-        return _fail(f"裸字符串返回不对: {out}")
-    return _ok("ask_user 工具层 header/chat 协议正常")
+        {"question": "单问", "options": [{"label": "A"}, {"label": "B"}]},
+        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    qs = captured.get("questions") or []
+    if len(qs) != 1 or qs[0].get("question") != "单问":
+        return _fail(f"老格式没包成 questions: {qs}")
+
+    # 超 4 问 → 报错
+    five = {"questions": [
+        {"question": f"Q{i}", "options": [{"label": "A"}, {"label": "B"}]}
+        for i in range(5)]}
+    out = _json.loads(aut._handle_ask_user(
+        five, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    if "error" not in out:
+        return _fail(f"超 4 问该报错: {out}")
+    return _ok("ask_user 工具层 questions/chat/取消协议正常")
 
 
 def check_question_selector():
