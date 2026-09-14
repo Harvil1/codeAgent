@@ -2015,6 +2015,23 @@ def check_memory_index_in_prompt(tmp):
         if len(fake_agent._pending_ephemeral_messages) != 1:
             return _fail("0 条写入不该发回执")
 
+        # supersedes/confidence 规范化不丢字段（推翻机制曾因此死代码）
+        fake_out = [{
+            "type": "feedback", "name": "改用 pip", "description": "x",
+            "summary": "s", "body": "b",
+            "confidence": 1.0, "supersedes": " 用 uv 不用 pip ",
+        }]
+        normed = _refl._normalize_insights(fake_out)
+        if not normed or normed[0].get("supersedes") != "用 uv 不用 pip" \
+                or normed[0].get("confidence") != 1.0:
+            return _fail(f"规范化丢了 supersedes/confidence: {normed}")
+        # 坏 confidence 不炸整个反思
+        normed2 = _refl._normalize_insights([
+            {"type": "user", "name": "n", "description": "d",
+             "confidence": "垃圾"}])
+        if len(normed2) != 1 or normed2[0].get("confidence") != 0.8:
+            return _fail(f"坏 confidence 应兜底 0.8: {normed2}")
+
         # 中文主题不坍缩：两个不同中文主题必须落两个文件、互不覆盖
         # （旧清洗规则把中文全变 "-"，全都挤进同一个 "--.jsonl" 互踩）
         store.save(name="主题A条目", description="d1", type="user", topic="偏好")
@@ -2045,7 +2062,7 @@ def check_memory_index_in_prompt(tmp):
         # _rows_cache 的键是 (分区目录字符串, 主题)——全局区分目录是空串
         if any(k[1] == bad_topic for k in store._rows_cache):
             return _fail("读失败后不该把空列表缓存（投毒）")
-        return _ok("索引常驻注入+截断+反思回执正常")
+        return _ok("索引常驻注入+截断+反思回执+规范化不丢字段正常")
     finally:
         _os.chdir(_old_cwd)
         if _old_home is None:

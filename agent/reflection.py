@@ -174,8 +174,9 @@ def run_reflection(
     - llm_client：LLM 客户端（chat_completions 是 async 的）
     - model：模型名（None 走客户端默认）
 
-    返回：经验字典列表，每项 {type, name, description, summary, body}；
-    任何失败（LLM 异常/坏 JSON/空响应）返回空列表（fail-open）。
+    返回：经验字典列表，每项 {type, name, description, summary, body,
+    confidence, supersedes}；任何失败（LLM 异常/坏 JSON/空响应）返回
+    空列表（fail-open）。
     """
     trajectory = extract_trajectory(messages)
     if not trajectory.strip():
@@ -224,7 +225,23 @@ def run_reflection(
     if not isinstance(result, list):
         return []
 
-    # 逐条过滤 + 规范化（类型非法或必需字段缺失的丢弃）
+    return _normalize_insights(result)
+
+
+def _normalize_insights(result: list) -> List[dict]:
+    """把 LLM 原始输出逐条过滤 + 规范化（类型非法或必需字段缺失的丢弃）。
+
+    大白话：LLM 吐出来的数组良莠不齐，这里当质检员——不合格的整条
+    扔掉，合格的修剪成统一规格。**confidence/supersedes 必须原样带过**：
+    曾吃过亏，规范化只保留五个基础键，下游 apply_reflection 的两阶段
+    推翻块 ins.get("supersedes") 永远拿 None——推翻机制整块成了死代码。
+
+    参数：
+    - result：LLM 输出解析出的数组（元素未必是 dict、未必有必需字段）
+
+    返回：规范化后的经验字典列表（每项含 type/name/description/
+    summary/body/confidence/supersedes 七键）。
+    """
     valid = []
     valid_types = {"user", "feedback", "project", "reference"}
     for item in result:
@@ -235,14 +252,34 @@ def run_reflection(
         desc = item.get("description", "").strip()
         if t not in valid_types or not name or not desc:
             continue  # 必需字段缺失，跳过
+        # 信心分：夹进 [0,1]；LLM 给了垃圾值（非数字）兜底 0.8——
+        # 别让一条坏值炸掉整批反思
+        try:
+            confidence = max(
+                0.0, min(1.0, float(item.get("confidence", 0.8) or 0.8))
+            )
+        except (TypeError, ValueError):
+            confidence = 0.8
         valid.append({
             "type": t,
             "name": name[:60],  # 防 LLM 给超长标题
             "description": desc[:80],
             "summary": (item.get("summary") or "").strip()[:200],
             "body": (item.get("body") or "").strip(),
+            # 这两键先前被弄丢（只留五键）→ 推翻机制死代码，必须带齐
+            "confidence": confidence,
+            "supersedes": (item.get("supersedes") or "").strip(),
         })
     return valid
+
+
+def _norm_key(s: str) -> str:
+    """去重比较用的名字归一：抹掉所有空白 + casefold 折叠大小写。
+
+    只影响比较、不改存储原值——「用 uv 不用 pip」和「用uv不用pip」
+    算同一条记忆，防大小写/空白变体换身马甲就重复入库堆积。
+    """
+    return re.sub(r"\s+", "", s or "").casefold()
 
 
 def apply_reflection(
@@ -275,9 +312,10 @@ def apply_reflection(
     if not insights:
         return 0
 
-    # 已有记忆的 (type, name) 集合，用来去重
+    # 已有记忆的 (type, name) 集合，用来去重——name 走 _norm_key 归一
+    # （大小写/空白差异不算不同记忆，否则同一经验换马甲就重复入库）
     existing = memory_store.list_all()
-    existing_keys = {(e.type, e.name) for e in existing}
+    existing_keys = {(e.type, _norm_key(e.name)) for e in existing}
 
     # 必须两阶段——先把整批全部 save 完，再统一处理 supersedes（推翻旧记忆）：
     # 边写边 supersede 的话，"同批刚写入的"不在 existing 快照里，
@@ -285,7 +323,7 @@ def apply_reflection(
     written = 0
     written_records = []  # [(经验, 记忆ID)]：记下本批写入的，阶段 2 推翻时要用
     for ins in insights:
-        key = (ins["type"], ins["name"])
+        key = (ins["type"], _norm_key(ins["name"]))  # 与 existing_keys 同款归一
         if key in existing_keys:
             continue
         try:
@@ -334,6 +372,9 @@ def apply_reflection(
                     target_id,
                     confidence=0.1,
                     body=f"[已被 '{ins['name']}' 推翻] " + target_body,
+                    # 被推翻的记忆不该装新鲜：不刷 updated_at，否则检索
+                    # 索引里它标 [age: 0d] 看着最新，反压过推翻它的新经验
+                    touch_updated_at=False,
                 )
                 logger.info(
                     "记忆 '%s' 被 '%s' 推翻,confidence 降到 0.1",
@@ -392,9 +433,21 @@ def trigger_reflection_async(agent) -> None:
     # 节流 1：已经有反思在跑 → 跳过（防连环问烧 token）
     # 节流 2：距上次启动不足冷却轮数 → 跳过
     with agent._reflection_lock:
-        current_turn = agent._last_reflection_turn + 1  # 本轮的"逻辑序号"
+        # 用真实轮数（正式历史里的 user 消息数）。旧写法 current_turn =
+        # last + 1 是从 last 自推的：首轮反思后 last=0，之后每次
+        # current=1、差值恒 1 < 冷却 → 永远跳过且 last 不再前进——
+        # 自引用死锁，反思每会话只跑一次。真实轮数随对话自然递增，
+        # 冷却窗口才会真正滑动。
+        current_turn = sum(
+            1 for m in agent.conversation_history
+            if isinstance(m, dict) and m.get("role") == "user"
+        )
         if agent._active_reflections >= 1:
             return
+        # 压缩会把历史换血、user 计数不增反降（如 20 → 2）：旧高水位
+        # 会把反思永久压住（自锁的变体）——计数缩水时重置基线
+        if 0 <= current_turn < agent._last_reflection_turn:
+            agent._last_reflection_turn = -1
         if (agent._last_reflection_turn >= 0
                 and current_turn - agent._last_reflection_turn < agent._reflection_cooldown_turns):
             return

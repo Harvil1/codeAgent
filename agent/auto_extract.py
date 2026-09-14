@@ -139,6 +139,7 @@ async def run_auto_extract(agent, start_idx: int) -> int:
                     summary=(item.get("summary") or "").strip()[:200],
                     body=(item.get("body") or "").strip(),
                     source_session_id=f"auto_extract:{getattr(agent, 'session_id', '')}",
+                    source="self",  # 模型自提取，未经用户确认（索引不戴 ⭐ 不置顶）
                 )
                 saved += 1
             except Exception as e:

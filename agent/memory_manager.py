@@ -15,6 +15,7 @@
 打架（两边都写、内容冲突）。
 """
 
+import contextvars
 import json
 import logging
 import re
@@ -125,8 +126,14 @@ class MemoryManager:
             return
         if not messages or len(messages) < 6:
             return
-        # 扔后台线程跑，主循环继续做压缩不被拖住
-        self._sync_executor.submit(self._safe_extract_and_save, messages)
+        # 扔后台线程跑，主循环继续做压缩不被拖住。ThreadPoolExecutor
+        # 不拷贝 contextvars（不像 asyncio.to_thread 有自动复制）——
+        # 手动 copy_context 快照 + ctx.run 包线程入口（对齐 reflection.py
+        # 后台线程的姿势），否则会话内切过工作目录后，后台提取写项目
+        # 记忆会落错项目区
+        _ctx = contextvars.copy_context()
+        self._sync_executor.submit(
+            _ctx.run, self._safe_extract_and_save, messages)
 
     def _safe_extract_and_save(self, messages: list) -> None:
         """后台线程里实际干活的入口：提取 + 保存，所有异常吞掉。
@@ -161,9 +168,18 @@ class MemoryManager:
             conversation_text=conversation_text[:8000],
         )
         try:
-            response = self._llm_client.chat_completions(
-                [{"role": "user", "content": prompt}],
-                model=self._llm_model,
+            # chat_completions 是 async 的，而本函数跑在后台线程池（不在
+            # 宿主循环线程）——同步调它只会拿到 coroutine，随后
+            # response.choices 直接 AttributeError，提取每次必失败。
+            # 交给进程级常驻循环宿主同步等结果（照抄 reflection.py 的
+            # run_reflection 姿势）；后台线程长活，豁免回合栅栏
+            from agent.loop_host import loop_host
+            response = loop_host.run_async(
+                self._llm_client.chat_completions(
+                    [{"role": "user", "content": prompt}],
+                    model=self._llm_model,
+                ),
+                exempt_from_fence=True,
             )
             content = response.choices[0].message.content or ""
         except Exception as e:
@@ -194,6 +210,7 @@ class MemoryManager:
                     type=ftype,
                     body=body,
                     source_session_id=self._session_id or "",
+                    source="self",  # 模型自提取，未经用户确认（索引不戴 ⭐ 不置顶）
                 )
                 saved += 1
             except Exception as e:
