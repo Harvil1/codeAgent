@@ -1947,6 +1947,24 @@ def check_memory_index_in_prompt(tmp):
         if "用户爱用 pytest" not in snap or "提交前跑 verify" not in snap:
             return _fail(f"索引快照缺条目: {snap[:200]!r}")
 
+        # ⭐ 只给用户确认过的 feedback：自学习经验（反思引擎写的 source=self）
+        # 不戴冠、排序降一档——防幻觉判定被自学习固化后顶格注入毒害后续会话
+        store.save(name="自学习经验甲", description="模型自总结的",
+                   type="feedback", topic="流程", source="self")
+        store.save(name="用户拍板乙", description="用户纠正过的",
+                   type="feedback", topic="流程", source="user")
+        snap2_lines = store.snapshot_for_prompt().splitlines()
+        star_line = next((ln for ln in snap2_lines if "用户拍板乙" in ln), "")
+        self_line = next((ln for ln in snap2_lines if "自学习经验甲" in ln), "")
+        if not star_line.startswith("- ⭐"):
+            return _fail(f"用户确认 feedback 该戴 ⭐: {star_line!r}")
+        if "⭐" in self_line:
+            return _fail(f"自学习 feedback 不该戴 ⭐: {self_line!r}")
+        if snap2_lines.index(self_line) < snap2_lines.index(star_line):
+            return _fail("自学习 feedback 不该排在用户确认的 feedback 前面")
+        if "未经用户确认" not in "\n".join(snap2_lines[:6]):
+            return _fail("索引头缺「自学习经验未经用户确认」说明文案")
+
         # 注入 system prompt：context 层带索引节；不传 store 不炸也不带
         layers = build_system_prompt_layers(memory_store=store)
         if "记忆索引（已有长期记忆清单" not in layers.context \

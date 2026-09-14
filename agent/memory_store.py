@@ -68,6 +68,10 @@ class MemoryEntry:
     confidence: float = 1.0
     expected_valid_days: int = 365
     source_session_id: str = ""
+    # 来源：user=用户确认过（⭐ 置顶待遇）；self=模型自学习（反思引擎写的，
+    # 无 ⭐、优先级降一档）。默认 user 是给历史存量行的兜底——老条目
+    # 没有 source 字段，保持原有待遇不动
+    source: str = "user"
     state: str = "active"
     last_reviewed_at: str = ""
 
@@ -466,6 +470,7 @@ class MemoryStore:
             confidence=float(row.get("confidence", 1.0) or 1.0),
             expected_valid_days=int(row.get("expected_valid_days", 365) or 365),
             source_session_id=row.get("source_session_id", "") or "",
+            source=row.get("source", "user") or "user",
             state=row.get("state", "active") or "active",
             last_reviewed_at=row.get("last_reviewed_at", "") or "",
         )
@@ -544,12 +549,21 @@ class MemoryStore:
         项目区是空的（没有 project 类条目）就不输出"当前项目记忆"这一节。
         """
         type_priority = {"feedback": 0, "user": 1, "project": 2, "reference": 3, "other": 4}
+
+        def _rank(e):
+            # ⭐ 待遇只给用户确认过的 feedback；自学习 feedback（source=self，
+            # 反思引擎写的）降一档，跟 user 类同档——未经用户验证的行为经验
+            # 不能压过一切顶格注入（防单次幻觉判定被固化后毒害后续会话）
+            if e.type == "feedback" and getattr(e, "source", "user") != "user":
+                return 1
+            return type_priority.get(e.type, 99)
+
         entries = self._scan_all_entries()
         entries = [e for e in entries if e.state != "archived"]
         # 三层排序：连排三次稳定排序，最后按类型优先级定大局
         entries.sort(key=lambda e: str(e.updated_at), reverse=True)
         entries.sort(key=lambda e: e.confidence, reverse=True)
-        entries.sort(key=lambda e: type_priority.get(e.type, 99))
+        entries.sort(key=_rank)
 
         # 按分区拆开：没带 _zone_dir 的是全局区，带的是项目区
         global_entries = [e for e in entries if getattr(e, "_zone_dir", None) is None]
@@ -558,7 +572,9 @@ class MemoryStore:
         lines = [
             "# Memory Index",
             "",
-            "自动生成，请勿手动编辑。⭐ 表示 feedback 类(用户纠正过的),永远优先显示。",
+            "自动生成，请勿手动编辑。⭐ 表示用户确认过的 feedback（用户纠正/拍板过），"
+            "永远优先显示；无 ⭐ 的 feedback 是自学习经验（模型自总结，未经用户确认），"
+            "优先级低一档。",
             "全局区记忆跨项目共享；项目区记忆仅当前项目可见。",
             "⚠️ 记忆是历史沉淀——用户当前消息明确写出的路径/项目名永远优先于"
             "记忆中出现的项目路径。",
@@ -579,7 +595,8 @@ class MemoryStore:
             for topic in sorted(by_topic.keys()):
                 lines.append(f"### 主题：{topic}")
                 for e in by_topic[topic]:
-                    marker = "⭐ " if e.type == "feedback" else ""
+                    marker = ("⭐ " if e.type == "feedback"
+                              and getattr(e, "source", "user") == "user" else "")
                     link = self._entry_link(e)
                     if e.summary:
                         lines.append(
@@ -616,9 +633,13 @@ class MemoryStore:
         # 常驻注入、检索喂给辅助模型的索引）都以它开头：记忆里的项目路径
         # 是历史信息，用户当前消息明确写出的路径永远优先
         #（问 A 项目答 B 项目事故的防线，文件头的同款文案到不了模型，
-        # 必须跟着 snapshot 走）。
+        # 必须跟着 snapshot 走）。⭐ 图例同理——模型不认识 ⭐ 的含义就会
+        # 把自学习经验当用户拍板过的铁律，图例必须跟着 snapshot 走。
         _warn = ("⚠️ 记忆是历史沉淀——用户当前消息明确写出的路径/项目名"
-                 "永远优先于记忆中出现的项目路径。")
+                 "永远优先于记忆中出现的项目路径。\n"
+                 "⭐ = 用户确认过的 feedback（用户纠正/拍板过，最可信）；"
+                 "无 ⭐ 的 feedback 是自学习经验（模型自总结，未经用户确认）——"
+                 "当参考线索用，别当铁律执行。")
         self._cached_snapshot = (
             _warn + "\n\n" + "\n".join(lines[head_end:])
         ) if head_end > 0 else ""
@@ -792,6 +813,7 @@ class MemoryStore:
         expected_valid_days: int = 365,
         source_session_id: str = "",
         topic: str = "general",
+        source: str = "user",
     ) -> str:
         """创建或更新一条记忆（写入即维护：同主题同名 → 更新旧条目）。返回记忆 id。
 
@@ -812,6 +834,8 @@ class MemoryStore:
         - expected_valid_days：预期多少天内有效（超龄会被 curator 标旧/归档）
         - source_session_id：来源会话 id
         - topic：主题（默认 general）
+        - source：来源——user=用户确认过（默认，⭐ 待遇）；self=模型自学习
+          （反思引擎写入用，索引里不戴 ⭐、优先级降一档）
         """
         if not name or not description:
             raise ValueError("name 和 description 必需")
@@ -841,6 +865,7 @@ class MemoryStore:
                     "summary": summary, "confidence": confidence,
                     "expected_valid_days": expected_valid_days,
                     "source_session_id": source_session_id,
+                    "source": source,
                     "updated_at": _now_iso(),
                 })
                 self._write_topic_rows(topic, rows, zone_dir=zone_dir)
@@ -860,6 +885,7 @@ class MemoryStore:
                 "confidence": confidence,
                 "expected_valid_days": expected_valid_days,
                 "source_session_id": source_session_id,
+                "source": source,
                 "state": "active",
             }
             self._append_topic_row(topic, row, zone_dir=zone_dir)

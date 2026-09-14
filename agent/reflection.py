@@ -297,6 +297,7 @@ def apply_reflection(
                 summary=ins["summary"],
                 confidence=ins.get("confidence", 0.8),
                 source_session_id=session_id or "",
+                source="self",  # 反思自学习经验：未经用户确认，索引不戴 ⭐ 不置顶
             )
             existing_keys.add(key)
             written += 1
