@@ -630,8 +630,14 @@ class RuntimeContext:
         if not getattr(self, "hooks_registry", None):
             return
         try:
+            import datetime as _dt
             self.hooks_registry.run_session_start({
                 "session_id": self.session_id or "",
+                # 契约字段补齐（hooks.py 文档承诺的 payload 形状）：
+                # 声明式 hook 的模板/脚本要引用这些字段
+                "started_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "agent_home": str(self.home),
+                "message_count": 0,
             })
         except Exception as e:
             logger.warning("SESSION_START hook 触发异常: %s", e)
@@ -644,8 +650,12 @@ class RuntimeContext:
         if not getattr(self, "hooks_registry", None):
             return
         try:
+            import datetime as _dt
             self.hooks_registry.run_session_end({
                 "session_id": self.session_id or "",
+                # 契约字段补齐（同上）
+                "ended_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "reason": "shutdown",
             })
         except Exception as e:
             logger.warning("SESSION_END hook 触发异常: %s", e)

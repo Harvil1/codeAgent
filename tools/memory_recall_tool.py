@@ -62,8 +62,8 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
     - 命名上下文从 dispatch_kwargs 拿：
         memory_store: 记忆仓库实例（registry 直接透传过来）
         agent_ref:    AIAgent 主对象，辅助模型路由器 aux_llm_router 挂在它属性上
-                      （和 agent/__init__.py 里 _auto_recall_memory 的用法一致：
-                       只传 llm_client=aux_llm_router、model 留空——由路由器自己挑模型）
+                      （只传 llm_client=aux_llm_router、model 留空——
+                       由路由器自己挑模型）
 
     参数：
         args: LLM 传来的参数——query（查询关键词）和 top_k（最多返回几条）
@@ -84,7 +84,7 @@ async def _handle_memory_recall(args: dict, **dispatch_kwargs) -> str:
         )
 
     # 辅助 LLM 客户端从 agent_ref.aux_llm_router 上取
-    # （和 _auto_recall_memory 的做法一致：路由器自己挑模型，所以 model 传 None）
+    # （路由器自己挑模型，所以 model 传 None）
     agent_ref = dispatch_kwargs.get("agent_ref")
     aux_client = getattr(agent_ref, "aux_llm_router", None) if agent_ref else None
     if aux_client is None:

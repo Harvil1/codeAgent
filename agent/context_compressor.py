@@ -146,6 +146,11 @@ def _files_errors_limit(msg_count: int, thresholds=None, limits=None) -> int:
 _IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
 # 文档/文件块类型
 _DOC_BLOCK_TYPES = frozenset({"document", "file", "input_file"})
+# 音视频块（防撑爆的目标对多模态音频/视频同样成立，一并换标记）
+_AV_BLOCK_TYPES = frozenset({
+    "audio", "input_audio", "audio_url",
+    "video", "input_video", "video_url",
+})
 
 
 def strip_media_blocks(messages: list) -> list:
@@ -182,6 +187,9 @@ def strip_media_blocks(messages: list) -> list:
                     continue
                 if btype in _DOC_BLOCK_TYPES:
                     new_blocks.append({"type": "text", "text": "[document]"})
+                    continue
+                if btype in _AV_BLOCK_TYPES:
+                    new_blocks.append({"type": "text", "text": f"[{btype}]"})
                     continue
             new_blocks.append(b)
         # 全是文字块时合并成纯字符串（消除块列表形态）
@@ -571,15 +579,7 @@ def _fix_tool_call_pairs(messages: list) -> list:
         messages：消息列表
     返回：修复配对后的消息列表。
     """
-    # 第一遍：收集全部出现过的工具调用 id（当「全场已知 id 集合」用；
-    # 反向孤儿判定实际用下面的 seen_so_far）
-    seen_tool_call_ids = set()
-    for msg in messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                seen_tool_call_ids.add(tc.get("id"))
-
-    # 反向孤儿要按「截至当前位置见过哪些 id」判断（逐步累加）；
+    # 反向孤儿按「截至当前位置见过哪些 id」判断（逐步累加）；
     # 用全量集合会漏判错序——结果 B 出现在发起 B 的调用之前也会放行
     # （B 已在全量集合里），导致 API 400。
     seen_so_far = set()

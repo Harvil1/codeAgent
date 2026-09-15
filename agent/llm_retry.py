@@ -183,12 +183,15 @@ def _is_connection_reset(error: Exception) -> bool:
     name = type(error).__name__.lower()
     if any(k in name for k in _RESET_NAMES):
         return True
-    cause = getattr(error, "__cause__", None)
-    while cause is not None:
-        cname = type(cause).__name__.lower()
-        if any(k in cname for k in _RESET_NAMES):
-            return True
-        cause = getattr(cause, "__cause__", None)
+    # cause/context 两条链都查（同 _is_client_closed_error 的纪律）：
+    # raise ... from 缺失时异常只挂在 __context__ 上，只走 cause 会漏判
+    for chain_attr in ("__cause__", "__context__"):
+        cause = getattr(error, chain_attr, None)
+        while cause is not None:
+            cname = type(cause).__name__.lower()
+            if any(k in cname for k in _RESET_NAMES):
+                return True
+            cause = getattr(cause, chain_attr, None)
     return False
 
 
@@ -336,8 +339,8 @@ async def call_with_retry(
                 max_hours = float(DEFAULT_UNATTENDED_MAX_HOURS)
             deadline = time.monotonic() + max_hours * 3600.0
             logger.info(
-                "持久重试（unattended）模式已开启：max_retries=∞，deadline=%d 小时后",
-                int(max_hours),
+                "持久重试（unattended）模式已开启：max_retries=∞，deadline=%.1f 小时后",
+                max_hours,
             )
 
     # 算出实际生效的重试上限：无人值守模式给无限（拿正无穷比较）。
@@ -722,11 +725,6 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
 
     返回：恢复后的响应对象（或原样返回）。
     """
-    from agent.llm_retry import (
-        DEFAULT_OUTPUT_RECOVERY_LIMIT,
-        call_with_retry,
-        detect_length_finish,
-    )
     if not detect_length_finish(response):
         return response
     if (agent._max_tokens_escalator is not None
@@ -784,7 +782,10 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
         if piece:
             accumulated += piece
         if not detect_length_finish(resp):
-            logger.info("续写恢复成功（第 %d 次），拼接 %d 字符", attempt, len(accumulated))
+            logger.info(
+                "续写恢复成功（第 %d 次），累计全文 %d 字符",
+                attempt, len(accumulated),
+            )
             return merge_continuation_response(
                 response, resp, accumulated, finished=True,
                 usage_override=_usage_namespace(merged_usage),

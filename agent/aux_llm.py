@@ -156,7 +156,12 @@ class AuxLLMRouter:
                 )
                 return None
         else:
+            # 与 env 分支同一待遇：兜底密钥也是空就不造 client——
+            # 不对称的话会造出空 key 的 client，之后 401 三连才熔断
             api_key = ep.api_key_default
+            if not api_key:
+                logger.debug("endpoint %s 未配置 api_key_default", ep.name)
+                return None
 
         try:
             from agent.llm_client import create_llm_client

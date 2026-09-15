@@ -698,7 +698,7 @@ class HookRegistry:
         return result.get("continue")
 
     def _invoke_declarative_script(self, hook, session_id: str, event: str,
-                                   timeout_cap: float = None, **extra) -> Optional[dict]:
+                                   timeout_cap: Optional[float] = None, **extra) -> Optional[dict]:
         """跑声明式 hook 的统一入口：拼好 payload 交给 dispatch_hook 执行——通知型事件（会话开始/结束等）的声明式 hook 都从这里走，免得每个事件重复拼 payload。
 
         payload 固定带 event/session_id/

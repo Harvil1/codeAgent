@@ -870,7 +870,9 @@ class MemoryStore:
             if located is None:
                 return None
             zone_dir, _rows, target, _i = located
-            return self._row_to_entry(topic, target)
+            # zone_dir 要带上：条目在项目区时 _zone_dir=None 会让后续
+            # update/delete（按 entry 的 _zone_dir 回写）找错分区
+            return self._row_to_entry(topic, target, zone_dir=zone_dir)
 
     def load_body(self, memory_id: str) -> Optional[str]:
         """按 id 取记忆的正文 body。找不到返回 None。

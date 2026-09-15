@@ -169,7 +169,7 @@ class AIAgent:
             session_id: 会话 ID（持久化、恢复都靠它）
             system_prompt_override: 直接给定 system prompt，跳过默认构建
                 （子代理场景常用）；None = 走默认构建
-            memory_store: 记忆仓库（MEMORY.md + USER.md 那套）
+            memory_store: 记忆仓库（.memory/ 主题 jsonl + MEMORY.md 索引那套）
             memory_manager: 外部记忆管理器（跨 provider 同步用）
             session_store: 会话库（历史落盘）
             codeagent_home: 数据根目录（默认 ~/.codeAgent）；None 时自动解析

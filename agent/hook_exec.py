@@ -237,7 +237,7 @@ def drain_rewake_notifications() -> list:
             return notes
 
 
-def _run_async_hook(hook, payload: dict, timeout_cap: float = None) -> None:
+def _run_async_hook(hook, payload: dict, timeout_cap: Optional[float] = None) -> None:
     """异步 command hook——丢到后台线程跑，dispatch 立刻返回不等它。
 
     后台跑完退出码是 2（block）且配了 async_rewake 时，推一条 rewake 通知
@@ -273,7 +273,7 @@ def _run_async_hook(hook, payload: dict, timeout_cap: float = None) -> None:
 
 def dispatch_hook(
     hook, payload: dict, *, propagate_error: bool = False,
-    timeout_cap: float = None,
+    timeout_cap: Optional[float] = None,
 ) -> Optional[dict]:
     """执行一个声明式 hook 的总入口：看配置选哪种执行器去跑。
 
@@ -343,7 +343,7 @@ def dispatch_hook(
 # ============================================================================
 
 
-def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
+def run_script_hook(hook, payload: dict, timeout_cap: Optional[float] = None) -> Optional[dict]:
     """在子进程里执行声明式 hook 命令，按约定解析它的输出。
 
     参数：
@@ -524,13 +524,14 @@ def interpolate_env_vars(value: str, allowed: list) -> str:
     out = _ENV_INTERP_RE.sub(_sub, value)
     for n in sorted(warned):
         logger.warning(
-            "http hook 引用了未白名单环境变量 ${%s}（保留原样）；"
-            "如需插值请把它加进 security.http_hook_allowed_env_vars", n,
+            "http hook 引用了 ${%s} 但未插值（不在白名单，或白名单了但"
+            "当前进程没 export 该变量；保留原样）；如需插值请把变量加进 "
+            "security.http_hook_allowed_env_vars 并确认环境里真有它", n,
         )
     return out
 
 
-def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[dict]:
+def run_http_hook(hook, payload: dict, timeout_cap: Optional[float] = None) -> Optional[dict]:
     """把 payload POST 到 hook 配置的 url，把响应 JSON 当判决返回。
 
     参数：

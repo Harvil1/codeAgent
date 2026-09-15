@@ -212,16 +212,26 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
 })
 
 
-def resolve_toolset(toolset_name: str) -> List[str]:
+def resolve_toolset(toolset_name: str, _seen: frozenset = frozenset()) -> List[str]:
     """把一个工具集名展开成具体的工具名清单。
 
     套餐可用 includes 捎带其他套餐，递归展开直到拿到全部工具名。
+    带环检测：includes 配成环（A 含 B、B 含 A）直接按空集返回并告警，
+    不然递归无底（当前所有套餐 includes 为空，纯防御）。
 
     参数：
         toolset_name: 套餐名（如 "core"、"minimal"）。
+        _seen: 递归路径上已出现过的套餐名（外部调用别传）。
 
     返回：工具名列表（按首次出现去重、保序）；套餐名不存在返回空列表。
     """
+    if toolset_name in _seen:
+        logger.warning(
+            "resolve_toolset: 工具集 includes 成环（%s → ... → %s），"
+            "该分支按空集处理——请检查 toolsets 配置",
+            " → ".join(_seen), toolset_name,
+        )
+        return []
     if toolset_name not in TOOLSETS:
         logger.warning(
             "resolve_toolset: 未知工具集名 %r（合法值: %s）——按空集处理，"
@@ -233,9 +243,9 @@ def resolve_toolset(toolset_name: str) -> List[str]:
     entry = TOOLSETS[toolset_name]
     tools = list(entry["tools"])
 
-    # 把捎带的套餐也递归展开进来
+    # 把捎带的套餐也递归展开进来（带上路径防环）
     for included in entry.get("includes", []):
-        tools.extend(resolve_toolset(included))
+        tools.extend(resolve_toolset(included, _seen | {toolset_name}))
 
     # 去重（保持原有顺序；dict.fromkeys 是"按首次出现去重"的惯用写法）
     return list(dict.fromkeys(tools))

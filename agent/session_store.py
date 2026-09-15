@@ -432,7 +432,12 @@ class SessionStore:
             # 同一窗口内连续 append 时 mtime 可能没变，缓存会误判"文件
             # 没变"而漏掉刚写的消息（回归用例 test_fork_session_does_not_mutate_source 盯着）
             self._msgs_cache.pop(session_id, None)
-            # 新轮次号回写内存表（下一条消息纯内存查表，不再读盘）
+            # 新轮次号回写内存表（下一条消息纯内存查表，不再读盘）。
+            # 容量保护：无上限的话长跑进程里会话越攒越多（delete 才清），
+            # 超 500 就整体重置——轮次号只是缓存加速，丢了下次 append
+            # 重算，无害
+            if len(self._turn_state) > 500:
+                self._turn_state.clear()
             self._turn_state[session_id] = turn_index
             # 同步刷新目录卡片（内存）——磁盘写盘去抖：每条消息都原子重写
             # 整个 index.json 是 IO 热点（大小 O(历史会话总数)），改为
@@ -484,8 +489,10 @@ class SessionStore:
         timestamp 与 pinned 有才透传（老行没有就不带这两个键）。
         """
         msgs = self._read_session_msgs(session_id)
-        if limit:
-            msgs = msgs[-limit:]  # 只保留最后 N 条
+        if limit is not None:
+            # limit<=0 按"一条都不要"处理——旧写法 `if limit:` 把 0 当
+            # "不限制"，与直觉相反（当前无调用方传 0，语义先摆正）
+            msgs = msgs[-limit:] if limit > 0 else []
         # 转成兼容格式（去掉 id/turn_index 等内部字段；timestamp 和
         # pinned 有才透传——pinned 供钉住标记跨重启存活，timestamp 供
         # resume 预热等上层按时间排序/过滤，ISO 字符串原样搬运）
@@ -520,14 +527,15 @@ class SessionStore:
             limit：一页最多几条，默认 50
             offset：跳过前几条（翻页用），默认 0
 
-        返回：会话元数据 dict 列表。
+        返回：会话元数据 dict 列表（元素是副本——直接返回内部缓存引用
+        的话，调用方改元素会污染索引缓存）。
         """
         with self._lock:
             index = list(self._load_index())
         sorted_index = sorted(
             index, key=lambda s: s.get("updated_at", ""), reverse=True
         )
-        return sorted_index[offset:offset + limit]
+        return [dict(s) for s in sorted_index[offset:offset + limit]]
 
     def get_session(self, session_id: str) -> Optional[dict]:
         """查一个会话的元数据（标题/时间/计数这些，不含消息）。
@@ -590,6 +598,10 @@ class SessionStore:
             index = self._load_index()
             self._index_cache = [s for s in index if s["id"] != session_id]
             self._save_index()
+            # 已删会话的轮次状态/消息缓存顺手清掉（不清会随删除次数缓慢泄漏，
+            # 且残留已删会话的轮次号——同 id 复用时接错轮次）
+            self._turn_state.pop(session_id, None)
+            self._msgs_cache.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # 全文搜索（用 Python 正则扫描）

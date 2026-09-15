@@ -308,6 +308,15 @@ class ToolRegistry:
                     name, toolset, existing.toolset,
                 )
                 return
+            if existing and existing.toolset == toolset and not override:
+                # 同 toolset 重注册按"刷新"放行（MCP 重连场景靠它），
+                # 但必须大声——静默覆盖会让"资源工具顶掉真工具"这类
+                # 撞名事故无声发生（docstring 说的"默认不允许覆盖"
+                # 只对跨 toolset 严格执行）
+                logger.warning(
+                    "工具 '%s' 在工具集 '%s' 内被重复注册，handler 已被覆盖",
+                    name, toolset,
+                )
 
             self._tools[name] = ToolEntry(
                 name=name, toolset=toolset, schema=schema,

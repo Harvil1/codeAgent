@@ -286,6 +286,9 @@ class OpenAICompatClient(LLMClient):
         # request_timeout：单次 HTTP 请求的超时秒数（None = SDK 默认 600s）。
         # 看门狗只护流式，非流式挂死全靠这里兜底
         self._request_timeout = request_timeout
+        # 旧关池 task 的强引用列表（reset 可反复发生；单槽会互相顶掉，
+        # 被顶掉的正是注释自己警告的 GC 蒸发场景）——留最近 4 个足够
+        self._old_close_tasks: list = []
         _client_kwargs = {"base_url": base_url, "api_key": api_key}
         if request_timeout is not None:
             _client_kwargs["timeout"] = request_timeout
@@ -308,8 +311,9 @@ class OpenAICompatClient(LLMClient):
                 if loop is not None:
                     # 强引用必须自己存：asyncio 对 task 只持弱引用，
                     # 没人引用的 fire-and-forget task 可能被 GC 中途蒸发
-                    # （关一半的池子状态更诡异）
-                    self._old_close_task = loop.create_task(self.client.close())
+                    # （关一半的池子状态更诡异）；列表容纳连续多次 reset
+                    self._old_close_tasks.append(loop.create_task(self.client.close()))
+                    del self._old_close_tasks[:-4]
             except RuntimeError:
                 pass
         except Exception:
@@ -544,7 +548,10 @@ class AnthropicClient(LLMClient):
                     # 强引用必须自己存（与 OpenAI 版同款）：asyncio 对 task
                     # 只持弱引用，没人引用的 fire-and-forget task 可能被
                     # GC 中途蒸发——半关的池子状态更诡异
-                    self._old_close_task = loop.create_task(self.client.close())
+                    if not hasattr(self, "_old_close_tasks"):
+                        self._old_close_tasks: list = []
+                    self._old_close_tasks.append(loop.create_task(self.client.close()))
+                    del self._old_close_tasks[:-4]
             except RuntimeError:
                 pass
         except Exception:
@@ -726,6 +733,9 @@ class AnthropicClient(LLMClient):
         # 得准备几个「篮子」把每个调用的 id/名字/参数碎片攒齐
         tool_buffers: Dict[int, Dict[str, Any]] = {}
         current_tool_idx: Optional[int] = None
+        # 思考内容是否已按分片实时吐过——吐过的话收尾那次汇总 yield
+        # 就不能再带（上层是累加语义，带了会全文翻倍）
+        streamed_thinking = False
 
         async with self.client.messages.stream(**stream_kwargs) as stream:
             # 看门狗：90 秒没等到新事件就中止流（async with 保证善后清理）
@@ -766,6 +776,18 @@ class AnthropicClient(LLMClient):
                         partial = getattr(delta, "partial_json", "") or ""
                         if current_tool_idx is not None and partial:
                             tool_buffers[current_tool_idx]["input_json"].append(partial)
+                    elif delta_type == "thinking_delta":
+                        # 思考分片实时透传（UI 思考框逐段出，不用等收尾）
+                        t = getattr(delta, "thinking", "") or ""
+                        if t:
+                            streamed_thinking = True
+                            yield {
+                                "content": "",
+                                "tool_calls": [],
+                                "finish_reason": None,
+                                "usage": None,
+                                "reasoning_content": t,
+                            }
                 elif evt_type == "content_block_stop":
                     current_tool_idx = None
 
@@ -804,7 +826,9 @@ class AnthropicClient(LLMClient):
                 "tool_calls": tool_calls_out,
                 "finish_reason": _finish,
                 "usage": usage_dict,
-                "reasoning_content": thinking_text or None,
+                # 分片已实时吐过就不再汇总重复（上层累加语义，重复=翻倍）；
+                # 没吐过（服务商不分片/老协议）才在收尾一次性给全文
+                "reasoning_content": None if streamed_thinking else (thinking_text or None),
                 "thinking_signature": thinking_sig or None,
             }
 
