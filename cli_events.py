@@ -440,9 +440,13 @@ def render_assistant_ansi(text: str, width: int = 100) -> str:
 
     md = _HEAD_RE.sub(r"**\1**", text or "")
     sio = StringIO()
+    # 渲染宽度必须给"● / 两格缩进"让位（width-2）：rich 会把分隔线、
+    # 表格边框、代码块底色按满宽画——事后加 2 格缩进等于每行超宽 2 格，
+    # 终端被迫自行折行，折下来的正好是 1 个中文字（孤字行）或 2 个 ─
+    # （悬空线头）。让 rich 在 width-2 里排版，加完缩进恰好 ≤ width
     inner = _MemConsole(
         file=sio, force_terminal=True, color_system="truecolor",
-        width=max(40, width), legacy_windows=False,
+        width=max(40, width - 2), legacy_windows=False,
     )
     inner.print(Markdown(md))
     raw = (sio.getvalue() or "").rstrip("\n")
