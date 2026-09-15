@@ -1142,6 +1142,8 @@ class RuntimeContext:
             logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
+        # 待办任务清单恢复：面板重拉 + 模型侧注入（续接执行不靠自觉）
+        _resume_todo_lines = _inject_task_recovery(self)
 
         # 重建 checkpoint 管理器（绑定恢复的这个会话 ID）
         try:
@@ -1180,6 +1182,18 @@ class RuntimeContext:
             replay_session_transcript(raw_for_replay)
         except Exception as e:
             logger.warning("会话重放失败（恢复本身不受影响）: %s", e)
+
+        # 重放之后补一块「当前待办」：任务存在全局 task_store 里跨会话
+        # 存活，但 live 面板黑板是纯内存——不重拉的话恢复后面板空空，
+        # 用户以为任务丢了。还有未完成任务才打（全做完了不打空块）
+        try:
+            if _resume_todo_lines:
+                from cli_events import print_style_lines
+                print_style_lines(
+                    [("dim", f"  待续任务 {len(_resume_todo_lines)} 条：")]
+                    + [("dim", f"  {ln}") for ln in _resume_todo_lines])
+        except Exception as e:
+            logger.debug("resume 待办回显失败（fail-open）: %s", e)
 
         return True
 
@@ -2035,6 +2049,61 @@ def _inject_progress_recovery(rt, session_id: str) -> None:
         logger.info("resume: 已注入 PROGRESS.md 进度外存（%d 字符）", len(ptext))
     except Exception as e:
         logger.debug("resume PROGRESS.md 回读失败（fail-open）: %s", e)
+
+
+def _inject_task_recovery(rt) -> list:
+    """resume 后把未完成任务清单注入 ephemeral 队列 + 重拉面板（fail-open）。
+
+    为什么要注入：任务存在全局 task_store 里跨会话存活，但恢复的模型
+    上下文里**没有**这份清单——续接执行全靠模型自觉调 task_list 碰运气。
+    这里主动把 pending/in_progress/blocked/triage 的任务列出来（完成
+    的不列），恢复后的第一次对话组装时模型就能看到「哪些没做完、从哪
+    续接」，不丢任务上下文。
+
+    返回：未完成任务行列表（回显块复用同一份数据；全完成返回空表）。
+    """
+    # 面板黑板重拉（用户可见的一半）：任务工具事件没来之前黑板是空的
+    try:
+        import cli_live
+        cli_live.refresh_tasks()
+    except Exception:
+        pass
+    # 模型侧注入（续接执行的一半）
+    lines = []
+    try:
+        from agent.task_store import get_task_store
+        store = get_task_store(rt.home)
+        rows = [
+            t for t in store.list_all()
+            if t.get("status") not in ("completed", "deleted")
+        ]
+        for t in rows[:30]:
+            mark = {"pending": "□", "in_progress": "■",
+                    "blocked": "⊘", "triage": "⚕"}.get(t.get("status"), "·")
+            lines.append(f"{mark} {t.get('subject', '')}（{t.get('id', '')}，{t.get('status', '')}）")
+        if not rows:
+            return []
+        agent = getattr(rt, "agent", None)
+        queue = getattr(agent, "_pending_ephemeral_messages", None)
+        if queue is not None:
+            queue.append({
+                "role": "user",
+                "content": (
+                    "<task_recovery>\n"
+                    "（会话恢复：以下是你之前规划但尚未全部完成的任务清单，"
+                    "来自跨会话持久化的任务库。请从未完成的任务续接执行——"
+                    "已完成的不要重做；做完调 task_complete，新发现用 "
+                    "task_create 追加。in_progress 的任务上次可能被中断，"
+                    "先核实其当前实际状态再继续。）\n"
+                    + "\n".join(lines)
+                    + "\n</task_recovery>"
+                ),
+                "_ephemeral": True,
+            })
+            logger.info("resume: 已注入待办任务清单（%d 条未完成）", len(rows))
+    except Exception as e:
+        logger.debug("resume 任务清单注入失败（fail-open）: %s", e)
+    return lines
 
 
 def _cleanup_redundant_summaries(msgs: list) -> list:
