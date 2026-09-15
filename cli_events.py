@@ -654,8 +654,8 @@ def replay_session_transcript(msgs) -> None:
     """把存档消息**完整重放**成对话流长相——恢复会话时用。
 
     用户定的规矩：恢复的就是对话里看到的——所以重放走和实时渲染
-    **同一套**格式化函数（● 头行 / ⎿ 结果块 / 子代理出发与完成行），
-    长相和当时一模一样，不是摘要。
+    **同一套**格式化函数（"> " 回显 / ● 回答块 / ● 头行 / ⎿ 结果块 /
+    子代理出发与完成行），长相和当时一模一样，不是摘要。
 
     关键：**配对渲染**。档案里并行工具批的结果消息排在下一条
     assistant 之后，逐条按档案顺序打会让 ⎿ 结果块掉队到几轮 AI
@@ -663,6 +663,28 @@ def replay_session_transcript(msgs) -> None:
     建表，打每个 ● 头行时立刻贴上它的 ⎿——批内永远成对，
     AI 文字永远整块在前（和实时渲染一致）。
     """
+    # 与实时渲染同源的两张文案表（cli_events 不能 import cli，复制并锚定注释）
+    # 1) 兜底/错误类 assistant 文案——实时走黄字提醒不吃 ● 块（cli._execute_turn）
+    _FALLBACK_PREFIXES = (
+        "[已被用户中断", "[LLM 调用失败", "[已达最大迭代次数",
+        "[模型只产出了思考过程", "[LLM 返回了空响应", "[API 错误",
+    )
+    # 2) 机器注入的临时消息 tag——当时是 ephemeral（屏上没出现过这种
+    #    尖括号原文），档案里正常不该有，防万一串进来不回显；
+    #    真实用户输入以 "<" 开头（贴 XML/HTML 提问）照常显示
+    _MACHINE_TAGS = (
+        "<task_notification>", "<scheduled_message>", "<team_messages>",
+        "<delegation_completion>", "<rewake_notification",
+        "<background_tasks_running>", "<queued_user_input>",
+        "<context_management_tip>", "<progress_reminder>",
+        "<tool_batch_summary>", "<continue_goal", "<goal nudge",
+        "<post_compress_brief", "<conditional_skills_ready",
+        "<plan_mode_reminder",
+    )
+
+    from rich.text import Text as _ReplayEchoText
+    from cli_ui import console as _replay_console
+
     # ---- 预扫描：tool_call_id → (工具名, 结果文本) ----
     results: dict = {}
     for m in msgs or []:
@@ -675,12 +697,35 @@ def replay_session_transcript(msgs) -> None:
             role = m.get("role")
             content = (m.get("content") or "").strip()
             if role == "user":
-                if content and not content.startswith("<"):
-                    print_style_lines([("", f"你: {content}")])
+                if not content:
+                    continue
+                # 压缩事务/边界标记：当时屏上没打过原文，回放降成一行淡分隔
+                if content.startswith("[COMPACT_BOUNDARY]"):
+                    print_style_lines([
+                        ("dim", "── 前面的对话已压缩为摘要（模型看到的是摘要"
+                                "＋此后的原文）──"),
+                    ])
+                    continue
+                if content.startswith("[COMPACT_START]"):
+                    continue  # 事务痕迹，当时没展示
+                # 后台唤醒消息：当时屏上是这句淡字，照原样
+                if content.startswith("[后台唤醒]"):
+                    print_style_lines([("dim", "[后台任务完成，自动继续]")])
+                    continue
+                if content.startswith(_MACHINE_TAGS):
+                    continue
+                # 真实用户输入：与实时回显完全同款 "> "（Text 不解析 markup，
+                # 多行续打 "> "）——不用 "你:" 这种重放专用皮
+                _replay_console.print(
+                    _ReplayEchoText("> " + content.replace("\n", "\n> ")))
             elif role == "assistant":
-                # AI 的「说一句再去干活」整块在前（glm 的话都在调用前）
+                # AI 的「说一句再去干活」整块在前（glm 的话都在调用前）。
+                # 正文走与实时非流式同款的 ● markdown 块；兜底/错误文案黄字
                 if content:
-                    print_style_lines([("", content)])
+                    if content.startswith(_FALLBACK_PREFIXES):
+                        _replay_console.print(f"[yellow]{content}[/yellow]")
+                    else:
+                        print_assistant_block(content)
                 for tc in m.get("tool_calls") or []:
                     try:
                         tc_id = tc.get("id")
