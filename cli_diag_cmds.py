@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
+from rich.panel import Panel
 from rich.table import Table
 
 from constants import get_codeagent_home

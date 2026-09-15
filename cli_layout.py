@@ -1138,11 +1138,26 @@ def request_app_exit(app) -> None:
     """工作线程请 UI 退出（跨线程必须走 call_soon_threadsafe 转发）。
 
     app 没在跑/已退出/压根是 None（降级模式）都静默返回。
+
+    回调必须先查 is_done 再退：强退路径里 `_force_exit` 可能已经直接
+    调过 app.exit()（return_value 已设），这里再排一个裸 `app.exit`
+    回调，运行时 prompt_toolkit 会抛 "Return value already set"——
+    异常发生在回调执行时，下面的 try/except（管的是调度）捕不到，
+    变成事件循环的 Unhandled exception 满屏刷栈。
     """
     if app is None:
         return
+
+    def _safe_exit():
+        if getattr(app, "is_done", False):
+            return  # 已经在退/退完了——本次请求作废
+        try:
+            app.exit()
+        except Exception:
+            pass  # 二次退出兜底（is_done 竞态窗口）
+
     try:
-        app.loop.call_soon_threadsafe(app.exit)
+        app.loop.call_soon_threadsafe(_safe_exit)
     except Exception:
         pass
 
