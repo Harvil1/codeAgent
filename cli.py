@@ -3751,6 +3751,13 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             console.print("[red]⚡ 强制退出——正在取消所有子代理和后台任务…[/red]")
         except Exception:
             pass
+        # 面板遗照：强退不走 _execute_turn 收尾，子代理树/任务清单
+        # 不落静态行就永远消失了——趁终端还在，先把快照打进滚动区
+        try:
+            import cli_live
+            cli_live.dump_panel_snapshot()
+        except Exception:
+            pass
         rt._force_exiting = True
         # 强退窗口里还在收尾的线程（worker/子代理摘要/线程池关停）会
         # 互相踩出 RuntimeError 噪声——进程马上就没了，日志全静音

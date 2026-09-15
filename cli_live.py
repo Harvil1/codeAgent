@@ -158,11 +158,53 @@ def turn_started(agent) -> None:
 
 
 def turn_ended() -> None:
-    """回合结束：清子代理黑板（防中断残留的 running 行挂在面板上）。"""
+    """回合结束：把没收场的子代理落成静态行，再清黑板。
+
+    旧版直接 clear——面板上的子代理树无声蒸发，中断后屏上什么都不剩
+    （用户视角：智能体调用、任务"都没有了"）。正常收场的条目不落
+    （POST 的 finished 静态块已经打过了，落了就重复）；只有还挂着
+    running 的条目（中断/被吞的收尾）落一行「已中断」留痕，对齐
+    claude code 中断后仍能看到每个子代理终态的行为。
+    """
     try:
+        with _lock:
+            snap = [(k, dict(_agents[k]))
+                    for k in _agents_order if k in _agents]
+        lines = []
+        for _, e in snap:
+            if e.get("status") != "running":
+                continue
+            tools = int(e.get("tools", 0) or 0)
+            lines.append((
+                "dim",
+                f"  ⎿  {e.get('desc', '')} · {tools} tool uses · 已中断",
+            ))
+        if lines:
+            try:
+                from cli_events import print_style_lines
+                print_style_lines(lines)
+            except Exception:
+                pass
         with _lock:
             _agents.clear()
             _agents_order.clear()
+    except Exception:
+        pass
+
+
+def dump_panel_snapshot() -> None:
+    """强退前的面板遗照：未收场子代理行 + 任务清单静态块，尽力落屏。
+
+    强退路径（双击 Ctrl+C → os._exit）不走 _execute_turn 收尾——
+    任务静态块永远没机会打。这里在进程消失前把面板内容落成滚动区
+    静态行，用户回头还能看到当时有哪些子代理、任务进展到哪。
+    """
+    turn_ended()
+    try:
+        from cli_events import format_tasks_static_block, print_style_lines
+        lines = format_tasks_static_block()
+        if lines:
+            print_style_lines(lines)
     except Exception:
         pass
 
