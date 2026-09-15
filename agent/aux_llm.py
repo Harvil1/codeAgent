@@ -121,6 +121,22 @@ class AuxLLMRouter:
                 [e.name for e in self._endpoints],
             )
 
+    def swap_main_client(self, new_client) -> None:
+        """运行期更换兜底主 client（/model 切换模型用）。
+
+        旧的兜底 client 若所有权归 router（owns_main=True）则关闭——
+        不关的话每次 /model 都漏一个绑着旧连接池的 client。
+        关池失败只记日志：切换是主流程，别被收尾拖死。
+        """
+        old = self._main_client
+        self._main_client = new_client
+        if old is not None and self._owns_main:
+            try:
+                from agent.loop_host import loop_host
+                loop_host.run_async(old.close(), timeout=10)
+            except Exception as e:
+                logger.warning("swap_main_client 关旧兜底 client 失败（忽略）: %s", e)
+
     def _create_client_for(self, ep: LLMEndpoint) -> Optional[Any]:
         """给一个端点造出它的 LLM client（初始化时逐个调用）。
 

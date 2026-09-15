@@ -138,6 +138,9 @@ async def run_auto_extract(agent, start_idx: int) -> int:
                     type=t,
                     summary=(item.get("summary") or "").strip()[:200],
                     body=(item.get("body") or "").strip(),
+                    # 轻量自提取没经过反思那道 LLM 复核——confidence 显式
+                    # 压低（默认 1.0 会让这批条目在索引排序里虚高）
+                    confidence=0.7,
                     source_session_id=f"auto_extract:{getattr(agent, 'session_id', '')}",
                     source="self",  # 模型自提取，未经用户确认（索引不戴 ⭐ 不置顶）
                 )

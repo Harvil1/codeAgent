@@ -41,8 +41,10 @@ def _extract_anchor_from_slice(messages_slice: list) -> tuple:
         c = m.get("content")
         if not isinstance(c, str) or not c or len(c) > 60000:
             continue
-        # 旧摘要 placeholder 的特征标记（出现在消息开头附近）
-        if "[之前的对话已自动总结]" not in c and "[对话摘要" not in c[:300]:
+        # 旧摘要 placeholder 的特征标记（全文搜，不截 300 字窗：
+        # partial 占位前面是 boundary 头几行，Windows 深路径下快照行
+        # 就能超 300 字，窗口搜会静默 miss——代际锚定随之失效）
+        if "[之前的对话已自动总结]" not in c and "[对话摘要" not in c:
             continue
         anchor = extract_summary_anchor(c)
         if anchor:
@@ -328,7 +330,8 @@ def snip_compact(
         "role": "user",
         "content": (
             f"[snip_compact: 中间 {omitted} 条已省略，"
-            f"完整记录见 .transcripts/latest.jsonl]"
+            f"如 .transcripts/ 下有快照（latest.txt 指向最新一份）可 read_file "
+            f"按 offset/limit 分段找回；无快照则原文已不可恢复]"
         ),
     }
     new_conv = head + [placeholder] + tail
@@ -408,8 +411,8 @@ def micro_compact(
             "micro_compacted": True,
             "orig_chars": len(content),
             "hint": (
-                f"Tool {m.get('name', '?')} 结果已折叠，"
-                f"完整内容见 .transcripts/latest.jsonl 或重跑工具"
+                f"Tool {m.get('name', '?')} 结果已折叠（本次未落盘），"
+                f"需要细节请重跑工具"
             ),
         }, ensure_ascii=False)
         out.append(new_m)
@@ -1189,7 +1192,8 @@ def reactive_compact(
             "[COMPACT_BOUNDARY]\n"
             "[紧急上下文压缩：API 返回 prompt_too_long，"
             f"已只保留最近 {len(keep)} 条消息。"
-            "完整历史见 .transcripts/latest.jsonl]"
+            "如 .transcripts/ 下有快照（latest.txt 指向最新一份）可 "
+            "read_file 分段找回；无快照则被裁原文已不可恢复]"
         ),
     }
     new_conv = [placeholder] + keep

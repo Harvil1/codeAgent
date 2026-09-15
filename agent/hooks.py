@@ -610,6 +610,16 @@ class HookRegistry:
         返回：新 result（hook 返回 {"result": "..."} 时）或 None（不改）。
         """
         from agent.hook_exec import dispatch_hook
+        # result 只塞摘要（同 pre_llm_call 只传 message_count 的纪律）：
+        # 大工具结果全文过子进程管道/HTTP body 又慢又可能撑爆——
+        # hook 要改写结果走 programmatic 注册，不靠声明式 payload
+        result_str = result if isinstance(result, str) else str(result)
+        _RESULT_CAP = 2000
+        payload_result = (
+            result_str
+            if len(result_str) <= _RESULT_CAP
+            else result_str[:_RESULT_CAP] + f"...[truncated {len(result_str)} chars]"
+        )
         payload = {
             "event": "post_tool_use",
             "session_id": session_id,
@@ -617,7 +627,7 @@ class HookRegistry:
             "hook_name": hook.name,
             "tool_name": tool_name,
             "args": args,
-            "result": result,
+            "result": payload_result,
         }
         proc_result = dispatch_hook(hook, payload)
         if proc_result is None:

@@ -48,6 +48,11 @@ def _cmd_memory(args):
 
     memory_dir = get_codeagent_home() / ".memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
+    # 本进程内只建一个 MemoryStore 全程共用（构造带副作用：老格式搬家 +
+    # 索引重建），两个阶段都传它——各阶段各自现建的话，两把实例锁互不
+    # 互斥，1/2 阶段并发写同一 topic.jsonl 会互相覆盖
+    from agent.memory_store import MemoryStore
+    _store = MemoryStore(codeagent_home=get_codeagent_home())
     sub = args[0] if args else "status"
 
     if sub == "status":
@@ -65,7 +70,7 @@ def _cmd_memory(args):
 
         # 第 1 阶段：纯规则状态转换，不依赖 LLM
         if not dry_run:
-            counts = apply_automatic_transitions(memory_dir)
+            counts = apply_automatic_transitions(memory_dir, store=_store)
         else:
             # dry-run 只预览不动真格：不修改任何记忆文件（和技能 curator 的语义保持一致）
             counts = {
@@ -82,7 +87,9 @@ def _cmd_memory(args):
             try:
                 rt = RuntimeContext()
                 factory = rt._make_memory_review_agent_factory()
-                report = run_memory_review(memory_dir, agent_factory=factory)
+                report = run_memory_review(
+                    memory_dir, agent_factory=factory, store=_store,
+                )
                 review_summary = (
                     f"reviewed={report['buckets_reviewed']}, "
                     f"actions={report['executed_actions']}, "

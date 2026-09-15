@@ -214,6 +214,10 @@ class AIAgent:
         # 流式空闲看门狗（流卡住多久算超时，settings.json 的 llm.stream_idle_timeout_seconds）
         if stream_idle_timeout is not None:
             model_config["stream_idle_timeout"] = stream_idle_timeout
+        # 非流式单请求超时（llm.request_timeout_seconds；不配 = SDK 默认）
+        _rt = (config or {}).get("llm", {}).get("request_timeout_seconds")
+        if _rt is not None:
+            model_config["request_timeout"] = _rt
         self.llm_client = create_llm_client(model_config)
         self.base_url = base_url
         self.api_key = api_key
@@ -905,9 +909,15 @@ class AIAgent:
 
         # ---------- 循环前准备 ----------
         # 钩子链挪出事件循环线程跑（慢钩子不会冻住流式输出）
+        _original_input = user_message
         user_message = await asyncio.to_thread(
             self._run_prompt_submit_hook, user_message,
         )
+        # hook 改写过输入 → 补落一份改写后的进会话库。不落的话存档里
+        # 只有原始输入，恢复会话看到的内容与实际发给模型的错位（审计
+        # 对不上账；恢复回放会多一条"原始+改写"，正是想要的完整轨迹）
+        if user_message != _original_input:
+            self._persist_session_message("user", user_message)
         # 这里故意不收消息——每轮 while 里都收，
         # 不然多轮工具调用中途新到的消息挤不进模型上下文
 
@@ -2159,11 +2169,9 @@ class AIAgent:
                         "流空闲超时的非流式恢复也失败（透出）: %s", e,
                     )
 
-            is_prompt_too_long = (
-                "prompt_too_long" in err_str
-                or "context_length" in err_str
-                or "maximum context" in err_str
-            )
+            # PTL 判定走统一口径（四家措辞，与压缩层同源——各写子集会漂移）
+            from agent.context_compressor import is_prompt_too_long_error
+            is_prompt_too_long = is_prompt_too_long_error(err_str)
             # 输入超长（PTL）一律先试紧急压缩抢救（不再受功能开关
             # 门控——超长是可恢复错误，恢复优先于报错；
             # 防无限循环的冷却/次数上限在紧急压缩内部生效。旧的功能开关语义

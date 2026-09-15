@@ -479,6 +479,11 @@ async def call_with_retry(
             last_error = e
             logger.error("备用 client 也失败: %s", e)
 
+    # 边界防护：deadline 在首次尝试前就到期（max_hours 配 0/极小）时
+    # 循环一圈没跑、last_error 还是 None——raise None 会变成莫名其妙的
+    # TypeError，给个说得清的错误
+    if last_error is None:
+        raise RuntimeError("LLM 调用未执行即退出（deadline 先于首次尝试到期？）")
     raise last_error
 
 
@@ -590,11 +595,11 @@ def _compute_backoff(
     """
     cap = DEFAULT_MAX_BACKOFF if max_backoff is None else max_backoff
     base = retry_after if retry_after else initial_backoff * (2 ** attempt)
-    base = min(base, cap)
     if jitter_ratio <= 0:
-        return base
+        return min(base, cap)
     jitter = random.uniform(0, base * jitter_ratio)
-    return base + jitter
+    # 先加 jitter 再封顶：加完再超 cap 的话实际等待可超上限 25%
+    return min(base + jitter, cap)
 
 
 # ---------------------------------------------------------------------------
@@ -658,10 +663,40 @@ def merge_usage_tokens(final_usage, retried):
         ),
     }
     prev_usage = final_usage if isinstance(final_usage, dict) else {}
-    return {
+    merged = {
         k: (prev_usage.get(k, 0) or 0) + (retry_usage.get(k, 0) or 0)
         for k in retry_usage
     }
+    # total 一并补齐：按 total 口径取数的消费方（现在还没有，但契约脆）
+    merged["total_tokens"] = (
+        merged.get("prompt_tokens", 0) + merged.get("completion_tokens", 0)
+    )
+    return merged
+
+
+def _usage_namespace(d: Optional[dict]):
+    """把 merge_usage_tokens 产出的 dict 包成各消费方都认的对象。
+
+    record_llm_usage / cache 监控按属性名取数（DeepSeek 名和 Anthropic
+    名各试一遍），namespace 里两种名都放上，谁读都不落空。
+    """
+    from types import SimpleNamespace
+    if not isinstance(d, dict) or not d:
+        return None
+    cache_read = d.get("cache_read", 0) or 0
+    cache_creation = d.get("cache_creation", 0) or 0
+    return SimpleNamespace(
+        prompt_tokens=d.get("prompt_tokens", 0) or 0,
+        completion_tokens=d.get("completion_tokens", 0) or 0,
+        total_tokens=d.get("total_tokens", 0) or 0,
+        cache_read=cache_read,
+        cache_creation=cache_creation,
+        # 双名兼容（同 llm_streaming 合成的 usage 对象）
+        prompt_cache_hit_tokens=cache_read,
+        cache_read_input_tokens=cache_read,
+        prompt_cache_miss_tokens=cache_creation,
+        cache_creation_input_tokens=cache_creation,
+    )
 
 
 async def recover_output_truncation(agent, response, messages, tool_schemas):
@@ -727,6 +762,9 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
         {"role": "assistant", "content": accumulated},
         {"role": "user", "content": recovery_meta},
     ]
+    # 用量账逐轮累加：截断那次 + 每轮续写都真实花了钱，只报最后一轮
+    # 会让 token 统计系统性偏低（与升级重试路径的 merge 口径对齐）
+    merged_usage = merge_usage_tokens({}, response)
     for attempt in range(1, limit + 1):
         try:
             resp = await call_with_retry(
@@ -741,6 +779,7 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
         except Exception as e:
             logger.warning("续写恢复调用失败（返回已拼接内容）: %s", e)
             break
+        merged_usage = merge_usage_tokens(merged_usage, resp)
         piece = (resp.choices[0].message.content or "")
         if piece:
             accumulated += piece
@@ -748,6 +787,7 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
             logger.info("续写恢复成功（第 %d 次），拼接 %d 字符", attempt, len(accumulated))
             return merge_continuation_response(
                 response, resp, accumulated, finished=True,
+                usage_override=_usage_namespace(merged_usage),
             )
         local_messages = list(local_messages) + [
             {"role": "assistant", "content": piece},
@@ -757,11 +797,13 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
         logger.warning("续写恢复 %d 次后仍截断，返回已拼接内容", limit)
     return merge_continuation_response(
         response, None, accumulated, finished=False,
+        usage_override=_usage_namespace(merged_usage),
     )
 
 
 def merge_continuation_response(
     truncated_response, last_response, content, *, finished: bool,
+    usage_override=None,
 ):
     """续写恢复的最后一步：把截断响应和续写响应合并成一个。
 
@@ -794,11 +836,15 @@ def merge_continuation_response(
         reasoning_content=getattr(src_msg, "reasoning_content", None),
         thinking_signature=getattr(src_msg, "thinking_signature", None),
     )
-    usage = (
-        getattr(last_response, "usage", None)
-        if last_response is not None
-        else getattr(truncated_response, "usage", None)
-    )
+    # 用量优先用调用方累加好的全量账（截断那次 + 每一轮续写都真花了钱，
+    # 只取最后一轮会系统性漏记）；没给才退回旧口径
+    usage = usage_override
+    if usage is None:
+        usage = (
+            getattr(last_response, "usage", None)
+            if last_response is not None
+            else getattr(truncated_response, "usage", None)
+        )
     if not finished:
         finish_reason = "length"
     else:

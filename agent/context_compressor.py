@@ -100,6 +100,20 @@ _last_summary_degraded = False
 # PTL（prompt_too_long）重试上限
 MAX_PTL_RETRIES = 3
 
+# PTL 错误识别的统一口径（四家服务商措辞全认）。此前三处各写各的
+# 子集（摘要重试认 2 种、主循环认 3 种、丢条数计算认 4 种）——OpenAI
+# 风格的 "maximum context length ..." 在摘要重试路径会被当普通失败，
+# 白计一次熔断还降级规则总结。全项目判定一律走 is_prompt_too_long_error
+_PTL_MARKERS = (
+    "prompt_too_long", "context_length", "too long", "maximum context",
+)
+
+
+def is_prompt_too_long_error(err_str: str) -> bool:
+    """判断一段错误文本是不是「输入超长」（PTL）。四家措辞口径统一。"""
+    s = (err_str or "").lower()
+    return any(kw in s for kw in _PTL_MARKERS)
+
 # Files/Errors 段字数分档：被摘要消息数过阈值就放宽——长任务一屏
 # 路径+报错 200 字装不下，砍了下次压缩就找不回来（锚定段只保跨代不丢）
 _DEFAULT_SCALE_THRESHOLDS = (60, 150)
@@ -209,6 +223,11 @@ def extract_summary_anchor(old_summary_text: str) -> str:
     Sections**：..."）也是同样格式，二次锚定时能被再次提取（累积有界，
     不翻倍）。
 
+    同名段取**后出现**的：锚定头在摘要最前、LLM 本次新写的段在后——
+    anchor_note 明确指示"专注新增内容"，后出现的才是最新内容；取先
+    出现（setdefault）会把 LLM 按指示写下的新增路径/报错静默丢掉，
+    锚定保真从此只剩旧信息。
+
     参数：
         old_summary_text: 旧摘要全文（placeholder 消息的 content）
 
@@ -224,7 +243,7 @@ def extract_summary_anchor(old_summary_text: str) -> str:
         title = m.group(1).strip()
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(old_summary_text)
-        sections.setdefault(title, old_summary_text[start:end].strip())
+        sections[title] = old_summary_text[start:end].strip()
     parts = []
     for t in _ANCHOR_SECTION_TITLES:
         body = sections.get(t, "")
@@ -383,7 +402,7 @@ async def _summarize_conversation(
             return _strip_analysis_draft(summary)
         except Exception as e:
             err_str = str(e).lower()
-            is_ptl = "prompt_too_long" in err_str or "context_length" in err_str
+            is_ptl = is_prompt_too_long_error(err_str)
             if is_ptl and retry < MAX_PTL_RETRIES:
                 # 用 tokenGap 精确算法计算该丢多少条
                 # _compute_ptl_drop_count 内部在错误消息解析不出数字时也会退回 20%
@@ -733,14 +752,8 @@ def _compute_ptl_drop_count(
 
     err_lower = error_msg.lower()
 
-    # 检测是不是「对话超长」类错误（不是的话走兜底）
-    is_ptl = (
-        "prompt_too_long" in err_lower
-        or "context_length" in err_lower
-        or "too long" in err_lower
-        or "maximum context" in err_lower
-    )
-    if not is_ptl:
+    # 检测是不是「对话超长」类错误（不是的话走兜底）——统一口径助手
+    if not is_prompt_too_long_error(err_lower):
         return max(1, len(messages) // 5)
 
     # 尝试提取 token 数——三种服务商的报错格式：

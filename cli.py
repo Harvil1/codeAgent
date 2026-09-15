@@ -3361,14 +3361,40 @@ def _switch_model(rt: RuntimeContext, args: str):
 
     # 再给 agent 重建 LLM 连接（用新模型的配置）
     try:
-        from agent.llm_client import create_llm_client
+        from agent.llm_client import create_llm_client, aclose_llm_client
         model_cfg = get_current_model_config()
         if not (model_cfg.get("api_key") or model_cfg.get("auth_token")):
             console.print(f"[red]{target} 未配置 api_key 或 auth_token[/red]")
             return
+        # 旧 client 留着最后关（先建新的再关旧的，中间零空窗）
+        _old_client = rt.agent.llm_client
+        _old_fb = getattr(rt.agent, "fallback_llm_client", None)
         rt.agent.llm_client = create_llm_client(model_cfg)
         rt.agent.model = model_cfg.get("model", target)
         rt.agent.model_format = model_cfg.get("format", "openai")
+        # fallback client 同步换新：不换的话主 client 挂了会静默切回旧模型
+        if getattr(rt.agent, "fallback_model", None):
+            _fb_cfg = dict(model_cfg)
+            _fb_cfg["model"] = rt.agent.fallback_model
+            try:
+                rt.agent.fallback_llm_client = create_llm_client(_fb_cfg)
+            except Exception as e:
+                logger.warning("重建 fallback client 失败（沿用旧的）: %s", e)
+        # aux router 的兜底 main_client 同步换新（顺带关掉归它所有的旧池）
+        _aux = getattr(rt.agent, "aux_llm_router", None)
+        if _aux is not None:
+            try:
+                _aux.swap_main_client(create_llm_client(model_cfg))
+            except Exception as e:
+                logger.warning("aux router 兜底 client 换新失败（沿用旧的）: %s", e)
+        # 最后关旧池：不关的话每次 /model 都漏一个绑着连接池的 client
+        for _oc in (_old_client, _old_fb):
+            if _oc is not None and _oc is not rt.agent.llm_client:
+                try:
+                    from agent.loop_host import loop_host
+                    loop_host.run_async(aclose_llm_client(_oc), timeout=10)
+                except Exception as e:
+                    logger.warning("关闭旧模型 client 失败（忽略）: %s", e)
         console.print(f"[green][已切换到 {target}（{model_cfg.get('model')}）][/green]")
 
         # === Hooks: CONFIG_CHANGE（配置变更事件——这里是模型切换）===

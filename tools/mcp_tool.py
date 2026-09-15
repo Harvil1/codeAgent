@@ -97,15 +97,17 @@ def register_mcp_tools(manager: MCPManager = None, servers: list = None) -> int:
             logger.warning("注册 MCP 工具 %s 失败: %s", full_name, e)
 
     # 给每个连着的 server 追加 resources（资源清单）协议工具，
-    # 命名对齐 mcp__<server>__<tool> 动态模式，check_fn 用同款 per-server 门控
-    count += _register_resource_tools(manager)
+    # 命名对齐 mcp__<server>__<tool> 动态模式，check_fn 用同款 per-server 门控。
+    # servers 过滤同样要带上——内联 spawn 场景只该暴露声明的子集，
+    # 这里给所有 server 无条件注册会让过滤形同虚设
+    count += _register_resource_tools(manager, servers=servers)
 
     if count:
         logger.info("已注册 %d 个 MCP 工具", count)
     return count
 
 
-def _register_resource_tools(manager: MCPManager) -> int:
+def _register_resource_tools(manager: MCPManager, servers: list = None) -> int:
     """给每个连着的 MCP server 配上"列资源/读资源"两个工具。
 
     MCP server 除了工具还能提供 resources（静态资源，比如一份文档）。
@@ -118,14 +120,18 @@ def _register_resource_tools(manager: MCPManager) -> int:
 
     参数：
         manager: MCP 管理器
+        servers: 只登记这些名字的 server（None = 全部；与
+                register_mcp_tools 的过滤同源）
 
     返回：
         成功登记的工具数量
     """
+    wanted = set(servers) if servers is not None else None
     with manager._lock:
         clients = {
             name: client for name, client in manager._clients.items()
             if client.connected
+            and (wanted is None or name in wanted)
         }
 
     registered = 0

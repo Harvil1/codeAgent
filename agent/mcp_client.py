@@ -482,8 +482,13 @@ class StdioTransport(MCPTransport):
 
     @property
     def is_connected(self) -> bool:
-        """还连着吗：握手成功过 且 子进程还活着。"""
-        return self._connected and self.process is not None
+        """还连着吗：握手成功过 且 子进程真活着（poll() 确认）。
+
+        只查 process is not None 会漏判崩溃：进程死了但句柄还在，
+        check_fn 照样放行、工具继续发给 LLM，直到调用才报错。"""
+        if not self._connected or self.process is None:
+            return False
+        return self.process.poll() is None
 
 
 # ---------------------------------------------------------------------------
@@ -1556,6 +1561,16 @@ class MCPManager:
         )
         client.connect()
         with self._lock:
+            # 并发竞态兜底：锁外 connect 期间另一个线程可能已把同名连接
+            # 写进来（各自起了一个子进程）。后到者认输——关掉自己刚拉的
+            # 连接复用先到者的，否则被覆盖那个的 stdio 子进程漂着没人管
+            winner = self._clients.get(name)
+            if winner is not None and winner is not client and winner.connected:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return winner
             self._clients[name] = client
         return client
 

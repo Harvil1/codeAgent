@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
-        "管理持久化记忆（跨会话保存）。每条记忆是一个独立文件，含 frontmatter + body。\n"
+        "管理持久化记忆（跨会话保存）。记忆按主题存进 .memory/{topic}.jsonl，"
+        "一条一行 JSON；MEMORY.md 是自动生成的索引。\n"
         "写入立即落盘，但索引下次会话才注入到 system prompt（保护 prompt cache）。\n\n"
         "action:\n"
         "  - save: 创建或更新记忆（必需 name/description/type；同 topic 同 name 自动更新）\n"

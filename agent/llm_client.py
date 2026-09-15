@@ -281,8 +281,15 @@ class OpenAICompatClient(LLMClient):
         model: str,
         *,
         stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
+        request_timeout: float = None,
     ):
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # request_timeout：单次 HTTP 请求的超时秒数（None = SDK 默认 600s）。
+        # 看门狗只护流式，非流式挂死全靠这里兜底
+        self._request_timeout = request_timeout
+        _client_kwargs = {"base_url": base_url, "api_key": api_key}
+        if request_timeout is not None:
+            _client_kwargs["timeout"] = request_timeout
+        self.client = AsyncOpenAI(**_client_kwargs)
         self.model = model
         self.base_url = base_url
         # 把密钥自己存一份：SDK 不保证让你读回
@@ -307,7 +314,10 @@ class OpenAICompatClient(LLMClient):
                 pass
         except Exception:
             pass
-        self.client = AsyncOpenAI(base_url=self.base_url, api_key=self._api_key)
+        _client_kwargs = {"base_url": self.base_url, "api_key": self._api_key}
+        if self._request_timeout is not None:
+            _client_kwargs["timeout"] = self._request_timeout
+        self.client = AsyncOpenAI(**_client_kwargs)
         # 换池也留栈：幻影关池排查线索（谁在什么路径上 reset 的）
         logger.info("reset_client 已换池（%s）", self.model, stack_info=True)
 
@@ -476,6 +486,7 @@ class AnthropicClient(LLMClient):
         auth_token: str = None,
         effort_level: str = None,
         stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
+        request_timeout: float = None,
     ):
         """创建 Anthropic 异步 client。
 
@@ -507,6 +518,10 @@ class AnthropicClient(LLMClient):
             kwargs["api_key"] = api_key
         else:
             raise ValueError("AnthropicClient 需要 api_key 或 auth_token")
+        # 非流式请求超时（None = SDK 默认；看门狗只护流式）
+        self._request_timeout = request_timeout
+        if request_timeout is not None:
+            kwargs["timeout"] = request_timeout
         self.client = AsyncAnthropic(**kwargs)
         self.model = model
         self.effort_level = (effort_level or "").lower() or None
@@ -526,7 +541,10 @@ class AnthropicClient(LLMClient):
             try:
                 loop = _aio.get_running_loop()
                 if loop is not None:
-                    loop.create_task(self.client.close())  # noqa
+                    # 强引用必须自己存（与 OpenAI 版同款）：asyncio 对 task
+                    # 只持弱引用，没人引用的 fire-and-forget task 可能被
+                    # GC 中途蒸发——半关的池子状态更诡异
+                    self._old_close_task = loop.create_task(self.client.close())
             except RuntimeError:
                 pass
         except Exception:
@@ -540,6 +558,8 @@ class AnthropicClient(LLMClient):
             kwargs["auth_token"] = self._auth_token
         elif self._api_key:
             kwargs["api_key"] = self._api_key
+        if self._request_timeout is not None:
+            kwargs["timeout"] = self._request_timeout
         self.client = AsyncAnthropic(**kwargs)
 
     def close(self) -> None:
@@ -586,13 +606,15 @@ class AnthropicClient(LLMClient):
     # budget_tokens，而是用 output_config.effort 控制思考强度。
 
     def _build_thinking_config(self):
-        """返回 DeepSeek 思考模式的开关参数。
+        """返回思考模式的开关参数。
 
-        DeepSeek 默认开着思考模式；effort_level=low 时才显式关掉，
-        其余档位都保持开。
+        DeepSeek 默认开着思考模式；effort_level=low（或未设）时必须
+        **显式关**——发 None 只是"不表态"，服务商默认开着的话用户拿到
+        的还是思考模式。{"type": "disabled"} 是 Anthropic SDK 认可的
+        显式关法，其余档位显式开。
         """
         if not self.effort_level or self.effort_level == "low":
-            return None
+            return {"type": "disabled"}
         return {"type": "enabled"}
 
     def _build_output_config(self):
@@ -606,11 +628,20 @@ class AnthropicClient(LLMClient):
         effort_map = {"max": "max", "high": "high", "medium": "high"}
         return {"effort": effort_map.get(self.effort_level, "high")}
 
+    # OpenAI 风格参数名 → Anthropic 参数名（透传白名单，不认识的静默忽略）
+    _KWARG_ALIASES = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "stop": "stop_sequences",
+    }
+
     def _build_anthropic_kwargs(
         self,
         messages: list,
         tools: Optional[List[dict]],
         max_tokens: int,
+        extra_kwargs: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """拼装一次 Anthropic 请求的全部参数（流式和非流式共用）。
 
@@ -621,6 +652,9 @@ class AnthropicClient(LLMClient):
             messages：OpenAI 格式的消息列表
             tools：OpenAI 格式的工具清单（可为 None）
             max_tokens：本次回答的输出上限
+            extra_kwargs：调用方透传的采样参数（temperature/top_p 等，
+                按白名单映射后并入；不认识的键静默忽略——对照 OpenAI
+                路径的 **kwargs 全透传，这里至少不让常用参数无声蒸发）
 
         返回：可直接拆开传给 Anthropic SDK 的参数字典。
         """
@@ -641,6 +675,12 @@ class AnthropicClient(LLMClient):
         }
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
+        # 采样参数透传（白名单映射；值非 None 才带上）
+        if extra_kwargs:
+            for src, dst in self._KWARG_ALIASES.items():
+                val = extra_kwargs.get(src)
+                if val is not None:
+                    kwargs[dst] = val
 
         # 思考模式：DeepSeek 格式 = thinking 开关 + output_config 强度，两个参数
         thinking = self._build_thinking_config()
@@ -663,7 +703,9 @@ class AnthropicClient(LLMClient):
             **kwargs：可含 max_tokens（输出上限，默认 4096）
         """
         max_tokens = kwargs.get("max_tokens", 4096)
-        create_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
+        create_kwargs = self._build_anthropic_kwargs(
+            messages, tools, max_tokens, extra_kwargs=kwargs,
+        )
         response = await self.client.messages.create(**create_kwargs)
         return self._wrap_response(response)
 
@@ -676,7 +718,9 @@ class AnthropicClient(LLMClient):
             **kwargs：可含 max_tokens（默认 4096）
         """
         max_tokens = kwargs.get("max_tokens", 4096)
-        stream_kwargs = self._build_anthropic_kwargs(messages, tools, max_tokens)
+        stream_kwargs = self._build_anthropic_kwargs(
+            messages, tools, max_tokens, extra_kwargs=kwargs,
+        )
 
         # Anthropic 的流式把一次工具调用拆成很多碎片发过来，
         # 得准备几个「篮子」把每个调用的 id/名字/参数碎片攒齐
@@ -982,6 +1026,12 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
         idle_timeout = float(model_config.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT))
     except (TypeError, ValueError):
         idle_timeout = DEFAULT_STREAM_IDLE_TIMEOUT
+    # 非流式单请求超时（None = SDK 默认 600s；看门狗只护流式，这里补非流式）
+    try:
+        request_timeout = float(model_config.get("request_timeout")) \
+            if model_config.get("request_timeout") is not None else None
+    except (TypeError, ValueError):
+        request_timeout = None
 
     if fmt == "anthropic":
         # auth_token 给 DeepSeek 等兼容端点用（Bearer 认证那种）
@@ -994,12 +1044,14 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
             base_url=base_url,
             effort_level=effort_level or None,
             stream_idle_timeout=idle_timeout,
+            request_timeout=request_timeout,
         )
 
     # 没特别说明就走 OpenAI 兼容格式
     return OpenAICompatClient(
         base_url=base_url, api_key=api_key, model=model,
         stream_idle_timeout=idle_timeout,
+        request_timeout=request_timeout,
     )
 
 

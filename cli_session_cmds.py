@@ -370,6 +370,23 @@ def _auto_resume_last(rt: RuntimeContext):
         if s["id"] != rt.session_id and (s.get("message_count") or 0) > 0
     ]
     if not history:
+        # 索引滞后兜底：崩溃/强退后 index.json 的 message_count 可能滞后
+        # 到 0（去抖落盘没跑），真实非空的会话被误判成空——对最近的
+        # 几个"零计数"会话实读一次消息数核实（最多查 5 个，不扫全库）
+        _checked = 0
+        for s in sessions:
+            if s["id"] == rt.session_id or _checked >= 5:
+                continue
+            if (s.get("message_count") or 0) > 0:
+                continue
+            _checked += 1
+            try:
+                if len(rt.session_store.get_messages(s["id"])) > 0:
+                    history = [s]
+                    break
+            except Exception:
+                continue
+    if not history:
         console.print("[yellow]没有可恢复的历史会话，已开始新对话[/yellow]")
         return
 

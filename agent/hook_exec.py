@@ -796,9 +796,12 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
 
     base_prompt = hook.script.prompt or "判断以下事件是否允许，返回 allow/deny"
     # 安全填充：payload 缺字段就保留模板原样，不让整个 hook 挂掉
+    # 安全填充（与 run_prompt_hook 同款）：payload 缺字段保留 {field} 原样
+    # 继续渲染——裸 .format(**payload) 缺 key 直接 KeyError 抛穿，格式串
+    # 带 {a.b} 之类的属性访问还会 ValueError，整个 hook 挂掉
     try:
-        goal = base_prompt.format(**payload)
-    except (KeyError, IndexError):
+        goal = base_prompt.format_map(_SafeFormatDict(payload))
+    except Exception:
         goal = base_prompt
 
     full_goal = goal + f"\n\npayload: {json.dumps(payload, ensure_ascii=False)}"

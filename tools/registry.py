@@ -161,9 +161,24 @@ class ToolEntry:
 
 _CHECK_FN_TTL_SECONDS = 30.0
 _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0  # 失败宽限期：最近成功过之后的失败先当抖动看
+# 表大小上限：缓存以 check_fn 闭包为 key，而每次 register_mcp_tools（启动/
+# 插件连接/每次内联 MCP spawn）都造全新闭包——不封顶的话旧闭包的条目
+# 永久滞留，长会话多次 spawn 会缓慢泄漏
+_CHECK_FN_CACHE_LIMIT = 128
 _check_fn_cache: Dict[Callable, tuple] = {}  # {fn: (timestamp, result)}
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
+
+
+def _check_fn_cache_evict_locked() -> None:
+    """淘汰最老的缓存条目（调用前必须已持 _check_fn_cache_lock）。"""
+    if len(_check_fn_cache) > _CHECK_FN_CACHE_LIMIT:
+        oldest = next(iter(_check_fn_cache))
+        del _check_fn_cache[oldest]
+        _check_fn_last_good.pop(oldest, None)
+    if len(_check_fn_last_good) > _CHECK_FN_CACHE_LIMIT:
+        oldest = next(iter(_check_fn_last_good))
+        del _check_fn_last_good[oldest]
 
 
 def _check_fn_cached(fn: Callable) -> bool:
@@ -195,6 +210,7 @@ def _check_fn_cached(fn: Callable) -> bool:
         if value:
             _check_fn_last_good[fn] = now
             _check_fn_cache[fn] = (now, True)
+            _check_fn_cache_evict_locked()
             return True
 
         # 走到这里说明这次调用失败了。如果最近成功过，就当是偶发抖动：
@@ -204,6 +220,7 @@ def _check_fn_cached(fn: Callable) -> bool:
             return True  # 沿用上次的好结果，不缓存这次失败
 
         _check_fn_cache[fn] = (now, False)
+        _check_fn_cache_evict_locked()
         return False
 
 

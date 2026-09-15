@@ -10,6 +10,7 @@ worktree 也要归一到主仓库，避免同一仓库分出两个项目区）�
 """
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -98,8 +99,26 @@ def get_project_memory_dir(agent_home, base: Optional[str] = None) -> Path:
     - base：基准目录（None 时同 get_project_memory_key 的规则）
 
     返回：<agent_home>/.memory/projects/<分区键> 的 Path。
+
+    Windows 大小写归一：盘符大小写不同的两种进入方式（D:\\Foo 和 d:\\foo）
+    会算出两个键、裂成两个互不可见的项目区。这里在 win32 上把目录名折叠
+    成小写；若已存在大小写不同的老目录（历史遗留分区），沿用老目录——
+    读写不分家，比硬迁移安全。
     """
-    return (
-        Path(agent_home) / ".memory" / "projects"
-        / get_project_memory_key(base)
-    )
+    key = get_project_memory_key(base)
+    dir_path = Path(agent_home) / ".memory" / "projects" / key
+    if sys.platform == "win32":
+        folded = key.lower()
+        if folded != key:
+            projects_root = dir_path.parent
+            folded_dir = projects_root / folded
+            if folded_dir.exists():
+                return folded_dir
+            try:
+                for child in projects_root.iterdir():
+                    if child.is_dir() and child.name.lower() == folded:
+                        return child  # 大小写不同的老目录：沿用，防读写分家
+            except OSError:
+                pass
+            return folded_dir
+    return dir_path
