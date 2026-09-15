@@ -407,6 +407,9 @@ def _handle_task_create(args: dict, **kwargs) -> str:
         description=args.get("description", ""),
         blocked_by=args.get("blocked_by"),
         owner=args.get("owner"),
+        # 会话归属：任务库全局共享，记上出生会话——恢复/续接注入和
+        # 面板都按会话过滤，别的会话的残留任务不会串进本会话
+        session_id=kwargs.get("session_id", ""),
     )
 
     # 建完任务后触发 TASK_CREATED 钩子

@@ -635,7 +635,12 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
-    _cc_state = {"t": 0.0}   # Ctrl+C 双击检测器的心跳本
+    # Ctrl+C 状态本：t=双击窗口计时；int=本回合是否已请求过中断。
+    # 关键语义：中断请求已发出后再按 Ctrl+C = 强退（不看 2 秒窗口）——
+    # 中断是商量式的（正在烧的 LLM 调用要等它落地），用户看着屏幕没变
+    # 会再按；窗口计时的"第二击"和用户直觉的"第二击"对不上，就出现
+    # 连按三下才退的现象
+    _cc_state = {"t": 0.0, "int": False}
 
     @kb.add("enter")
     def _submit(event):
@@ -730,10 +735,11 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
             _tighten_next_render(event.app)
             return
         if interrupt_fn is not None and interrupt_fn():
-            # 回合进行中：第一击中断本轮；2 秒内第二击强制退出一切
-            #（子代理/后台任务/所有线程——交给 cli.py 的 force_exit_fn）
-            if is_double_press(_cc_state, time.monotonic()) \
-                    and force_exit_fn is not None:
+            # 回合进行中：第一击中断本轮；之后的再击（不再看时间窗，
+            # 中断请求还挂着就说明上一击没把回合送走）强制退出一切
+            already_int = _cc_state["int"]
+            _cc_state["int"] = True
+            if already_int and force_exit_fn is not None:
                 force_exit_fn()
             else:
                 from cli_ui import console
@@ -742,6 +748,8 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
                     "再按一次 Ctrl+C 强制退出所有任务[/yellow]"
                 )
             return
+        # 空闲（回合已收）：清中断标记——下一回合的第一击仍是"中断"
+        _cc_state["int"] = False
         if eof_sentinel is not None and input_queue is not None:
             input_queue.put(eof_sentinel)   # 空闲空框：走统一退出通道
 

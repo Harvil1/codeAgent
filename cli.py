@@ -454,6 +454,12 @@ class RuntimeContext:
                 model=self.config["model"]["name"],
                 provider=self.config["model"]["provider"],
             )
+        # 任务面板的会话过滤域（任务库全局共享，面板只认本会话的）
+        try:
+            import cli_live
+            cli_live.set_task_scope(self.session_id)
+        except Exception:
+            pass
 
         # Checkpoint：文件快照/回滚（按会话隔离）
         try:
@@ -1031,6 +1037,12 @@ class RuntimeContext:
                 provider=self.config["model"]["provider"],
             )
             self.agent.session_id = self.session_id
+        # 任务面板过滤域跟随新会话
+        try:
+            import cli_live
+            cli_live.set_task_scope(self.session_id)
+        except Exception:
+            pass
         # checkpoint 管理器重建（跟 resume_session 的做法对齐）
         try:
             from agent.checkpoint import CheckpointManager
@@ -1127,6 +1139,12 @@ class RuntimeContext:
         # _timestamp + 无损压缩前移」的预热结果装回对话历史
         self.session_id = session_id
         self.agent.session_id = session_id
+        # 任务面板过滤域切到恢复的会话（待续清单也按它取）
+        try:
+            import cli_live
+            cli_live.set_task_scope(session_id)
+        except Exception:
+            pass
         self.agent.conversation_history = _resume_warmup(self, conv)
         self.agent.invalidate_system_prompt()
         # STOP hook 续命计数按会话算——恢复的是"别的会话"，额度重新起算
@@ -2073,9 +2091,14 @@ def _inject_task_recovery(rt) -> list:
     try:
         from agent.task_store import get_task_store
         store = get_task_store(rt.home)
+        _sid = getattr(rt, "session_id", "") or ""
         rows = [
             t for t in store.list_all()
             if t.get("status") not in ("completed", "deleted")
+            # 只认本会话的任务：任务库全局共享，别的会话/项目的残留
+            # 任务注入进来就是"冒出第二份任务清单"（无归属的老任务
+            # 说不清属于谁，同样不注入，仍可用 task_list 工具查全局）
+            and t.get("session_id", "") == _sid
         ]
         for t in rows[:30]:
             mark = {"pending": "□", "in_progress": "■",

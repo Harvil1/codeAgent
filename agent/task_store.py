@@ -102,6 +102,7 @@ class TaskStore:
         description: str = "",
         blocked_by: Optional[List[str]] = None,
         owner: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> dict:
         """新建一个任务并落盘，初始状态是 pending（待办）。
 
@@ -121,6 +122,10 @@ class TaskStore:
             "status": "pending",
             "owner": owner,
             "blocked_by": list(blocked_by or []),
+            # 会话归属：任务库是全局单仓库，不归属会话的话——恢复/续接
+            # 注入会把别的会话的残留任务也刷进来（用户视角"冒出两份任务
+            # 清单"），面板也会串台
+            "session_id": session_id or "",
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
             "last_heartbeat_at": None,

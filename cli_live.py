@@ -409,20 +409,40 @@ def agent_tools_count(key) -> int:
 # 任务清单黑板
 # ---------------------------------------------------------------------------
 
+# 任务面板的会话过滤域：None=不过滤（测试/无 CLI）；否则只显示归属该
+# 会话的任务。任务库是全局单仓库——不过滤的话别的会话/项目的残留任务
+# 会串进本会话的面板和恢复注入（用户视角"冒出两份任务清单"）。
+_task_scope: "str | None" = None
+
+
+def set_task_scope(session_id) -> None:
+    """设置任务面板的会话过滤域（建会话/换会话/恢复会话时调）。"""
+    global _task_scope
+    try:
+        with _lock:
+            _task_scope = str(session_id) if session_id else None
+    except Exception:
+        pass
+
+
 def refresh_tasks() -> None:
-    """从 task_store 整表重拉任务快照（task 工具事件来了就调一次）。
+    """从 task_store 重拉任务快照（task 工具事件来了就调一次）。
 
     只留 pending/in_progress/completed/blocked 四类（deleted 剔除），
-    顺序按 store 现有顺序。拉不到就保持原样（fail-open）。
+    顺序按 store 现有顺序；设了会话过滤域（set_task_scope）就只拉
+    归属该会话的任务。拉不到就保持原样（fail-open）。
     """
     global _tasks, _tasks_touched
     try:
         from agent.task_store import get_task_store
         store = get_task_store(None)
+        with _lock:
+            scope = _task_scope
         rows = [
             {"subject": t.get("subject", ""), "status": t.get("status", "")}
             for t in store.list_all()
             if t.get("status") not in ("deleted",)
+            and (scope is None or t.get("session_id") == scope)
         ]
         with _lock:
             _tasks = rows
