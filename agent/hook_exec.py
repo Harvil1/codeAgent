@@ -692,9 +692,32 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         '返回 JSON：{"permissionDecision": "allow"|"deny", "reason": "..."}'
     )
 
+    # chat_completions 是 async 的（aux_llm 公开契约：跨线程同步等结果一律
+    # 走 loop_host.run_async）——本函数是同步函数，在钩子的 worker 线程里跑
+    # （pre_tool_use 经 model_tools 的 asyncio.to_thread 进来），直接调
+    # coroutine 只会拿到协程对象（判空/类型检查全空转，hook 永远不生效）。
+    # 防死锁保险：万一在宿主循环线程里被同步调用（自己等自己），fail-open
+    # 放行并大声告警——宁可跳过评估也不能把事件循环冻死。
     try:
-        resp = router.chat_completions(
-            messages=[{"role": "user", "content": full_prompt}],
+        import asyncio as _aio
+        _aio.get_running_loop()
+        logger.warning(
+            "prompt hook %s 跳过：在事件循环线程内无法同步等待 LLM（防死锁）",
+            hook.name,
+        )
+        return None
+    except RuntimeError:
+        pass  # 当前线程没有在跑的事件循环——可以安全阻塞等
+
+    try:
+        from agent.loop_host import loop_host
+        resp = loop_host.run_async(
+            router.chat_completions(
+                messages=[{"role": "user", "content": full_prompt}],
+            ),
+            # hook 评估可能从后台线程发起、跨回合边界才返回——豁免回合栅栏
+            #（同 reflection 的取法），防被回合收尾当遗留误杀
+            exempt_from_fence=True,
         )
     except Exception as e:
         logger.warning("prompt hook %s LLM 调用失败: %s", hook.name, e)
@@ -703,16 +726,22 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
     if not resp:
         return None
 
-    # 响应格式不保证统一：可能是纯字符串，也可能是 OpenAI 风格的 dict
-    text = resp if isinstance(resp, str) else ""
-    if isinstance(resp, dict):
+    # 响应格式不保证统一：可能是纯字符串 / OpenAI 风格的 dict / 响应对象
+    text = ""
+    if isinstance(resp, str):
+        text = resp
+    elif isinstance(resp, dict):
         # OpenAI 风格结构：{choices: [{message: {content: "..."}}]}，取正文
         try:
             text = resp["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             text = json.dumps(resp, ensure_ascii=False)
-    elif hasattr(resp, "content"):
-        text = getattr(resp, "content", "")
+    else:
+        # 响应对象（正常返回形态）：choices[0].message.content
+        try:
+            text = resp.choices[0].message.content
+        except (AttributeError, IndexError, TypeError):
+            text = ""
 
     try:
         import re

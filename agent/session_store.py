@@ -416,9 +416,25 @@ class SessionStore:
             line_obj["pinned"] = pinned
         with self._lock:
             # 往 .jsonl 尾部追加一行（单行小写入，在 POSIX 上小于
-            # PIPE_BUF 时天然原子，不会被别的进程写穿插）
-            with self._session_file(session_id).open("a", encoding="utf-8") as f:
-                f.write(json.dumps(line_obj, ensure_ascii=False) + "\n")
+            # PIPE_BUF 时天然原子，不会被别的进程写穿插）。
+            # 半行修补：上次进程在写入窗口被硬杀（强退的 os._exit 真实存在）
+            # 可能留下**没有换行结尾的半行**——不补的话本次的完整行会粘在
+            # 半行后面，读取端按行解析时两条消息一起变非法 JSON 被丢。
+            # 追加前看一眼文件尾：不是 \n 就先补一个（把"永久丢两条"
+            # 降级成"只丢崩溃那半条"，且粘行不再发生）。
+            # 用 ab+（二进制追加+可读）：append 模式写恒在文件尾，读要走 seek。
+            _line_bytes = (
+                json.dumps(line_obj, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            with self._session_file(session_id).open("ab+") as f:
+                f.seek(0, 2)  # 到底
+                _size = f.tell()
+                _prefix = b""
+                if _size:
+                    f.seek(_size - 1)
+                    if f.read(1) != b"\n":
+                        _prefix = b"\n"
+                f.write(_prefix + _line_bytes)
             # 写完必须主动踢掉消息缓存——mtime 精度只有 ~15ms，
             # 同一窗口内连续 append 时 mtime 可能没变，缓存会误判"文件
             # 没变"而漏掉刚写的消息（回归用例 test_fork_session_does_not_mutate_source 盯着）

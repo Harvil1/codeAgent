@@ -165,6 +165,22 @@ def _extract_anthropic_usage(usage_obj) -> Optional[dict]:
     }
 
 
+def _anthropic_finish_reason(stop_reason) -> str:
+    """把 Anthropic 的 stop_reason 翻译成 OpenAI 语义的 finish_reason。
+
+    两家方言不同：Anthropic 用 "max_tokens" 表示输出被截断（OpenAI 叫
+    "length"）、"tool_use" 表示要调工具（OpenAI 叫 "tool_calls"）。
+    不翻译的话，上层的 detect_length_finish / max_tokens 升级重试 /
+    续写恢复整条截断救援链路都认不出来——截断回答会被当正常完成
+    直接交付。
+    """
+    if stop_reason == "max_tokens":
+        return "length"
+    if stop_reason == "tool_use":
+        return "tool_calls"
+    return "stop"
+
+
 # ---------------------------------------------------------------------------
 # 基类
 # ---------------------------------------------------------------------------
@@ -426,6 +442,11 @@ class OpenAICompatClient(LLMClient):
                 "tool_calls": list(delta.tool_calls or []),
                 "finish_reason": chunk.choices[0].finish_reason,
                 "usage": usage_dict,
+                # DeepSeek 思考内容的流式分片（SDK extra 字段，标准 OpenAI
+                # 模型没有此属性——getattr 兜 None）。不透传的话上层
+                # llm_streaming 永远拿不到思考内容：UI 思考框、纯思考
+                # 截断检测、思考兜底回复全失效
+                "reasoning_content": getattr(delta, "reasoning_content", None),
             }
 
 
@@ -728,10 +749,16 @@ class AnthropicClient(LLMClient):
                 if getattr(block, "type", "") == "thinking":
                     thinking_text += getattr(block, "thinking", "")
                     thinking_sig = getattr(block, "signature", "") or thinking_sig
+            # stop_reason 要翻译成 OpenAI 语义再上报（max_tokens→length）：
+            # 硬编码 "stop" 会把截断当正常完成，上层升级重试/续写全认不出
+            _finish = _anthropic_finish_reason(
+                getattr(final_message, "stop_reason", None))
+            if tool_calls_out and _finish == "stop":
+                _finish = "tool_calls"  # 有工具调用但 stop_reason 缺失时的兜底
             yield {
                 "content": "",
                 "tool_calls": tool_calls_out,
-                "finish_reason": "tool_calls" if tool_calls_out else "stop",
+                "finish_reason": _finish,
                 "usage": usage_dict,
                 "reasoning_content": thinking_text or None,
                 "thinking_signature": thinking_sig or None,
@@ -904,7 +931,14 @@ class AnthropicClient(LLMClient):
         )
 
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=message)],
+            choices=[SimpleNamespace(
+                message=message,
+                # finish_reason 必须翻译带上——上层 detect_length_finish
+                # 靠 getattr(choice, "finish_reason") 判截断，缺这个字段
+                # Anthropic 路径的截断救援（升级/续写）整条失效
+                finish_reason=_anthropic_finish_reason(
+                    getattr(anthropic_response, "stop_reason", None)),
+            )],
             usage=SimpleNamespace(
                 prompt_tokens=getattr(anthropic_response.usage, "input_tokens", 0),
                 completion_tokens=getattr(anthropic_response.usage, "output_tokens", 0),

@@ -26,8 +26,10 @@ def _check_mcp_connected() -> bool:
         from agent.mcp_client import get_mcp_manager
         mgr = get_mcp_manager()
         with mgr._lock:
-            # 注意：MCPClient 的状态属性叫 is_connected，不是 connected
-            return any(c.is_connected for c in mgr._clients.values())
+            # 注意：MCPClient 的状态属性叫 connected（is_connected 是
+            # transport 层的属性），写错属性名会 AttributeError 被
+            # 下面的 except 吞成 False——工具就对 LLM 永久隐身了
+            return any(c.connected for c in mgr._clients.values())
     except Exception:
         return False
 

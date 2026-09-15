@@ -245,6 +245,7 @@ class RuntimeContext:
         self.skill_commands = {}
         self.bundle_commands = {}  # 技能束斜杠命令：一个命令连发多个技能
         self.quit_requested = False  # 用户敲了 /quit 的标志（走正常关机流程，不是硬杀）
+        self._shutdown_done = False  # 关机只跑一次的幂等标志（atexit + 显式调用双通道）
         self.checkpoint_mgr = None  # Checkpoint 管理器：文件快照/回滚
         # === Hooks 系统（事件钩子——特定事件发生时自动执行用户配置的动作）===
         from agent.hooks import HookRegistry
@@ -389,8 +390,10 @@ class RuntimeContext:
             set_default_checker(PermissionChecker(
                 approval_callback=_make_approval_callback(
                     # 审批时按 e 可以让辅助模型解释命令。
-                    # 延迟获取——aux_llm_router 要到更晚才构造好
-                    aux_provider=lambda: getattr(self, "aux_llm_router", None),
+                    # 延迟获取——aux router 挂在 agent 身上（项目约定：
+                    # rt 上不放 aux 字段），审批发生时 agent 早已建好
+                    aux_provider=lambda: getattr(
+                        getattr(self, "agent", None), "aux_llm_router", None),
                 ),
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
@@ -1047,6 +1050,11 @@ class RuntimeContext:
         a._pending_tool_batch_summary = None
         a._queued_cli_commands = []
         a._surfaced_memory_ids = set()
+        # STOP hook 续命计数按会话算（"本会话最多续命几次"）——agent 侧和
+        # registry 侧两份都要清，否则上个会话耗掉的额度让新会话静默哑火
+        a._stop_fire_count = 0
+        if self.hooks_registry is not None:
+            self.hooks_registry.reset_stop_budget()
         try:
             from agent.memory_injection import reset_injection_cache
             reset_injection_cache()
@@ -1105,6 +1113,11 @@ class RuntimeContext:
         self.agent.session_id = session_id
         self.agent.conversation_history = _resume_warmup(self, conv)
         self.agent.invalidate_system_prompt()
+        # STOP hook 续命计数按会话算——恢复的是"别的会话"，额度重新起算
+        #（agent 侧 + registry 侧两份都清，与 new_session 同款）
+        self.agent._stop_fire_count = 0
+        if self.hooks_registry is not None:
+            self.hooks_registry.reset_stop_budget()
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
 
@@ -1156,6 +1169,12 @@ class RuntimeContext:
 
         参数：无。返回：无（每一步都容错，单步失败不影响其余清理）。
         """
+        # 幂等闸：shutdown 走两条路（run_interactive 收尾显式调 + atexit 兜底），
+        # 不拦的话 SESSION_END 钩子正常退出会跑两遍（通知/审计类 hook 双份副作用）
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
+
         # === Hooks: SESSION_END（在资源清理前触发，此时会话上下文还在）===
         self._fire_session_end()
 
@@ -1262,7 +1281,17 @@ def _make_approval_callback(aux_provider=None):
             return
         try:
             import asyncio as _aio
-            resp = _aio.run(aux.chat_completions([{"role": "user", "content": (
+            # 防死锁保险：审批发生在事件循环线程内时不能同步等（自己等自己）
+            _aio.get_running_loop()
+            console.print("[dim]（解释器不可用——事件循环线程内无法等待 LLM）[/dim]")
+            return
+        except RuntimeError:
+            pass  # 普通工作线程，可以安全阻塞等
+        try:
+            # chat_completions 是 async 且连接池绑常驻宿主循环——
+            # asyncio.run 另起炉灶会踩跨循环错误，统一走 loop_host
+            from agent.loop_host import loop_host
+            resp = loop_host.run_async(aux.chat_completions([{"role": "user", "content": (
                 "用中文解释下面这条 shell 命令做什么。输出两行：\n"
                 "第 1 行：用途（一句话）\n"
                 "第 2 行：风险等级：LOW / MEDIUM / HIGH + 一句话理由\n\n"

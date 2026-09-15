@@ -893,10 +893,13 @@ async def llm_compact(
     返回：(新消息列表, 是否真的压缩了)。
     """
     system, conv = _split_system(messages)
+    # 边界口径必须和调用方（compress_if_needed）的触发判定一致（>=）：
+    # 外层 >= 内层 > 的话，恰好等于阈值时会「外层放行落 START + 强制快照 →
+    # 内层拒绝」每轮空转——悬挂 START 堆会话库、快照配额被同状态刷满
     if precomputed_tokens is not None:
-        over_token = precomputed_tokens > token_threshold
+        over_token = precomputed_tokens >= token_threshold
     else:
-        over_token = estimate_message_tokens(messages) > token_threshold
+        over_token = estimate_message_tokens(messages) >= token_threshold
     if not over_token:  # 压不压只看 token，不看消息条数
         return messages, False
 

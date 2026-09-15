@@ -306,11 +306,26 @@ class MemoryStore:
         - topic：主题名
         - zone_dir：分区目录（None=全局区，否则读指定项目区）
         """
+        rows, _read_ok = self._load_topic_rows(topic, zone_dir=zone_dir)
+        return rows
+
+    def _load_topic_rows(
+        self, topic: str, *, zone_dir: Optional[Path] = None,
+    ) -> Tuple[List[dict], bool]:
+        """_read_topic_rows 的"带成败标志"版：返回 (行列表, 是否读成功)。
+
+        为什么要成败标志：追加路径（_append_topic_row）在文件读失败（GBK/
+        IO 错）时必须知道"这份 rows 是残缺的"——残缺列表一旦进了缓存，
+        后续 update/delete 按缓存整文件重写会把没读进来的旧行物理抹掉。
+
+        返回：(rows, read_ok)。read_ok=False 表示文件存在但整体读失败
+        （此时 rows 一定是空列表且不写缓存）；单行损坏跳过不算读失败。
+        """
         key = self._cache_key(zone_dir, topic)
         mtime = self._topic_mtime(topic, zone_dir=zone_dir)
         cached = self._rows_cache.get(key)
         if cached is not None and cached[0] == mtime:
-            return cached[1]
+            return cached[1], True
         path = self._topic_path(topic, zone_dir=zone_dir)
         rows: List[dict] = []
         if path.exists():
@@ -336,13 +351,13 @@ class MemoryStore:
                 # 整文件读失败：直接返回空列表，绝不写缓存！
                 # mtime 没变，假"空缓存"会一直被当成新鲜数据——之后该主题任何
                 # update/delete 按空缓存整文件重写，等于把整个主题物理清空
-                return rows
+                return rows, False
             except Exception as e:
                 logger.warning("读 topic 文件失败 %s: %s", path, e)
                 # 同上：读失败不写缓存（防投毒），下次读再试盘
-                return rows
+                return rows, False
         self._rows_cache[key] = (mtime, rows)
-        return rows
+        return rows, True
 
     def _write_topic_rows(
         self, topic: str, rows: List[dict], *, zone_dir: Optional[Path] = None,
@@ -381,7 +396,7 @@ class MemoryStore:
         """
         if zone_dir is not None:
             zone_dir.mkdir(parents=True, exist_ok=True)
-        rows = self._read_topic_rows(topic, zone_dir=zone_dir)  # 先读一次，保证缓存已加载
+        rows, read_ok = self._load_topic_rows(topic, zone_dir=zone_dir)
         path = self._topic_path(topic, zone_dir=zone_dir)
         # 先落盘：成功之后才动内存（rows 追加 + 缓存刷新）；失败抛出去，内存一行未动
         try:
@@ -390,6 +405,14 @@ class MemoryStore:
         except Exception as e:
             logger.error("append topic 行失败 %s: %s（向上抛，缓存未动）", path, e)
             raise
+        if not read_ok:
+            # 旧文件读失败（GBK/IO 错）：磁盘上旧行还在但读不进来，这里的
+            # rows 是残缺的（只有空列表）——绝不能 append 新行后写进缓存：
+            # 缓存会谎称"该主题只有这 1 行"，之后任何 update/delete 按缓存
+            # 整文件重写，旧行被物理抹掉（整个主题清库）。新行已落盘不丢；
+            # 缓存跳过（不写也不留旧的），下次读取重试盘、修好文件前查重
+            # 暂时失明（宁可重复也不清库）。
+            return
         rows.append(row)
         key = self._cache_key(zone_dir, topic)
         self._rows_cache[key] = (self._topic_mtime(topic, zone_dir=zone_dir), rows)

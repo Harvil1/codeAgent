@@ -660,6 +660,15 @@ class HookRegistry:
                 logger.warning("hook %s 异常（视为 None）: %s", hook.name, e)
         return None
 
+    def reset_stop_budget(self) -> None:
+        """换新会话（/new、/resume）时清零 STOP 续命计数。
+
+        max_fires 的语义是「**本会话**最多续命几次」——不重置的话，
+        registry 是 RuntimeContext 级单例、跨会话存活，上个会话耗掉的
+        额度会让新会话的 STOP hook 静默哑火（连非续命类的副作用也不跑了）。
+        """
+        self._stop_fire_count = 0
+
     def _invoke_declarative_stop(self, hook, session_id):
         """跑一个声明式 stop hook。
 

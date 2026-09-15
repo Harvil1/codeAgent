@@ -65,7 +65,9 @@ async def call_llm_streaming(agent, *, messages, tools):
     tool_call_buffers: dict[int, dict] = {}
     final_usage = None
     finish_reason = "stop"
-    reasoning_content = None   # DeepSeek 的思考内容（下次带工具调用回传时要带上）
+    # DeepSeek 思考内容的分片篮子（下次带工具调用回传时要带上）——和
+    # _content_parts 同款攒法：思考是逐分片流出的，收尾 join 一次定稿
+    _reasoning_parts: list[str] = []
     thinking_signature = None
 
     # === 流式并发执行（只读的安全工具趁模型还在吐字先跑起来）===
@@ -172,7 +174,9 @@ async def call_llm_streaming(agent, *, messages, tools):
                 final_usage = delta["usage"]
             # DeepSeek 思考内容提取（后续带工具调用的请求要回传）
             if delta.get("reasoning_content"):
-                reasoning_content = delta["reasoning_content"]
+                # 攒进篮子而不是直接赋值——思考内容分多片流出，
+                # 赋值会把前面的分片全丢掉（只剩最后一片）
+                _reasoning_parts.append(delta["reasoning_content"])
                 # 思考流也通知回调（CLI 画暗色思考框用）。加法式：
                 # 没回调/回调不认识该类型时零行为变化。
                 if agent._stream_callback is not None:
@@ -228,6 +232,7 @@ async def call_llm_streaming(agent, *, messages, tools):
     # return，半截片段随函数一起扔掉），再补完最后一个工具的完整化 +
     # 收集预执行结果
     full_content = "".join(_content_parts)
+    reasoning_content = "".join(_reasoning_parts) or None
     if _executor is not None:
         try:
             if _last_seen_idx is not None and _last_seen_idx in tool_call_buffers:
