@@ -18,6 +18,7 @@ import logging
 import re
 import shutil
 import threading
+from contextlib import contextmanager
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +50,17 @@ def _is_project_type(mtype: str) -> bool:
     返回：属于项目分区类型返回 True，否则 False。
     """
     return mtype in _PROJECT_TYPES
+
+
+def norm_key(s: str) -> str:
+    """去重比较用的名字归一：抹掉所有空白 + casefold 折叠大小写。
+
+    只影响比较、不改存储原值——「用 uv 不用 pip」和「用uv不用pip」
+    算同一条记忆，防大小写/空白变体换身马甲就重复入库堆积。
+    （单一事实源：save 的 upsert 查重、reflection 的判重/推翻匹配
+    全走这里——各写各的会漂移成两种口径。）
+    """
+    return re.sub(r"\s+", "", s or "").casefold()
 
 
 @dataclass
@@ -119,18 +131,6 @@ def _parse_frontmatter(text: str) -> tuple[Optional[dict], str]:
     except yaml.YAMLError as e:
         logger.warning("frontmatter 解析失败: %s", e)
         return None, text
-
-
-def _format_frontmatter(meta: dict) -> str:
-    """把字典序列化成 frontmatter 文本（`---\\n...yaml...\\n---\\n`）。
-
-    和 `_parse_frontmatter` 是一对（一个拆一个装）。主要给测试用：造老格式的
-    .md 文件来测"老格式搬家到 jsonl"的逻辑，另外任何要写 frontmatter 的
-    工具脚本也能用。meta 是空字典时返回空串（不输出 frontmatter）。
-    """
-    if not meta:
-        return ""
-    return "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + "---\n"
 
 
 def validate_memory_dir(memory_dir, codeagent_home) -> Optional[str]:
@@ -212,7 +212,7 @@ class MemoryStore:
         # 惰性索引重建：写入时只做"索引脏了"标记，真要读索引时才重建
         # （每存一条就全量重扫重写的话，批量存 n 条是 n² 开销）。
         # 不改变语义：记忆本来就要等下次会话才注入（保护 prompt cache 的设计），
-        # 下次会话构造时会调 build_index_text 强制刷新索引。
+        # 下次会话构造时 __init__ 末尾的 _rebuild_index 会强制刷新索引。
         self._index_dirty = False
         # 记住上次重建索引用的项目键，
         # _ensure_index_fresh 靠它发现"切换了项目"——没有新写入也要重建索引。
@@ -229,6 +229,33 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # 主题文件读写（分区机制：全局区/项目区）
     # ------------------------------------------------------------------
+
+    def _xlock(self):
+        """跨进程写锁（.memory/.write.lock）。
+
+        线程锁只防本进程并发；团队 worker 各自是独立进程、手动跑的
+        curator CLI 也自建实例——它们写同一主题文件时线程锁完全不生效，
+        只剩 atomic rename 的"后写覆盖先写"（丢更新）。这把文件锁把
+        读-改-写的整个过程圈起来互斥。等锁超时照写（fail-open + 大声
+        警告），绝不因等锁把主流程卡死。
+
+        用法：with self._xlock(), self._lock: ...（文件锁在外层，
+        全项目统一顺序，不会死锁）
+        """
+        from agent.file_lock import exclusive_file_lock
+
+        @contextmanager
+        def _cm():
+            with exclusive_file_lock(
+                self._memory_dir / ".write.lock", timeout=5.0,
+            ) as got:
+                if not got:
+                    logger.warning(
+                        "记忆写锁等待超时（5s）——照写不阻塞，"
+                        "存在跨进程并发覆盖风险"
+                    )
+                yield
+        return _cm()
 
     @staticmethod
     def _cache_key(zone_dir: Optional[Path], topic: str) -> tuple:
@@ -827,12 +854,6 @@ class MemoryStore:
                 ):
                     self._rebuild_index()
 
-    def build_index_text(self) -> str:
-        """强制重建索引并返回截断版（启动时用）。"""
-        with self._lock:
-            self._rebuild_index()
-        return self.snapshot_for_prompt()
-
     # ------------------------------------------------------------------
     # 公开：读
     # ------------------------------------------------------------------
@@ -955,13 +976,16 @@ class MemoryStore:
                 f"记忆内容疑似含密钥（规则: {secret_hits[0]['rule']}），拒绝写入"
             )
         # 注意：save 里自己内联做查重/更新，避免嵌套拿锁（threading.Lock 不可重入，重复拿会自己锁死自己）
-        with self._lock:
+        with self._xlock(), self._lock:
             # 按类型路由到对应分区
             zone_dir = self._resolve_zone(type)
             rows = self._read_topic_rows(topic, zone_dir=zone_dir)
+            # 查重走归一比较（norm_key）：精确 == 的话，「用 uv」和「用uv」
+            # 会被当两条记忆各自入库堆积——和 reflection 的判重口径必须一致
             existing = next(
                 (r for r in rows
-                 if r.get("name") == name and r.get("state", "active") != "archived"),
+                 if norm_key(r.get("name", "")) == norm_key(name)
+                 and r.get("state", "active") != "archived"),
                 None,
             )
             if existing is not None:
@@ -1052,7 +1076,7 @@ class MemoryStore:
             raise ValueError(
                 f"更新内容疑似含密钥（规则: {secret_hits[0]['rule']}），拒绝写入"
             )
-        with self._lock:
+        with self._xlock(), self._lock:
             topic, uid = _split_entry_id(memory_id)
             located = self._locate_entry(topic, uid)
             if located is None:
@@ -1103,7 +1127,7 @@ class MemoryStore:
         - memory_id：完整 id
         返回：删成功 True，找不到 False。
         """
-        with self._lock:
+        with self._xlock(), self._lock:
             topic, uid = _split_entry_id(memory_id)
             located = self._locate_entry(topic, uid)
             if located is None:
@@ -1124,51 +1148,6 @@ class MemoryStore:
             self._write_topic_rows(topic, rows, zone_dir=zone_dir)
             self._mark_index_dirty()
             return True
-
-    def clear_all(self) -> int:
-        """软删除全部记忆（主题文件整个挪进 .archive，可恢复）。返回删掉的条数。
-
-        同时清全局区和当前项目区。
-        """
-        with self._lock:
-            total = 0
-            # 1. 先清全局区
-            total += self._clear_zone(None)
-            # 2. 再清当前项目区
-            zone = self._current_project_zone()
-            if zone is not None and zone.exists():
-                total += self._clear_zone(zone)
-            self._mark_index_dirty()
-            return total
-
-    def _clear_zone(self, zone_dir: Optional[Path]) -> int:
-        """清空指定分区的全部主题文件（软删除挪到 .archive）。返回清掉的条数。
-
-        参数：
-        - zone_dir：分区目录（None=全局区）
-        """
-        base = self._zone_base_dir(zone_dir)
-        topics = sorted(p.stem for p in base.glob("*.jsonl"))
-        total = 0
-        for topic in topics:
-            rows = self._read_topic_rows(topic, zone_dir=zone_dir)
-            total += len(rows)
-            try:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                archive_dir = self._home / ".archive" / f"memory-{ts}"
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                src = self._topic_path(topic, zone_dir=zone_dir)
-                dst = archive_dir / f"{topic}.jsonl"
-                # 防止覆盖同名的归档文件——重名就加序号
-                n = 1
-                while dst.exists():
-                    dst = archive_dir / f"{topic}-{n}.jsonl"
-                    n += 1
-                shutil.move(str(src), str(dst))
-            except Exception as e:
-                logger.warning("清空 topic %s 失败: %s", topic, e)
-                continue
-        return total
 
     # ------------------------------------------------------------------
     # 老格式搬家（一条记忆一个 .md → 主题 jsonl）
@@ -1218,10 +1197,6 @@ class MemoryStore:
     # 老接口兼容（给旧调用方垫的一层）
     # ------------------------------------------------------------------
 
-    def format_for_system_prompt(self, target: str) -> str:
-        """老接口兼容：直接返回索引（target 参数已废弃不用）。"""
-        return self.snapshot_for_prompt()
-
     def add(self, target: str, content: str) -> bool:
         """老接口兼容：相当于 save（target 当 type 用）。成功 True，失败 False。"""
         try:
@@ -1231,13 +1206,6 @@ class MemoryStore:
         except Exception as e:
             logger.warning("旧 add() 兼容失败: %s", e)
             return False
-
-    def modify(self, action: str, target: str, content: str, old_content: str = "") -> bool:
-        """老接口兼容：粗略映射到 save。只支持 add，其他 action 不再支持。"""
-        if action == "add":
-            return self.add(target, content)
-        logger.warning("旧 modify(action=%s) 不再支持，请用 memory 工具新 action", action)
-        return False
 
 
 def _parse_dt(value) -> datetime:

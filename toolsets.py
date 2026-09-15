@@ -240,10 +240,3 @@ def resolve_toolset(toolset_name: str) -> List[str]:
     # 去重（保持原有顺序；dict.fromkeys 是"按首次出现去重"的惯用写法）
     return list(dict.fromkeys(tools))
 
-
-def list_toolsets() -> List[str]:
-    """列出所有可用的工具集名。
-
-    返回：套餐名列表（供 UI 或配置校验用）。
-    """
-    return list(TOOLSETS.keys())

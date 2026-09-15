@@ -238,6 +238,13 @@ class StdioTransport(MCPTransport):
         self.process: Optional[subprocess.Popen] = None
         self._request_id = 0
         self._lock = threading.Lock()
+        # 请求-响应串行锁：send_request 要"写请求 → 等响应"全程持锁。
+        # 共享 _response_queue 里 id 不匹配的消息会被丢弃——两个线程并发
+        # 请求同一 server 时，A 会把 B 的响应当"过期响应"扔掉、B 干等到
+        # 超时。串行化后一次只有一个在途请求，配对永不误伤（与 HTTP 系
+        # transport 全程持锁的做法对齐）。独立于 _lock：send_notification
+        # 走 _lock 写 stdin，不该被别的请求的等待期堵住
+        self._request_lock = threading.Lock()
         self._connected = False
         # reader 线程相关
         self._response_queue: "queue.Queue" = queue.Queue()
@@ -389,43 +396,47 @@ class StdioTransport(MCPTransport):
         # 懒启动 reader 线程（第一次调用时起，之后复用）
         self._ensure_reader_started()
 
-        with self._lock:
-            self._request_id += 1
-            req_id = self._request_id
-            msg = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "method": method,
-                "params": params,
-            }
-            try:
-                self.process.stdin.write(json.dumps(msg) + "\n")
-                self.process.stdin.flush()
-            except (BrokenPipeError, OSError) as e:
-                raise RuntimeError(f"MCP stdio 写入失败: {e}")
+        # 写请求 → 等响应全程串行（_request_lock）：并发请求会互吃
+        # 队列里的响应（id 配不上就被丢，另一个请求干等到超时）
+        with self._request_lock:
+            with self._lock:
+                self._request_id += 1
+                req_id = self._request_id
+                msg = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "method": method,
+                    "params": params,
+                }
+                try:
+                    self.process.stdin.write(json.dumps(msg) + "\n")
+                    self.process.stdin.flush()
+                except (BrokenPipeError, OSError) as e:
+                    raise RuntimeError(f"MCP stdio 写入失败: {e}")
 
-        # 从队列里等响应（reader 线程已经把响应投进来了）
-        # 注意：必须在 _lock 锁外等——队列本身线程安全，但如果持着锁
-        # 阻塞等，reader 那边也拿不到写 stdin 要的同一把锁，就死锁了
-        while True:
-            try:
-                data = self._response_queue.get(
-                    timeout=self._response_timeout,
-                )
-            except queue.Empty:
-                raise RuntimeError(
-                    f"MCP stdio request 超时（{self._response_timeout}s）"
-                )
-            # 按 id 配对：队列里这条是不是我们这次请求的响应
-            if data.get("id") == req_id:
-                if "error" in data:
-                    err = data["error"]
-                    raise RuntimeError(
-                        f"MCP 错误 {err.get('code')}: {err.get('message')}"
+            # 从队列里等响应（reader 线程已经把响应投进来了）。
+            # 持着 _request_lock 等、不持 _lock：队列线程安全，
+            # reader 也不需要 _lock；持 _lock 等会堵死 send_notification
+            while True:
+                try:
+                    data = self._response_queue.get(
+                        timeout=self._response_timeout,
                     )
-                return data.get("result")
-            # id 对不上（多半是迟到的旧请求响应）→ 丢弃继续等
-            logger.debug("MCP 丢弃过期 response: id=%s", data.get("id"))
+                except queue.Empty:
+                    raise RuntimeError(
+                        f"MCP stdio request 超时（{self._response_timeout}s）"
+                    )
+                # 按 id 配对：队列里这条是不是我们这次请求的响应
+                if data.get("id") == req_id:
+                    if "error" in data:
+                        err = data["error"]
+                        raise RuntimeError(
+                            f"MCP 错误 {err.get('code')}: {err.get('message')}"
+                        )
+                    return data.get("result")
+                # id 对不上（多半是迟到的旧请求响应）→ 丢弃继续等。
+                # 串行化后正常不该出现；留着兜超时漏网的残响
+                logger.debug("MCP 丢弃过期 response: id=%s", data.get("id"))
 
     def send_notification(self, method: str, params: dict) -> None:
         """发一个不等回复的通知（fire-and-forget，写失败也只静默吞掉）。
@@ -1740,11 +1751,6 @@ def get_mcp_manager() -> MCPManager:
     return _mcp_manager
 
 
-def is_mcp_tool(name: str) -> bool:
-    """判断工具名是否是 MCP 工具（mcp__ 前缀）。"""
-    return name.startswith("mcp__")
-
-
 def collect_routing_hints(config_path=None) -> str:
     """从 .mcp.json 收集 keywords,生成给 system prompt 用的 routing hints 块。
 
@@ -1781,21 +1787,3 @@ def collect_routing_hints(config_path=None) -> str:
         "当用户消息涉及以下关键词时,优先用对应的 MCP server 工具:\n"
         + "\n".join(lines)
     )
-
-
-def filter_tool_name(
-    tool_name: str,
-    include: Optional[List[str]] = None,
-    exclude: Optional[List[str]] = None,
-) -> bool:
-    """判断单个工具是否应该保留。
-
-    include 优先：include 非空时，只有在 include 里才保留。
-    exclude：在 exclude 里的不保留。
-    两者都空时保留所有。
-    """
-    if include is not None:
-        return tool_name in include
-    if exclude:
-        return tool_name not in exclude
-    return True

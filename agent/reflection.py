@@ -274,12 +274,10 @@ def _normalize_insights(result: list) -> List[dict]:
 
 
 def _norm_key(s: str) -> str:
-    """去重比较用的名字归一：抹掉所有空白 + casefold 折叠大小写。
-
-    只影响比较、不改存储原值——「用 uv 不用 pip」和「用uv不用pip」
-    算同一条记忆，防大小写/空白变体换身马甲就重复入库堆积。
-    """
-    return re.sub(r"\s+", "", s or "").casefold()
+    """去重比较用的名字归一——单一事实源在 memory_store.norm_key
+    （save 的 upsert 查重同款），这里保留同名薄壳防两处口径漂移。"""
+    from agent.memory_store import norm_key
+    return norm_key(s)
 
 
 def apply_reflection(
@@ -346,13 +344,15 @@ def apply_reflection(
     # 阶段 2：处理 supersedes（注意：type 必须一致才允许替代；批内新写入里也要找）
     for ins, _ in written_records:
         supersedes = ins.get("supersedes")
-        if not supersedes or supersedes == ins["name"]:
+        # 匹配一律走归一比较：LLM 抄旧 name 带空白/大小写差异时，
+        # 精确 == 会让推翻机制静默失效（与判重同款纪律）
+        if not supersedes or _norm_key(supersedes) == _norm_key(ins["name"]):
             continue
         target_id = None
         target_body = ""
         # 先在旧记忆里找；必须 name + type 都匹配（同名不同类不算）
         for old_entry in existing:
-            if (old_entry.name == supersedes
+            if (_norm_key(old_entry.name) == _norm_key(supersedes)
                     and old_entry.type == ins["type"]):
                 target_id = old_entry.id
                 target_body = old_entry.body or ""
@@ -360,9 +360,9 @@ def apply_reflection(
         # 旧记忆里没有，再在本批刚写入的里找（同批之间也能推翻）
         if target_id is None:
             for other_ins, other_id in written_records:
-                if (other_ins["name"] == supersedes
+                if (_norm_key(other_ins["name"]) == _norm_key(supersedes)
                         and other_ins["type"] == ins["type"]
-                        and other_ins["name"] != ins["name"]):
+                        and _norm_key(other_ins["name"]) != _norm_key(ins["name"])):
                     target_id = other_id
                     target_body = other_ins.get("body", "")
                     break

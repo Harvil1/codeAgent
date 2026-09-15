@@ -213,9 +213,18 @@ def initialize_mcp(approval_callback=None) -> int:
         登记的工具数量（初始化失败返回 0）
     """
     manager = get_mcp_manager()
+    # 应用配置（feature flag 用）：sse/websocket transport 的开关在
+    # settings.json features 节——不传 app_config 的话 is_feature_enabled
+    # 拿到 None 按 fail-safe 恒 False，用户配置开了也连不上（内联 spawn
+    # 路径 delegate_child 就传了，这里是漏传不是设计）
+    try:
+        from agent.settings import load_settings
+        _app_cfg = load_settings()
+    except Exception:
+        _app_cfg = None
     try:
         # 用户级配置（用户直接控制，直接连）
-        manager.connect_all()
+        manager.connect_all(app_config=_app_cfg)
 
         # 项目级 .mcp.json 首连审批
         from agent.mcp_client import load_mcp_config, load_project_mcp_config
@@ -254,7 +263,7 @@ def initialize_mcp(approval_callback=None) -> int:
                     persist_project_mcp_approval(key)
                 approved_now[name] = cfg
             if approved_now:
-                manager.connect_all(approved_now)
+                manager.connect_all(approved_now, app_config=_app_cfg)
 
         # 项目级 agent .md 里内联声明的 MCP server 走同款首连审批
         # （威胁模型跟项目 .mcp.json 一样：clone 陌生 repo 可能带进恶意配置）
@@ -400,10 +409,16 @@ def connect_servers_and_register(servers: Dict[str, dict]) -> int:
         成功登记的工具数。单个 server 连不上只记日志跳过，不连累别的。
     """
     manager = get_mcp_manager()
+    # app_config 同样要带上（sse/ws flag）——与 initialize_mcp 主路径一致
+    try:
+        from agent.settings import load_settings
+        _app_cfg = load_settings()
+    except Exception:
+        _app_cfg = None
     connected: list = []
     for name, cfg in servers.items():
         try:
-            manager.connect_one(name, cfg)
+            manager.connect_one(name, cfg, app_config=_app_cfg)
             connected.append(name)
         except Exception as e:
             logger.warning("MCP server %s 连接失败（跳过）: %s", name, e)

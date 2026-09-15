@@ -742,7 +742,6 @@ class RuntimeContext:
                     ]
                 aux_llm_router = AuxLLMRouter(
                     main_client=main_client,
-                    main_model=model_cfg["name"],
                     aux_config=aux_cfg if not endpoints else None,
                     endpoints=endpoints,
                     # owns_main=True：上面这个 main_client 是专为 router 现造的
@@ -1055,6 +1054,13 @@ class RuntimeContext:
         a._stop_fire_count = 0
         if self.hooks_registry is not None:
             self.hooks_registry.reset_stop_budget()
+        # max_tokens 升级账本也按会话翻页——不清的话上局升过级，
+        # 新会话第一次截断会因 has_escalated 跳过"调大上限重发"
+        try:
+            if getattr(a, "_max_tokens_escalator", None) is not None:
+                a._max_tokens_escalator.reset()
+        except Exception as e:
+            logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
         try:
             from agent.memory_injection import reset_injection_cache
             reset_injection_cache()
@@ -1118,6 +1124,12 @@ class RuntimeContext:
         self.agent._stop_fire_count = 0
         if self.hooks_registry is not None:
             self.hooks_registry.reset_stop_budget()
+        # max_tokens 升级账本同款翻页（与 new_session 一致）
+        try:
+            if getattr(self.agent, "_max_tokens_escalator", None) is not None:
+                self.agent._max_tokens_escalator.reset()
+        except Exception as e:
+            logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
 
@@ -2029,7 +2041,9 @@ def _cleanup_redundant_summaries(msgs: list) -> list:
         i for i, m in enumerate(msgs)
         if m.get("role") == "user"
         and str(m.get("content", "")).startswith(
-            ("[之前的对话已自动总结]", "[紧急上下文压缩")
+            # 现行占位以 [COMPACT_BOUNDARY]\n 开头（老格式前缀也留着兼容：
+            # boundary 落库失败/旧会话的占位还是裸前缀形态）
+            ("[COMPACT_BOUNDARY]", "[之前的对话已自动总结]", "[紧急上下文压缩")
         )
     ]
     if len(summary_idx) <= 1:

@@ -31,50 +31,12 @@ _PASTE_REF_RE = re.compile(r"\[Pasted text #([A-Za-z0-9]+)(?: \+\d+ lines)?\]")
 
 @contextmanager
 def _file_lock(lock_path: Path, timeout: float = 5.0):
-    """跨平台的独占文件锁（Windows 用 msvcrt，Linux/macOS 用 fcntl，与团队协作 bus 同一套方案）——防多进程并发读写互相覆盖。
-
-    参数：
-        lock_path：锁文件路径
-        timeout：最多等多久（秒）
-
-    用法：with 块里 yield 一个 bool——True 表示真拿到锁了，False 表示等到超时
-    还没等到（拿没拿到由调用方自己决定接下来怎么办）。
+    """跨平台独占文件锁——实现已提炼到 agent/file_lock.py（行为零变化），
+    这里保留同名薄壳，本模块的调用点不用改。
     """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w", encoding="utf-8") as lf:
-        acquired = False
-        deadline = time.time() + timeout
-        if sys.platform == "win32":
-            import msvcrt
-            while time.time() < deadline:
-                try:
-                    msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
-                    acquired = True
-                    break
-                except OSError:
-                    time.sleep(0.01)
-        else:
-            import fcntl
-            while time.time() < deadline:
-                try:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired = True
-                    break
-                except (BlockingIOError, OSError):
-                    time.sleep(0.01)
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                try:
-                    if sys.platform == "win32":
-                        import msvcrt
-                        msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
+    from agent.file_lock import exclusive_file_lock
+    with exclusive_file_lock(lock_path, timeout) as acquired:
+        yield acquired
 
 
 class GlobalHistory:

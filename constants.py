@@ -172,15 +172,6 @@ def memory_file() -> Path:
     return get_codeagent_home() / "MEMORY.md"
 
 
-def user_file() -> Path:
-    """USER.md 的路径（用户画像：偏好、沟通风格）。
-
-    返回：
-        Path 对象，指向 <agent home>/USER.md。
-    """
-    return get_codeagent_home() / "USER.md"
-
-
 def config_path() -> Path:
     """config.yaml 的路径（主要作为迁移源使用）。
 

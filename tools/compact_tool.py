@@ -83,9 +83,13 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     up_to_idx = args.get("up_to_idx", -1)
     is_partial = from_idx != 0 or up_to_idx != -1
 
-    # 太短的对话压了没意义；只压中段时门槛放宽到 2 条
+    # 太短的对话压了没意义；只压中段时门槛放宽到 2 条。
+    # 全量门槛 = keep_recent + 1：引擎全量分支要求 len(conv) > keep_recent
+    # 才肯压，门口就用同一把尺（10~30 条的旧门槛放进去了也是必然被
+    # 引擎拒绝，白跑一趟还报个含糊的"压缩未生效"）
+    keep_recent = 30  # 比系统自动压缩保留更多近期消息，主动压缩后少失忆
     history_len = len(agent.conversation_history)
-    min_threshold = 2 if is_partial else 10
+    min_threshold = 2 if is_partial else keep_recent + 1
     if history_len < min_threshold:
         return json.dumps({
             "success": False,
@@ -105,16 +109,15 @@ async def _handle_compact(args: dict, **kwargs) -> str:
     # 压缩引擎自带"超过阈值才压"的检查，这里把阈值设成 0，
     # 相当于"我让你压你就必须压"，跳过它的犹豫。
     from agent.context_pipeline import llm_compact
-    keep_recent = 30  # 比系统自动压缩保留更多近期消息，主动压缩后少失忆
     new_messages, changed = await llm_compact(
         full_messages,
         llm_client=agent.llm_client,
         model=getattr(agent, "model", None),
         keep_recent=keep_recent,
         token_threshold=0,   # 0 = 见上，逼它无条件触发
-        msg_threshold=0,
         from_idx=from_idx,
         up_to_idx=up_to_idx,
+        focus_hint=focus,  # schema 承诺的"重点保什么"真接进摘要 prompt
     )
 
     if not changed:

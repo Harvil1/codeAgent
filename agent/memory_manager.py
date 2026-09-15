@@ -284,22 +284,6 @@ class MemoryManager:
 
         return "\n\n".join(parts)
 
-    def prefetch_all(self, query: str) -> str:
-        """每轮调 LLM 前调用：向外部 provider 要一份召回的上下文。
-
-        参数：
-        - query：当前用户输入（用于判断召回什么）
-
-        返回：召回的上下文文本；无 provider 或失败返回空串（不影响主流程）。
-        """
-        if not self.external_provider or not self._initialized:
-            return ""
-        try:
-            return self.external_provider.prefetch(query, session_id=self._session_id or "")
-        except Exception as e:
-            logger.debug("预取失败: %s", e)
-            return ""
-
     def sync_all(self, user_content: str, assistant_content: str) -> None:
         """每轮对话结束后调用：把这一轮写进外部 provider（后台异步）。
 
@@ -330,21 +314,6 @@ class MemoryManager:
             )
         except Exception as e:
             logger.warning("sync_turn 失败: %s", e)
-
-    def queue_prefetch_all(self, query: str) -> None:
-        """为下一轮排队后台预取（外部 provider 自己异步去查）。
-
-        参数：
-        - query：当前用户输入，provider 拿它预判下一轮可能要什么
-
-        返回：无；失败静默（预取只是优化，丢了不影响正确性）。
-        """
-        if not self.external_provider or not self._initialized:
-            return
-        try:
-            self.external_provider.queue_prefetch(query, session_id=self._session_id or "")
-        except Exception as e:
-            logger.debug("queue_prefetch 失败: %s", e)
 
     def shutdown(self) -> None:
         """会话结束时清理：通知 provider 关门、关掉后台线程池。

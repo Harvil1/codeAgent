@@ -315,16 +315,21 @@ def _show_memory(rt: RuntimeContext):
     if not user_entries:
         console.print("  [dim]（空）[/dim]")
 
-    # 菜单：让用户直接打开 MEMORY.md / USER.md 编辑
+    # 菜单：让用户直接打开文件编辑。注意两个文件的身份要说清楚：
+    # - MEMORY.md 是自动生成的索引（手动编辑会被下次索引重建覆盖），
+    #   真正的增删改走 `#` 快捷记忆 / memory 工具——打开只当"查看"
+    # - 用户画像的真身是 USER_PROFILE.md（USER.md 是没人读写的幽灵文件，
+    #   打开它纯属白编）
     console.print(
-        "\n[dim]输入 [cyan]m[/cyan] 编辑 MEMORY.md，[cyan]u[/cyan] 编辑 USER.md，"
-        "其他键返回[/dim]"
+        "\n[dim]输入 [cyan]m[/cyan] 查看 MEMORY.md（自动生成，手编会被覆盖——"
+        "写入请用 # 或 memory 工具），[cyan]u[/cyan] 编辑 USER_PROFILE.md"
+        "（用户画像），其他键返回[/dim]"
     )
     choice = console.input("> ").strip().lower()
     if choice == "m":
         _open_in_editor(get_codeagent_home() / "MEMORY.md")
     elif choice == "u":
-        _open_in_editor(get_codeagent_home() / "USER.md")
+        _open_in_editor(get_codeagent_home() / "USER_PROFILE.md")
 
 
 def _open_in_editor(path: Path) -> None:

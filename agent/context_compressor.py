@@ -7,7 +7,7 @@
     - ``_fix_tool_call_pairs``：修复压缩切坏了的工具调用配对
     - ``estimate_message_tokens``：按字符数粗估 token
     - ``_strip_analysis_draft``：剥掉 LLM 回复里的 <analysis> 草稿区
-    - ``reset_compact_circuit_breaker``：新会话开始时重置熔断器
+    - ``SummaryCircuitBreaker``：摘要熔断器（每 agent 一份，见类 docstring）
 """
 
 import json
@@ -52,12 +52,44 @@ SUMMARIZE_PROMPT_9SECTION = """请把以下对话总结成 9 段结构化摘要�
 
 
 # ---------------------------------------------------------------------------
-# 熔断器状态（模块级全局；熔断=连续失败太多次就暂停调 LLM）
+# 熔断器（熔断=连续失败太多次就暂停调 LLM）
 # ---------------------------------------------------------------------------
 
-_consecutive_failures = 0
 MAX_CONSECUTIVE_FAILURES = 3
-_compact_circuit_open = False
+
+
+class SummaryCircuitBreaker:
+    """摘要熔断器：连续失败太多次就拉闸，不再调 LLM 直接走规则总结。
+
+    **每 agent 一份**（挂在 CompressionSessionState 上）：旧实现是模块级
+    全局——同进程的并发子代理（delegate/team worker 复用本进程）一个刚
+    把熔断打开，另一个新 AIAgent 构造时的全局重置就把它清零，防线互相
+    拆台。实例化后各 agent 各管各的账；新会话自然拿到全新熔断器，
+    不再需要显式 reset（也去掉了那个会拆别人台的 reset 调用）。
+    """
+
+    def __init__(self):
+        self.consecutive_failures = 0
+        self.open = False
+
+    def record_success(self) -> None:
+        """成功一次就清账合闸。"""
+        self.consecutive_failures = 0
+        self.open = False
+
+    def record_failure(self) -> None:
+        """失败一次记一笔；连续达上限就拉闸。"""
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            self.open = True
+            logger.error(
+                "摘要熔断器开启（连续 %d 次失败）",
+                self.consecutive_failures,
+            )
+
+
+# 独立调用（不带会话状态）时的兜底熔断器——如 cli 的手动压缩命令
+_DEFAULT_SUMMARY_CIRCUIT = SummaryCircuitBreaker()
 
 # 最近一次摘要是否「降级产出」（LLM 失败 → 用规则总结凑合）。
 # 调度层（compress_if_needed）读它判定 L4 触发质量失败——降级摘要虽然能用
@@ -215,6 +247,8 @@ async def _summarize_conversation(
     anchor_note: str = "",
     scale_thresholds=None,
     files_limits=None,
+    circuit: "SummaryCircuitBreaker" = None,
+    focus_hint: str = "",
 ) -> str:
     """调 LLM 把一段对话历史总结成摘要文本（async；9 段式固定格式）。
 
@@ -243,10 +277,20 @@ async def _summarize_conversation(
           就降级走独立调用（前缀已失效可接受）；配了 summary_model 时不用 fork
           （专用小模型和主对话的缓存空间不同，用户显式配置优先）
         tools：当前工具 schema 列表，fork 请求带上（保持和主调用一致）
+        circuit：摘要熔断器（每 agent 一份，从 session_state 传下来）；
+            不传用模块级兜底（独立调用场景）
+        focus_hint：调用方指定的"重点保什么"（compact 工具的 focus 参数）。
+            拼进摘要 prompt 的指令行——不传的话 schema 承诺的定向保真
+            就是空话
     返回：摘要文本；拿不到 LLM 摘要时返回规则总结的降级版本。
     """
-    global _consecutive_failures, _compact_circuit_open, _last_summary_degraded
+    global _last_summary_degraded
     _last_summary_degraded = False  # 每次调用先重置
+    circuit = circuit if circuit is not None else _DEFAULT_SUMMARY_CIRCUIT
+    focus_suffix = (
+        f"\n\n[compress focus] 调用方指定重点保留：{focus_hint}"
+        if focus_hint else ""
+    )
 
     # 局部提取（from_idx/up_to_idx）
     is_partial = from_idx != 0 or up_to_idx != -1
@@ -260,10 +304,10 @@ async def _summarize_conversation(
         return ""
 
     # 1. 熔断器检查（连续失败达上限 → 直接走规则总结，不再花钱调 LLM）
-    if _compact_circuit_open:
+    if circuit.open:
         logger.warning(
             "摘要熔断器开启（连续 %d 次失败），跳过 LLM 摘要",
-            _consecutive_failures,
+            circuit.consecutive_failures,
         )
         _last_summary_degraded = True  # 标记这次是降级产出
         return _rule_based_summary(to_summarize)
@@ -291,6 +335,7 @@ async def _summarize_conversation(
     # 锚定提示：三段关键内容由调用方原样拼接，LLM 不必重复罗列（省输出 + 防重写矛盾）
     if anchor_note:
         prompt += "\n\n" + anchor_note
+    prompt += focus_suffix
 
     # === fork 前缀复用（先试它，失败降级独立调用路径）===
     if fork_prefix_messages and not summary_model:
@@ -304,8 +349,7 @@ async def _summarize_conversation(
             summary = response.choices[0].message.content or ""
             if summary.strip():
                 # 成功：重置熔断器（与独立调用路径同一套语义）
-                _consecutive_failures = 0
-                _compact_circuit_open = False
+                circuit.record_success()
                 logger.info(
                     "fork 摘要成功（前缀 %d 条消息复用主对话缓存）",
                     len(fork_prefix_messages),
@@ -334,8 +378,7 @@ async def _summarize_conversation(
             )
             summary = response.choices[0].message.content or ""
             # 成功：重置熔断器
-            _consecutive_failures = 0
-            _compact_circuit_open = False
+            circuit.record_success()
             # 剥掉 <analysis> 草稿（模型内部推敲，不属于最终摘要）
             return _strip_analysis_draft(summary)
         except Exception as e:
@@ -357,20 +400,14 @@ async def _summarize_conversation(
                     files_errors_limit=_files_errors_limit(
                         len(working_messages), fe_th, fe_lm,
                     ),
-                )
+                ) + focus_suffix  # PTL 重建 prompt 也要带上关注点（防丢）
                 logger.warning(
                     "PTL 重试 %d/%d：tokenGap 精确算法丢 %d 条（旧 20%% 会丢 %d 条）",
                     retry + 1, MAX_PTL_RETRIES, drop_count, old_drop,
                 )
                 continue
             # 其他错误、或 PTL 重试耗尽 → 走规则总结 + 熔断器计数加一
-            _consecutive_failures += 1
-            if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                _compact_circuit_open = True
-                logger.error(
-                    "摘要熔断器开启（连续 %d 次失败）",
-                    _consecutive_failures,
-                )
+            circuit.record_failure()
             logger.warning("LLM 摘要失败（降级规则总结）: %s", e)
             _last_summary_degraded = True  # 标记这次是降级产出
             return _rule_based_summary(working_messages)
@@ -471,15 +508,9 @@ def _strip_analysis_draft(summary: str) -> str:
     return re.sub(r'<analysis>.*?</analysis>\s*', '', summary, flags=re.DOTALL)
 
 
-def reset_compact_circuit_breaker() -> None:
-    """新会话开始时重置熔断器（别让上一场的失败计数殃及这一场）。
-
-    在 AIAgent.__init__ 调用。
-    """
-    global _consecutive_failures, _compact_circuit_open
-    _consecutive_failures = 0
-    _compact_circuit_open = False
-
+# （reset_compact_circuit_breaker 已删除：熔断器实例化进
+# CompressionSessionState.summary_circuit——每 agent 一份，新会话天然
+# 从全新状态开始，不再需要、也不该有跨 agent 的全局重置）
 
 def _rule_based_summary(messages: list) -> str:
     """降级方案：不调 LLM，机械地把对话要点抽出来拼成文本。

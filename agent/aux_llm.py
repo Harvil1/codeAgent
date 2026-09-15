@@ -59,7 +59,6 @@ class AuxLLMRouter:
     def __init__(
         self,
         main_client: Any,
-        main_model: Optional[str] = None,
         aux_config: Optional[Dict[str, Any]] = None,
         endpoints: Optional[List[LLMEndpoint]] = None,
         owns_main: bool = False,
@@ -68,7 +67,6 @@ class AuxLLMRouter:
 
         参数：
             main_client：主 LLM client（兜底用，必须有 chat_completions 方法）
-            main_model：主模型名（保留的参数，会透传给 chat_completions）
             aux_config：旧式单 aux 配置（自动转成一个端点）
             endpoints：新的多端点列表（给了它就无视 aux_config）
             owns_main：main_client 的所有权声明——外部传入的东西谁传谁
@@ -77,7 +75,6 @@ class AuxLLMRouter:
                        close() 才会连兜底 client 一起关
         """
         self._main_client = main_client
-        self._main_model = main_model
         self._owns_main = owns_main
 
         # 兼容旧配置：aux_config 里有 model 字段时，转成 1 个端点
@@ -251,31 +248,3 @@ class AuxLLMRouter:
     # ------------------------------------------------------------------
     # 熔断状态查询（测试 / 监控用）
     # ------------------------------------------------------------------
-
-    def get_circuit_status(self) -> Dict[str, Dict]:
-        """看一眼每个端点的保险丝状态（连败几次、拉闸没、还剩几秒解封）。
-
-        返回：字典，键是端点名，值含 failures（连败次数）、
-        circuit_open（是否拉闸中）、circuit_remaining_seconds（解封倒计时）。
-        """
-        now = time.time()
-        result = {}
-        for ep in self._endpoints:
-            open_until = self._circuit_open_until.get(ep.name, 0)
-            result[ep.name] = {
-                "failures": self._failure_counts.get(ep.name, 0),
-                "circuit_open": open_until > now,
-                "circuit_remaining_seconds": max(0, open_until - now),
-            }
-        return result
-
-    def reset_circuit(self, name: Optional[str] = None) -> None:
-        """手动把保险丝合回去（测试 / 运维排障用）。
-
-        参数：
-            name：指定端点名；不传（None）就把所有端点都复位。
-        """
-        targets = [name] if name else list(self._failure_counts.keys())
-        for n in targets:
-            self._failure_counts[n] = 0
-            self._circuit_open_until[n] = 0

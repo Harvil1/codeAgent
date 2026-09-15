@@ -331,13 +331,6 @@ class SessionStore:
         """兼容老接口的空操作：JSONL 存储没有连接要关，什么都不做。"""
         pass
 
-    def __del__(self):
-        # 兼容老接口：现在没有连接要关
-        try:
-            pass
-        except Exception:
-            pass
-
     def create_session(
         self,
         *,
@@ -597,56 +590,6 @@ class SessionStore:
             index = self._load_index()
             self._index_cache = [s for s in index if s["id"] != session_id]
             self._save_index()
-
-    # ------------------------------------------------------------------
-    # 会话 fork（克隆）
-    # ------------------------------------------------------------------
-
-    def fork_session(
-        self,
-        source_session_id: str,
-        *,
-        title: Optional[str] = None,
-    ) -> str:
-        """把一个现有会话整个克隆成新会话——消息文件原样复制一份，
-        之后两边各改各的互不影响（像复印一份档案）。
-
-        参数：
-            source_session_id：被克隆的源会话 ID
-            title：新会话标题；不填就自动叫 "Fork of <源标题>"
-
-        返回：新会话的 session_id。源会话不存在时抛 ValueError。
-        """
-        source = self.get_session(source_session_id)
-        if source is None:
-            raise ValueError(f"source session 不存在: {source_session_id}")
-
-        src_title = source.get("title") or source_session_id[:8]
-        new_id = self.create_session(
-            title=title or f"Fork of {src_title}",
-            model=source.get("model"),
-            provider=source.get("provider"),
-        )
-
-        src_path = self._session_file(source_session_id)
-        dst_path = self._session_file(new_id)
-        if src_path.exists():
-            with self._lock:
-                dst_path.write_text(
-                    src_path.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-                # 把新会话的消息计数改准（复制来的不是 0）
-                line_count = sum(
-                    1 for line in dst_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                )
-                index = self._load_index()
-                for s in index:
-                    if s["id"] == new_id:
-                        s["message_count"] = line_count
-                        break
-                self._save_index()
-        return new_id
 
     # ------------------------------------------------------------------
     # 全文搜索（用 Python 正则扫描）

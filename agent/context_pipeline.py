@@ -15,13 +15,13 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Tuple
 
 from agent.context_compressor import (
     _summarize_conversation, _fix_tool_call_pairs, estimate_message_tokens,
-    reset_compact_circuit_breaker, extract_summary_anchor, _get_model_max_tokens,
+    SummaryCircuitBreaker, extract_summary_anchor, _get_model_max_tokens,
 )
 from agent.transcript import snapshot_if_needed
 
@@ -138,7 +138,7 @@ def time_based_clear_old_tool_results(
     CLEARED_MARK = "[Old tool result content cleared]"
     try:
         # config 是 context 配置子字典（由 compress_if_needed 从 self.config.get("context", {}) 传入），
-        # 按扁平 key 读，跟 snip_compact / offload_large_tool_results 的读法保持一致
+        # 按扁平 key 读，跟 snip_compact 的读法保持一致
         ctx_cfg = config if isinstance(config, dict) else {}
         enabled = ctx_cfg.get("time_based_mc_enabled", True)
         if not enabled:
@@ -453,97 +453,6 @@ def _already_offloaded(msg: dict) -> bool:
         return False
 
 
-def offload_large_tool_results(
-    messages: list,
-    *,
-    agent_home,
-    threshold: int = 50000,
-    preview_chars: int = 2000,
-    message_threshold: int = 200000,
-    freeze: bool = True,
-) -> Tuple[list, bool]:
-    """L2.5：主动扫描所有工具结果消息，超阈值就落盘。
-
-    三层触发逻辑（大白话）：
-      1. 单条阈值（threshold，默认 5 万字符）：某一条工具结果太大 → 落盘
-      2. 分段聚合阈值（message_threshold，默认 20 万字符）：一段连续的工具结果
-         （不跨 user/assistant 边界）加起来太大 → 从最大的开始逐个落盘，
-         直到总和降到阈值以下
-      3. 决策冻结（freeze=True）：已经落过盘的工具调用，下次直接照抄上次生成的
-         预览内容，不再重新评估——保证内容一个字节都不变，保护 prompt cache
-
-    参数：
-        messages：完整消息列表
-        agent_home：CodeAgent 数据目录，落盘位置
-        threshold：单条工具结果的落盘阈值（字符）
-        preview_chars：落盘后保留的预览长度
-        message_threshold：一段连续工具结果的聚合阈值；0 表示关闭聚合检查
-        freeze：是否启用决策冻结
-    返回：(新消息列表, 是否有变化)。除 content 外消息结构不变（保住工具调用配对）。
-    """
-    from agent.output_offload import maybe_offload
-
-    changed = False
-    out = []
-    for m in messages:
-        if m.get("role") != "tool":
-            out.append(m)
-            continue
-
-        tc_id = m.get("tool_call_id") or ""
-
-        # ── 决策冻结：落过盘的直接照抄上次的预览内容（一字不差，保 prompt cache）──
-        if freeze and tc_id and tc_id in _offload_decisions:
-            decision = _offload_decisions[tc_id]
-            # 直接用记录的预览内容替换（不重新评估）
-            if m.get("content") != decision["preview"]:
-                new_m = dict(m)
-                new_m["content"] = decision["preview"]
-                out.append(new_m)
-                # 冻结重放不算 changed（没新落盘，只是保持一致）
-            else:
-                out.append(m)
-            continue
-
-        content = m.get("content", "")
-        if not isinstance(content, str) or len(content) <= threshold:
-            out.append(m)
-            continue
-        if _already_offloaded(m):
-            out.append(m)  # 已是占位（来自其他路径），不二次落盘
-            continue
-
-        # 单条阈值触发落盘
-        effective_tc_id = tc_id or f"orphan_{id(m)}"
-        new_content = maybe_offload(
-            content,
-            tool_call_id=effective_tc_id,
-            agent_home=agent_home,
-            threshold=threshold,
-            preview_chars=preview_chars,
-        )
-        if new_content != content:
-            new_m = dict(m)
-            new_m["content"] = new_content
-            out.append(new_m)
-            changed = True
-            if freeze and tc_id:
-                _record_decision(tc_id, new_content)
-        else:
-            out.append(m)
-
-    # ── per-message 聚合检查 ──
-    if message_threshold > 0:
-        agg_changed = _enforce_per_message_budget(
-            out, message_threshold, agent_home, preview_chars, freeze,
-        )
-        if agg_changed:
-            changed = True
-
-    if changed:
-        logger.info("L2.5 offload_large_tool_results: 至少 1 条 tool 消息已落盘（精细化）")
-    return out, changed
-
 
 # ---------------------------------------------------------------------------
 # 决策冻结 + 按段聚合落盘
@@ -732,9 +641,14 @@ def apply_context_collapse(
         keep_recent_turns：保护最近几轮对话（1 轮 = 2 条消息）
     返回：(新消息列表, 是否发生了折叠)。新列表是浅拷贝，原列表不改。
     """
-    # 幂等：已是折叠状态 → 不二次折叠
+    # 幂等：已是折叠状态 → 不二次折叠。
+    # 三重限定（前缀 + role + startswith，同 snip_compact 的纪律）：
+    # 裸搜子串的话，历史里只要出现字面 "[context_collapse:"（比如模型
+    # 读过本文件、或消息里讨论压缩机制）就会被误判成已折叠——这一层
+    # 从此永久 no-op，静默降级
     if any(
-        "[context_collapse:" in str(m.get("content", ""))
+        m.get("role") == "user"
+        and str(m.get("content", "")).startswith("[context_collapse:")
         for m in messages
     ):
         return messages, False
@@ -854,7 +768,6 @@ async def llm_compact(
     model: Optional[str],
     keep_recent: int = 10,
     token_threshold: int = 100000,
-    msg_threshold: int = 100,
     precomputed_tokens: Optional[int] = None,
     session_memory: Optional[str] = None,
     from_idx: int = 0,
@@ -864,6 +777,7 @@ async def llm_compact(
     summary_files_errors_limits=None,
     transcript_path: Optional[str] = None,
     session_state: Optional["CompressionSessionState"] = None,
+    focus_hint: str = "",
 ) -> Tuple[list, bool]:
     """L4 第 4 层：前面几层压不下去、仍超 token 阈值时，调 LLM 把旧对话写成摘要。
 
@@ -877,7 +791,6 @@ async def llm_compact(
         model：模型名
         keep_recent：全量模式下末尾保护条数（最近这么多条不进摘要）
         token_threshold：token 阈值，超过才压
-        msg_threshold：当前逻辑不用（压缩只看 token，不看消息条数）
         precomputed_tokens：调用方已算好的 token 数（省得重复遍历）；None 时内部自己算
         session_memory：预提取的会话记忆；有值就直接用它当摘要，
                         不调 LLM。获取接口尚未实现，目前永远传 None
@@ -909,6 +822,14 @@ async def llm_compact(
     if is_partial:
         # 局部模式：头段原文 + 摘要 + 尾段原文 拼装
         effective_up_to = len(conv) if up_to_idx < 0 else up_to_idx
+        # 尾部回退保护：被摘要段的最后一条若是 assistant(tool_calls)——
+        # 它的工具结果在段外还没产生（比如 compact 工具自己发起的那条
+        # 调用正好落在段尾）——压掉它就造出"反向孤儿"：随后追加的工具
+        # 结果配不上对，会被 _fix_tool_call_pairs 删掉，模型当轮看不到
+        # 压缩成败。把这类未配对消息划回 tail 原文保留
+        while (effective_up_to > from_idx + 1
+               and _has_tool_calls(conv[effective_up_to - 1])):
+            effective_up_to -= 1
         head = conv[:from_idx]
         tail = conv[effective_up_to:] if effective_up_to < len(conv) else []
 
@@ -932,6 +853,9 @@ async def llm_compact(
             anchor_note=anchor_note,
             scale_thresholds=summary_scale_thresholds,
             files_limits=summary_files_errors_limits,
+            # 熔断器按实例传（每 agent 一份，防并发子代理互相拆台）
+            circuit=session_state.summary_circuit if session_state is not None else None,
+            focus_hint=focus_hint,
         )
         if not summary:
             return messages, False
@@ -1010,6 +934,9 @@ async def llm_compact(
         anchor_note=anchor_note,
         scale_thresholds=summary_scale_thresholds,
         files_limits=summary_files_errors_limits,
+        # 熔断器按实例传（每 agent 一份，防并发子代理互相拆台）
+        circuit=session_state.summary_circuit if session_state is not None else None,
+        focus_hint=focus_hint,
     )
     if not summary:
         return messages, False
@@ -1091,6 +1018,9 @@ class CompressionSessionState:
     last_llm_compact_turn: int = -10**6
     current_turn: int = 0
     llm_compact_failures: int = 0
+    # 摘要生成层的熔断器（每实例一份）——旧实现是模块级全局，同进程并发
+    # 子代理一个拉闸另一个重置，防线互相拆台；实例化后各管各的账
+    summary_circuit: "SummaryCircuitBreaker" = field(default_factory=lambda: SummaryCircuitBreaker())
 
     @property
     def reacted(self) -> bool:

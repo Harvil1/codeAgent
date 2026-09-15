@@ -361,7 +361,10 @@ def _auto_resume_last(rt: RuntimeContext):
     if not rt.session_store:
         return
 
-    sessions = rt.session_store.list_sessions(limit=5)
+    # 先取大候选池再滤空会话：裸启动每次都会留下一个空会话档案，
+    # limit=5 先截断的话攒 4 个空会话就把窗口占满——明明库里有非空
+    # 历史却报"没有可恢复的会话"
+    sessions = rt.session_store.list_sessions(limit=50)
     history = [
         s for s in sessions
         if s["id"] != rt.session_id and (s.get("message_count") or 0) > 0

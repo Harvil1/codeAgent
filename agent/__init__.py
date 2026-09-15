@@ -35,7 +35,6 @@ from typing import Optional
 
 from agent.budget import IterationBudget
 from agent.context_pipeline import CompressionSessionState, strip_internal_fields
-from agent.context_compressor import reset_compact_circuit_breaker
 # 临时注入纯函数区拆到独立模块（行为零变化搬迁）；带下划线别名 re-export
 # 保住旧调用点与习惯引用
 from agent.ephemeral_inject import (
@@ -326,8 +325,9 @@ class AIAgent:
         # 破坏逐字节重放（等于打穿 prompt cache）。不用担心的理由：
         # tool_call_id 是服务商随机生成的（call_xxx）跨会话不撞车；
         # 内存也有 _OFFLOAD_DECISIONS_LIMIT 的 LRU 上限兜底。
-        # 新会话要重置「摘要熔断器」（防止上个会话的失败计数污染本会话）
-        reset_compact_circuit_breaker()
+        # 摘要熔断器同款纪律：不再做全局 reset（那个 reset 会把同进程其他
+        # agent 刚拉开的闸清零）——它已实例化进 _compress_session_state
+        # （下面几行创建），每 agent 一份、新会话天然全新
         # 新会话重置 LLM 观察器的熔断器和调用计数（同样防跨会话污染）
         try:
             from agent.skill_learning.llm_observer import reset_llm_observer_state
@@ -1061,6 +1061,12 @@ class AIAgent:
                     messages = strip_internal_fields(messages)
             except Exception as guard_err:
                 logger.warning("发送前预检失败（fail-open 照发）: %s", guard_err)
+
+            # 最后一道剥离：strip 之后追加的尾部（记忆预取/重试警告/钩子
+            # 提醒）又带上了 _ephemeral/_timestamp——不剥的话这些内部字段
+            # 会原样进 OpenAI 请求体（严格兼容端直接 400）。压缩层要的
+            # flag 完好版走下面的 _flagged，互不影响
+            messages = strip_internal_fields(messages)
 
             # 调 LLM（含 max_tokens 升级 + 输入超长时的紧急压缩）
             # 本方法是异步的

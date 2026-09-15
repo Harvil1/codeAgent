@@ -33,6 +33,16 @@ from agent.hooks import Hook, HookEvent, HookScriptConfig
 
 logger = logging.getLogger(__name__)
 
+# 这些事件当前版本**没有任何触发点**（事件名合法、会被成功加载，但全项目
+# 没人调对应的 run_xxx——配了就永远静默不跑）。加载时必须大声告知用户，
+# 否则等于承诺了一个不存在的功能（fail-open 但要响）
+_UNWIRED_EVENTS = frozenset({
+    HookEvent.SETUP,
+    HookEvent.TEAMMATE_IDLE,
+    HookEvent.ELICITATION_STARTED,
+    HookEvent.INSTRUCTIONS_LOADED,
+})
+
 
 # ---------------------------------------------------------------------------
 # SnapshotCache：启动时装一份配置进内存锁死，运行期只读（防会话中途被篡改）
@@ -85,6 +95,12 @@ def load_declarative_hooks(registry, settings_path: Path) -> int:
             raise ValueError(
                 f"settings.json event '{event_str}' 必须是 list，"
                 f"实际是 {type(hook_list).__name__}"
+            )
+        if event in _UNWIRED_EVENTS:
+            logger.warning(
+                "事件 '%s' 当前版本没有触发点，%d 个 hook 会加载但永远不会执行"
+                "（配置形同虚设——请检查事件名是否写错）",
+                event_str, len(hook_list),
             )
         for h_cfg in hook_list:
             hook = _parse_hook(h_cfg, event)

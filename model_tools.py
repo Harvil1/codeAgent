@@ -16,9 +16,6 @@ from toolsets import resolve_toolset
 
 logger = logging.getLogger(__name__)
 
-# 模块级暂存：记下最近一次解析出哪些工具名（调试或 UI 展示用）
-_last_resolved_tool_names: List[str] = []
-
 # 工具名清单解析缓存：键 -> tuple(tool_names)。每轮重建 toolset 展开 +
 # mcp list_all 扫描 + deny 过滤在工具多时是重复劳动；registry.generation
 # 在任何登记/注销时 +1，天然当失效信号。只缓存名字（definitions 构建不缓存
@@ -171,9 +168,6 @@ def get_tool_definitions(
         if len(_tool_names_cache) > 32:
             _tool_names_cache.clear()
         _tool_names_cache[_cache_key] = tuple(tool_names)
-
-    global _last_resolved_tool_names
-    _last_resolved_tool_names = tool_names
 
     # 为什么要分两拨下发：
     # - 自带工具：数量少、用得勤，直接发完整说明书
@@ -356,12 +350,3 @@ async def handle_function_call(
             logger.warning("工具输出统一封顶失败（fail-open）: %s", e)
 
     return result
-
-
-def get_last_resolved_tool_names() -> List[str]:
-    """看一眼最近一次发给 LLM 的工具名清单（get_tool_definitions 的筛选结果
-    暂存在模块变量里，这里取出来给调试或 UI 展示用）。
-
-    返回：工具名列表的副本（改它不影响内部状态）。
-    """
-    return list(_last_resolved_tool_names)

@@ -32,6 +32,10 @@ VALID_STATUSES = {"pending", "in_progress", "completed", "deleted", "blocked", "
 TRIAGE_THRESHOLD = 3
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
+# in_progress 任务心跳超过这个分钟数视为"认领人已死"（find_ready 顺手回收）。
+# 传 0 可关闭。
+STALE_HEARTBEAT_MINUTES = 30.0
+
 
 def _now_iso() -> str:
     """返回当前时间的 UTC 标准格式字符串（用在任务的创建/更新时间戳上）。"""
@@ -319,13 +323,21 @@ class TaskStore:
                 return False
         return True
 
-    def find_ready(self) -> List[dict]:
+    def find_ready(
+        self, *, reclaim_stale_minutes: float = STALE_HEARTBEAT_MINUTES,
+    ) -> List[dict]:
         """挑出"可以马上开工"的任务：状态是 pending 且挡路的都完成了。
 
-        参数：无。
+        派活前先顺手回收心跳超时的僵尸 in_progress（认领人崩了没人
+        重派就是调度死区——心跳只写不读的债在这里还上）。
+        参数：reclaim_stale_minutes 见 reclaim_stale（0 = 不回收）。
         返回：可开工任务 dict 的列表。
         注意：triage 状态的任务不在此列（它们在等人工介入，不自动调度）。
         """
+        try:
+            self.reclaim_stale(reclaim_stale_minutes)
+        except Exception as e:
+            logger.debug("reclaim_stale 失败（fail-open，不影响派活）: %s", e)
         ready = []
         for t in self.list_all(status="pending"):
             if self.can_start(t["id"]):
@@ -356,6 +368,54 @@ class TaskStore:
         返回：更新后的任务 dict；任务不存在返回 None。
         """
         return self.update(task_id, last_heartbeat_at=_now_iso())
+
+    def reclaim_stale(self, timeout_minutes: float = 30.0) -> List[dict]:
+        """回收"心跳超时"的 in_progress 任务：打回 pending 等人重认领。
+
+        为什么需要它：认领人（团队 worker/子代理）崩溃后任务永远卡在
+        in_progress——find_ready 只捞 pending，没人重派就是调度死区。
+        心跳字段此前只写不读，这里补上读的一端："距上次心跳超过
+        timeout 分钟"就视为认领人已死，回炉重造。
+
+        不误伤的设计：
+        - 从没报过心跳的任务不回收（auto_heartbeat 之外的任务没有
+          心跳语义，比如主代理亲自领的活）
+        - timeout_minutes <= 0 视为关闭回收
+
+        参数：
+            timeout_minutes：判定"死了"的心跳超时分钟数。
+        返回：被回收的任务 dict 列表（空列表 = 没有僵死任务）。
+        """
+        if timeout_minutes <= 0:
+            return []
+        now = datetime.now(timezone.utc)
+        reclaimed: List[dict] = []
+        for t in self.list_all(status="in_progress"):
+            hb = t.get("last_heartbeat_at")
+            if not hb:
+                continue
+            try:
+                hb_dt = datetime.fromisoformat(str(hb))
+            except (ValueError, TypeError):
+                continue
+            if hb_dt.tzinfo is None:
+                hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+            if (now - hb_dt).total_seconds() < timeout_minutes * 60:
+                continue
+            updated = self.update(
+                t["id"],
+                status="pending",
+                owner=None,
+                stale_reclaimed_at=_now_iso(),
+            )
+            if updated is not None:
+                logger.warning(
+                    "task %s 心跳超时（>%s 分钟无心跳），已回收为 pending "
+                    "等重认领（原 owner=%s）",
+                    t["id"], timeout_minutes, t.get("owner"),
+                )
+                reclaimed.append(updated)
+        return reclaimed
 
     def add_comment(
         self, task_id: str, *, author: str, content: str,

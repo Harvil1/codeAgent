@@ -422,6 +422,9 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
                 timeout=effective_timeout,
                 env=env,
                 input=payload_json,
+                # GBK 控制台脚本输出中文时严格解码会抛 UnicodeDecodeError
+                # 穿透拦截协议（exit 2 的 block 判决整条丢失）——replace 兜底
+                errors="replace",
             )
         except OSError as e:
             logger.warning("hook %s 启动失败: %s", hook.name, e)
@@ -441,6 +444,7 @@ def run_script_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",  # GBK 输出兜底（同上，防解码炸穿 exit 2 协议）
                 timeout=effective_timeout,
                 env=env,
             )
@@ -573,13 +577,16 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
     block = check_url_against_allowlist(url, allowed)
     if block:
         logger.warning("http hook %s 被 URL allowlist 拦截: %s", hook.name, block)
-        return None
+        # fail_closed 对 pre_tool_use 要兑现成"拦截"——静默 None 等于放行
+        return _fail_closed_or_none(
+            hook, f"http hook {hook.name} 被 URL allowlist 拦截: {block}")
 
     # 第二道：SSRF 地址段预检
     err = validate_url_for_ssrf(url)
     if err:
         logger.warning("http hook %s SSRF 防护拦截: %s", hook.name, err)
-        return None
+        return _fail_closed_or_none(
+            hook, f"http hook {hook.name} SSRF 防护拦截: {err}")
 
     resp = requests.post(
         url,
@@ -600,16 +607,19 @@ def run_http_hook(hook, payload: dict, timeout_cap: float = None) -> Optional[di
             "http hook %s 响应体 %d bytes 超上限 %d，丢弃",
             hook.name, len(_body), _MAX_HTTP_HOOK_BODY_BYTES,
         )
-        return None
+        return _fail_closed_or_none(
+            hook, f"http hook {hook.name} 响应体超上限")
     if resp.status_code != 200:
         logger.warning("http hook %s 返回 %d", hook.name, resp.status_code)
-        return None
+        return _fail_closed_or_none(
+            hook, f"http hook {hook.name} 返回 {resp.status_code}")
     try:
         parsed = resp.json()
         return parsed if isinstance(parsed, dict) else None
     except Exception as e:
         logger.warning("http hook %s 响应非合法 JSON: %s", hook.name, e)
-        return None
+        return _fail_closed_or_none(
+            hook, f"http hook {hook.name} 响应非合法 JSON: {e}")
 
 
 # ============================================================================
@@ -638,7 +648,8 @@ def run_mcp_tool_hook(hook, payload: dict) -> Optional[dict]:
         return result if isinstance(result, dict) else {"result": result}
     except Exception as e:
         logger.warning("mcp_tool hook %s 调用失败: %s", hook.name, e)
-        return None
+        return _fail_closed_or_none(
+            hook, f"mcp_tool hook {hook.name} 调用失败: {e}")
 
 
 # ============================================================================
@@ -721,7 +732,8 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         )
     except Exception as e:
         logger.warning("prompt hook %s LLM 调用失败: %s", hook.name, e)
-        return None
+        return _fail_closed_or_none(
+            hook, f"prompt hook {hook.name} LLM 评估失败: {e}")
 
     if not resp:
         return None
@@ -805,7 +817,8 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
         )
     except Exception as e:
         logger.warning("agent hook %s _run_child 失败: %s", hook.name, e)
-        return None
+        return _fail_closed_or_none(
+            hook, f"agent hook {hook.name} 子代理评估失败: {e}")
 
     if not isinstance(result, str):
         return None

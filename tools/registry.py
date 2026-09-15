@@ -69,7 +69,16 @@ def _module_registers_tools(module_path: Path) -> bool:
     try:
         source = module_path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(module_path))
-    except (OSError, SyntaxError):
+    except (OSError, SyntaxError, ValueError) as e:
+        # ValueError 一族必须捕（UnicodeDecodeError 是它的子类）：Windows
+        # 下混进 GBK 编码的 .py 时，裸 UnicodeDecodeError 会穿出本函数
+        # 炸穿整个工具发现链（get_tool_definitions/handle_function_call
+        # 全无兜底）——主对话直接起不来。跳过 + ERROR 大声（fail-open
+        # 但要响），别让一个坏文件无声吞掉
+        logger.error(
+            "工具文件 %s 无法解析（编码/语法问题），已跳过: %s",
+            module_path, e,
+        )
         return False
     return any(_is_registry_register_call(stmt) for stmt in tree.body)
 
