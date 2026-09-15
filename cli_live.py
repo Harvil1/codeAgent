@@ -268,9 +268,11 @@ def note_child_tool(key, activity: str) -> None:
     """子代理每调一次工具上报一次：计数 +1、活动行更新。
 
     activity 形如 ``read_file(D:/x.py)``（调用方拼好）。
-    除了面板上的「当前活动」，还往对话流里记一笔缩进行——用户要的
-    「Agent 运行过程记录在 Agent 行下面」：子代理头行（● Agent(...)）
-    是 PRE 时就打好的，这里每次工具调用往下补一行 ⎿，过程留痕。
+
+    只更新 live 面板黑板（每个子代理固定一行的「当前活动」，spinner
+    0.1s 一拍原地刷新）——**不往对话流打字**。旧版每次工具调用都往
+    滚动历史刷一行 ⎿，3 个子代理跑几分钟就是几十行刷屏（对齐
+    claude code：运行过程看面板一行，细节等收尾块）。
     """
     try:
         with _lock:
@@ -279,13 +281,6 @@ def note_child_tool(key, activity: str) -> None:
                 return
             entry["tools"] = int(entry.get("tools", 0)) + 1
             entry["activity"] = _oneline(activity, 120)
-        # 对话流留痕（fail-open：打印线断了不碰任务线）
-        try:
-            from cli_events import print_style_lines
-            print_style_lines(
-                [("dim", f"  ⎿  {_oneline(activity, 110)}")])
-        except Exception:
-            pass
     except Exception:
         pass
 

@@ -820,9 +820,17 @@ def install_event_lines(rt) -> None:
             return None
 
     def _running_label(tool_name, args) -> str:
-        """运行中标签：● 头行去掉子弹点（live 面板自己画会闪的 ●）。"""
+        """运行中标签：● 头行去掉子弹点（live 面板自己画会闪的 ●）。
+
+        subagent 工具走 depart 短摘要（Running N agents… / Agent(短任务)）——
+        summarize_args 会把整个 system prompt 拼进动画行，面板顶部
+        挂一大段长文既吵又把树挤走。
+        """
         try:
-            head = format_tool_line(tool_name, args or {})
+            if tool_name in _SUBAGENT_TOOLS:
+                head = format_subagent_depart(args)
+            else:
+                head = format_tool_line(tool_name, args or {})
             return head[2:] if head.startswith("● ") else head
         except Exception:
             return tool_name
