@@ -96,16 +96,22 @@ _HEREDOC_OPEN_RE = re.compile(
 )
 
 
-def _strip_quoted_heredocs(command: str) -> str:
-    r"""把「带引号/转义定界符」的 heredoc 正文从命令里拿掉，返回剩余部分。
+def _strip_quoted_heredocs(command: str):
+    r"""把「带引号/转义定界符」的 heredoc 正文从命令里拿掉。
 
     定界符加了引号（<<'EOF'）或反斜杠（<<\EOF）时，正文是纯字面量、
     不会被 shell 展开——里面的 $() 之类的可疑形态是纸老虎，
     拿掉可以少误报。没加引号的 heredoc（<<EOF）正文会展开 $() 和反引号，
     必须留给检查器看。找不到闭合定界符时整段保留（宁可多查不漏查）。
+
+    返回 (剩余部分, 是否真的剥过正文)。第二返回值给调用方做骨架豁免：
+    剥完的骨架（如 "cat > path" + 后续命令）天然带换行——那是 heredoc
+    语法结构，不是"换行分隔多条命令"的注入面，不豁免的话所有多行
+    写文件操作都会被误弹审批。
     """
     lines = command.split("\n")
     out: list = []
+    stripped_any = False
     i = 0
     n = len(lines)
     while i < n:
@@ -126,11 +132,12 @@ def _strip_quoted_heredocs(command: str) -> str:
                 # << 前面如果有真命令（如 "cat "）要留着，不能整行丢
                 prefix = line[: m.start()].rstrip()
                 out.append(prefix if prefix else "true")
+                stripped_any = True
                 i = j + 1
                 continue
         out.append(line)
         i += 1
-    return "\n".join(out)
+    return "\n".join(out), stripped_any
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +592,7 @@ def check_injection_surface(command: str) -> Optional[str]:
         return "以操作符开头的续行片段"
 
     # quoted heredoc 的正文是字面量，剥掉之后再跑模式检查
-    heredoc_stripped = _strip_quoted_heredocs(command)
+    heredoc_stripped, had_quoted_heredoc = _strip_quoted_heredocs(command)
     base = command.split(" ")[0] or ""
     with_dq, fully, _keepq = _extract_quoted_content(
         heredoc_stripped, is_jq=(base == "jq")
@@ -622,8 +629,12 @@ def check_injection_surface(command: str) -> Optional[str]:
     if _check_carriage_return_outside_dq(command):
         return "双引号外的回车符（\\r 分词差异）"
 
-    # 换行分隔多条命令（「反斜杠+换行」的续行写法豁免）
-    if _NEWLINE_CMD_RE.search(fully):
+    # 换行分隔多条命令（「反斜杠+换行」的续行写法豁免）。
+    # heredoc 骨架豁免：剥完正文后骨架（cat > path + 后续命令）天然
+    # 带换行，那是 heredoc 语法结构不是注入面——不豁免的话模型往
+    # 白名单路径写报告文件这种正当操作也弹审批（用户屏上就是
+    # "⚠️ 破坏性命令"+ 200 行命令全文刷屏）
+    if not had_quoted_heredoc and _NEWLINE_CMD_RE.search(fully):
         return "换行分隔多条命令"
 
     # IFS 注入

@@ -194,17 +194,24 @@ def _spawn_resumed_agent(
         # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
         # 关循环顺带释放池，迁常驻循环后不主动关就一直滞留到进程退出。
         # fail-open：关不上只警告，不影响续跑结果（异常照样往上穿透）。
+        _close_coro = None
         try:
             from agent.llm_client import aclose_llm_client
-            loop_host.run_async(aclose_llm_client(child.llm_client))
+            # 先建协程再 run：失败时 coro.close() 消毒，防
+            # "coroutine never awaited" 收尾警告（loop_host 停机场景）
+            _close_coro = aclose_llm_client(child.llm_client)
+            loop_host.run_async(_close_coro)
+            _close_coro = None
         except (asyncio.CancelledError, concurrent.futures.CancelledError):
-            # 回合栅栏恰好落下时关闭协程被顺带取消——会打穿本 finally
-            # 盖掉续跑真正的异常/结果。concurrent 版是 fut.result() 搬运
-            # 后的实际类型，两个都接；asyncio 版是 BaseException，except
-            # Exception 接不住。池留给进程退出收尾，安静放行
             pass
         except Exception as e:
             logger.warning("子代理 client 关闭失败（fail-open）: %s", e)
+        finally:
+            if _close_coro is not None:
+                try:
+                    _close_coro.close()
+                except Exception:
+                    pass
     return result
 
 

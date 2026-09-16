@@ -1386,7 +1386,11 @@ def _make_approval_callback(aux_provider=None):
             return answer in ("y", "yes")
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
-            console.print(f"[bold]{item}[/bold]")
+            # 命令可能极长（heredoc 写文件几百行）——全文刷屏淹没界面，
+            # 只显示开头 + 总长，想看用途按 e 让辅助模型解释
+            _shown = item if len(item) <= 200 else (
+                item[:200] + f"\n…（共 {len(item)} 字符，已截断）")
+            console.print(f"[bold]{_shown}[/bold]")
             explain_hint = "[dim] e=解释[/dim]" if aux_provider else ""
             while True:
                 try:
@@ -4474,6 +4478,19 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         rt.shutdown()
     except (Exception, KeyboardInterrupt) as e:
         logger.warning("收尾清理异常（忽略）: %s", e)
+
+    # === 终极自毁保底 ===
+    # 收尾全走完了，但进程可能仍被卡死的 daemon 线程拖住不退（实测：
+    # 子代理线程在已停机的循环上收尾、Ctrl+C 打不进去——"反复按没反应"
+    # 的僵死）。8 秒后无论如何结束进程：正常路径此刻本来就要退出，多等
+    # 8 秒无感；僵死路径保证必死，不会留在屏幕上装死。
+    import os as _os_final
+    import threading as _th_final
+
+    def _final_exit():
+        _os_final._exit(0)
+
+    _th_final.Timer(8.0, _final_exit, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------

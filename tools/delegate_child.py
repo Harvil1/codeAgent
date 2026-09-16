@@ -811,15 +811,24 @@ def _run_child(
         # child.llm_client 的步骤都已完成（它们全在 try 体的 return
         # 之前），这时关不碰任何人。fail-open：关不上只警告。
         if child is not None:
+            _close_coro = None
             try:
                 from agent.llm_client import aclose_llm_client
                 from agent.loop_host import loop_host
-                loop_host.run_async(aclose_llm_client(child.llm_client))
+                # 先建协程再 run：失败时能 coro.close() 消毒——不然
+                # "loop_host 已停机" 的 RuntimeError 会留下没人 await 的
+                # 协程，解释器收尾刷 RuntimeWarning（coroutine never
+                # awaited）吓人
+                _close_coro = aclose_llm_client(child.llm_client)
+                loop_host.run_async(_close_coro)
+                _close_coro = None
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                # 回合栅栏恰好落下时关闭协程被顺带取消——CancelledError 是
-                # BaseException，except Exception 接不住会打穿本 finally，
-                # 把子代理真正的结果/异常盖成取消错误。池留给进程退出
-                # 收尾，安静放行
                 pass
             except Exception as e:
                 logger.warning("子代理 client 关闭失败（fail-open）: %s", e)
+            finally:
+                if _close_coro is not None:
+                    try:
+                        _close_coro.close()
+                    except Exception:
+                        pass
