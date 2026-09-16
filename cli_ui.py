@@ -191,6 +191,13 @@ class BridgeConsole(Console):
         return None
 
     def input(self, prompt="", **kwargs):
+        """工作线程的 input 走 pt 终端让渡桥（挂起界面→读→恢复）。
+
+        桥失败时**绝不退回直读**——直读会跟 pt 抢 stdin，把 prompt_toolkit
+        的事件循环打崩（Executor shutdown 满屏崩栈，实测吃过亏）。
+        改为抛 EOFError：审批回调接住后自动拒绝（fail-closed），模型
+        收到 permission denied 走别的路——比整个 UI 崩掉好一万倍。
+        """
         if _input_bridge is not None and \
                 threading.current_thread() is not threading.main_thread():
             try:
@@ -198,7 +205,13 @@ class BridgeConsole(Console):
                     lambda: Console.input(self, prompt, **kwargs)
                 )
             except Exception as e:
-                logger.warning("输入桥改道失败，退回直读: %s", e)
+                logger.warning(
+                    "输入桥改道失败（自动拒绝而非直读防崩UI）: %s", e,
+                )
+                raise EOFError(
+                    f"终端让渡失败，无法读取用户输入: {e}",
+                )
+        # 主线程（无 pt 争抢）照常直读
         return Console.input(self, prompt, **kwargs)
 
 
