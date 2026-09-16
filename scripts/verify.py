@@ -2348,12 +2348,19 @@ def check_assistant_block():
     echo = ce.format_ask_user_echo_batch(
         [{"question": "范围怎么定？", "answers": ["只做核心包"],
           "multi": False}], width=80)
-    if "User answered" not in echo[0][1] or "只做核心包" not in echo[1][1]:
+    if "用户已回答" not in echo[0][1] or "只做核心包" not in echo[1][1] \
+            or "→" not in echo[1][1]:
         return _fail(f"批量回显不对: {echo}")
+    # headers 传了用短标题
+    hecho = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}], headers=["删除范围"], width=80)
+    if "删除范围" not in hecho[1][1]:
+        return _fail(f"短标题回显不对: {hecho}")
     cecho = ce.format_ask_user_echo_batch(
         [{"question": "范围怎么定？", "answers": ["只做核心包"],
           "multi": False}], chat="我想先聊聊", width=80)
-    if "chat" not in cecho[0][1] or "我想先聊聊" not in cecho[1][1] \
+    if "聊聊" not in cecho[0][1] or "我想先聊聊" not in cecho[1][1] \
             or "只做核心包" not in cecho[2][1]:
         return _fail(f"chat 回显不对: {cecho}")
     # 长问题：CC 同款悬挂缩进——全文不砍字、续行缩进 5 格、答案跟末行

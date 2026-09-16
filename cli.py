@@ -1435,11 +1435,13 @@ def _make_ask_user_bridge():
         result = run_with_input_bridge(_do_ask) or {}
         answers = result.get("answers") or []
         chat = result.get("chat")
-        # 汇总回显：答完一条打总账；转对话时头行换掉
+        # 汇总回显：短标题 → 答案，一行一问
         # 取消不打「已答完」汇总（模型收到的是 user_interrupt，别骗眼睛）
         if not result.get("cancelled"):
+            _headers = [q.get("header") or "" for q in questions]
             cli_events.print_style_lines(
-                cli_events.format_ask_user_echo_batch(answers, chat))
+                cli_events.format_ask_user_echo_batch(
+                    answers, chat, headers=_headers))
         return result
     return bridge
 

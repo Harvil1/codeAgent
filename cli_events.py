@@ -495,19 +495,19 @@ def format_skill_lines(name: str) -> list:
 
 
 def format_ask_user_echo_batch(answers: list, chat: str = None,
+                               headers: list = None,
                                width: int = None) -> list:
-    """批量提问的汇总回显：一条头行 + 每问一块 ⎿ Q → A（CC 同款悬挂缩进）。
+    """批量提问的汇总回显：短标题 → 答案，一行一问（干净利落）。
 
-    大白话：一份问卷答完，打一条「用户答完了」+ 每道题的答案。长问题
-    不砍字（模型和用户都要看全文），超宽自己折行、续行缩进 5 格挂在
-    ⎿ 底下——跟 claude code 实录一个长相，绝不让终端裸折行撕成锯齿。
-    用户要是选了转对话（Chat about this），头行换成「用户想聊聊」，
-    对话文本放第一块，已答部分跟在后面。
+    用户定的规矩：答完了就不要那个交互组件了，换成内容汇总——
+    一行就是一个问题→答案，多选用「、」分割。短标题优先（headers
+    传了就用 header，没传截问题前 12 字），不刷长问题原文。
 
     参数：
         answers: [{"question", "answers", "multi"}, ...]
         chat: 用户转对话时输入的文本（None=正常答完）
-        width: 折行宽度（显示列数；默认动态取终端宽度）
+        headers: 每问的短标题列表（ask_via_selector 传来的 header 字段）
+        width: 折行宽度
     """
     import shutil
 
@@ -517,21 +517,26 @@ def format_ask_user_echo_batch(answers: list, chat: str = None,
         width = max(40, shutil.get_terminal_size((80, 24)).columns)
     lines = []
 
-    def _wrap_block(head: str, body: str):
-        """head 起头的一块挂缩进折行：首行 head+正文，续行缩进 5 格。"""
+    def _wrap(head: str, body: str):
         for i, ln in enumerate(wrap_cjk(f"{head}{body}", width)):
             lines.append(("dim", ln if i == 0 else f"     {ln}"))
 
     if chat:
-        lines.append(("", "● User wants to chat about this:"))
-        _wrap_block("  ⎿  ", chat)
+        lines.append(("", "● 用户想聊聊："))
+        _wrap("  ⎿  ", chat)
     else:
-        lines.append(("", "● User answered Claude's questions:"))
-    for a in answers or []:
-        # _cut 的 400 只折叠多行空白 + 兜底防极端，正常全文保留
-        q = _cut(a.get("question", ""), 400)
-        ans = "、".join(str(x) for x in (a.get("answers") or [])) or "（未选择）"
-        _wrap_block("  ⎿  · ", f"{q} → {ans}")
+        lines.append(("", "● 用户已回答："))
+    for i, a in enumerate(answers or []):
+        # 短标题优先：headers 列表给了就用（ask_via_selector 的 header 字段，
+        # 默认 question[:12]）；没传 headers 走老行为（问题全文折行）
+        if headers and i < len(headers) and headers[i]:
+            label = headers[i]
+            ans = "、".join(str(x) for x in (a.get("answers") or [])) or "（未选择）"
+            _wrap("  ⎿  ", f"{label} → {ans}")
+        else:
+            q = _cut(a.get("question", ""), 400)
+            ans = "、".join(str(x) for x in (a.get("answers") or [])) or "（未选择）"
+            _wrap("  ⎿  ", f"{q} → {ans}")
     return lines
 
 

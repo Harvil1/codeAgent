@@ -541,14 +541,20 @@ def ask_via_selector(questions, fallback_input=None):
         return {"answers": results, "chat": text or None,
                 "cancelled": not text}
 
-    for i, q in enumerate(qs):
+    # === 可回退导航：i 可以前进也可以后退（重答上一题） ===
+    i = 0
+    while i < len(qs):
+        q = qs[i]
         chips = ([(qq["header"], j < i) for j, qq in enumerate(qs)]
                  if len(qs) > 1 else None)
+        # 第一题之后的题加一个「← 上一题」导航选项（放在 Chat about this 前）
+        opts = list(q["options"])
+        if i > 0:
+            opts.append({"label": "← 上一题", "description": "回去改上一题的答案"})
         try:
-            res = run_selector(q["question"], q["header"], q["options"],
+            res = run_selector(q["question"], q["header"], opts,
                                q["multi"], chips=chips)
         except Exception as e:
-            # 面板起不来（无头/终端不支持）——降级老式编号输入
             logger.debug("方向键提问面板不可用，降级编号输入: %s", e)
             res = _fallback_number_input(q["question"], q["options"],
                                          q["multi"], fallback_input)
@@ -556,9 +562,25 @@ def ask_via_selector(questions, fallback_input=None):
             return {"answers": results, "chat": None, "cancelled": True}
         if res.get("chat"):
             return _chat_flow()
+        # 检查是否选了「← 上一题」
+        picked = res.get("answers") or []
+        if any(a == "← 上一题" for a in picked):
+            i = max(0, i - 1)
+            # 回退时截掉上一题的结果（重答会覆盖）
+            if i < len(results):
+                results = results[:i]
+            continue
+        # 正常作答：如果是回退后重答，确保 results 长度对齐
+        while len(results) > i:
+            results.pop()
+        while len(results) < i:
+            # 理论不该到这（中间题不会跳过），兜底用空答案填
+            results.append({"question": qs[len(results)]["question"],
+                            "answers": [], "multi": False})
         results.append({"question": q["question"],
-                        "answers": res.get("answers") or [],
+                        "answers": [a for a in picked if a != "← 上一题"],
                         "multi": q["multi"]})
+        i += 1
     return {"answers": results, "chat": None, "cancelled": False}
 
 
