@@ -260,6 +260,9 @@ class RuntimeContext:
             result_stdout_cap=bg_cfg.get("result_stdout_cap", 5000),
             default_timeout=bg_cfg.get("default_timeout", 600),
             stall_timeout=bg_cfg.get("stall_timeout", 45.0),  # 停滞看门狗——45 秒没有新输出就通知用户（防"卡死没动静"）
+            # 注册表目录：任务表/通知队列纯内存，落一份盘进程重启后
+            # 恢复注入才知道"上次还有哪些后台任务没跑完/结果没送达"
+            registry_dir=Path(self.home) / ".task_outputs",
         )
 
         # === Cron 调度器（定时任务，像闹钟一样到点触发）===
@@ -1162,6 +1165,8 @@ class RuntimeContext:
         _inject_progress_recovery(self, session_id)
         # 待办任务清单恢复：面板重拉 + 模型侧注入（续接执行不靠自觉）
         _resume_todo_lines = _inject_task_recovery(self)
+        # 后台任务 + 可续跑子代理：上次会话没跑完/没送达的，注入让模型知道
+        _inject_bg_recovery(self, session_id)
 
         # 重建 checkpoint 管理器（绑定恢复的这个会话 ID）
         try:
@@ -2127,6 +2132,115 @@ def _inject_task_recovery(rt) -> list:
     except Exception as e:
         logger.debug("resume 任务清单注入失败（fail-open）: %s", e)
     return lines
+
+
+def _inject_bg_recovery(rt, session_id: str) -> None:
+    """resume 后注入「后台任务遗态 + 可续跑子代理」（ephemeral，fail-open）。
+
+    两块内容：
+    1. bg 任务注册表里本会话还没跑完的条目——任务表/通知队列纯内存，
+       进程一退就蒸发；不注入的话恢复的模型根本不知道曾有这些任务
+       （registry 里的 running 是崩溃瞬间的遗照，进程已随程序退出终止；
+       detach 的可能仍在独立跑但无人监管，监视文件可 read_file 查增量）。
+    2. 上次被中断的异步子代理（subagent_persistence 里 interrupted 且
+       属于本会话）——它们带已落盘的对话轨迹，可经 /resumable 或
+       subagent_resume 续跑，不丢上下文。不列出来模型就只会重派从 0 跑。
+    """
+    parts = []
+    try:
+        from agent.background import BackgroundManager
+        entries = BackgroundManager.load_registry_entries(
+            Path(rt.home) / ".task_outputs")
+        _sid = session_id or ""
+        unfinished = [
+            e for e in entries
+            if e.get("status") in ("running", "stopping")
+            and e.get("session_id", "") == _sid
+        ]
+        if unfinished:
+            lines = []
+            for e in unfinished[:5]:
+                cmd = " ".join(str(c) for c in (e.get("command") or []))[:80]
+                extra = ""
+                if e.get("detach"):
+                    extra = "；detach 任务，进程可能仍在独立运行但无人监管"
+                if e.get("output_file"):
+                    extra += f"；增量输出文件：{e['output_file']}"
+                lines.append(f"- [{e.get('task_id')}] {cmd}{extra}")
+            parts.append(
+                "<bg_task_recovery>\n"
+                "（会话恢复：以下后台任务在上次会话仍在运行。默认情况下"
+                "程序退出后其进程已终止、结果不可再取——需要结果请重跑；"
+                "带增量输出文件的先 read_file 看已产出的部分再决定。）\n"
+                + "\n".join(lines)
+                + "\n</bg_task_recovery>"
+            )
+        # 崩溃前已完成但通知大概率没送达的（本会话最近 3 条终态），
+        # 带输出摘要兜底——模型的续接判断有据可依
+        done_recent = [
+            e for e in entries
+            if e.get("status") in ("completed", "failed", "stopped")
+            and e.get("session_id", "") == _sid
+        ][:3]
+        if done_recent:
+            lines = []
+            for e in done_recent:
+                cmd = " ".join(str(c) for c in (e.get("command") or []))[:60]
+                out = (e.get("stdout") or e.get("stderr") or "")[:200]
+                lines.append(
+                    f"- [{e.get('task_id')}] {cmd} → {e.get('status')}"
+                    f"(exit={e.get('exit_code')}) 输出摘要：{out}")
+            parts.append(
+                "<bg_task_result_recovery>\n"
+                "（会话恢复：以下后台任务在上次会话已结束，完成通知可能"
+                "未送达。输出摘要见各行，如需完整结果可重跑该命令。）\n"
+                + "\n".join(lines)
+                + "\n</bg_task_result_recovery>"
+            )
+    except Exception as e:
+        logger.debug("resume bg 任务注入失败（fail-open）: %s", e)
+
+    # 中断的异步子代理：可续跑、带上下文
+    try:
+        from agent.subagent_persistence import _sessions_dir
+        resumable = []
+        for meta_path in _sessions_dir().glob("*.meta.json"):
+            try:
+                import json as _json
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                if (meta.get("status") == "interrupted"
+                        and meta.get("parent_session_id", "") == (session_id or "")):
+                    resumable.append(meta)
+            except Exception:
+                continue
+        if resumable:
+            lines = []
+            for m in resumable[:5]:
+                goal = (m.get("description") or m.get("goal") or "")[:80]
+                lines.append(f"- {m.get('agent_id')}：{goal}")
+            parts.append(
+                "<subagent_recovery>\n"
+                "（会话恢复：以下子代理上次被中断，各自的对话轨迹已落盘"
+                "——可带着已做部分续跑，不必从 0 重来。请用 subagent_resume"
+                " 工具恢复它们，或基于历史判断已完成部分后重派剩余工作。）\n"
+                + "\n".join(lines)
+                + "\n</subagent_recovery>"
+            )
+    except Exception as e:
+        logger.debug("resume 子代理注入失败（fail-open）: %s", e)
+
+    if not parts:
+        return
+    try:
+        agent = getattr(rt, "agent", None)
+        queue = getattr(agent, "_pending_ephemeral_messages", None)
+        if queue is None:
+            return
+        for p in parts:
+            queue.append({"role": "user", "content": p, "_ephemeral": True})
+        logger.info("resume: 已注入后台任务/子代理恢复信息（%d 块）", len(parts))
+    except Exception as e:
+        logger.debug("resume bg/subagent 注入投递失败（fail-open）: %s", e)
 
 
 def _cleanup_redundant_summaries(msgs: list) -> list:

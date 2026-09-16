@@ -239,6 +239,8 @@ def _handle_bg_start(args: dict, **kwargs) -> str:
             command, cwd=cwd, detach=detach,
             timeout=timeout if timeout is not None else None,
             monitor=monitor,
+            # 会话归属：注册表按会话过滤，恢复注入不串台
+            session_id=kwargs.get("session_id", "") or "",
         )
     except RuntimeError as e:
         return json.dumps({

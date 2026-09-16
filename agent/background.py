@@ -68,6 +68,7 @@ class BackgroundTask:
     status: str  # 取值：running(跑着) / completed(正常结束) / failed(失败) / stopped(被手动停)
     pid: Optional[int]
     started_at: datetime
+    session_id: str = ""   # 出生会话（恢复注入按会话过滤，别会话的任务不串台）
     detach: bool = False
     ended_at: Optional[datetime] = None
     exit_code: Optional[int] = None
@@ -90,6 +91,7 @@ class BackgroundManager:
         result_stdout_cap: int = 5000,
         default_timeout: float = 600.0,
         stall_timeout: float = 45.0,  # 默认 45 秒看门狗开启（传 0 等于关掉）
+        registry_dir=None,
     ):
         """建管理器。
 
@@ -99,6 +101,11 @@ class BackgroundManager:
         - result_stdout_cap：查询任务结果时的输出上限，默认 5000 字符
         - default_timeout：任务默认最长跑多久（秒），默认 600=10 分钟
         - stall_timeout：多久没新输出算"可能卡住"（秒）；0=关闭看门狗
+        - registry_dir：注册表目录（如 ~/.codeAgent/.task_outputs）。给了的话
+          任务登记/状态变化都落一份 bg_registry.json——任务表和通知队列
+          都是纯内存，进程一重启就全蒸发，恢复注入靠注册表才知道
+          "上次会话还有哪些后台任务没跑完/结果没送达"。None = 不落盘
+          （测试用），行为与旧版完全一致。
 
         返回：无（构造函数）。
         """
@@ -109,6 +116,11 @@ class BackgroundManager:
         self._notification_stdout_cap = notification_stdout_cap
         self._result_stdout_cap = result_stdout_cap
         self._default_timeout = default_timeout
+        # 注册表路径（None=关持久化）
+        self._registry_path = (
+            Path(registry_dir) / "bg_registry.json"
+            if registry_dir else None
+        )
         # 停滞看门狗超时。0=关闭（走单次阻塞等待的兼容路径）；
         # >0 开启：用专门的读输出线程 + 主线程定期巡查，超过这个秒数没新输出就发提醒。
         self._stall_timeout = stall_timeout
@@ -117,6 +129,69 @@ class BackgroundManager:
         self._wake_callback = None
 
     # ---- 启动 ----
+    def _persist_registry_locked(self) -> None:
+        """把任务表落盘成 bg_registry.json（调用前必须已持 self._lock）。
+
+        记的是瘦身版（进程对象/监视句柄不进 JSON）：id/命令/状态/pid/
+        会话归属/输出摘要。只留最近 50 条防文件无限长。fail-open：
+        写失败只记日志，绝不影响任务本身。
+        """
+        if self._registry_path is None:
+            return
+        try:
+            entries = []
+            for t in sorted(
+                self._tasks.values(),
+                key=lambda x: x.started_at, reverse=True,
+            )[:50]:
+                entries.append({
+                    "task_id": t.task_id,
+                    "command": t.command,
+                    "cwd": str(t.cwd) if t.cwd else None,
+                    "status": t.status,
+                    "pid": t.pid,
+                    "session_id": t.session_id,
+                    "detach": t.detach,
+                    "monitor": t.monitor,
+                    "output_file": t.output_file,
+                    "started_at": t.started_at.isoformat(),
+                    "ended_at": t.ended_at.isoformat() if t.ended_at else None,
+                    "exit_code": t.exit_code,
+                    # 输出摘要进盘：崩溃前完成但通知没送达的结果，恢复
+                    # 注入靠这份摘要兜底（取通知上限，不撑爆文件）
+                    "stdout": (t.stdout or "")[: self._notification_stdout_cap],
+                    "stderr": (t.stderr or "")[:200],
+                })
+            from agent.atomic_io import atomic_write_text_lite
+            self._registry_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text_lite(
+                self._registry_path,
+                __import__("json").dumps(entries, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.debug("bg 注册表落盘失败（fail-open）: %s", e)
+
+    @staticmethod
+    def load_registry_entries(registry_dir) -> list:
+        """读回注册表条目（恢复注入用；文件不在/读坏返回空列表）。
+
+        参数：
+            registry_dir：注册表目录（RuntimeContext 的 home/.task_outputs）
+
+        返回：条目 dict 列表（新→旧）。
+        """
+        import json as _json
+        try:
+            path = Path(registry_dir) / "bg_registry.json"
+            if not path.exists():
+                return []
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.debug("bg 注册表读取失败（fail-open）: %s", e)
+            return []
+
     def start(
         self,
         command: list,
@@ -126,6 +201,7 @@ class BackgroundManager:
         timeout: Optional[float] = None,
         monitor: bool = False,
         monitor_dir=None,
+        session_id: str = "",
     ) -> str:
         """启动一个后台任务，立刻返回任务编号（不等命令跑完）。
 
@@ -183,6 +259,7 @@ class BackgroundManager:
                     status="failed",
                     pid=None,
                     started_at=datetime.now(),
+                    session_id=session_id,
                     detach=detach,
                     ended_at=datetime.now(),
                     exit_code=-1,
@@ -199,6 +276,7 @@ class BackgroundManager:
                 status="running",
                 pid=proc.pid,
                 started_at=datetime.now(),
+                session_id=session_id,
                 detach=detach,
                 _proc=proc,
                 monitor=monitor,
@@ -214,6 +292,7 @@ class BackgroundManager:
                 except Exception:
                     task.output_file = None  # 求稳：落盘失败也不影响任务照跑
             self._tasks[task_id] = task
+            self._persist_registry_locked()
 
         # 起一个守护线程专门盯这个任务
         effective_timeout = timeout if timeout is not None else self._default_timeout
@@ -550,6 +629,8 @@ class BackgroundManager:
             "command": task.command,
             "ended_at": task.ended_at.isoformat() if task.ended_at else None,
         })
+        # 终态落盘：崩溃前完成但通知没送达的，恢复注入靠注册表兜底
+        self._persist_registry_locked()
         if self._wake_callback is not None:
             try:
                 self._wake_callback()
