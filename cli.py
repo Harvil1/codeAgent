@@ -1389,53 +1389,50 @@ def _make_approval_callback(aux_provider=None):
     def callback(item: str):
         # 审批入口：命令/路径的判定用 _is_path_item
         #（check_path 发来的内容恒带"文件写入审批: "前缀，按这个约定识别）
+        # 所有审批统一用同款三选面板：允许（本次）/ 总是允许并记住 / 拒绝
         if _is_path_item(item):
             console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
             console.print(f"[bold]{item}[/bold]")
-            # 选择器面板（比文本 y/N 显眼得多）
-            _picked = _ask_via_selector(
-                f"写入 {item}，允许吗？",
-                [
-                    {"label": "允许（本次）", "description": "仅这一次"},
-                    {"label": "总是允许并记住", "description": "父目录进持久化白名单"},
-                    {"label": "拒绝", "description": "不写入"},
-                ],
-                header="路径审批",
-            )
-            if _picked == "总是允许并记住":
-                return "always"
-            if _picked == "允许（本次）":
-                return True
-            return False
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
             _shown = item if len(item) <= 200 else (
                 item[:200] + f"\n…（共 {len(item)} 字符，已截断）")
             console.print(f"[bold]{_shown}[/bold]")
-            # 构造选项（有辅助模型才加"解释"选项）
-            opts = [
-                {"label": "允许执行", "description": "本次放行，下次同命令不再问"},
-                {"label": "拒绝", "description": "不执行"},
-            ]
-            if aux_provider:
-                opts.insert(1, {
-                    "label": "先解释这条命令",
-                    "description": "让辅助模型说明用途和风险",
-                })
+
+        # 统一选项（命令审批多一个"解释"选项，有辅助模型才显示）
+        opts = [
+            {"label": "允许（本次）", "description": "仅这一次"},
+            {"label": "总是允许并记住", "description":
+                "路径→父目录进白名单 / 命令→加入审批白名单"},
+            {"label": "拒绝", "description": "不执行"},
+        ]
+        if not _is_path_item(item) and aux_provider:
+            opts.insert(2, {
+                "label": "先解释这条命令",
+                "description": "让辅助模型说明用途和风险",
+            })
+
+        _header = "路径审批" if _is_path_item(item) else "命令审批"
+        _q = (f"写入 {item}，允许吗？" if _is_path_item(item)
+              else "允许执行以上命令吗？")
+        _picked = _ask_via_selector(_q, opts, header=_header)
+
+        if _picked == "先解释这条命令":
+            _explain(item)
+            # 解释完再问一遍（同款面板）
             _picked = _ask_via_selector(
-                f"允许执行以上命令吗？", opts, header="命令审批",
+                "现在允许执行吗？",
+                [
+                    {"label": "允许（本次）", "description": "仅这一次"},
+                    {"label": "总是允许并记住", "description": "下次同命令不再问"},
+                    {"label": "拒绝", "description": "不执行"},
+                ],
+                header=_header,
             )
-            if _picked == "先解释这条命令":
-                _explain(item)
-                # 解释完再问一遍（简化为文本——解释面板已经占了屏）
-                try:
-                    answer = console.input(
-                        "[bold]现在允许执行？(y/N):[/bold] ",
-                    ).strip().lower()
-                    return answer in ("y", "yes")
-                except (EOFError, KeyboardInterrupt):
-                    return False
-            return _picked == "允许执行"
+
+        if _picked == "总是允许并记住":
+            return "always"
+        return _picked == "允许（本次）"
     return callback
 
 
