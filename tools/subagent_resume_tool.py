@@ -110,7 +110,10 @@ def _spawn_resumed_agent(
     # === UI 直播：续跑子代理的工具活动上报面板（与 _run_child 同款）===
     # 不接的话面板上没有任何行——续跑动辄几分钟，用户看着就是"卡住了"。
     # key 用 agent_id 派生；纯展示 fail-open，展示线断了不许断任务线
-    _ui_key = f"resume-{agent_id or id(messages):x}"
+    # 注意：agent_id 是字符串不能直接 :x（%x 只吃整数——吃过 TypeError
+    # "Unknown format code 'x' for object of type 'str'" 的亏，三个续跑
+    # 同时炸在这）；空才退回内存地址做 key
+    _ui_key = f"resume-{agent_id}" if agent_id else f"resume-{id(messages):x}"
     _ui_desc = (instruction or "续跑子代理")[:40]
     try:
         import cli_live

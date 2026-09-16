@@ -4413,10 +4413,20 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         # 工作线程收到 EOF → request_app_exit → app.run 返回；
         # 这里反向兜底：UI 先退了（异常），也让工作线程尽快收工
         _set_active_app(None)   # 注销 app：之后的打印走直写（不再搬事件循环）
+        # UI 退了但回合可能还在烧（Ctrl+C 从没被键位拦住的缝漏进来时，
+        # app.run 是被 KeyboardInterrupt 打断的）——先按"全部中断"
+        # （标志+子代理取消旗+cancel_current_turn 硬断在飞调用），worker
+        # 才有机会在宽限期内从回合里出来走正常收尾。不按的话 worker
+        # 卡在回合里等 LLM，join 超时 → 直接闪退（单击 Ctrl+C 整程序
+        # 退出的执行点就是这）
+        try:
+            _do_turn_interrupt()
+        except Exception:
+            pass
         _input_stop.set()
         _input_q.put(_EOF_SENTINEL)
         try:
-            _worker_thread.join(timeout=2.0)
+            _worker_thread.join(timeout=5.0)
         except KeyboardInterrupt:
             # 收尾窗口里又按 Ctrl+C：此刻 pt 已退、终端回到经典模式，
             # 信号以裸 KeyboardInterrupt 打进 join——不接住它会掀翻整个
