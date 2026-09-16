@@ -1163,6 +1163,10 @@ class RuntimeContext:
             logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
+        # 老任务认领：session_id 特性之前建的任务没有归属字段，直接按
+        # 会话过滤会把它们全藏掉（用户看到的就是"任务列表没了"）。
+        # 本会话档案里出现过的 task_/bg_ 编号就是本会话的——回填归属
+        _adopt_legacy_tasks(self, session_id, msgs)
         # 待办任务清单恢复：面板重拉 + 模型侧注入（续接执行不靠自觉）
         _resume_todo_lines = _inject_task_recovery(self)
         # 后台任务 + 可续跑子代理：上次会话没跑完/没送达的，注入让模型知道
@@ -2072,6 +2076,67 @@ def _inject_progress_recovery(rt, session_id: str) -> None:
         logger.info("resume: 已注入 PROGRESS.md 进度外存（%d 字符）", len(ptext))
     except Exception as e:
         logger.debug("resume PROGRESS.md 回读失败（fail-open）: %s", e)
+
+
+def _adopt_legacy_tasks(rt, session_id: str, archive_msgs: list) -> None:
+    """把无归属的老任务/老 bg 条目认领给当前恢复的会话（fail-open）。
+
+    背景：task/bg 的 session_id 归属是后来加的——在那之前建的任务没有
+    这个字段，恢复时按会话过滤会把它们全部藏掉（用户视角：任务列表
+    消失了）。认领依据是**会话档案**：恢复的历史消息里出现过的
+    task_xxx / bg_xxx 编号就是这个会话建的（别会话的档案里不会有），
+    给这些条目回填 session_id 后，面板/注入/续接全部恢复可见——
+    别会话的老任务仍然不认领，不串台。
+    """
+    if not session_id or not archive_msgs:
+        return
+    try:
+        import re as _re
+        blob = "\n".join(
+            str(m.get("content") or "") for m in archive_msgs
+            if isinstance(m, dict)
+        )
+        task_ids = set(_re.findall(r"task_[0-9a-f]{12}", blob))
+        bg_ids = set(_re.findall(r"bg_[0-9a-f]{8}", blob))
+        if not task_ids and not bg_ids:
+            return
+        # 1) 任务库回填：只动"没有归属字段"的老任务（有归属的别覆盖）
+        adopted = 0
+        from agent.task_store import get_task_store
+        store = get_task_store(rt.home)
+        for t in store.list_all():
+            if t.get("id") in task_ids and not t.get("session_id"):
+                try:
+                    store.update(t["id"], session_id=session_id)
+                    adopted += 1
+                except Exception:
+                    pass
+        # 2) bg 注册表回填：同理只补空归属
+        if bg_ids:
+            try:
+                from agent.background import BackgroundManager
+                from agent.atomic_io import atomic_write_text_lite
+                reg_dir = Path(rt.home) / ".task_outputs"
+                entries = BackgroundManager.load_registry_entries(reg_dir)
+                changed = False
+                for e in entries:
+                    if e.get("task_id") in bg_ids and not e.get("session_id"):
+                        e["session_id"] = session_id
+                        changed = True
+                if changed:
+                    atomic_write_text_lite(
+                        reg_dir / "bg_registry.json",
+                        json.dumps(entries, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+            except Exception:
+                pass
+        if adopted:
+            logger.info(
+                "resume: 已认领 %d 条无归属老任务归属本会话", adopted,
+            )
+    except Exception as e:
+        logger.debug("老任务认领失败（fail-open）: %s", e)
 
 
 def _inject_task_recovery(rt) -> list:
