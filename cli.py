@@ -2286,13 +2286,35 @@ def _inject_bg_recovery(rt, session_id: str) -> None:
             lines = []
             for m in resumable[:5]:
                 goal = (m.get("description") or m.get("goal") or "")[:80]
-                lines.append(f"- {m.get('agent_id')}：{goal}")
+                # 进度摘要：从轨迹尾部抽最后一条 assistant 消息的前 80 字
+                # + 总轮数——模型看到"已读完文件正在写报告"就不用自己去
+                # cat 轨迹文件了（cat 会把子代理全部上下文灌进主代理，
+                # 打穿隔离架构）
+                _progress = ""
+                try:
+                    from agent import subagent_persistence as _sp
+                    _aid = m.get("agent_id", "")
+                    _tr = _sp.load_transcript(_aid)
+                    _turns = len(_tr)
+                    _last_asst = ""
+                    for _tm in reversed(_tr):
+                        if _tm.get("role") == "assistant" and _tm.get("content"):
+                            _last_asst = str(_tm["content"])[:80]
+                            break
+                    _progress = f"（{_turns} 轮，最后动作：{_last_asst}…）"
+                except Exception:
+                    _progress = "（轨迹不可读）"
+                lines.append(
+                    f"- {m.get('agent_id')}：{goal}\n  {_progress}")
             parts.append(
                 "<subagent_recovery>\n"
                 "（会话恢复：以下子代理上次被中断，各自的对话轨迹已落盘"
-                "——可带着已做部分续跑，不必从 0 重来。恢复姿势（严格遵守）：\n"
-                "1. **禁止先跑 tail/ls/cat 等任何侦查命令**——子代理的状态"
-                "和轨迹本注入已经列全，你自己查一遍纯属浪费时间和 token；\n"
+                "——可带着已做部分续跑，不必从 0 重来。每条的进度摘要"
+                "已列在下方，**不需要自己去 cat/ls 查**。恢复姿势（严格"
+                "遵守）：\n"
+                "1. **禁止先跑 tail/ls/cat 等任何侦查命令**——本注入已含"
+                "每个子代理的状态、任务和进度，你自己查纯属浪费时间和"
+                "token，还会把子代理的原始上下文灌进你的窗口；\n"
                 "2. **本条回复里同时发出全部 subagent_resume 调用**——"
                 "多个调用一起发才不被串行等待拖慢；一个一个发每轮要等"
                 "上一个跑完才轮到下一个；\n"
