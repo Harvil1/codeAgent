@@ -38,6 +38,7 @@ def _spawn_resumed_agent(
     messages: list,
     instruction: str,
     *,
+    agent_id: str = "",
     agent_ref=None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -106,6 +107,33 @@ def _spawn_resumed_agent(
         "- 不要做任务范围外的事\n"
     )
 
+    # === UI 直播：续跑子代理的工具活动上报面板（与 _run_child 同款）===
+    # 不接的话面板上没有任何行——续跑动辄几分钟，用户看着就是"卡住了"。
+    # key 用 agent_id 派生；纯展示 fail-open，展示线断了不许断任务线
+    _ui_key = f"resume-{agent_id or id(messages):x}"
+    _ui_desc = (instruction or "续跑子代理")[:40]
+    try:
+        import cli_live
+        cli_live.agent_begin(_ui_key, _ui_desc)
+    except Exception:
+        pass
+    from agent.hooks import HookRegistry
+    _ui_hooks = HookRegistry()
+
+    def _ui_on_pre(tool_name, args, **_kw):
+        try:
+            from cli_events import summarize_args
+            import cli_live
+            cli_live.note_child_tool(
+                _ui_key,
+                f"{tool_name}({summarize_args(tool_name, args or {})})",
+            )
+        except Exception:
+            pass
+        return None   # 纯旁观，不拦不改变量
+
+    _ui_hooks.register_pre_tool_use(_ui_on_pre, name="cli_live_resume")
+
     child = AIAgent(
         base_url=base_url,
         api_key=api_key or None,
@@ -120,8 +148,17 @@ def _spawn_resumed_agent(
         config=config,
         memory_store=memory_store,  # 必须透传父记忆库（漏了续跑子代理等于失忆）
         initial_messages=messages,  # 用 initial_messages 机制带入历史
+        hooks_registry=_ui_hooks,   # 面板活动行靠它上报
         on_response=None,  # resume 不再递归落盘（主入口已经统一 append 了）
     )
+
+    # 超时护栏（与同步委托同款语义）：config.delegation.resume_timeout_seconds
+    # 或默认 600s——不设的话续跑子代理跑飞了会永远挂着，Ctrl+C 是唯一出路
+    _rcfg = (config or {}).get("delegation", {}) if isinstance(config, dict) else {}
+    try:
+        _resume_timeout = float(_rcfg.get("resume_timeout_seconds", 600))
+    except (TypeError, ValueError):
+        _resume_timeout = 600.0
 
     # 同步跑：交给进程级常驻循环宿主桥接 async chat（替代 asyncio.run
     # 现建现拆循环——child 的 client 是新实例，迁移后绑宿主循环不再漂移；
@@ -133,8 +170,17 @@ def _spawn_resumed_agent(
     # messages 时故意不带末尾的 instruction，由 chat 追加，避免出现
     # 两条重复的 user 消息。
     try:
-        result = loop_host.run_async(child.chat(instruction))
+        result = loop_host.run_async(
+            child.chat(instruction),
+            timeout=_resume_timeout if _resume_timeout > 0 else None,
+        )
     finally:
+        # 面板收场（超时/异常/正常都走；abandon 场景由回合结束统一清）
+        try:
+            import cli_live
+            cli_live.agent_finish(_ui_key, status="done")
+        except Exception:
+            pass
         # === 子代理 client 用后即关 ===
         # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
         # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
@@ -229,6 +275,7 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
         result = _spawn_resumed_agent(
             clean_msgs,
             instruction,
+            agent_id=agent_id,
             agent_ref=_agent_ref,
             base_url=dispatch_kwargs.get("base_url"),
             api_key=dispatch_kwargs.get("api_key"),
@@ -237,6 +284,17 @@ def _run_resume(agent_id: str, instruction: str, **dispatch_kwargs) -> str:
             model_format=dispatch_kwargs.get("model_format"),
             config=dispatch_kwargs.get("config"),
             memory_store=_memory_store,
+        )
+    except TimeoutError as e:
+        logger.warning("subagent_resume 续跑超时 [%s]: %s", agent_id, e)
+        return json.dumps(
+            {"error": (
+                f"续跑超时（{e}）。本次中间过程未写入 transcript——"
+                "该子代理仍可再次 subagent_resume 续跑，或改派新子代理"
+            ),
+             "error_type": "resume_timeout",
+             "agent_id": agent_id},
+            ensure_ascii=False,
         )
     except Exception as e:
         logger.warning("subagent_resume 跑失败 [%s]: %s", agent_id, e)
