@@ -278,6 +278,7 @@ def agents_begin(pairs: list) -> None:
 
 def agent_begin(key, desc) -> None:
     """单个进场（同步子代理）：追加一条，不重置黑板。"""
+    import time as _t
     try:
         with _lock:
             key = str(key)
@@ -286,6 +287,7 @@ def agent_begin(key, desc) -> None:
             _agents[key] = {
                 "desc": _oneline(desc, 48), "status": "running",
                 "tools": 0, "activity": "",
+                "started_at": _t.monotonic(),  # 面板显示已耗时用
             }
     except Exception:
         pass
@@ -549,33 +551,34 @@ def panel_lines(width=80) -> list:
         out = []
         # ---- 运行中工具（● 闪烁动画行，工具跑完 POST 出栈自动消失）----
         out.extend(running_tool_lines(width))
-        # ---- 子代理树 ----
+        # ---- 子代理树（running 的行带已耗时+活动行实时更新）----
         snap = agents_snapshot()
         if snap:
-            if len(snap) == 1:
-                # 单个子代理：⎿ 当前活动 + 计数（claude code 单 Agent 形态）
-                _, e = snap[0]
-                acts = e["activity"] or e["desc"]
-                out.append(("class:live-dim", f"  ⎿  {acts}"[:w]))
-                if e["tools"] > 1:
+            import time as _t_now
+            for i, (_, e) in enumerate(snap):
+                last = i == len(snap) - 1
+                branch = "└─" if last else "├─"
+                running = e["status"] == "running"
+                # 已耗时（running 才显示，spinner 线程 0.1s 重绘=秒表在走）
+                _elapsed = ""
+                if running and e.get("started_at"):
+                    _sec = int(_t_now.monotonic() - e["started_at"])
+                    if _sec >= 60:
+                        _elapsed = f" ({_sec // 60}m{_sec % 60:02d}s)"
+                    elif _sec >= 3:
+                        _elapsed = f" ({_sec}s)"
+                status_bit = {
+                    "done": " · Done",
+                    "failed": " · ✗",
+                    "cancelled": " · cancelled",
+                }.get(e["status"], f" · {e['tools']} tool uses")
+                out.append(("class:live-dim",
+                            f"   {branch} {e['desc']}{status_bit}{_elapsed}"[:w]))
+                activity = e["activity"]
+                if running and activity:
+                    pipe = "   " if last else "│  "
                     out.append(("class:live-dim",
-                                f"     {e['tools']} tool uses"))
-            else:
-                for i, (_, e) in enumerate(snap):
-                    last = i == len(snap) - 1
-                    branch = "└─" if last else "├─"
-                    status_bit = {
-                        "done": " · Done",
-                        "failed": " · ✗",
-                        "cancelled": " · cancelled",
-                    }.get(e["status"], f" · {e['tools']} tool uses")
-                    out.append(("class:live-dim",
-                                f"   {branch} {e['desc']}{status_bit}"[:w]))
-                    activity = e["activity"]
-                    if e["status"] == "running" and activity:
-                        pipe = "   " if last else "│  "
-                        out.append(("class:live-dim",
-                                    f"   {pipe} ⎿  {activity}"[:w]))
+                                f"   {pipe} ⎿  {activity}"[:w]))
         # ---- 任务清单 ----
         rows = tasks_lines(width)
         if rows:
