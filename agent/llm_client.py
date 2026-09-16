@@ -387,7 +387,7 @@ class OpenAICompatClient(LLMClient):
                 raise
             # 连接池已被关闭（reset_client/收尾的竞态窗口正好撞上）——
             # 重建一次重试，别让一次竞态炸掉整轮调用（反思/主对话都遭过）
-            logger.warning("LLM client 已关闭（竞态窗口），重建后重试一次")
+            logger.debug("LLM client 已关闭（竞态窗口），重建后重试一次")
             self.reset_client()
             return await self.client.chat.completions.create(
                 model=self.model,
@@ -423,7 +423,7 @@ class OpenAICompatClient(LLMClient):
         except Exception as e:
             if not _is_client_closed_error(e):
                 raise
-            logger.warning("LLM client 已关闭（竞态窗口），重建后重试一次")
+            logger.debug("LLM client 已关闭（竞态窗口），重建后重试一次")
             self.reset_client()
             stream = await self.client.chat.completions.create(
                 model=self.model,
