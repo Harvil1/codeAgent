@@ -182,6 +182,7 @@ class WorkflowJournal:
             old = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         old.update(data)
         atomic_write_text(
             p, json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8",

@@ -64,7 +64,7 @@ def _reset_server() -> None:
                 proc.terminate()
                 proc.wait(timeout=2)
             except Exception:
-                logger.debug("关闭 pylsp 子进程失败（忽略，进程可能已退出）", exc_info=True)
+                logger.warning("关闭 pylsp 子进程失败（忽略，进程可能已退出）", exc_info=True)
         _SERVER["proc"] = None
         _SERVER["init"] = False
 

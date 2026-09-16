@@ -113,7 +113,7 @@ class ProgressReporter:
             try:
                 self.stream_callback(event)
             except Exception as e:
-                logger.debug("stream_callback 异常（progress）: %s", e)
+                logger.warning("stream_callback 异常（progress）: %s", e)
         return event
 
     def _run(self) -> None:
@@ -122,7 +122,7 @@ class ProgressReporter:
             try:
                 self.tick_once()
             except Exception as e:
-                logger.debug("progress reporter tick 异常: %s", e)
+                logger.warning("progress reporter tick 异常: %s", e)
 
     def generate_message(self) -> str:
         """生成一条进度文案：有小模型就让它现写一句，否则发固定心跳。
@@ -154,5 +154,5 @@ class ProgressReporter:
             if text and text.strip():
                 return text.strip()[:80]
         except Exception as e:
-            logger.debug("aux_llm 进度摘要失败，发心跳: %s", e)
+            logger.warning("aux_llm 进度摘要失败，发心跳: %s", e)
         return DEFAULT_HEARTBEAT_MESSAGE

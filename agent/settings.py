@@ -476,7 +476,7 @@ def migrate_from_legacy() -> bool:
                     bak.unlink()
                 f.rename(bak)
             except Exception as e:
-                logger.debug("改名 %s 失败: %s", f, e)
+                logger.warning("改名 %s 失败: %s", f, e)
 
     return True
 

@@ -142,5 +142,5 @@ def read_progress_file(session_id: str, codeagent_home=None) -> str:
             return ""
         return p.read_text(encoding="utf-8", errors="replace").strip()
     except Exception as e:
-        logger.debug("PROGRESS.md 读取失败（fail-open）: %s", e)
+        logger.warning("PROGRESS.md 读取失败（fail-open）: %s", e)
         return ""

@@ -80,7 +80,7 @@ async def call_llm_streaming(agent, *, messages, tools):
         try:
             _executor = StreamingToolExecutor(agent)
         except Exception as e:
-            logger.debug("流式执行器构造失败（退正常路径）: %s", e)
+            logger.warning("流式执行器构造失败（退正常路径）: %s", e)
     _last_seen_idx = None
 
     try:
@@ -205,6 +205,7 @@ async def call_llm_streaming(agent, *, messages, tools):
             discard_partial_stream_state(agent)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         from agent.llm_retry import call_with_retry
         response = await call_with_retry(
             agent.llm_client,
@@ -225,6 +226,7 @@ async def call_llm_streaming(agent, *, messages, tools):
                 })
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         return response
 
     # 流正常结束：先给正文片段结账（join 成整串，之后的长度判断/最终
@@ -244,7 +246,7 @@ async def call_llm_streaming(agent, *, messages, tools):
                 )
             agent._streaming_preset_results = await _executor.collect()
         except Exception as e:
-            logger.debug("流式预执行 collect 失败（弃用）: %s", e)
+            logger.warning("流式预执行 collect 失败（弃用）: %s", e)
             agent._streaming_preset_results = {}
 
     # 合成 tool_calls 列表（按 idx 排序，过滤掉没 name 的）
@@ -313,6 +315,7 @@ async def call_llm_streaming(agent, *, messages, tools):
                     })
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             # 更新 usage：截断那次 + 升级重试这次都真实花过钱，两边加总
             # （直接覆盖会漏记截断那次的花费）
             final_usage = merge_usage_tokens(final_usage, retried)
@@ -330,6 +333,7 @@ async def call_llm_streaming(agent, *, messages, tools):
             })
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 拼一个 OpenAI 兼容的响应对象（让记账 / hook 等下游代码不用改）
     message = SimpleNamespace(
@@ -368,4 +372,4 @@ def discard_partial_stream_state(agent) -> None:
     参数：agent——AIAgent 实例（原 self）；其余见签名。返回：无。
     """
     agent._streaming_preset_results = {}
-    logger.debug("流式失败：半截增量已丢弃（不入 history）")
+    logger.warning("流式失败：半截增量已丢弃（不入 history）")

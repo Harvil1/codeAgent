@@ -111,5 +111,5 @@ def notify(title: str, message: str) -> bool:
         )
         return True
     except Exception as e:
-        logger.debug("notify fail-open: %s", e)
+        logger.warning("notify fail-open: %s", e)
         return False

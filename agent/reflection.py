@@ -155,7 +155,7 @@ def build_memory_manifest(memory_store) -> str:
             + "\n".join(lines)
         )
     except Exception as e:
-        logger.debug("读取已有记忆清单失败（fail-open，manifest 留空）: %s", e)
+        logger.warning("读取已有记忆清单失败（fail-open，manifest 留空）: %s", e)
         return ""
 
 
@@ -382,6 +382,7 @@ def apply_reflection(
                 )
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     if written:
         logger.info("反思写入 %d 条新经验", written)
@@ -408,7 +409,7 @@ def _notify_memory_saved(agent, count: int) -> None:
                 "_ephemeral": True,
             })
     except Exception as e:
-        logger.debug("memory-saved 回执投递失败（fail-open）: %s", e)
+        logger.warning("memory-saved 回执投递失败（fail-open）: %s", e)
 
 
 def trigger_reflection_async(agent) -> None:
@@ -481,9 +482,9 @@ def trigger_reflection_async(agent) -> None:
                         agent_home=agent.codeAgent_home,
                     )
             except Exception as e:
-                logger.debug("用户画像更新失败(fail-open): %s", e)
+                logger.warning("用户画像更新失败(fail-open): %s", e)
         except Exception as e:
-            logger.debug("反思后台任务异常: %s", e)
+            logger.warning("反思后台任务异常: %s", e)
         finally:
             with agent._reflection_lock:
                 agent._active_reflections -= 1

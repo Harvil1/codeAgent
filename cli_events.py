@@ -395,6 +395,8 @@ def format_task_event(tool_name, result_str) -> list:
         done = sum(1 for t in tasks if t.get("status") == "completed")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     head = f"● TaskComplete({_cut(subject, 50)})" if subject else "● TaskComplete"
     if done is not None:
         return [("", head), ("dim", f"  ⎿  {done}/{total} done")]
@@ -484,6 +486,8 @@ def print_assistant_block(text: str) -> None:
             console.print(text)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def format_skill_lines(name: str) -> list:
@@ -620,6 +624,8 @@ def reset_pending(rt) -> None:
             snaps.clear()
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +663,8 @@ def print_style_lines(lines) -> None:
             console.print(Text(text, style=style) if style else Text(text))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def replay_session_transcript(msgs) -> None:
@@ -791,6 +799,8 @@ def install_event_lines(rt) -> None:
             rt.event_pending = pairer.pending_names()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _print_block(lines) -> None:
         """把 (style, text) 行列表画上屏（真身在模块级 print_style_lines）。"""
@@ -810,6 +820,8 @@ def install_event_lines(rt) -> None:
                 p.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _read_new_text(args):
         """POST 时把写完的文件读回来（读不到返回 None，跳过 diff）。"""
@@ -854,6 +866,8 @@ def install_event_lines(rt) -> None:
                     _running_label(tool_name, args))
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             if tool_name in _SUBAGENT_TOOLS:
                 _print_block([("", format_subagent_depart(args))])
             elif tool_name in _WRITE_TOOLS:
@@ -861,6 +875,8 @@ def install_event_lines(rt) -> None:
             # 普通工具的等待期反馈归 spinner 行/状态栏 ◐ 段（cli_layout）
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _on_post(tool_name, args, result, **_kw):
         """打 ● 头行 + ⎿ 结果块。POST 是流水线——最后原样 return result。"""
@@ -873,6 +889,8 @@ def install_event_lines(rt) -> None:
                     _running_label(tool_name, args))
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             dt = pairer.pop(tool_name, args)
             _update_pending()
             if tool_name in _QUIET_TOOLS:
@@ -891,6 +909,8 @@ def install_event_lines(rt) -> None:
                     cli_live.refresh_tasks()
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             else:
                 head = format_tool_line(tool_name, args, dt, result)
                 if tool_name in _WRITE_TOOLS:
@@ -912,6 +932,8 @@ def install_event_lines(rt) -> None:
                     [("", head)] + format_result_block(tool_name, result))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         return result
 
     try:

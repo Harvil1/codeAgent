@@ -81,7 +81,7 @@ class GoalState:
             from agent.notifier import notify
             notify("Goal 已暂停", f"原因: {reason}")
         except Exception as e:
-            logger.debug("pause notify fail-open: %s", e)
+            logger.warning("pause notify fail-open: %s", e)
 
     def resume(self) -> None:
         """把暂停的目标恢复成进行中，并清掉上次的暂停原因。
@@ -240,6 +240,7 @@ def goal_persist_path(agent) -> Path:
             return Path(fn())
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
     home = getattr(agent, "codeagent_home", None)
     if home:
         return Path(home) / ".goal" / "current.json"

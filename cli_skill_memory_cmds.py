@@ -189,7 +189,7 @@ def _list_skills(rt: RuntimeContext):
             fm, _ = parse_frontmatter(content)
             desc = fm.get("description", "")
         except Exception:
-            logger.debug("读取技能 frontmatter 失败", exc_info=True)
+            logger.warning("读取技能 frontmatter 失败", exc_info=True)
 
         rating = rec.get("rating")
         rating_str = f"{rating}★" if rating else "-"

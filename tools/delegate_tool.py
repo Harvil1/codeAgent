@@ -109,7 +109,7 @@ class DelegationCompletionQueue:
             try:
                 self._wake_callback()
             except Exception as e:
-                logger.debug("delegation wake 回调失败（fail-open）: %s", e)
+                logger.warning("delegation wake 回调失败（fail-open）: %s", e)
 
     def drain(self) -> List[dict]:
         """主对话取件：一次性拿走信箱里所有结果并清空，下次从空箱开始。"""
@@ -167,12 +167,14 @@ def cancel_all_subagents(reason: str = "shutdown") -> int:
                 count += 1
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         ex = batch.get("executor")
         if ex is not None:
             try:
                 ex.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
     # 异步子代理花名册（subagent_kill 管的那个）
     for info in _async_tasks.values():
         ev = info.get("cancel_event")
@@ -182,6 +184,7 @@ def cancel_all_subagents(reason: str = "shutdown") -> int:
                 count += 1
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
     if count:
         logger.info("已取消 %d 个活跃子代理（%s）", count, reason)
     return count
@@ -433,6 +436,7 @@ def _delegate_sync(
         cli_live.agent_begin(_ui_key, goal[:50])
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 把心跳刷新挂到子代理的 hooks_registry——但 _run_child 内部才建
     # registry，这里先记到一个闭包可写的地方，delegate_child 的 UI 钩子
@@ -453,6 +457,7 @@ def _delegate_sync(
                     status="failed" if "error" in box else "done")
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     thread = threading.Thread(target=_run, daemon=True, name="delegate-sync")
     thread.start()
@@ -506,7 +511,7 @@ def _delegate_sync(
                     from agent.subagent_persistence import mark_completed as _mark
                     _mark(_pid, "interrupted")
                 except Exception:
-                    logger.debug("abandon 标记 interrupted 失败（fail-open）")
+                    logger.warning("abandon 标记 interrupted 失败（fail-open）")
             return json.dumps({
                 "success": False,
                 "error": (
@@ -758,6 +763,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
         ])
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         for i, task in enumerate(tasks):
             goal = task.get("goal", "") or task.get("prompt", "")
@@ -800,8 +806,10 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                         cli_live.agent_finish(_name, status=_st)
                     except Exception:
                         pass
+                        logger.warning("异常被吞(fail-open)", exc_info=True)
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             future.add_done_callback(_mark_child_done)
 
         # 2 个以上子代理并行时用户只能干等——起 30 秒一班的进度播报线程，
@@ -840,11 +848,13 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                 parent.interrupt()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         for ev in batch_cancel_events:
             try:
                 ev.set()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         for f in futures:
             f.cancel()
         executor.shutdown(wait=False, cancel_futures=True)

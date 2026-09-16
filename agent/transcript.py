@@ -116,7 +116,7 @@ def _update_latest_pointer(transcripts_dir: Path, target: Path) -> None:
     try:
         pointer.write_text(str(target), encoding="utf-8")
     except OSError as e:
-        logger.debug("latest 指针更新失败: %s", e)
+        logger.warning("latest 指针更新失败: %s", e)
 
 
 def _prune_old(transcripts_dir: Path, retention: int) -> None:
@@ -137,4 +137,4 @@ def _prune_old(transcripts_dir: Path, retention: int) -> None:
         try:
             old.unlink()
         except OSError as e:
-            logger.debug("删除旧 transcript 失败 %s: %s", old, e)
+            logger.warning("删除旧 transcript 失败 %s: %s", old, e)

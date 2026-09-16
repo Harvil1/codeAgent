@@ -84,6 +84,7 @@ class GlobalHistory:
                         )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _read_all(self) -> List[str]:
         """内部：把历史文件的每一行读成列表。读不了返回空列表（fail-open）。"""
@@ -199,6 +200,7 @@ def expand_paste_references(text: str, home) -> str:
                 return path.read_text(encoding="utf-8")
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         return m.group(0)  # 文件不在就保留占位符不动
 
     return _PASTE_REF_RE.sub(_expand, text)

@@ -103,7 +103,7 @@ def flush_usage(skills_dir: Path = None) -> None:
             atomic_write_text(path, json.dumps(entry["data"], ensure_ascii=False, indent=2))
             entry["dirty"] = False
         except Exception as e:
-            logger.debug("flush_usage 失败 %s: %s", key, e)
+            logger.warning("flush_usage 失败 %s: %s", key, e)
 
 
 def _ensure_record(data: Dict, skill_name: str) -> Dict:
@@ -150,7 +150,7 @@ def bump_view(skills_dir: Path, skill_name: str) -> None:
         rec["last_viewed_at"] = _now_iso()
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("bump_view 失败: %s", e)
+        logger.warning("bump_view 失败: %s", e)
 
 
 def bump_use(skills_dir: Path, skill_name: str) -> None:
@@ -171,7 +171,7 @@ def bump_use(skills_dir: Path, skill_name: str) -> None:
         rec["last_used_at"] = _now_iso()
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("bump_use 失败: %s", e)
+        logger.warning("bump_use 失败: %s", e)
 
 
 def bump_patch(skills_dir: Path, skill_name: str) -> None:
@@ -192,7 +192,7 @@ def bump_patch(skills_dir: Path, skill_name: str) -> None:
         rec["last_patched_at"] = _now_iso()
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("bump_patch 失败: %s", e)
+        logger.warning("bump_patch 失败: %s", e)
 
 
 def mark_agent_created(skills_dir: Path, skill_name: str) -> None:
@@ -213,7 +213,7 @@ def mark_agent_created(skills_dir: Path, skill_name: str) -> None:
         rec["created_by"] = "agent"
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("mark_agent_created 失败: %s", e)
+        logger.warning("mark_agent_created 失败: %s", e)
 
 
 def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
@@ -243,7 +243,7 @@ def set_state(skills_dir: Path, skill_name: str, state: str) -> None:
             rec["archived_at"] = None
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("set_state 失败: %s", e)
+        logger.warning("set_state 失败: %s", e)
 
 
 def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
@@ -268,7 +268,7 @@ def set_pinned(skills_dir: Path, skill_name: str, pinned: bool) -> None:
         rec["pinned"] = bool(pinned)
         save_usage(skills_dir, data)
     except Exception as e:
-        logger.debug("set_pinned 失败: %s", e)
+        logger.warning("set_pinned 失败: %s", e)
 
 
 def archive_skill(skills_dir: Path, skill_name: str) -> tuple:
@@ -412,6 +412,7 @@ def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
                             break
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         candidates.append({
             "name": name,

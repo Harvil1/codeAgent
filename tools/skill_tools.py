@@ -233,6 +233,7 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
                     description = frontmatter.get("description", "")
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
 
             skills[name] = {
                 "name": name,
@@ -368,6 +369,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
                 bump_view(usage_dir, sname)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         return json.dumps(result, ensure_ascii=False)
 
     skill_md = _find_skill_md(name, dirs)
@@ -404,6 +406,7 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
             agent._skill_tool_scope = (allowed, disallowed)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     return json.dumps({
         "name": name,

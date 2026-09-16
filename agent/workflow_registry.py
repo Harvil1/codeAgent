@@ -36,11 +36,13 @@ def _script_dirs() -> list:
         dirs.append(get_codeagent_home() / "workflows")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         from agent.workspace_context import get_workspace_cwd
         dirs.append(Path(get_workspace_cwd()) / ".codeAgent" / "workflows")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return dirs
 
 
@@ -72,10 +74,10 @@ def load_workflow_scripts() -> Dict[str, str]:
             try:
                 result[py.stem] = py.read_text(encoding="utf-8")
             except Exception as e:
-                logger.debug("workflow 脚本读取失败 %s: %s", py, e)
+                logger.warning("workflow 脚本读取失败 %s: %s", py, e)
         _cache["key"] = key
         _cache["scripts"] = result
         return result
     except Exception as e:
-        logger.debug("load_workflow_scripts fail-open: %s", e)
+        logger.warning("load_workflow_scripts fail-open: %s", e)
         return {}

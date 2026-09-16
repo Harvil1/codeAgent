@@ -53,7 +53,7 @@ def flush_skill_activations(agent) -> None:
         try:
             activate_conditional_skills(agent, p)
         except Exception as e:
-            logger.debug("条件技能激活失败（fail-open）: %s", e)
+            logger.warning("条件技能激活失败（fail-open）: %s", e)
 
 
 def activate_conditional_skills(agent, path) -> None:
@@ -96,7 +96,7 @@ def activate_conditional_skills(agent, path) -> None:
             path, ", ".join(h["name"] for h in new_hits),
         )
     except Exception as e:
-        logger.debug("条件技能激活失败（fail-open）: %s", e)
+        logger.warning("条件技能激活失败（fail-open）: %s", e)
 
 
 def start_tool_batch_summary(agent, tool_calls, safe_processed, unsafe_processed) -> None:
@@ -143,7 +143,7 @@ def start_tool_batch_summary(agent, tool_calls, safe_processed, unsafe_processed
             generate_tool_batch_summary(agent, items), "tool-batch-summary",
         )
     except Exception as e:
-        logger.debug("批间摘要启动失败（fail-open）: %s", e)
+        logger.warning("批间摘要启动失败（fail-open）: %s", e)
 
 
 async def generate_tool_batch_summary(agent, items) -> None:
@@ -175,4 +175,4 @@ async def generate_tool_batch_summary(agent, items) -> None:
             agent._pending_tool_batch_summary = text[:200]
             logger.debug("批间摘要已生成（%d 字）", len(text))
     except Exception as e:
-        logger.debug("批间摘要生成失败（fail-open）: %s", e)
+        logger.warning("批间摘要生成失败（fail-open）: %s", e)

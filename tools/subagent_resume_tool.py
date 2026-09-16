@@ -127,6 +127,7 @@ def _spawn_resumed_agent(
         cli_live.agent_begin(_ui_key, _ui_desc)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     from agent.hooks import HookRegistry
     _ui_hooks = HookRegistry()
 
@@ -140,6 +141,7 @@ def _spawn_resumed_agent(
             )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         return None   # 纯旁观，不拦不改变量
 
     _ui_hooks.register_pre_tool_use(_ui_on_pre, name="cli_live_resume")
@@ -191,6 +193,7 @@ def _spawn_resumed_agent(
             cli_live.agent_finish(_ui_key, status="done")
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         # === 子代理 client 用后即关 ===
         # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
         # create_llm_client 现造，不共享父代理的）——旧 asyncio.run
@@ -214,6 +217,7 @@ def _spawn_resumed_agent(
                     _close_coro.close()
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
     return result
 
 

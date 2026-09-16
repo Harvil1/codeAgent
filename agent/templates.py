@@ -46,11 +46,13 @@ def _template_dirs() -> list:
         dirs.append(get_codeagent_home() / "templates")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         from agent.workspace_context import get_workspace_cwd
         dirs.append(Path(get_workspace_cwd()) / ".codeAgent" / "templates")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return dirs
 
 
@@ -94,10 +96,10 @@ def load_task_templates() -> Dict[str, dict]:
                     "recurring": bool(fm.get("recurring", True)),
                 }
             except Exception as e:
-                logger.debug("模板解析失败 %s: %s", md, e)
+                logger.warning("模板解析失败 %s: %s", md, e)
         _cache["key"] = key
         _cache["templates"] = result
         return result
     except Exception as e:
-        logger.debug("load_task_templates fail-open: %s", e)
+        logger.warning("load_task_templates fail-open: %s", e)
         return {}

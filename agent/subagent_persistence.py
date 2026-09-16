@@ -118,7 +118,7 @@ def load_metadata(agent_id: str) -> Optional[dict]:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.debug("load_metadata fail-open [%s]: %s", agent_id, e)
+        logger.warning("load_metadata fail-open [%s]: %s", agent_id, e)
         return None
 
 
@@ -190,7 +190,7 @@ def list_resumable() -> List[dict]:
                 continue
         return result
     except Exception as e:
-        logger.debug("list_resumable fail-open: %s", e)
+        logger.warning("list_resumable fail-open: %s", e)
         return []
 
 
@@ -228,7 +228,7 @@ def cleanup_old(days: int = 7) -> int:
     try:
         sessions_dir = _sessions_dir()
     except Exception as e:
-        logger.debug("cleanup_old: _sessions_dir 失败: %s", e)
+        logger.warning("cleanup_old: _sessions_dir 失败: %s", e)
         return 0
 
     for meta_path in sessions_dir.glob("*.meta.json"):

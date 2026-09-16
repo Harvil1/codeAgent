@@ -764,6 +764,7 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
             return parsed if isinstance(parsed, dict) else None
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
 
@@ -836,4 +837,5 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
                 return parsed
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return {"decision": "review", "raw": result[:500]}

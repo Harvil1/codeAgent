@@ -98,9 +98,9 @@ def record_llm_usage(agent, response, sent_message_count: int = None) -> None:
                     cache_creation=cache_creation,
                 )
             except Exception as te:
-                logger.debug("usage_tracker 记录失败（fail-open）: %s", te)
+                logger.warning("usage_tracker 记录失败（fail-open）: %s", te)
     except Exception as e:
-        logger.debug("记录 LLM usage 失败（fail-open）: %s", e)
+        logger.warning("记录 LLM usage 失败（fail-open）: %s", e)
 
 
 def extract_turn_tokens(response) -> int:

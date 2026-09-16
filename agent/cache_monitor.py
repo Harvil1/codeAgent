@@ -170,7 +170,7 @@ def record_prompt_state(
         )
         return state
     except Exception as e:
-        logger.debug("record_prompt_state fail-open: %s", e)
+        logger.warning("record_prompt_state fail-open: %s", e)
         return PromptState()
 
 
@@ -231,7 +231,7 @@ def check_cache_break(
         try:
             diff_path = _write_break_diff(_last_state, current_state, reasons)
         except Exception as de:
-            logger.debug("_write_break_diff fail-open: %s", de)
+            logger.warning("_write_break_diff fail-open: %s", de)
 
         # 记进历史（限长，防长会话内存膨胀）
         _break_history.append({
@@ -263,7 +263,7 @@ def check_cache_break(
         )
         return root_cause
     except Exception as e:
-        logger.debug("check_cache_break fail-open: %s", e)
+        logger.warning("check_cache_break fail-open: %s", e)
         return None
 
 
@@ -426,7 +426,7 @@ def _write_break_diff(
         diff_path.write_text("\n".join(lines), encoding="utf-8")
         return str(diff_path)
     except Exception as e:
-        logger.debug("write_break_diff fail-open: %s", e)
+        logger.warning("write_break_diff fail-open: %s", e)
         return None
 
 
@@ -443,6 +443,7 @@ def _enforce_diff_lru_limit() -> None:
             limit = _read_diff_limit()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         diff_dir = get_codeagent_home() / ".cache-breaks"
         if not diff_dir.exists():
@@ -458,8 +459,9 @@ def _enforce_diff_lru_limit() -> None:
                 f.unlink()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
     except Exception as e:
-        logger.debug("enforce_diff_lru_limit fail-open: %s", e)
+        logger.warning("enforce_diff_lru_limit fail-open: %s", e)
 
 
 # 模块级 diff 上限（AIAgent 启动时可覆盖）
@@ -494,6 +496,7 @@ def set_diff_limit(limit: int) -> None:
         _diff_limit = max(1, int(limit))
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def notify_compaction() -> None:

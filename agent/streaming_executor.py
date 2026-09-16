@@ -130,7 +130,7 @@ class StreamingToolExecutor:
             self._tasks.append((tc, task))
             logger.info("流式预执行启动: %s（idx=%s）", tc.function.name, idx)
         except Exception as e:
-            logger.debug("流式预执行启动失败（fail-open）: %s", e)
+            logger.warning("流式预执行启动失败（fail-open）: %s", e)
 
     async def _run(self, tc) -> str:
         """实际预执行一个 safe 工具。
@@ -204,6 +204,7 @@ class StreamingToolExecutor:
                 )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         finally:
             # 结果要被扔掉了——预执行 read 记的去重账一并撤
             # （模型从没见过内容，重试重读必须给全文）
@@ -234,4 +235,4 @@ class StreamingToolExecutor:
                 except Exception:
                     continue
         except Exception as e:
-            logger.debug("read 去重撤销失败（fail-open）: %s", e)
+            logger.warning("read 去重撤销失败（fail-open）: %s", e)

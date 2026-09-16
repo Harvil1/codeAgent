@@ -170,7 +170,7 @@ def validate_url_for_ssrf(url: str) -> Optional[str]:
     except socket.gaierror as e:
         # DNS 解析失败不在这拦——放行给 requests 报真实的连接错误
         # （fail-open，对齐 hook 的容错语义）
-        logger.debug("SSRF 预检 DNS 解析失败（放行交给请求层）: %s: %s", hostname, e)
+        logger.warning("SSRF 预检 DNS 解析失败（放行交给请求层）: %s: %s", hostname, e)
         return None
 
     for info in infos:

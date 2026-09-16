@@ -293,6 +293,7 @@ class StdioTransport(MCPTransport):
                 self.process.wait(timeout=2)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             self.process = None
             raise
         self._connected = True
@@ -470,6 +471,7 @@ class StdioTransport(MCPTransport):
             self.process.stdin.close()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             self.process.terminate()
             self.process.wait(timeout=3)
@@ -478,6 +480,7 @@ class StdioTransport(MCPTransport):
                 self.process.kill()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         self.process = None
 
     @property
@@ -601,6 +604,7 @@ class HTTPTransport(MCPTransport):
                 return True, f"HEAD ok (status={r.status_code}, ct={ct})"
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # HEAD 没结论再试 GET
         try:
@@ -762,6 +766,7 @@ class HTTPTransport(MCPTransport):
             )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def close(self) -> None:
         """关闭连接：关掉 HTTP 客户端。"""
@@ -771,6 +776,7 @@ class HTTPTransport(MCPTransport):
                 self._client.close()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             self._client = None
 
     @property
@@ -1010,6 +1016,7 @@ class SSETransport(MCPTransport):
             )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def close(self) -> None:
         self._connected = False
@@ -1018,6 +1025,7 @@ class SSETransport(MCPTransport):
                 self._client.close()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             self._client = None
 
     @property
@@ -1211,6 +1219,7 @@ class WebSocketTransport(MCPTransport):
             loop_host.run_async(self._ws.send(json.dumps(msg)))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def _ws_close(self) -> None:
         """（内部）关掉 WebSocket 连接（幂等，已关也不报错）。"""
@@ -1219,6 +1228,7 @@ class WebSocketTransport(MCPTransport):
                 await self._ws.close()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             self._ws = None
 
     def close(self) -> None:
@@ -1230,6 +1240,7 @@ class WebSocketTransport(MCPTransport):
                 loop_host.run_async(self._ws_close())
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     @property
     def is_connected(self) -> bool:
@@ -1570,6 +1581,7 @@ class MCPManager:
                     client.close()
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
                 return winner
             self._clients[name] = client
         return client
@@ -1590,7 +1602,7 @@ class MCPManager:
         try:
             client.close()
         except Exception as e:
-            logger.debug("MCP server %s 关闭异常（忽略）: %s", name, e)
+            logger.warning("MCP server %s 关闭异常（忽略）: %s", name, e)
         return True
 
     def get_all_tools(self) -> List[dict]:
@@ -1750,6 +1762,7 @@ class MCPManager:
                 client.close()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     @property
     def servers(self) -> List[str]:

@@ -136,7 +136,7 @@ def get_disk_version() -> Dict:
         config = json.loads(_snapshot_settings_path.read_text(encoding="utf-8"))
         return config.get("hooks", {}) if isinstance(config, dict) else {}
     except Exception as e:
-        logger.debug("读取磁盘 hook 配置失败: %s", e)
+        logger.warning("读取磁盘 hook 配置失败: %s", e)
         return {}
 
 

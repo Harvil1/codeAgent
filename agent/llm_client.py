@@ -318,6 +318,7 @@ class OpenAICompatClient(LLMClient):
                 pass
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         _client_kwargs = {"base_url": self.base_url, "api_key": self._api_key}
         if self._request_timeout is not None:
             _client_kwargs["timeout"] = self._request_timeout
@@ -362,6 +363,7 @@ class OpenAICompatClient(LLMClient):
                     coro.close()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
         """非流式调用：直接转交给 AsyncOpenAI SDK，原样返回它的响应对象。
@@ -556,6 +558,7 @@ class AnthropicClient(LLMClient):
                 pass
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         from anthropic import AsyncAnthropic
         kwargs = {}
         if self._base_url:
@@ -606,6 +609,7 @@ class AnthropicClient(LLMClient):
                     coro.close()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # effort_level（思考强度）换算成 DeepSeek 的思考参数。
     # 参考: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
@@ -1096,3 +1100,4 @@ async def aclose_llm_client(client) -> None:
                 await result
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)

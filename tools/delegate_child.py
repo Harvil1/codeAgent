@@ -113,7 +113,7 @@ def _run_child(
             })
             logger.debug("Task I: 子代理 transcript 持久化启用: %s", _child_agent_id)
         except Exception as e:
-            logger.debug("Task I: transcript 持久化初始化失败（fail-open）: %s", e)
+            logger.warning("Task I: transcript 持久化初始化失败（fail-open）: %s", e)
             _child_agent_id = None
 
     # LLM 连接配置：优先用 kwargs 里带的，缺了再从 config 补
@@ -593,6 +593,7 @@ def _run_child(
                 parent_agent._children.append(child)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # === UI 直播 + 心跳：子代理的工具活动上报 live 面板 + 刷新活跃心跳 ===
         # 心跳的作用：同步委托的空闲超时靠它判定"还在干活"——每次工具调用
@@ -616,6 +617,7 @@ def _run_child(
                         )
                     except Exception:
                         pass
+                        logger.warning("异常被吞(fail-open)", exc_info=True)
                     return None   # 不拦不改变量——纯旁观
 
                 def _ui_on_post(tool_name, args, result, **_kw):
@@ -632,6 +634,7 @@ def _run_child(
                         )
                     except Exception:
                         pass
+                        logger.warning("异常被吞(fail-open)", exc_info=True)
                     return result  # POST 流水线：原样透传
 
                 child.hooks_registry.register_pre_tool_use(
@@ -639,7 +642,7 @@ def _run_child(
                 child.hooks_registry.register_post_tool_use(
                     _ui_on_post, name="cli_live_child_post")
             except Exception as e:
-                logger.debug("live 面板钩子注册失败（fail-open）: %s", e)
+                logger.warning("live 面板钩子注册失败（fail-open）: %s", e)
         elif isinstance(_heartbeat, dict):
             # 没有 ui_child_key（非 CLI 场景）也要挂心跳——不然同步委托
             # 空闲 5 分钟就误杀长任务
@@ -652,6 +655,7 @@ def _run_child(
                     _hb_on_pre, name="sync_heartbeat")
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # === 长任务进行中的进度播报（P1-10）===
         # 用辅助小模型周期性生成「正在做什么」的摘要，推给父代理的
@@ -799,6 +803,7 @@ def _run_child(
                     parent_agent._children.remove(child)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         # 恢复工作目录上下文（替代 os.chdir 的回切）
         # ContextVar 的 token reset 只影响当前线程，踩不到别的并发子代理
         if _workspace_cwd_token is not None:
@@ -806,6 +811,7 @@ def _run_child(
                 _workspace_cwd.reset(_workspace_cwd_token)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         if workspace_cleanup:
             # 智能清理 worktree：子代理有改动就保留现场，没改动才删
             # config.delegation.worktree_always_cleanup=True → 恢复旧行为（无脑总清理）
@@ -866,3 +872,4 @@ def _run_child(
                         _close_coro.close()
                     except Exception:
                         pass
+                        logger.warning("异常被吞(fail-open)", exc_info=True)

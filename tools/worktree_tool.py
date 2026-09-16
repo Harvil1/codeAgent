@@ -371,7 +371,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
             try:
                 _run_git(["branch", "-D", wt.branch], repo_root)
             except Exception as e:
-                logger.debug("删除分支 %s 失败: %s", wt.branch, e)
+                logger.warning("删除分支 %s 失败: %s", wt.branch, e)
 
     return json.dumps(
         {"path": str(wt.path), "kept": False, "cleaned": cleaned},

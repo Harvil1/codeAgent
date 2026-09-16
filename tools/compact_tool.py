@@ -139,6 +139,7 @@ async def _handle_compact(args: dict, **kwargs) -> str:
         agent.invalidate_system_prompt()
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 冷却记账（与主循环 L4 成功后的收尾对齐）：不记账的话，紧接着的
     # 自动压缩看不到"刚压过"，冷却期判定失真、可能连着再压一次

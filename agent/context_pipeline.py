@@ -404,6 +404,7 @@ def micro_compact(
                     continue
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 兜底（没传 agent_home 或落盘失败）：换成提示性占位
         new_m = dict(m)
@@ -906,7 +907,7 @@ async def llm_compact(
             from agent.cache_monitor import notify_compaction
             notify_compaction()
         except Exception as e:
-            logger.debug("notify_compaction fail-open: %s", e)
+            logger.warning("notify_compaction fail-open: %s", e)
         # partial 故意不写 _last_compact_placeholder（不落库边界占位）：恢复端
         # _truncate_at_last_compact_boundary 按「最后边界之前全裁」工作，落了
         # 会把 partial 明确保留的 head 段裁掉——与边界文本「保留段范围：
@@ -988,7 +989,7 @@ async def llm_compact(
         from agent.cache_monitor import notify_compaction
         notify_compaction()
     except Exception as e:
-        logger.debug("notify_compaction fail-open: %s", e)
+        logger.warning("notify_compaction fail-open: %s", e)
     # 全量模式才写边界占位暂存（partial 分支在上面故意跳过——恢复裁剪
     # 会误裁 head 保留段）。global 声明只在全量分支用，partial 分支已不
     # 触碰该名字，放这里不会 SyntaxError。
@@ -1212,7 +1213,7 @@ def reactive_compact(
         from agent.cache_monitor import notify_compaction
         notify_compaction()
     except Exception as e:
-        logger.debug("notify_compaction fail-open: %s", e)
+        logger.warning("notify_compaction fail-open: %s", e)
     global _last_compact_placeholder
     _last_compact_placeholder = placeholder["content"]
     return new_messages, True
@@ -1757,7 +1758,7 @@ async def compress_if_needed(
             from agent.cache_monitor import notify_compaction
             notify_compaction()
         except Exception as e:
-            logger.debug("notify_compaction fail-open: %s", e)
+            logger.warning("notify_compaction fail-open: %s", e)
 
     # POST_COMPACT hook（广播压缩已完成）
     if hooks_registry is not None:

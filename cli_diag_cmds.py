@@ -62,6 +62,8 @@ def _sync_history_after_compact(agent, new_messages: list) -> None:
             invalidate()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 def _print_compact_delta(
     before_msgs: int, before_tokens: int,
     after_msgs: int, after_tokens: int,
@@ -164,6 +166,8 @@ def _handle_compact_cli(args: str, rt) -> bool:
                 state.record_llm_compact()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         # 边界占位落库（和自动压缩的收尾一致）：手动压缩不落边界的话，
         # 压完重启 = 会话库里没有 [COMPACT_BOUNDARY] 锚点，恢复时全量
         # 载入旧历史，这次压缩等于白压。fail-open：落库失败不挡压缩。
@@ -280,7 +284,7 @@ def _status_row(label: str, fn):
     try:
         return (label, fn())
     except Exception as e:
-        logger.debug("/status 段 %s 读取失败: %s", label, e)
+        logger.warning("/status 段 %s 读取失败: %s", label, e)
         return (label, f"[red]读取失败：{e}[/red]")
 def _handle_status_cli(args: str, rt) -> bool:
     """/status 命令：一张表看全当前运行状态。
@@ -568,7 +572,7 @@ def _show_usage(rt: RuntimeContext):
                                 f"cache r{row['cache_read']:,}/w{row['cache_creation']:,}"
                             )
                 except Exception as e:
-                    logger.debug("per-model 用量展示失败（fail-open）: %s", e)
+                    logger.warning("per-model 用量展示失败（fail-open）: %s", e)
     if rt.session_store and rt.session_id:
         info = rt.session_store.get_session(rt.session_id)
         if info:

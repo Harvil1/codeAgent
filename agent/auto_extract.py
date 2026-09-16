@@ -147,12 +147,12 @@ async def run_auto_extract(agent, start_idx: int) -> int:
                 saved += 1
             except Exception as e:
                 # 包括秘密拒绝——单条失败不连累其余条目
-                logger.debug("auto_extract 保存单条失败: %s", e)
+                logger.warning("auto_extract 保存单条失败: %s", e)
         if saved:
             logger.info("auto_extract 增量提取保存 %d 条记忆", saved)
         return saved
     except Exception as e:
-        logger.debug("auto_extract 失败（fail-open）: %s", e)
+        logger.warning("auto_extract 失败（fail-open）: %s", e)
         return 0
 
 

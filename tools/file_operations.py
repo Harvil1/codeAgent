@@ -158,6 +158,7 @@ def _read_seen_refresh(path) -> None:
             _READ_SEEN.popitem(last=False)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +334,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
                     _skip_offload = True
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         if _skip_offload:
             final_content = raw_content
@@ -352,6 +354,7 @@ def _handle_read_file(args: dict, **kwargs) -> str:
                 _READ_SEEN.popitem(last=False)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 默认 limit（没显式传）截断了、后面还有没读到的行 → 给续读提示，
         # 告诉 LLM 从哪一行接着读（显式传了 limit 的老路径不加，行为保持不变）
@@ -436,6 +439,7 @@ def _track_checkpoint(path, kwargs) -> None:
             tracker(str(path))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def _trigger_file_changed(path, op: str, kwargs) -> None:

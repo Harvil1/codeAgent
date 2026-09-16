@@ -263,11 +263,15 @@ def edit_in_notepad(initial: str = "", editor: str = None):
                 os.close(fd)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         if path:
             try:
                 os.unlink(path)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +321,8 @@ def run_selector(question, header, options, multi=False, chips=None):
             get_app().exit()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _custom_text():
         return custom_buf.text.strip()
@@ -338,6 +344,8 @@ def run_selector(question, header, options, multi=False, chips=None):
             get_app().layout.focus(win)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _move(delta):
         state["cursor"] = (state["cursor"] + delta) % max(1, idx["total"])
@@ -606,6 +614,8 @@ def _fallback_number_input(question, options, multi, fallback_input) -> dict:
         emit_ansi("\n".join(lines) + "\n")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         raw = ((fallback_input("选择/输入 > ") if fallback_input else "")
                or "").strip()

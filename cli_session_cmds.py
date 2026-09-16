@@ -164,7 +164,7 @@ def _resume_and_cleanup_empty(rt: RuntimeContext, target_session_id: str) -> Non
         try:
             rt.session_store.delete_session(empty_id)
         except Exception:
-            logger.debug("清理空 session 失败: %s", empty_id, exc_info=True)
+            logger.warning("清理空 session 失败: %s", empty_id, exc_info=True)
 def _resume_session_interactive(rt: RuntimeContext, args: str):
     """/resume 命令主体：交互式恢复一个历史会话。
 

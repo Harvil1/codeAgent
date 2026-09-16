@@ -73,7 +73,7 @@ class UsageTracker:
             row["cache_creation"] += int(cache_creation or 0)
             self._save()
         except Exception as e:
-            logger.debug("usage_tracker.record 失败（fail-open）: %s", e)
+            logger.warning("usage_tracker.record 失败（fail-open）: %s", e)
 
     # ---- 查询 ----
 
@@ -116,4 +116,4 @@ class UsageTracker:
                 encoding="utf-8",
             )
         except Exception as e:
-            logger.debug("usage 持久化失败（fail-open）: %s", e)
+            logger.warning("usage 持久化失败（fail-open）: %s", e)

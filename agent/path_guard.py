@@ -153,6 +153,7 @@ try:
     _WRITE_PROTECTED_PATHS.append((project_root().resolve(), "项目代码目录"))
 except Exception:
     pass
+    logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def is_write_protected_path(path) -> Optional[str]:
@@ -341,6 +342,7 @@ def default_allowed_roots() -> List[Path]:
         roots.append(get_codeagent_home().resolve())
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     # /add-dir 运行时追加的额外白名单(含启动时从
     # settings.json 里加载回来的)
     roots.extend(_EXTRA_ALLOWED_ROOTS)

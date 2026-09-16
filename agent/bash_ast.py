@@ -53,12 +53,12 @@ def parse_info(command: str) -> Optional[dict]:
     try:
         import bashlex
     except ImportError:
-        logger.debug("bashlex 未安装，AST 解析跳过（fail-open）")
+        logger.warning("bashlex 未安装，AST 解析跳过（fail-open）")
         return None
     try:
         nodes = bashlex.parse(cmd)
     except Exception as e:
-        logger.debug("bashlex 解析失败（fail-open 回落正则）: %r → %s", cmd[:80], e)
+        logger.warning("bashlex 解析失败（fail-open 回落正则）: %r → %s", cmd[:80], e)
         return None
 
     segments: List[List[str]] = []
@@ -101,7 +101,7 @@ def parse_info(command: str) -> Optional[dict]:
         for n in nodes:
             _walk(n)
     except Exception as e:
-        logger.debug("bashlex AST 遍历异常（fail-open）: %s", e)
+        logger.warning("bashlex AST 遍历异常（fail-open）: %s", e)
         return None
 
     if not segments:

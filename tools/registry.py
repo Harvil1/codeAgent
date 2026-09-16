@@ -484,7 +484,7 @@ class ToolRegistry:
         for name, entry in entries:
             if entry is None:
                 if not quiet:
-                    logger.debug("工具 %s 未注册（被忽略）", name)
+                    logger.warning("工具 %s 未注册（被忽略）", name)
                 continue
             # 可用性检查（结果有 30 秒缓存，见上文说明）
             if entry.check_fn and not _check_fn_cached(entry.check_fn):

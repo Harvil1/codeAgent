@@ -117,7 +117,7 @@ def load_tool_permission_rules() -> Dict[str, List[str]]:
             logger.warning("权限规则遮蔽: %s", warning)
         return rules
     except Exception as e:
-        logger.debug("load_tool_permission_rules fail-open: %s", e)
+        logger.warning("load_tool_permission_rules fail-open: %s", e)
         return {"allow": [], "deny": [], "ask": []}
 
 

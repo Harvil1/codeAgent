@@ -140,7 +140,7 @@ def cleanup_worktree_smart(worktree_path: Path, force: bool = False) -> bool:
         try:
             _run_git(["worktree", "remove", "--force", str(wt)], repo_root)
         except Exception as e:
-            logger.debug("git worktree remove 失败: %s", e)
+            logger.warning("git worktree remove 失败: %s", e)
 
     # 兜底手段：不管 git 说什么，直接把目录删了（删不掉也不报错）
     shutil.rmtree(wt, ignore_errors=True)
@@ -239,6 +239,7 @@ def get_repo_root(path=None) -> Optional[Path]:
             return Path(result.stdout.strip())
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
 
@@ -387,7 +388,7 @@ def _create_git_worktree(base: Path, name: str, *,
             _run_git(["branch", "-D", branch], repo_root)
             logger.info("已清理 worktree: %s", worktree_dir)
         except Exception as e:
-            logger.debug("清理 worktree 失败: %s", e)
+            logger.warning("清理 worktree 失败: %s", e)
         # 兜底手段：git 命令没删干净就直接删目录
         shutil.rmtree(worktree_dir, ignore_errors=True)
         # 流水账：删完了记一笔

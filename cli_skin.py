@@ -228,6 +228,8 @@ def list_skins() -> List[Dict[str, str]]:
                             "source": p.stem})
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return out
 
 
@@ -242,6 +244,8 @@ def load_skin(name: str) -> SkinConfig:
                 return _build_skin_config(data)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     logger.warning("皮肤 %r 不存在，回退 default", name)
     return _build_skin_config(_BUILTIN_SKINS["default"])
 

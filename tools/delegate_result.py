@@ -71,7 +71,7 @@ def _review_handoff(result: str, parent_agent) -> str:
             logger.warning("交接复审命中: %s", warning)
             return f"[⚠ 交接复审警告] {warning}\n\n{result}"
     except Exception as e:
-        logger.debug("交接复审 aux 调用失败（放行原文）: %s", e)
+        logger.warning("交接复审 aux 调用失败（放行原文）: %s", e)
     return result
 
 
@@ -121,6 +121,7 @@ def _attach_full_result_pointer(summary: str, offloaded_json: str) -> str:
             )
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return summary
 
 
@@ -165,7 +166,7 @@ def _summarize_child_result(
         summary = response.choices[0].message.content
         return f"[摘要] {summary}\n\n[完整结果 {len(result)} 字符已省略]"
     except Exception as e:
-        logger.debug("子代理结果摘要失败，返回原文: %s", e)
+        logger.warning("子代理结果摘要失败，返回原文: %s", e)
         return result
 
 
@@ -283,7 +284,7 @@ def _start_progress_ticker(
                 p.write_text("\n".join(new) + "\n", encoding="utf-8")
                 logger.info("[子代理进度] %s", text)
             except Exception as e:
-                logger.debug("progress ticker fail-open: %s", e)
+                logger.warning("progress ticker fail-open: %s", e)
 
     t = threading.Thread(target=_tick, daemon=True, name="delegate-progress")
     t.start()

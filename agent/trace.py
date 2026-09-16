@@ -76,6 +76,7 @@ class TraceSink:
                 fields = redact_fields(fields)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             record.update(fields)
             date_str = datetime.now().strftime("%Y-%m-%d")
             path = self._trace_dir / f"{date_str}.jsonl"
@@ -335,4 +336,5 @@ def _extract_response_model(response) -> Optional[str]:
             return response.get("model")
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None

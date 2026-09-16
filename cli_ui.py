@@ -95,6 +95,8 @@ async def terminal_handover(app, fn):
                     cm.__exit__(None, None, None)
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("终端让渡挂起失败，原地执行（界面可能残影）: %s", e)
         return fn()
 
@@ -108,12 +110,16 @@ async def terminal_handover(app, fn):
                 cm.__exit__(None, None, None)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             app.renderer.reset()
             app._request_absolute_cursor_position()
             app._redraw()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def run_with_input_bridge(fn):
@@ -159,6 +165,8 @@ def emit_ansi(text: str) -> None:
                 print(text, end="")
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     _render()
 

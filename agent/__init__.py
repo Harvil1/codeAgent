@@ -337,13 +337,13 @@ class AIAgent:
             from agent.skill_learning.llm_observer import reset_llm_observer_state
             reset_llm_observer_state()
         except Exception as e:
-            logger.debug("reset_llm_observer_state 失败（fail-open）: %s", e)
+            logger.warning("reset_llm_observer_state 失败（fail-open）: %s", e)
         # 新会话重置缓存监控状态（防上个会话的基线数据污染本会话）
         try:
             from agent.cache_monitor import reset_cache_monitor
             reset_cache_monitor()
         except Exception as e:
-            logger.debug("reset_cache_monitor 失败（fail-open）: %s", e)
+            logger.warning("reset_cache_monitor 失败（fail-open）: %s", e)
         # 从 config 读「diff 文件列表」的 LRU 上限，传给缓存监控
         try:
             from agent.cache_monitor import set_diff_limit
@@ -354,7 +354,7 @@ class AIAgent:
             )
             set_diff_limit(_diff_limit)
         except Exception as e:
-            logger.debug("set_diff_limit 失败（fail-open）: %s", e)
+            logger.warning("set_diff_limit 失败（fail-open）: %s", e)
 
         # === 辅助 LLM 路由器（杂活走便宜小模型）===
         self.aux_llm_router = aux_llm_router
@@ -592,12 +592,12 @@ class AIAgent:
         try:
             self.interrupt()  # 含 _children 级联
         except Exception as e:
-            logger.debug("cleanup_runtime 中断级联失败: %s", e)
+            logger.warning("cleanup_runtime 中断级联失败: %s", e)
         if getattr(self, "bg_manager", None) is not None:
             try:
                 self.bg_manager.shutdown()
             except Exception as e:
-                logger.debug("cleanup_runtime bg shutdown 失败: %s", e)
+                logger.warning("cleanup_runtime bg shutdown 失败: %s", e)
 
     def _record_llm_usage(self, response, sent_message_count: int = None) -> None:
         """薄委托：记账本体已拆到 usage_accounting（verify 等价门直调本方法，签名/行为不动）。"""
@@ -685,7 +685,7 @@ class AIAgent:
             })
             logger.info("排队输入回流（%d 条）", len(lines))
         except Exception as e:
-            logger.debug("输入队列 drain fail-open: %s", e)
+            logger.warning("输入队列 drain fail-open: %s", e)
 
     @staticmethod
     def _is_cli_command_like(line: str) -> bool:
@@ -829,7 +829,7 @@ class AIAgent:
                 if _style is not None:
                     style_text = render_style_section(_style)
             except Exception as e:
-                logger.debug("输出风格解析失败（fail-open）: %s", e)
+                logger.warning("输出风格解析失败（fail-open）: %s", e)
             layers = build_system_prompt_layers(
                 memory_store=self.memory_store,
                 memory_manager=self.memory_manager,
@@ -972,7 +972,7 @@ class AIAgent:
             try:
                 self._update_prevent_sleep()
             except Exception as e:
-                logger.debug("prevent_sleep fail-open: %s", e)
+                logger.warning("prevent_sleep fail-open: %s", e)
 
             # 消耗预算（遗言轮不消耗预算）
             consumed_this_iter = False
@@ -1330,7 +1330,7 @@ class AIAgent:
                             except RuntimeError:
                                 _bg_notify(f"后台任务:{_tid[:8]}", f"{_tid} {status}")
                 except Exception as notify_err:
-                    logger.debug("bg notify fail-open: %s", notify_err)
+                    logger.warning("bg notify fail-open: %s", notify_err)
             except Exception as e:
                 logger.warning("drain_notifications 异常: %s", e)
 
@@ -1373,7 +1373,7 @@ class AIAgent:
             from agent.hook_exec import drain_rewake_notifications
             rewake_notifications = drain_rewake_notifications()
         except Exception as e:
-            logger.debug("rewake drain 失败（fail-open）: %s", e)
+            logger.warning("rewake drain 失败（fail-open）: %s", e)
 
         return {
             "bg_notifications": bg_notifications,
@@ -1397,13 +1397,13 @@ class AIAgent:
             if self.bg_manager is not None and self.bg_manager.has_notifications():
                 return True
         except Exception as e:
-            logger.debug("has_notifications 预检失败（fail-open 视为无）: %s", e)
+            logger.warning("has_notifications 预检失败（fail-open 视为无）: %s", e)
         try:
             queue = getattr(self, "_delegation_queue", None)
             if queue is not None and queue.has_pending():
                 return True
         except Exception as e:
-            logger.debug("delegation_queue 预检失败（fail-open 视为无）: %s", e)
+            logger.warning("delegation_queue 预检失败（fail-open 视为无）: %s", e)
         return False
 
     def _build_bg_running_note(self):
@@ -1428,7 +1428,7 @@ class AIAgent:
                         cmd = cmd[:60] + "…"
                     lines.append(f"- {t.task_id} (running): {cmd}")
         except Exception as e:
-            logger.debug("bg running 状态收集失败（fail-open）: %s", e)
+            logger.warning("bg running 状态收集失败（fail-open）: %s", e)
         try:
             from tools.delegate_tool import _async_tasks
             for del_id, info in _async_tasks.items():
@@ -1442,7 +1442,7 @@ class AIAgent:
                     goal = goal[:60] + "…"
                 lines.append(f"- {del_id} (async 子代理): {goal}")
         except Exception as e:
-            logger.debug("async 子代理状态收集失败（fail-open）: %s", e)
+            logger.warning("async 子代理状态收集失败（fail-open）: %s", e)
         if not lines:
             return None
         shown = lines[:10]
@@ -1478,7 +1478,7 @@ class AIAgent:
                 messages.append(msg)
                 logger.debug("记忆 prefetch 已消费（并行检索完成）")
         except Exception as e:
-            logger.debug("记忆 prefetch 消费 fail-open: %s", e)
+            logger.warning("记忆 prefetch 消费 fail-open: %s", e)
         return messages
 
     def _kick_memory_prefetch(self, user_message: str) -> None:
@@ -1515,7 +1515,7 @@ class AIAgent:
                     )
                 )
             except Exception as e:
-                logger.debug("记忆注入 fail-open: %s", e)
+                logger.warning("记忆注入 fail-open: %s", e)
 
     def _assemble_turn_messages(self, system_prompt: str, injected: dict) -> list:
         """组装本轮要发给 LLM 的消息：系统提示词 + 历史 + 各种临时消息。
@@ -1772,7 +1772,7 @@ class AIAgent:
                     "_ephemeral": True,  # 一次性管理提示（同上）
                 })
         except Exception as e:
-            logger.debug("上下文管理提示注入失败（忽略）: %s", e)
+            logger.warning("上下文管理提示注入失败（忽略）: %s", e)
 
     def _is_long_task(self) -> bool:
         """长任务信号：历史条数 > 100 或本场触发过 L4 压缩。
@@ -1827,7 +1827,7 @@ class AIAgent:
                 "_ephemeral": True,
             })
         except Exception as e:
-            logger.debug("progress reminder 注入失败（fail-open）: %s", e)
+            logger.warning("progress reminder 注入失败（fail-open）: %s", e)
 
     async def _run_context_compression(
         self, messages: list, system_prompt: str, *, force: bool = False,
@@ -1908,6 +1908,7 @@ class AIAgent:
             self._surfaced_memory_ids.clear()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 压缩后重新对齐：注入一条「刚醒来」简报
         brief_parts = [
@@ -1929,7 +1930,7 @@ class AIAgent:
             from agent.post_compact_recovery import build_post_compact_brief
             reinject = build_post_compact_brief(self)
         except Exception as e:
-            logger.debug("post_compact_recovery fail-open: %s", e)
+            logger.warning("post_compact_recovery fail-open: %s", e)
             reinject = ""
         if reinject:
             brief_parts.append(
@@ -1949,7 +1950,7 @@ class AIAgent:
                     "下次压缩时该文件会被原样回读，防止长任务细节在反复压缩中丢失。"
                 )
         except Exception as e:
-            logger.debug("进度外存提示失败（fail-open）: %s", e)
+            logger.warning("进度外存提示失败（fail-open）: %s", e)
 
         brief_parts.append("请继续之前的工作。")
         messages.append({
@@ -2074,7 +2075,7 @@ class AIAgent:
                 messages_count=len(messages),
             )
         except Exception as e:
-            logger.debug("cache_monitor pre-call fail-open: %s", e)
+            logger.warning("cache_monitor pre-call fail-open: %s", e)
 
         try:
             if self._stream_callback is not None:
@@ -2126,7 +2127,7 @@ class AIAgent:
                         query_source="main",
                     )
                 except Exception as e:
-                    logger.debug("cache_monitor post-call fail-open: %s", e)
+                    logger.warning("cache_monitor post-call fail-open: %s", e)
 
             return response
 
@@ -2147,6 +2148,7 @@ class AIAgent:
                     discard_partial_stream_state(self)
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
                 from agent.llm_retry import call_with_retry as _cwr
                 try:
                     response = await _cwr(
@@ -2276,7 +2278,7 @@ class AIAgent:
             try:
                 self.checkpoint_manager.track_file(path)
             except Exception as e:
-                logger.debug("checkpoint track 失败: %s", e)
+                logger.warning("checkpoint track 失败: %s", e)
 
     def _maybe_auto_extract(self) -> None:
         """对话级轻量记忆提取的启动器（主循环末尾调）。
@@ -2317,7 +2319,7 @@ class AIAgent:
                 run_auto_extract(self, start_idx), "auto-extract",
             )
         except Exception as e:
-            logger.debug("auto_extract 启动失败（fail-open）: %s", e)
+            logger.warning("auto_extract 启动失败（fail-open）: %s", e)
 
     def _record_recent(self, kind: str, key: str) -> None:
         """记下最近读过的文件 / 加载过的技能（去重、保序，只留最近 10 个）。
@@ -2354,7 +2356,7 @@ class AIAgent:
             _, body = parse_frontmatter(content)
             return body.strip()
         except Exception as e:
-            logger.debug("加载技能正文失败 %s: %s", name, e)
+            logger.warning("加载技能正文失败 %s: %s", name, e)
             return ""
 
     def _persist_session_message(self, role, content, *, tool_calls=None,
@@ -2480,6 +2482,7 @@ class AIAgent:
                         is_safe = True
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             if is_safe:
                 safe_calls.append(tc)
             else:
@@ -2588,6 +2591,7 @@ class AIAgent:
                 self.on_tool_call(tool_name, tool_args)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def _run_safe_group_concurrently(self, safe_calls, handle_function_call):
         """safe 组的并发执行。
@@ -2669,6 +2673,7 @@ class AIAgent:
                 self.on_tool_call(tool_name, tool_args)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         result = await handle_function_call(
             tool_name, tool_args,
@@ -2909,6 +2914,7 @@ class AIAgent:
                 self.on_response(final_content)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 异步同步到外部记忆服务（不阻塞返回）
         self._sync_memory(user_message, final_content)
@@ -3012,7 +3018,7 @@ class AIAgent:
                 prevent_sleep.release("busy")
                 self._prevent_sleep_held = False
         except Exception as e:
-            logger.debug("prevent_sleep 状态切换 fail-open: %s", e)
+            logger.warning("prevent_sleep 状态切换 fail-open: %s", e)
 
     def _emit_loop_exit_trace(self, reason: str, **extra) -> None:
         """把循环退出原因记进轨迹 sink（失败放行；没配 sink 就什么都不做）。
@@ -3025,7 +3031,7 @@ class AIAgent:
         try:
             self._trace_sink.emit("loop_exit", reason=reason, **extra)
         except Exception as e:
-            logger.debug("loop_exit trace fail-open: %s", e)
+            logger.warning("loop_exit trace fail-open: %s", e)
 
     def _handle_loop_exit(self, turn_exit_reason: str, user_message: str) -> str:
         """循环退场（预算耗尽或中断）时的兜底回复。
@@ -3135,4 +3141,4 @@ class AIAgent:
         try:
             self.memory_manager.sync_all(user_message, assistant_message)
         except Exception as e:
-            logger.debug("memory_manager.sync_all 失败: %s", e)
+            logger.warning("memory_manager.sync_all 失败: %s", e)

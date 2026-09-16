@@ -109,7 +109,7 @@ def build_post_compact_brief(agent: "AIAgent") -> str:
         out = _apply_budget(sections, budget_tokens)
         return "\n\n".join(out)
     except Exception as e:
-        logger.debug("build_post_compact_brief fail-open: %s", e)
+        logger.warning("build_post_compact_brief fail-open: %s", e)
         return ""
 
 
@@ -175,7 +175,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
                 + ptext[:20000]
             )
     except Exception as e:
-        logger.debug("PROGRESS.md 回读失败（fail-open）: %s", e)
+        logger.warning("PROGRESS.md 回读失败（fail-open）: %s", e)
 
     try:
         if getattr(agent, "plan_mode", False):
@@ -191,7 +191,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
                 f"{plan_text}"
             )
     except Exception as e:
-        logger.debug("plan 状态恢复失败（fail-open）: %s", e)
+        logger.warning("plan 状态恢复失败（fail-open）: %s", e)
 
     # 任务清单（Task System 的权威数据，不是 LLM 摘要——长任务压缩后
     # 模型对"做到第几步"的认知只靠摘要里 200 字的 Pending Tasks 段，
@@ -225,7 +225,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
                 + "\n".join(task_lines)
             )
     except Exception as e:
-        logger.debug("task 状态恢复失败（fail-open）: %s", e)
+        logger.warning("task 状态恢复失败（fail-open）: %s", e)
 
     try:
         import time as _time
@@ -245,7 +245,7 @@ def _build_plan_async_state_brief(agent: "AIAgent") -> str:
                 "## 在跑的 async 子代理（compact 后仍在后台执行）\n" + "\n".join(running)
             )
     except Exception as e:
-        logger.debug("async 状态恢复失败（fail-open）: %s", e)
+        logger.warning("async 状态恢复失败（fail-open）: %s", e)
 
     return "\n\n".join(lines)
 
@@ -292,7 +292,7 @@ def _build_recent_files_brief(paths: list, max_files: int = MAX_RECENT_FILES) ->
             lines.append(f"### {path}\n```\n{preview}\n```")
             any_success = True
         except Exception as e:
-            logger.debug("recovery 读文件失败 %s: %s", path, e)
+            logger.warning("recovery 读文件失败 %s: %s", path, e)
             continue
 
     return "\n".join(lines) if any_success else ""
@@ -345,7 +345,7 @@ def _build_invoked_skills_brief(
             used += len(body)
             any_success = True
         except Exception as e:
-            logger.debug("recovery 加载技能失败 %s: %s", name, e)
+            logger.warning("recovery 加载技能失败 %s: %s", name, e)
             continue
 
     return "\n".join(lines) if any_success else ""

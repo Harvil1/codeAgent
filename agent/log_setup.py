@@ -104,10 +104,12 @@ def _install_excepthooks() -> None:
         threading.excepthook = _thread_hook
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         sys.excepthook = _main_hook
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def setup_logging(logs_dir, *, level: Optional[int] = None) -> Path:
@@ -163,5 +165,6 @@ def reset_logging() -> None:
             h.close()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         root.removeHandler(h)
     _configured_path = None

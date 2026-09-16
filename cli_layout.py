@@ -25,6 +25,8 @@ try:
     cli_pt_extras.install_all()
 except Exception:
     pass
+    logger.warning("异常被吞(fail-open)", exc_info=True)
+    logger.warning("异常被吞(fail-open)", exc_info=True)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,8 @@ def _tighten_next_render(app=None) -> None:
             app.renderer._last_screen = None
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def submit_input(buffer, input_queue) -> None:
@@ -364,6 +368,8 @@ class SlashCompleter(_PtCompleter):
                     tokens.update(self._dynamic_tokens_fn() or [])
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
                 frag = parts[0] if parts else ""
                 for t in sorted(tokens):
                     if t.startswith(frag):
@@ -445,6 +451,8 @@ def build_completer(rt):
                 return "技能束"
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         return ""
 
     return SlashCompleter(
@@ -600,6 +608,8 @@ class _GrayHint:
                 )
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         return Transformation(transform_input.fragments)
 
 
@@ -676,6 +686,8 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
                         b.complete_state.completions[idx])
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
                 b.complete_state = None
                 return
             b.complete_state = None   # 先收补全菜单，下一记 Enter 才提交
@@ -791,6 +803,8 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
                 style="dim"))
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     return kb
 
@@ -857,6 +871,8 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                         h, mode.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # ---- 状态黑板（spinner 线程写，渲染闭包读）----
         state = {"turn_started": None, "was_active": False, "frame": 0}
@@ -1135,6 +1151,8 @@ def start_spinner_thread(rt, app, stop_event):
                             cli_live.turn_started(getattr(rt, "agent", None))
                         except Exception:
                             pass
+                            logger.warning("异常被吞(fail-open)", exc_info=True)
+                            logger.warning("异常被吞(fail-open)", exc_info=True)
                     elif not active:
                         state["turn_started"] = None              # 归零
                         try:
@@ -1142,6 +1160,8 @@ def start_spinner_thread(rt, app, stop_event):
                             cli_live.turn_ended()
                         except Exception:
                             pass
+                            logger.warning("异常被吞(fail-open)", exc_info=True)
+                            logger.warning("异常被吞(fail-open)", exc_info=True)
                         # 回合结束 live 面板收起 → 渲染高度回落
                         #（不掀地板的话，面板撑高过的行数会赖着，
                         # 全塞给输入框把它顶成大空箱子）
@@ -1183,6 +1203,8 @@ def request_app_exit(app) -> None:
         app.loop.call_soon_threadsafe(_safe_exit)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def install_input_bridge(app) -> None:

@@ -62,7 +62,7 @@ def _cleanup_old_runs(base) -> int:
                         removed, _KEEP_MAX_RUNS)
         return removed
     except Exception as e:
-        logger.debug("run 目录清理失败（fail-open）: %s", e)
+        logger.warning("run 目录清理失败（fail-open）: %s", e)
         return 0
 
 
@@ -83,7 +83,7 @@ def _notify_completion(run_id: str, args: dict, kwargs: dict, out_json: str):
             "completed_at": time.time(),
         })
     except Exception as e:
-        logger.debug("workflow 完成通知失败（fail-open）: %s", e)
+        logger.warning("workflow 完成通知失败（fail-open）: %s", e)
 
 
 def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
@@ -128,6 +128,7 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
                 })
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             _notify_completion(run_id, args, kwargs,
                                json.dumps({"ok": False, "error": str(e)}))
 

@@ -525,7 +525,7 @@ class PermissionChecker:
                 self._persistent_prefixes = set(data.get("prefixes", []))
                 logger.info("加载 %d 条已批准命令", len(self._persistent_whitelist))
         except Exception as e:
-            logger.debug("加载白名单失败: %s", e)
+            logger.warning("加载白名单失败: %s", e)
 
     def _save_whitelist(self):
         """把持久化白名单写回 JSON 文件（原子写；快照+写盘整段加锁）。
@@ -550,7 +550,7 @@ class PermissionChecker:
                 )
                 atomic_write_text(Path(self._whitelist_file), payload)
         except Exception as e:
-            logger.debug("保存白名单失败: %s", e)
+            logger.warning("保存白名单失败: %s", e)
 
     def _load_paths_whitelist(self):
         """从 JSON 文件加载路径白名单(用户批过的写入路径);读失败只记 debug 日志。"""
@@ -563,7 +563,7 @@ class PermissionChecker:
                 self._approved_paths = set(data.get("paths", []))
                 logger.info("加载 %d 条已批准写入路径", len(self._approved_paths))
         except Exception as e:
-            logger.debug("加载路径白名单失败: %s", e)
+            logger.warning("加载路径白名单失败: %s", e)
 
     def _save_paths_whitelist(self):
         """把路径白名单写回 JSON 文件(原子写;写失败只记 debug 日志)。"""
@@ -580,7 +580,7 @@ class PermissionChecker:
                 ),
             )
         except Exception as e:
-            logger.debug("保存路径白名单失败: %s", e)
+            logger.warning("保存路径白名单失败: %s", e)
 
     def _approval_gate(
         self,
@@ -659,6 +659,7 @@ class PermissionChecker:
             _notify("需要审批", "agent 请求执行命令")
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
         try:
             approved = bool(self.approval_callback(command))
@@ -1139,6 +1140,7 @@ class PermissionChecker:
                 _notify("需要审批", "agent 请求写入白名单外路径（可选总是允许）")
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
             try:
                 decision = self.approval_callback(f"文件写入审批: {resolved}")
@@ -1157,6 +1159,7 @@ class PermissionChecker:
                     add_extra_allowed_root(parent)
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
                 # 持久化:写 settings.json 的 security.extra_allowed_roots
                 # (和 /add-dir 走同一条通道)
                 persisted = False

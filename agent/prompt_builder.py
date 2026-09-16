@@ -213,7 +213,7 @@ def build_system_prompt_layers(
             "不代表用户当前所在的项目——除非用户明确点名，一律以当前目录为准。"
         )
     except Exception as e:
-        logger.debug("当前工作目录注入失败(可忽略): %s", e)
+        logger.warning("当前工作目录注入失败(可忽略): %s", e)
     if skills_dir is None:
         try:
             from constants import all_skills_dirs as _asd
@@ -237,6 +237,7 @@ def build_system_prompt_layers(
                 context_parts.append(ext_block)
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 用户画像文件（系统自动归纳，每 5 次反思后更新一次）
     try:
@@ -248,6 +249,7 @@ def build_system_prompt_layers(
                 context_parts.append(profile_text)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # MCP 路由提示：用户在 .mcp.json 里可以给 server 加
     # keywords 字段，模型一看到关键词就知道该找哪个外部工具服务器。例如：
@@ -258,7 +260,7 @@ def build_system_prompt_layers(
         if hints_block:
             context_parts.append(hints_block)
     except Exception as e:
-        logger.debug("MCP routing hints 收集失败(可忽略): %s", e)
+        logger.warning("MCP routing hints 收集失败(可忽略): %s", e)
 
     # 项目记忆：从当前目录一路向上扫到仓库根，收集沿途所有 CODEAGENT.md。
     # cwd 用 get_workspace_cwd() 而不是 Path.cwd()——后者读的是整个进程的
@@ -283,7 +285,7 @@ def build_system_prompt_layers(
                 except Exception as e:
                     logger.warning("读取项目记忆失败 %s: %s", pmd, e)
         except Exception as e:
-            logger.debug("项目记忆扫描失败(可忽略): %s", e)
+            logger.warning("项目记忆扫描失败(可忽略): %s", e)
 
     # 记忆索引常驻注入（claude code 同款：索引放指令链末尾=离用户消息
     # 最近、注意力权重最高的位置）。只放 name+一句话钩子两层，详情靠
@@ -304,7 +306,7 @@ def build_system_prompt_layers(
                     "用户现在所指的项目。"
                 )
         except Exception as e:
-            logger.debug("记忆索引注入失败(可忽略): %s", e)
+            logger.warning("记忆索引注入失败(可忽略): %s", e)
 
     if context_files:
         for cf in context_files:
@@ -575,6 +577,7 @@ def _build_skill_index(skills_dirs) -> str:
                 usage.update(json.loads(usage_path.read_text(encoding="utf-8")))
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 扫各目录的技能，同名以后扫的为准
     seen = {}  # 技能名 → SKILL.md 路径

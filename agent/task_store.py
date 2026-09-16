@@ -342,7 +342,7 @@ class TaskStore:
         try:
             self.reclaim_stale(reclaim_stale_minutes)
         except Exception as e:
-            logger.debug("reclaim_stale 失败（fail-open，不影响派活）: %s", e)
+            logger.warning("reclaim_stale 失败（fail-open，不影响派活）: %s", e)
         ready = []
         for t in self.list_all(status="pending"):
             if self.can_start(t["id"]):

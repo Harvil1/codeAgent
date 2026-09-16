@@ -90,12 +90,12 @@ def acquire(reason: str) -> bool:
             _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
         )
         if rc == 0:
-            logger.debug("SetThreadExecutionState(唤醒) 失败")
+            logger.warning("SetThreadExecutionState(唤醒) 失败")
             return False
         _state_dirty = True
         return True
     except Exception as e:
-        logger.debug("prevent_sleep.acquire fail-open: %s", e)
+        logger.warning("prevent_sleep.acquire fail-open: %s", e)
         return False
 
 
@@ -133,12 +133,12 @@ def release(reason: str) -> bool:
             return True
         rc = _kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
         if rc == 0:
-            logger.debug("SetThreadExecutionState(恢复) 失败")
+            logger.warning("SetThreadExecutionState(恢复) 失败")
             return False
         _state_dirty = False
         return True
     except Exception as e:
-        logger.debug("prevent_sleep.release fail-open: %s", e)
+        logger.warning("prevent_sleep.release fail-open: %s", e)
         return False
 
 
@@ -163,7 +163,7 @@ def _release_all() -> None:
             _state_dirty = False
         _reasons.clear()
     except Exception as e:
-        logger.debug("prevent_sleep._release_all fail-open: %s", e)
+        logger.warning("prevent_sleep._release_all fail-open: %s", e)
 
 
 # 兜底注册：正常流程之外的退出路径（异常/解释器关闭）也走一次恢复

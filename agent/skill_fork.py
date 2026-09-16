@@ -72,6 +72,7 @@ def run_skill_in_fork(
                 })
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             # AIAgent.chat 是 async，而本函数是同步的、从 cli 工作线程直接
             # 调（那里没有事件循环）——交给进程级常驻循环宿主同步等结果
@@ -94,6 +95,7 @@ def run_skill_in_fork(
                     })
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             # === 子代理 client 用后即关 ===
             # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时
             # create_llm_client 现造，不共享父代理的）——旧 asyncio.run

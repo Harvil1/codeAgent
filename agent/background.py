@@ -170,7 +170,7 @@ class BackgroundManager:
                 encoding="utf-8",
             )
         except Exception as e:
-            logger.debug("bg 注册表落盘失败（fail-open）: %s", e)
+            logger.warning("bg 注册表落盘失败（fail-open）: %s", e)
 
     @staticmethod
     def load_registry_entries(registry_dir) -> list:
@@ -189,7 +189,7 @@ class BackgroundManager:
             data = _json.loads(path.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
         except Exception as e:
-            logger.debug("bg 注册表读取失败（fail-open）: %s", e)
+            logger.warning("bg 注册表读取失败（fail-open）: %s", e)
             return []
 
     def start(
@@ -433,11 +433,13 @@ class BackgroundManager:
                     q.put(line)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             finally:
                 try:
                     stream.close()
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
 
         t_out = threading.Thread(
             target=_reader, args=(proc.stdout, stdout_q), daemon=True,
@@ -486,6 +488,7 @@ class BackgroundManager:
                                 tee_f.flush()
                             except Exception:
                                 pass
+                                logger.warning("异常被吞(fail-open)", exc_info=True)
                         got_new = True
                 except queue.Empty:
                     pass
@@ -537,6 +540,7 @@ class BackgroundManager:
                         proc.wait(timeout=2.0)
                     except Exception:
                         pass
+                        logger.warning("异常被吞(fail-open)", exc_info=True)
                     with self._lock:
                         task = self._tasks.get(task_id)
                         if task is None or task.status != "running":
@@ -589,6 +593,7 @@ class BackgroundManager:
                 proc.kill()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
             with self._lock:
                 task = self._tasks.get(task_id)
                 if task is None or task.status != "running":
@@ -605,6 +610,7 @@ class BackgroundManager:
                     tee_f.close()
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _push_notification_locked(self, task: BackgroundTask):
         """把一条任务结束通知塞进队列（内部方法）。
@@ -635,7 +641,7 @@ class BackgroundManager:
             try:
                 self._wake_callback()
             except Exception as e:
-                logger.debug("bg wake 回调失败（fail-open）: %s", e)
+                logger.warning("bg wake 回调失败（fail-open）: %s", e)
 
     # ---- 查询 ----
     def status(self, task_id: str) -> Optional[BackgroundTask]:
@@ -695,6 +701,7 @@ class BackgroundManager:
                     proc.wait(timeout=2)
                 except Exception:
                     pass
+                    logger.warning("异常被吞(fail-open)", exc_info=True)
             except Exception as e:
                 logger.warning("stop task %s 失败: %s", task_id, e)
         with self._lock:

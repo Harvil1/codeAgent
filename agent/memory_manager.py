@@ -214,7 +214,7 @@ class MemoryManager:
                 )
                 saved += 1
             except Exception as e:
-                logger.debug("on_pre_compress 保存单条失败: %s", e)
+                logger.warning("on_pre_compress 保存单条失败: %s", e)
         if saved > 0:
             logger.info("on_pre_compress 提取并保存了 %d 条记忆", saved)
 
@@ -325,4 +325,5 @@ class MemoryManager:
                 self.external_provider.shutdown()
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
         self._sync_executor.shutdown(wait=False)

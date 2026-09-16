@@ -566,7 +566,7 @@ def consolidate_transcripts(session_store, memory_store, *, llm) -> int:
                 )
                 saved += 1
             except Exception as e:
-                logger.debug("consolidate 单条保存失败（含秘密拒绝）: %s", e)
+                logger.warning("consolidate 单条保存失败（含秘密拒绝）: %s", e)
         if saved:
             logger.info("curator consolidate_transcripts 沉淀 %d 条跨会话记忆", saved)
         return saved
@@ -603,7 +603,7 @@ def _maybe_consolidate_transcripts(
     try:
         total_sessions = len(session_store.list_sessions(limit=1000))
     except Exception as e:
-        logger.debug("consolidate 会话计数失败（本轮跳过）: %s", e)
+        logger.warning("consolidate 会话计数失败（本轮跳过）: %s", e)
         return 0
     new_sessions = max(0, total_sessions - int(state.get("sessions_seen") or 0))
     if not should_consolidate(state, now=time.time(), new_sessions_since=new_sessions):

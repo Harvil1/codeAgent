@@ -462,7 +462,7 @@ def _cleanup_old_seatbelt_profiles(sandbox_dir: Path, *, max_age_days: int = 7) 
                 p.unlink(missing_ok=True)
                 deleted += 1
         except Exception as e:
-            logger.debug("清理 profile %s 失败（忽略）: %s", p, e)
+            logger.warning("清理 profile %s 失败（忽略）: %s", p, e)
     if deleted:
         logger.info("清理了 %d 个过期 seatbelt profile（>=%d 天）", deleted, max_age_days)
     return deleted

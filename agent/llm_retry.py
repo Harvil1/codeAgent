@@ -78,6 +78,7 @@ async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
                 heartbeat_cb(elapsed, total)
             except Exception:
                 pass
+                logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def _error_status_code(error: Exception) -> Optional[int]:
@@ -163,6 +164,7 @@ def get_retry_after(error: Exception) -> Optional[float]:
             return float(ra)
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
 
@@ -421,7 +423,7 @@ async def call_with_retry(
                         reset()
                         logger.warning("连接重置类错误，已重建 LLM client 重试: %s", e)
                     except Exception as re:
-                        logger.debug("reset_client 失败（按原样重试）: %s", re)
+                        logger.warning("reset_client 失败（按原样重试）: %s", re)
 
             # 529 连续失败计数：过载期间服务器可能 529/500 交替着抛，
             # 所以所有 5xx 都算「过载嫌疑」往计数器上加——不然出现

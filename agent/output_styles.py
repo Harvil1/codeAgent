@@ -47,7 +47,7 @@ def _parse_style_file(path: Path) -> Optional[OutputStyle]:
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as e:
-        logger.debug("读取输出风格 %s 失败（忽略）: %s", path, e)
+        logger.warning("读取输出风格 %s 失败（忽略）: %s", path, e)
         return None
     try:
         from agent.skill_commands import parse_frontmatter

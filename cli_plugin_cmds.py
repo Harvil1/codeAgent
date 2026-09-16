@@ -232,9 +232,9 @@ def _unwire_plugin_mcp(plugin_name: str) -> None:
                 if manager.disconnect_one(conn):
                     console.print(f"[dim]MCP server {conn} 已断开（工具随之下架）[/dim]")
             except Exception as e:
-                logger.debug("断开插件 MCP %s 失败（重启后自然干净）: %s", conn, e)
+                logger.warning("断开插件 MCP %s 失败（重启后自然干净）: %s", conn, e)
     except Exception as e:
-        logger.debug("插件 %s 的 MCP 拆线检查失败: %s", plugin_name, e)
+        logger.warning("插件 %s 的 MCP 拆线检查失败: %s", plugin_name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ def _install_dir(src_root: Path) -> str | None:
                 "（工具名/文档名 → 本项目对应）[/dim]"
             )
     except Exception as e:
-        logger.debug("CC 适配改写失败（不影响安装）: %s", e)
+        logger.warning("CC 适配改写失败（不影响安装）: %s", e)
 
     n = _count_skills(target)
     console.print(
@@ -403,6 +403,8 @@ def _git_origin(dir_path: Path) -> str | None:
             return r.stdout.strip() or None
     except Exception:
         pass
+        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
 
@@ -570,7 +572,7 @@ def _builtin_marketplace_defs() -> list:
             if out:
                 return out
     except Exception as e:
-        logger.debug("读内置市场配置失败，用代码兜底: %s", e)
+        logger.warning("读内置市场配置失败，用代码兜底: %s", e)
     return [
         {
             "name": "claude-plugins-official",

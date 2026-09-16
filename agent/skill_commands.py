@@ -238,6 +238,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
             cwd = get_workspace_cwd()
         except Exception:
             pass
+            logger.warning("异常被吞(fail-open)", exc_info=True)
         if skills_dirs is None:
             # 常规目录 + 嵌套发现目录，后者放后面让同名覆盖生效
             try:
@@ -368,7 +369,7 @@ def read_skill_attachment_files(
                 content = content[:max_chars] + "\n...[附件截断]"
             items.append({"path": rel, "content": content})
         except Exception as e:
-            logger.debug("技能附件读取失败 %s: %s", rel, e)
+            logger.warning("技能附件读取失败 %s: %s", rel, e)
     return items
 
 
