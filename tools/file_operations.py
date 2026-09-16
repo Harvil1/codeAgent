@@ -15,13 +15,50 @@
 import hashlib
 import json
 import re
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import safe_path
 from tools._common import get_mode_override_from_kwargs
 from tools.registry import registry
+
+# ---------------------------------------------------------------------------
+# 同文件写互斥：并行子代理对同一文件"读旧→改→写回"的临界区串行化
+# ---------------------------------------------------------------------------
+_path_write_locks: dict = {}
+_path_locks_guard = threading.Lock()
+_PATH_LOCK_LIMIT = 512
+
+
+@contextmanager
+def _file_write_lock(path) -> Iterator[None]:
+    """同一文件的写临界区互斥（进程内，按 resolve 后的路径分锁）。
+
+    为什么需要：多个并行子代理（tasks=[...] 批量 / 异步委托）同 cwd 跑
+    时，对同一文件的"读旧内容→改→写回"没有互斥——A、B 同时读到旧版，
+    各自改完先后写回，先写的那份更新被静默覆盖（原子写只保证不出半截
+    文件，不保证不丢更新）。串行化后第二个写者基于第一个的结果改，
+    str_replace 的内容匹配也能对上号。跨进程的并发另有文件锁
+    （agent/file_lock），这里只管本进程。
+    """
+    try:
+        key = str(Path(path).resolve())
+    except Exception:
+        key = str(path)
+    with _path_locks_guard:
+        lock = _path_write_locks.get(key)
+        if lock is None:
+            if len(_path_write_locks) >= _PATH_LOCK_LIMIT:
+                # 防泄漏：满了整体重置（锁只护瞬时临界区，丢了顶多
+                # 退回无锁的旧行为，不影响正确性之外的东西）
+                _path_write_locks.clear()
+            lock = threading.Lock()
+            _path_write_locks[key] = lock
+    with lock:
+        yield
 
 
 def _content_hash(text: str) -> str:
@@ -475,52 +512,55 @@ def _handle_write_file(args: dict, **kwargs) -> str:
     if path.exists() and not _was_recently_read(path):
         return _must_read_first_error()
 
-    # 写前指纹校验（只在覆盖模式 + 调用方传了 expected_hash 时做）
-    if expected_hash and not append and path.exists():
+    with _file_write_lock(path):
+        # 写前指纹校验（只在覆盖模式 + 调用方传了 expected_hash 时做）。
+        # 校验和写盘必须同锁：不锁的话"校验通过→（别人插入写）→落盘"，
+        # 指纹防线被架空
+        if expected_hash and not append and path.exists():
+            try:
+                current = path.read_text(encoding="utf-8")
+                current_hash = _content_hash(current)
+                if current_hash != expected_hash:
+                    return json.dumps({
+                        "error": (
+                            f"read-before-write 校验失败:文件已被外部修改"
+                            f"(expected={expected_hash}, current={current_hash})。"
+                            f"请重新调 read_file 拿最新内容再 write。"
+                        ),
+                        "error_type": "stale_hash",
+                        "current_hash": current_hash,
+                    }, ensure_ascii=False)
+            except UnicodeDecodeError:
+                # 二进制文件没法算文本指纹，跳过校验（保持老行为兼容）
+                pass
+
         try:
-            current = path.read_text(encoding="utf-8")
-            current_hash = _content_hash(current)
-            if current_hash != expected_hash:
-                return json.dumps({
-                    "error": (
-                        f"read-before-write 校验失败:文件已被外部修改"
-                        f"(expected={expected_hash}, current={current_hash})。"
-                        f"请重新调 read_file 拿最新内容再 write。"
-                    ),
-                    "error_type": "stale_hash",
-                    "current_hash": current_hash,
-                }, ensure_ascii=False)
-        except UnicodeDecodeError:
-            # 二进制文件没法算文本指纹，跳过校验（保持老行为兼容）
-            pass
+            # 目录不存在就一路建出来（比如写 a/b/c.txt 时把 a/b/ 都创建好）
+            path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # 目录不存在就一路建出来（比如写 a/b/c.txt 时把 a/b/ 都创建好）
-        path.parent.mkdir(parents=True, exist_ok=True)
+            # 同样必须显式 utf-8，防 Windows 默认编码乱码
+            if append:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(content + "\n")
+            else:
+                # 必须原子写（先写临时文件、刷盘、再一步换过去）。
+                # 直接 write_text 的话，写到一半程序崩了会留下半截文件——
+                # 原子写要么完整的新的，要么还是旧的，绝不出现半截
+                from agent.atomic_io import atomic_write_text
+                atomic_write_text(path, content)
 
-        # 同样必须显式 utf-8，防 Windows 默认编码乱码
-        if append:
-            with path.open("a", encoding="utf-8") as f:
-                f.write(content + "\n")
-        else:
-            # 必须原子写（先写临时文件、刷盘、再一步换过去）。
-            # 直接 write_text 的话，写到一半程序崩了会留下半截文件——
-            # 原子写要么完整的新的，要么还是旧的，绝不出现半截
-            from agent.atomic_io import atomic_write_text
-            atomic_write_text(path, content)
+            _track_checkpoint(path, kwargs)  # 给 /rewind 存档
+            _read_seen_refresh(path)  # 刚写过，读去重缓存立刻作废
+            _trigger_file_changed(path, "append" if append else "write", kwargs)  # 广播"文件变了"事件
 
-        _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-        _read_seen_refresh(path)  # 刚写过，读去重缓存立刻作废
-        _trigger_file_changed(path, "append" if append else "write", kwargs)  # 广播"文件变了"事件
-
-        return json.dumps({
-            "path": str(path),
-            "bytes": len(content.encode("utf-8")),
-            "appended": append,
-            "content_hash": _content_hash(content) if not append else None,
-        }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return json.dumps({
+                "path": str(path),
+                "bytes": len(content.encode("utf-8")),
+                "appended": append,
+                "content_hash": _content_hash(content) if not append else None,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -838,61 +878,65 @@ def _handle_str_replace(args: dict, **kwargs) -> str:
     if not _was_recently_read(path):
         return _must_read_first_error()
 
-    try:
-        content = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return json.dumps({"error": "无法解码为文本(可能是二进制文件)"}, ensure_ascii=False)
+    with _file_write_lock(path):
+        # 读→校验→替换→写回必须整段同锁（并行子代理同文件读-改-写竞态）
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return json.dumps({"error": "无法解码为文本(可能是二进制文件)"}, ensure_ascii=False)
 
-    # 写前指纹校验（文件被外部改过就拒绝动手）
-    current_hash = _content_hash(content)
-    if expected_hash and expected_hash != current_hash:
+        # 写前指纹校验（文件被外部改过就拒绝动手）
+        current_hash = _content_hash(content)
+        if expected_hash and expected_hash != current_hash:
+            return json.dumps({
+                "error": (
+                    f"read-before-write 校验失败:文件已被外部修改"
+                    f"(expected={expected_hash}, current={current_hash})。"
+                    f"请重新调 read_file 拿最新内容再 str_replace。"
+                ),
+                "error_type": "stale_hash",
+                "current_hash": current_hash,
+            }, ensure_ascii=False)
+
+        # 先看要替换的文字在不在、有几处
+        occurrences = content.count(old_str)
+        if occurrences == 0:
+            return json.dumps({
+                "error": "old_str 在文件里找不到。请检查拼写或重新 read_file。",
+                "error_type": "old_str_not_found",
+            }, ensure_ascii=False)
+        if not replace_all and occurrences > 1:
+            return json.dumps({
+                "error": f"old_str 在文件里有 {occurrences} 处匹配,不唯一。"
+                         f"传 replace_all=true 全部替换,或把 old_str 写得更具体。",
+                "error_type": "ambiguous_match",
+                "occurrences": occurrences,
+            }, ensure_ascii=False)
+
+        # 真正动手替换
+        if replace_all:
+            new_content = content.replace(old_str, new_str)
+            replaced = occurrences
+        else:
+            new_content = content.replace(old_str, new_str, 1)
+            replaced = 1
+
+        try:
+            # 原子写（与 write_file 同一纪律）：写到一半崩了不留半截文件
+            from agent.atomic_io import atomic_write_text
+            atomic_write_text(path, new_content)
+        except Exception as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        _track_checkpoint(path, kwargs)  # 给 /rewind 存档
+        _read_seen_refresh(path)  # 刚改过，读去重缓存立刻作废
+        _trigger_file_changed(path, "edit", kwargs)  # 广播"文件变了"事件
+
         return json.dumps({
-            "error": (
-                f"read-before-write 校验失败:文件已被外部修改"
-                f"(expected={expected_hash}, current={current_hash})。"
-                f"请重新调 read_file 拿最新内容再 str_replace。"
-            ),
-            "error_type": "stale_hash",
-            "current_hash": current_hash,
+            "path": str(path),
+            "replaced": replaced,
+            "content_hash": _content_hash(new_content),
         }, ensure_ascii=False)
-
-    # 先看要替换的文字在不在、有几处
-    occurrences = content.count(old_str)
-    if occurrences == 0:
-        return json.dumps({
-            "error": "old_str 在文件里找不到。请检查拼写或重新 read_file。",
-            "error_type": "old_str_not_found",
-        }, ensure_ascii=False)
-    if not replace_all and occurrences > 1:
-        return json.dumps({
-            "error": f"old_str 在文件里有 {occurrences} 处匹配,不唯一。"
-                     f"传 replace_all=true 全部替换,或把 old_str 写得更具体。",
-            "error_type": "ambiguous_match",
-            "occurrences": occurrences,
-        }, ensure_ascii=False)
-
-    # 真正动手替换
-    if replace_all:
-        new_content = content.replace(old_str, new_str)
-        replaced = occurrences
-    else:
-        new_content = content.replace(old_str, new_str, 1)
-        replaced = 1
-
-    try:
-        path.write_text(new_content, encoding="utf-8")
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-    _track_checkpoint(path, kwargs)  # 给 /rewind 存档
-    _read_seen_refresh(path)  # 刚改过，读去重缓存立刻作废
-    _trigger_file_changed(path, "edit", kwargs)  # 广播"文件变了"事件
-
-    return json.dumps({
-        "path": str(path),
-        "replaced": replaced,
-        "content_hash": _content_hash(new_content),
-    }, ensure_ascii=False)
 
 
 registry.register(
@@ -1004,80 +1048,81 @@ def _handle_notebook_edit(args: dict, **kwargs) -> str:
             "error": f"不是 notebook 文件（.ipynb）: {path}", "error_type": "invalid_args",
         }, ensure_ascii=False)
 
-    try:
-        nb = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return json.dumps({"error": f"notebook 解析失败: {e}"}, ensure_ascii=False)
+    with _file_write_lock(path):
+            try:
+                nb = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                return json.dumps({"error": f"notebook 解析失败: {e}"}, ensure_ascii=False)
 
-    cells = nb.get("cells")
-    if not isinstance(cells, list):
-        return json.dumps({"error": "notebook 缺 cells 数组（结构异常）"}, ensure_ascii=False)
+            cells = nb.get("cells")
+            if not isinstance(cells, list):
+                return json.dumps({"error": "notebook 缺 cells 数组（结构异常）"}, ensure_ascii=False)
 
-    # 老版本 notebook 的单元格没有 id 字段，这里补上（nbformat 4.5+ 的标准要求）。
-    # 起名用 cell_<序号>，避免和文件里已有的 id 撞车
-    for i, cell in enumerate(cells):
-        if isinstance(cell, dict) and not cell.get("id"):
-            cell["id"] = f"cell_{i}"
+            # 老版本 notebook 的单元格没有 id 字段，这里补上（nbformat 4.5+ 的标准要求）。
+            # 起名用 cell_<序号>，避免和文件里已有的 id 撞车
+            for i, cell in enumerate(cells):
+                if isinstance(cell, dict) and not cell.get("id"):
+                    cell["id"] = f"cell_{i}"
 
-    if edit_mode == "insert":
-        if cell_type not in ("code", "markdown", "raw"):
+            if edit_mode == "insert":
+                if cell_type not in ("code", "markdown", "raw"):
+                    return json.dumps({
+                        "error": f"insert 需要合法 cell_type（code/markdown/raw）: {cell_type}",
+                        "error_type": "invalid_args",
+                    }, ensure_ascii=False)
+                new_cell = {
+                    "cell_type": cell_type,
+                    "metadata": {},
+                    "source": str(new_source),
+                }
+                if cell_type == "code":
+                    new_cell["outputs"] = []
+                    new_cell["execution_count"] = None
+                else:
+                    new_cell["id"] = f"cell_new_{len(cells)}"
+                # 新建的 code 单元格也统一补上 id（上面的循环只照顾了文件里原有的单元格）
+                if "id" not in new_cell:
+                    new_cell["id"] = f"cell_new_{len(cells)}"
+                if cell_id:
+                    idx = _find_cell_index(cells, cell_id)
+                    insert_at = idx if idx >= 0 else len(cells)
+                else:
+                    insert_at = len(cells)
+                cells.insert(insert_at, new_cell)
+                action_desc = f"insert {cell_type} @ {insert_at} (id={new_cell['id']})"
+            else:
+                if not cell_id:
+                    return json.dumps({
+                        "error": f"{edit_mode} 需要 cell_id", "error_type": "invalid_args",
+                    }, ensure_ascii=False)
+                idx = _find_cell_index(cells, cell_id)
+                if idx < 0:
+                    return json.dumps({
+                        "error": f"未找到 cell: {cell_id}", "error_type": "cell_not_found",
+                    }, ensure_ascii=False)
+                if edit_mode == "delete":
+                    removed = cells.pop(idx)
+                    action_desc = f"delete @ {idx} (id={removed.get('id', '?')})"
+                else:  # replace
+                    cells[idx]["source"] = str(new_source)
+                    action_desc = f"replace @ {idx} (id={cells[idx].get('id', '?')})"
+
+            # 原子写回（临时文件+一步替换，写一半崩了也不会毁原文件；
+            # 缩进用 1 是 nbformat 的惯例，末尾带换行）
+            from agent.atomic_io import atomic_write_text
+            try:
+                atomic_write_text(path, json.dumps(nb, ensure_ascii=False, indent=1) + "\n")
+            except Exception as e:
+                return json.dumps({"error": f"写回失败: {e}"}, ensure_ascii=False)
+
+            _track_checkpoint(path, kwargs)
+            _trigger_file_changed(path, "edit", kwargs)
+
             return json.dumps({
-                "error": f"insert 需要合法 cell_type（code/markdown/raw）: {cell_type}",
-                "error_type": "invalid_args",
+                "path": str(path),
+                "action": action_desc,
+                "total_cells": len(cells),
             }, ensure_ascii=False)
-        new_cell = {
-            "cell_type": cell_type,
-            "metadata": {},
-            "source": str(new_source),
-        }
-        if cell_type == "code":
-            new_cell["outputs"] = []
-            new_cell["execution_count"] = None
-        else:
-            new_cell["id"] = f"cell_new_{len(cells)}"
-        # 新建的 code 单元格也统一补上 id（上面的循环只照顾了文件里原有的单元格）
-        if "id" not in new_cell:
-            new_cell["id"] = f"cell_new_{len(cells)}"
-        if cell_id:
-            idx = _find_cell_index(cells, cell_id)
-            insert_at = idx if idx >= 0 else len(cells)
-        else:
-            insert_at = len(cells)
-        cells.insert(insert_at, new_cell)
-        action_desc = f"insert {cell_type} @ {insert_at} (id={new_cell['id']})"
-    else:
-        if not cell_id:
-            return json.dumps({
-                "error": f"{edit_mode} 需要 cell_id", "error_type": "invalid_args",
-            }, ensure_ascii=False)
-        idx = _find_cell_index(cells, cell_id)
-        if idx < 0:
-            return json.dumps({
-                "error": f"未找到 cell: {cell_id}", "error_type": "cell_not_found",
-            }, ensure_ascii=False)
-        if edit_mode == "delete":
-            removed = cells.pop(idx)
-            action_desc = f"delete @ {idx} (id={removed.get('id', '?')})"
-        else:  # replace
-            cells[idx]["source"] = str(new_source)
-            action_desc = f"replace @ {idx} (id={cells[idx].get('id', '?')})"
-
-    # 原子写回（临时文件+一步替换，写一半崩了也不会毁原文件；
-    # 缩进用 1 是 nbformat 的惯例，末尾带换行）
-    from agent.atomic_io import atomic_write_text
-    try:
-        atomic_write_text(path, json.dumps(nb, ensure_ascii=False, indent=1) + "\n")
-    except Exception as e:
-        return json.dumps({"error": f"写回失败: {e}"}, ensure_ascii=False)
-
-    _track_checkpoint(path, kwargs)
-    _trigger_file_changed(path, "edit", kwargs)
-
-    return json.dumps({
-        "path": str(path),
-        "action": action_desc,
-        "total_cells": len(cells),
-    }, ensure_ascii=False)
 
 
 registry.register(
