@@ -1366,45 +1366,76 @@ def _make_approval_callback(aux_provider=None):
         except Exception as e:
             console.print(f"[dim]（解释失败: {e}）[/dim]")
 
+    def _ask_via_selector(question, options, header="确认"):
+        """用选择器面板做审批（跟 ask_user 同款交互，↑↓ 选 + Enter 确认）。
+
+        文本 y/N 提示在滚动区里根本不显眼（用户看着像"没让我确认就执行
+        了"）——面板独占终端、高亮选中行，想看不见都难。选择器起不来时
+        降级回文本提示（无头/终端不支持的老路）。
+        """
+        try:
+            from cli_question import run_selector
+            from cli_ui import run_with_input_bridge
+            res = run_with_input_bridge(
+                lambda: run_selector(question, header, options, False)
+            ) or {}
+            if res.get("cancelled"):
+                return None  # 取消 = 拒绝
+            picked = (res.get("answers") or [])
+            return picked[0] if picked else None
+        except Exception:
+            return None  # 选择器不可用 → 走文本降级
+
     def callback(item: str):
         # 审批入口：命令/路径的判定用 _is_path_item
         #（check_path 发来的内容恒带"文件写入审批: "前缀，按这个约定识别）
         if _is_path_item(item):
             console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
             console.print(f"[bold]{item}[/bold]")
-            try:
-                answer = console.input(
-                    "[bold]允许？(y=本次 / a=总是允许并记住 / N=拒绝):[/bold] ",
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                console.print()
-                return False
-            if answer in ("a", "always"):
-                # 返回约定的哨兵值，持久化由 PermissionChecker.check_path 统一做
-                #（不在回调里直接写文件，职责分开）
+            # 选择器面板（比文本 y/N 显眼得多）
+            _picked = _ask_via_selector(
+                f"写入 {item}，允许吗？",
+                [
+                    {"label": "允许（本次）", "description": "仅这一次"},
+                    {"label": "总是允许并记住", "description": "父目录进持久化白名单"},
+                    {"label": "拒绝", "description": "不写入"},
+                ],
+                header="路径审批",
+            )
+            if _picked == "总是允许并记住":
                 return "always"
-            return answer in ("y", "yes")
+            if _picked == "允许（本次）":
+                return True
+            return False
         else:
             console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
-            # 命令可能极长（heredoc 写文件几百行）——全文刷屏淹没界面，
-            # 只显示开头 + 总长，想看用途按 e 让辅助模型解释
             _shown = item if len(item) <= 200 else (
                 item[:200] + f"\n…（共 {len(item)} 字符，已截断）")
             console.print(f"[bold]{_shown}[/bold]")
-            explain_hint = "[dim] e=解释[/dim]" if aux_provider else ""
-            while True:
+            # 构造选项（有辅助模型才加"解释"选项）
+            opts = [
+                {"label": "允许执行", "description": "本次放行，下次同命令不再问"},
+                {"label": "拒绝", "description": "不执行"},
+            ]
+            if aux_provider:
+                opts.insert(1, {
+                    "label": "先解释这条命令",
+                    "description": "让辅助模型说明用途和风险",
+                })
+            _picked = _ask_via_selector(
+                f"允许执行以上命令吗？", opts, header="命令审批",
+            )
+            if _picked == "先解释这条命令":
+                _explain(item)
+                # 解释完再问一遍（简化为文本——解释面板已经占了屏）
                 try:
                     answer = console.input(
-                        f"[bold]允许执行？(y/N):[/bold]{explain_hint} "
-                        "[dim]（同意后此命令不再询问）[/dim] ",
+                        "[bold]现在允许执行？(y/N):[/bold] ",
                     ).strip().lower()
+                    return answer in ("y", "yes")
                 except (EOFError, KeyboardInterrupt):
-                    console.print()
                     return False
-                if answer == "e" and aux_provider:
-                    _explain(item)
-                    continue  # 解释完再问一遍
-                return answer in ("y", "yes")
+            return _picked == "允许执行"
     return callback
 
 
