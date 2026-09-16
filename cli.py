@@ -411,7 +411,7 @@ class RuntimeContext:
                 if sandbox_mode in ("off", "on"):
                     _checker.set_sandbox_mode(sandbox_mode)
         except Exception as e:
-            logger.debug("权限检查器初始化失败（用默认）: %s", e)
+            logger.warning("权限检查器初始化失败（用默认）: %s", e)
 
         # 0.5 加载声明式 hooks（用户在配置文件里声明的事件钩子；如果启用）
         if self.config.get("hooks", {}).get("enabled", True):
@@ -576,7 +576,7 @@ class RuntimeContext:
                     name="memory-curator",
                 ).start()
         except Exception as e:
-            logger.debug("Memory Curator 触发检查失败(不阻塞): %s", e)
+            logger.warning("Memory Curator 触发检查失败(不阻塞): %s", e)
 
         # === 清理僵尸子代理记录 + 过期记录清理 ===
         # 启动时把"标着 running 但进程早就没了"的残留（上次崩溃留下的）改成
@@ -597,7 +597,7 @@ class RuntimeContext:
                         "子代理持久化清理：stale=%d, expired=%d", stale_n, old_n,
                     )
             except Exception as e:
-                logger.debug("子代理持久化清理失败（不阻塞）: %s", e)
+                logger.warning("子代理持久化清理失败（不阻塞）: %s", e)
 
         # === 落盘产物清理：tool-results（mtime）+ scratchpad ===
         # scratchpad 的 cleanup_old_scratchpads 此前定义了但从未被调用
@@ -617,7 +617,7 @@ class RuntimeContext:
                     "落盘清理：tool-results=%d, scratchpad=%d", _to_n, _sp_n,
                 )
         except Exception as e:
-            logger.debug("落盘产物清理失败（不阻塞）: %s", e)
+            logger.warning("落盘产物清理失败（不阻塞）: %s", e)
 
         # === statusline 项目分区键（赋值一次，取不到就空着）===
         # 放在 initialize 末尾（所有依赖就绪后），失败不影响主流程
@@ -625,7 +625,7 @@ class RuntimeContext:
             from agent.project_scope import get_project_memory_key
             self._statusline_project_key = get_project_memory_key()
         except Exception as e:
-            logger.debug("statusline 项目键获取失败（不阻塞）: %s", e)
+            logger.warning("statusline 项目键获取失败（不阻塞）: %s", e)
             self._statusline_project_key = ""
 
         # === Hooks: SESSION_START（会话已建立、声明式 hooks 已加载完毕）===
@@ -819,7 +819,7 @@ class RuntimeContext:
                 _perm_checker.set_aux_llm_provider(lambda: aux_llm_router)
                 _perm_checker.set_config_provider(lambda: self.config)
         except Exception as e:
-            logger.debug("PermissionChecker provider 注入失败（闸门 4 将跳过）: %s", e)
+            logger.warning("PermissionChecker provider 注入失败（闸门 4 将跳过）: %s", e)
 
         agent = AIAgent(
             base_url=model_cfg.get("base_url"),
@@ -1015,7 +1015,7 @@ class RuntimeContext:
                     # except 接住跳过这行，不会谎报"完毕"）
                     console.print("[dim]整理技能库完毕[/dim]")
             except Exception as e:
-                logger.debug("curator 触发失败: %s", e)
+                logger.warning("curator 触发失败: %s", e)
 
         # 守护线程：程序退出时它自动跟着结束，不会拖住主循环
         t = threading.Thread(target=_check, daemon=True)
@@ -1065,7 +1065,7 @@ class RuntimeContext:
             from agent.context_pipeline import CompressionSessionState
             a._compress_session_state = CompressionSessionState()
         except Exception as e:
-            logger.debug("压缩状态重置失败（忽略）: %s", e)
+            logger.warning("压缩状态重置失败（忽略）: %s", e)
         a._interrupt_requested = False
         a._auto_extract_cursor = 0
         a._auto_extract_turn_count = 0
@@ -1085,12 +1085,12 @@ class RuntimeContext:
             if getattr(a, "_max_tokens_escalator", None) is not None:
                 a._max_tokens_escalator.reset()
         except Exception as e:
-            logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
+            logger.warning("max_tokens 升级器重置失败（忽略）: %s", e)
         try:
             from agent.memory_injection import reset_injection_cache
             reset_injection_cache()
         except Exception as e:
-            logger.debug("记忆注入缓存重置失败（忽略）: %s", e)
+            logger.warning("记忆注入缓存重置失败（忽略）: %s", e)
         a.invalidate_system_prompt()
 
     def resume_session(self, session_id: str) -> bool:
@@ -1160,7 +1160,7 @@ class RuntimeContext:
             if getattr(self.agent, "_max_tokens_escalator", None) is not None:
                 self.agent._max_tokens_escalator.reset()
         except Exception as e:
-            logger.debug("max_tokens 升级器重置失败（忽略）: %s", e)
+            logger.warning("max_tokens 升级器重置失败（忽略）: %s", e)
         # 长任务进度外存回读（ephemeral，第一次对话组装时消费）
         _inject_progress_recovery(self, session_id)
         # 老任务认领：session_id 特性之前建的任务没有归属字段，直接按
@@ -1220,7 +1220,7 @@ class RuntimeContext:
                     [("dim", f"  待续任务 {len(_resume_todo_lines)} 条：")]
                     + [("dim", f"  {ln}") for ln in _resume_todo_lines])
         except Exception as e:
-            logger.debug("resume 待办回显失败（fail-open）: %s", e)
+            logger.warning("resume 待办回显失败（fail-open）: %s", e)
 
         return True
 
@@ -1246,7 +1246,7 @@ class RuntimeContext:
             from tools.skill_usage import flush_usage
             flush_usage()
         except Exception:
-            logger.debug("flush 技能使用统计失败", exc_info=True)
+            logger.warning("flush 技能使用统计失败", exc_info=True)
 
         if hasattr(self, "bg_manager") and self.bg_manager:
             try:
@@ -2109,7 +2109,7 @@ def _inject_progress_recovery(rt, session_id: str) -> None:
         })
         logger.info("resume: 已注入 PROGRESS.md 进度外存（%d 字符）", len(ptext))
     except Exception as e:
-        logger.debug("resume PROGRESS.md 回读失败（fail-open）: %s", e)
+        logger.warning("resume PROGRESS.md 回读失败（fail-open）: %s", e)
 
 
 def _adopt_legacy_tasks(rt, session_id: str, archive_msgs: list) -> None:
@@ -2170,7 +2170,7 @@ def _adopt_legacy_tasks(rt, session_id: str, archive_msgs: list) -> None:
                 "resume: 已认领 %d 条无归属老任务归属本会话", adopted,
             )
     except Exception as e:
-        logger.debug("老任务认领失败（fail-open）: %s", e)
+        logger.warning("老任务认领失败（fail-open）: %s", e)
 
 
 def _inject_task_recovery(rt) -> list:
@@ -2229,7 +2229,7 @@ def _inject_task_recovery(rt) -> list:
             })
             logger.info("resume: 已注入待办任务清单（%d 条未完成）", len(rows))
     except Exception as e:
-        logger.debug("resume 任务清单注入失败（fail-open）: %s", e)
+        logger.warning("resume 任务清单注入失败（fail-open）: %s", e)
     return lines
 
 
@@ -2297,7 +2297,7 @@ def _inject_bg_recovery(rt, session_id: str) -> None:
                 + "\n</bg_task_result_recovery>"
             )
     except Exception as e:
-        logger.debug("resume bg 任务注入失败（fail-open）: %s", e)
+        logger.warning("resume bg 任务注入失败（fail-open）: %s", e)
 
     # 中断的异步子代理：可续跑、带上下文
     try:
@@ -2358,7 +2358,7 @@ def _inject_bg_recovery(rt, session_id: str) -> None:
                 + "\n</subagent_recovery>"
             )
     except Exception as e:
-        logger.debug("resume 子代理注入失败（fail-open）: %s", e)
+        logger.warning("resume 子代理注入失败（fail-open）: %s", e)
 
     if not parts:
         return
@@ -2371,7 +2371,7 @@ def _inject_bg_recovery(rt, session_id: str) -> None:
             queue.append({"role": "user", "content": p, "_ephemeral": True})
         logger.info("resume: 已注入后台任务/子代理恢复信息（%d 块）", len(parts))
     except Exception as e:
-        logger.debug("resume bg/subagent 注入投递失败（fail-open）: %s", e)
+        logger.warning("resume bg/subagent 注入投递失败（fail-open）: %s", e)
 
 
 def _cleanup_redundant_summaries(msgs: list) -> list:
@@ -3004,7 +3004,7 @@ def _handle_init_command(rt, args: str) -> bool:
             + "\n".join(entries + sub_tree[:60])
         )
     except Exception as e:
-        logger.debug("收集目录结构失败（跳过）: %s", e)
+        logger.warning("收集目录结构失败（跳过）: %s", e)
 
     # 2. 关键配置文件（每个只读前 4KB，够 LLM 认出项目类型了）
     for fname in (
@@ -3031,7 +3031,7 @@ def _handle_init_command(rt, args: str) -> bool:
         top = ", ".join(f"{e}({c})" for e, c in exts.most_common(5))
         parts.append(f"## 文件类型统计（前 5）\n{top}")
     except Exception as e:
-        logger.debug("文件类型统计失败（跳过）: %s", e)
+        logger.warning("文件类型统计失败（跳过）: %s", e)
 
     info = "\n\n".join(parts) or "（空项目，无可用信息）"
 
@@ -3959,7 +3959,7 @@ def _execute_turn(rt, agent_input: str) -> None:
         if _sl:
             console.print(f"[dim]{_sl}[/dim]")
     except Exception as _e:
-        logger.debug("statusline 渲染失败（不阻塞）: %s", _e)
+        logger.warning("statusline 渲染失败（不阻塞）: %s", _e)
 
 
 def _is_path_item(item: str) -> bool:
