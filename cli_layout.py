@@ -621,6 +621,19 @@ def is_double_press(state: dict, now: float, window: float = 2.0) -> bool:
     return hit
 
 
+# Ctrl+C 状态本（模块级，供回合开始时跨作用域重置）：
+# t=双击窗口计时；int=本回合是否已请求过中断。
+# int 必须**每回合开始清零**（reset_interrupt_press，cli._execute_turn 调）——
+# 只在按键路径里清的话，上个回合的中断标志会残留到下个回合：新回合里
+# 第一击就被误判成"已中断过的第二击"直接强退整个程序（单击退出事故）
+_CC_STATE = {"t": 0.0, "int": False}
+
+
+def reset_interrupt_press() -> None:
+    """新回合开始时清「本回合已中断」标志（防跨回合残留误判强退）。"""
+    _CC_STATE["int"] = False
+
+
 def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=None):
     """键位路由表（大白话：操作台怎么响应特殊键）。
 
@@ -639,8 +652,10 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
     # 关键语义：中断请求已发出后再按 Ctrl+C = 强退（不看 2 秒窗口）——
     # 中断是商量式的（正在烧的 LLM 调用要等它落地），用户看着屏幕没变
     # 会再按；窗口计时的"第二击"和用户直觉的"第二击"对不上，就出现
-    # 连按三下才退的现象
-    _cc_state = {"t": 0.0, "int": False}
+    # 连按三下才退的现象。状态本用模块级 _CC_STATE：回合开始时
+    # reset_interrupt_press 清 int，跨回合残留会把新回合第一击
+    # 误判成强退
+    _cc_state = _CC_STATE
 
     @kb.add("enter")
     def _submit(event):

@@ -3842,6 +3842,13 @@ def _execute_turn(rt, agent_input: str) -> None:
     """
     from agent.loop_host import loop_host
     cli_events.reset_pending(rt)  # 新回合清 ◐ 黑板（防幻影残留）
+    # 新回合清「本回合已中断」标志：上个回合的 Ctrl+C 残留会把本回合
+    # 第一击误判成强退（单击退出的根因）
+    try:
+        import cli_layout
+        cli_layout.reset_interrupt_press()
+    except Exception:
+        pass
     _turn_t0 = time.monotonic()
     rt.turn_active = True
     try:
