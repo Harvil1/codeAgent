@@ -90,16 +90,24 @@ def hint_text(multi: bool, custom_focused: bool = False) -> str:
             " · ctrl+g to edit in Notepad · Esc to cancel")
 
 
-def row_indices(n_options: int, multi: bool) -> dict:
+def row_indices(n_options: int, multi: bool,
+                allow_custom: bool = True, allow_chat: bool = True) -> dict:
     """行号表：普通选项 0..N-1、自填行 N、(多选)Submit N+1、Chat 永远最后。
 
     大白话：整块面板的可选行从上到下编了号，数字直达键按这个对号入座。
+    allow_custom/allow_chat 为 False 时不画对应行（-1 表示不存在）。
     """
-    custom_i = n_options
-    submit_i = n_options + 1 if multi else None
-    chat_i = n_options + (2 if multi else 1)
+    custom_i = n_options if allow_custom else -1
+    submit_i = n_options + 1 if (multi and allow_custom) else (n_options if multi else None)
+    _last_normal = n_options - 1
+    if allow_custom:
+        _last = custom_i
+    if multi and allow_custom:
+        _last = submit_i
+    chat_i = _last + 1 if allow_chat else -1
+    total = (chat_i + 1) if allow_chat else (_last + 1)
     return {"custom": custom_i, "submit": submit_i, "chat": chat_i,
-            "total": chat_i + 1}
+            "total": max(total, n_options)}
 
 
 def build_above(question, header, options, cursor, checked, multi,
@@ -176,12 +184,13 @@ def custom_row_fragments(idx: int, cursor_on: bool, multi: bool,
 
 
 def build_below(n_options, cursor, checked, multi, custom_text,
-                width=80, with_hint=True, custom_focused=False):
+                width=80, with_hint=True, custom_focused=False,
+                allow_chat=True):
     """面板下半部片段：自填行之后的一切——(多选)Submit 行、分隔线、
-    Chat about this 行、空行、提示栏。"""
+    Chat about this 行、空行、提示栏。allow_chat=False 不画 Chat 行。"""
     frags = []
     divider = "─" * max(10, width)
-    idx = row_indices(n_options, multi)
+    idx = row_indices(n_options, multi, allow_chat=allow_chat)
 
     def _row(style, text):
         frags.append((style, text))
@@ -194,11 +203,12 @@ def build_below(n_options, cursor, checked, multi, custom_text,
         style = "class:q-selected" if selected else "class:q-desc"
         _row(style, f"{mark}{i + 1}. ✓ Submit")
     _row("class:q-divider", divider)
-    i = idx["chat"]
-    selected = (cursor == i)
-    mark = "> " if selected else "  "
-    style = "class:q-selected" if selected else "class:q-opt"
-    _row(style, f"{mark}{i + 1}. Chat about this")
+    if allow_chat:
+        i = idx["chat"]
+        selected = (cursor == i)
+        mark = "> " if selected else "  "
+        style = "class:q-selected" if selected else "class:q-opt"
+        _row(style, f"{mark}{i + 1}. Chat about this")
     _row("", "")
     if with_hint:
         _row("class:q-hint", hint_text(multi, custom_focused))
@@ -278,7 +288,8 @@ def edit_in_notepad(initial: str = "", editor: str = None):
 # 交互主体：临时 pt Application（一问一面板）
 # ---------------------------------------------------------------------------
 
-def run_selector(question, header, options, multi=False, chips=None):
+def run_selector(question, header, options, multi=False, chips=None,
+                 allow_custom=True, allow_chat=True):
     """画一问的 CC 同款面板（自填行是行内真输入框）。
 
     键位：↑/↓ 移光标（光标落到自填行时焦点给输入框、直接打字）、
@@ -290,6 +301,8 @@ def run_selector(question, header, options, multi=False, chips=None):
         question/header/options/multi: 这一问的内容（options 只有普通选项，
             自填/Submit/Chat 行由本函数按行号表自动画）
         chips: 多问时的进度标签行（单问传 None）
+        allow_custom: False 时不画"Type something."自填行（审批面板用）
+        allow_chat: False 时不画"Chat about this"行（审批面板用）
 
     返回：{"answers": [选项label或自填文本], "cancelled": bool, "chat": bool}
         chat=True 表示用户选了 Chat about this（answers 为空）；
@@ -305,7 +318,8 @@ def run_selector(question, header, options, multi=False, chips=None):
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style
 
-    idx = row_indices(len(options or []), multi)
+    idx = row_indices(len(options or []), multi,
+                      allow_custom=allow_custom, allow_chat=allow_chat)
     state = {"cursor": 0, "checked": set(), "done": False, "result": None}
     custom_buf = Buffer(multiline=False)
     custom_focused = Condition(lambda: state["cursor"] == idx["custom"])
@@ -464,12 +478,19 @@ def run_selector(question, header, options, multi=False, chips=None):
                 len(options), state["cursor"], state["checked"], multi,
                 custom_buf.text,
                 width=shutil.get_terminal_size((80, 24)).columns,
-                custom_focused=(state["cursor"] == idx["custom"])),
+                custom_focused=(state["cursor"] == idx["custom"]),
+                allow_chat=allow_chat),
             show_cursor=False),
         dont_extend_height=True)
 
+    # allow_custom=False 时不画自填行（审批面板只要干净三选）
+    _children = [above_window]
+    if allow_custom:
+        _children.append(custom_row)
+    _children.append(below_window)
+
     app = Application(
-        layout=Layout(HSplit([above_window, custom_row, below_window])),
+        layout=Layout(HSplit(_children)),
         key_bindings=kb,
         style=Style.from_dict({
             "q-title": "bold",

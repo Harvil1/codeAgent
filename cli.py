@@ -1370,24 +1370,26 @@ def _make_approval_callback(aux_provider=None):
             console.print(f"[dim]（解释失败: {e}）[/dim]")
 
     def _ask_via_selector(question, options, header="确认"):
-        """用选择器面板做审批（跟 ask_user 同款交互，↑↓ 选 + Enter 确认）。
+        """用选择器面板做审批（只显示给定选项，无自填/转对话行）。
 
-        文本 y/N 提示在滚动区里根本不显眼（用户看着像"没让我确认就执行
-        了"）——面板独占终端、高亮选中行，想看不见都难。选择器起不来时
-        降级回文本提示（无头/终端不支持的老路）。
+        审批不需要"Type something"和"Chat about this"——用户要的就是
+        干净三选：选完面板消失、工具直接执行。选择器起不来时自动拒绝。
         """
         try:
             from cli_question import run_selector
             from cli_ui import run_with_input_bridge
             res = run_with_input_bridge(
-                lambda: run_selector(question, header, options, False)
+                lambda: run_selector(
+                    question, header, options, False,
+                    allow_custom=False, allow_chat=False,
+                )
             ) or {}
             if res.get("cancelled"):
-                return None  # 取消 = 拒绝
+                return None  # 取消/选择器起不来 = 拒绝
             picked = (res.get("answers") or [])
             return picked[0] if picked else None
         except Exception:
-            return None  # 选择器不可用 → 走文本降级
+            return None  # 选择器不可用 → 拒绝（fail-closed）
 
     def callback(item: str):
         # 审批入口：命令/路径的判定用 _is_path_item
@@ -1402,36 +1404,18 @@ def _make_approval_callback(aux_provider=None):
                 item[:200] + f"\n…（共 {len(item)} 字符，已截断）")
             console.print(f"[bold]{_shown}[/bold]")
 
-        # 统一选项（命令审批多一个"解释"选项，有辅助模型才显示）
+        # 干净三选（用户定的规矩：不要解释、不要自填、不要转对话）
         opts = [
             {"label": "允许（本次）", "description": "仅这一次"},
             {"label": "总是允许并记住", "description":
                 "路径→父目录进白名单 / 命令→加入审批白名单"},
             {"label": "拒绝", "description": "不执行"},
         ]
-        if not _is_path_item(item) and aux_provider:
-            opts.insert(2, {
-                "label": "先解释这条命令",
-                "description": "让辅助模型说明用途和风险",
-            })
 
         _header = "路径审批" if _is_path_item(item) else "命令审批"
         _q = (f"写入 {item}，允许吗？" if _is_path_item(item)
               else "允许执行以上命令吗？")
         _picked = _ask_via_selector(_q, opts, header=_header)
-
-        if _picked == "先解释这条命令":
-            _explain(item)
-            # 解释完再问一遍（同款面板）
-            _picked = _ask_via_selector(
-                "现在允许执行吗？",
-                [
-                    {"label": "允许（本次）", "description": "仅这一次"},
-                    {"label": "总是允许并记住", "description": "下次同命令不再问"},
-                    {"label": "拒绝", "description": "不执行"},
-                ],
-                header=_header,
-            )
 
         if _picked == "总是允许并记住":
             return "always"
