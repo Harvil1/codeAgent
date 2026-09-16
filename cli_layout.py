@@ -744,8 +744,8 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
             else:
                 from cli_ui import console
                 console.print(
-                    "[yellow]⚡ 已请求中断本轮；"
-                    "再按一次 Ctrl+C 强制退出所有任务[/yellow]"
+                    "[yellow]⚡ 已中断本轮（进行中的调用已取消）；"
+                    "再按 Ctrl+C 退出程序[/yellow]"
                 )
             return
         # 空闲（回合已收）：清中断标记——下一回合的第一击仍是"中断"

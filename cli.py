@@ -3817,12 +3817,24 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     rt.turn_active = False
 
     def _do_turn_interrupt():
+        """一击 = 全部中断（用户定的规则）。
+
+        三板斧按序：标志位（子代理主循环下轮自查）→ 取消旗（线程池里的
+        子代理任务不再继续）→ cancel_current_turn（正在烧的 LLM 调用直接
+        断——不硬断的话用户要干等长响应落地，屏幕没变化只会继续按）。
+        CancelledError 沿 worker 的 except 安静出回合，不刷栈。
+        """
         rt.agent.interrupt()
         try:
             from tools.delegate_tool import cancel_all_subagents
             cancel_all_subagents("用户中断（Ctrl+C）")
         except Exception:
             pass
+        try:
+            from agent.loop_host import cancel_current_turn
+            cancel_current_turn()
+        except Exception:
+            pass  # 没有在跑的回合时是安全空操作
 
     _interrupt_fn = cli_layout.build_interrupt_fn(
         lambda: getattr(rt, "turn_active", False),
