@@ -94,6 +94,31 @@ _CMD_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&|\r|\n")
 _MAX_COMPOUND_SEGMENTS = 50
 
 
+# git 只读子命令白名单：cd 后跑这些不触发审批（不加载 hooks、不写状态、
+# 不执行任意代码——`git log/status/diff/show` 只读仓库元数据）
+_GIT_READONLY_SUBCMDS = frozenset({
+    "log", "status", "diff", "show", "blame", "shortlog", "describe",
+    "branch", "tag", "remote", "rev-parse", "ls-files", "ls-remote",
+    "cat-file", "name-rev", "reflog", "stash--list", "config", "-l",
+    "--version", "help", "whatchanged", "grep",
+})
+
+
+def _is_readonly_git(toks: list) -> bool:
+    """判断 git 命令是否只读（子命令在白名单里且不带写 flag。）
+
+    白名单覆盖 log/status/diff/show 等纯查询——它们不加载 hooks、
+    不执行 clean/fsmonitor，cd 后跑它们不构成注入面。config -l 例外
+    （config 不带 -l 是写操作）。
+    """
+    if len(toks) < 2:
+        return False
+    sub = toks[1].lower()
+    if sub in ("config",) and len(toks) >= 3 and toks[2] in ("-l", "--list"):
+        return True
+    return sub in _GIT_READONLY_SUBCMDS
+
+
 def _has_cd_git_combo(command: str) -> bool:
     """复合命令里 cd 之后再出现 git(含 xargs git)就返回 True。
 
@@ -102,10 +127,14 @@ def _has_cd_git_combo(command: str) -> bool:
     顺序敏感:git 在 cd **之前**跑,
     操作的是原目录,不构成这个攻击面,返回 False。
 
+    只读 git 命令（log/status/diff/show 等）豁免：它们不加载 hooks
+    不写状态，cd 后跑不构成注入面——不豁免的话 `cd 项目 && git log`
+    这种最常见的排查命令每次都弹审批，用户烦死了。
+
     参数:
         command: 完整命令字符串。
 
-    返回:True 表示存在"cd 之后的 git"。
+    返回:True 表示存在"cd 之后的 git"且不是只读命令。
     """
     segs = _CMD_SEGMENT_SPLIT_RE.split(command)
     if len(segs) < 2:
@@ -120,7 +149,7 @@ def _has_cd_git_combo(command: str) -> bool:
             saw_cd = True
             continue
         if verb == "git" or (verb == "xargs" and "git" in toks):
-            if saw_cd:
+            if saw_cd and not _is_readonly_git(toks):
                 return True
     return False
 # Windows del/rd 的斜杠式选项(/s /q);注意别把 /usr 这种真路径也当成选项。

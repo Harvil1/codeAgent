@@ -380,10 +380,16 @@ def _delegate_sync(
 
     返回：JSON 字符串（成功带 result；被中断带 partial result；超时带错误说明）。
     """
-    child_timeout = float(kwargs.get("child_timeout", 600))
-    # 优雅退出窗口时长从 config.delegation.sync_cancel_timeout_seconds 读（默认 2 秒）
+    # 默认 1200s（20 分钟）：探索/审查类任务动辄读十几个文件，600s
+    # （10 分钟）经常差临门一脚就被强杀——全部工作打水漂主代理从零重做，
+    # 用户看着就是"卡了半天没进展"。config 可调：delegation.child_timeout_seconds
     _cfg = kwargs.get("config") or {}
     _delegation_cfg = (_cfg.get("delegation") or {}) if isinstance(_cfg, dict) else {}
+    child_timeout = float(_delegation_cfg.get(
+        "child_timeout_seconds",
+        kwargs.get("child_timeout", 1200),
+    ))
+    # 优雅退出窗口时长从 config.delegation.sync_cancel_timeout_seconds 读（默认 2 秒）
     sync_cancel_timeout = float(_delegation_cfg.get(
         "sync_cancel_timeout_seconds", 2.0,
     ))
@@ -687,7 +693,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     # （不能只看 kwargs——只看 kwargs 的话配置永远不生效，一直 fallback 到 3）
     _cfg = (kwargs.get("config") or {}) if isinstance(kwargs.get("config"), dict) else {}
     max_concurrent = int((_cfg.get("delegation") or {}).get("max_concurrent_children", 5))
-    child_timeout = float(kwargs.get("child_timeout", 600))
+    child_timeout = float(kwargs.get("child_timeout", 1200))
 
     results = []
     # 不用 `with ThreadPoolExecutor` 写法的原因：它退出时会 shutdown(wait=True)
