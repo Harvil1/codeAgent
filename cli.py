@@ -4490,7 +4490,9 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     def _final_exit():
         _os_final._exit(0)
 
-    _th_final.Timer(8.0, _final_exit, daemon=True).start()
+    _t = _th_final.Timer(8.0, _final_exit)
+    _t.daemon = True   # Timer 不收 daemon 关键字——退出码路径上别再炸
+    _t.start()
 
 
 # ---------------------------------------------------------------------------
