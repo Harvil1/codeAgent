@@ -594,16 +594,20 @@ def _run_child(
             except Exception:
                 pass
 
-        # === UI 直播：子代理的工具活动上报给 live 面板（纯展示，fail-open）===
-        # 大白话：子代理在下面干活，屏幕上的树（├─ 描述 · N tool uses）
-        # 靠这里每次工具调用敲一笔。只注册钩子不改执行逻辑，任何异常
-        # 都吞——展示线断了也不许断任务线。
+        # === UI 直播 + 心跳：子代理的工具活动上报 live 面板 + 刷新活跃心跳 ===
+        # 心跳的作用：同步委托的空闲超时靠它判定"还在干活"——每次工具调用
+        # 刷新一次，有心跳就永远不超时。不挂的话空闲 5 分钟就被误杀。
         _ui_child_key = kwargs.get("ui_child_key")
+        _heartbeat = kwargs.get("_sync_heartbeat")  # 同步委托传的心跳 dict
         if _ui_child_key:
             try:
                 import cli_live
 
                 def _ui_on_pre(tool_name, args, **_kw):
+                    # 心跳刷新（同步委托的空闲超时判定靠这个）
+                    if isinstance(_heartbeat, dict):
+                        import time as _hb_time
+                        _heartbeat["last"] = _hb_time.monotonic()
                     try:
                         from cli_events import summarize_args
                         cli_live.note_child_tool(
@@ -618,6 +622,18 @@ def _run_child(
                     _ui_on_pre, name="cli_live_child")
             except Exception as e:
                 logger.debug("live 面板钩子注册失败（fail-open）: %s", e)
+        elif isinstance(_heartbeat, dict):
+            # 没有 ui_child_key（非 CLI 场景）也要挂心跳——不然同步委托
+            # 空闲 5 分钟就误杀长任务
+            try:
+                def _hb_on_pre(tool_name, args, **_kw):
+                    import time as _hb_time
+                    _heartbeat["last"] = _hb_time.monotonic()
+                    return None
+                child.hooks_registry.register_pre_tool_use(
+                    _hb_on_pre, name="sync_heartbeat")
+            except Exception:
+                pass
 
         # === 长任务进行中的进度播报（P1-10）===
         # 用辅助小模型周期性生成「正在做什么」的摘要，推给父代理的

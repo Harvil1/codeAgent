@@ -380,28 +380,38 @@ def _delegate_sync(
 
     返回：JSON 字符串（成功带 result；被中断带 partial result；超时带错误说明）。
     """
-    # 默认 1200s（20 分钟）：探索/审查类任务动辄读十几个文件，600s
-    # （10 分钟）经常差临门一脚就被强杀——全部工作打水漂主代理从零重做，
-    # 用户看着就是"卡了半天没进展"。config 可调：delegation.child_timeout_seconds
+    # === 活跃检测取代固定总超时 ===
+    # 旧设计：固定 600s/1200s 总超时——探索任务读 15 个文件差临门一脚被
+    # 强杀，全部工作打水漂。用户说得对：子代理在干活就不该被杀。
+    # 新设计：idle_timeout——只有**连续没有任何活动**（不调工具、不产
+    # LLM 响应）超过 N 秒才判定为死/挂，按取消处理。正在干活的子代理
+    # 每次工具调用都会刷新心跳，永远不会被误杀。
     _cfg = kwargs.get("config") or {}
     _delegation_cfg = (_cfg.get("delegation") or {}) if isinstance(_cfg, dict) else {}
-    child_timeout = float(_delegation_cfg.get(
-        "child_timeout_seconds",
-        kwargs.get("child_timeout", 1200),
+    # 空闲超时：多久没心跳算死（默认 300s = 5 分钟没任何活动）
+    idle_timeout = float(_delegation_cfg.get(
+        "child_idle_timeout_seconds",
+        kwargs.get("child_idle_timeout", 300),
     ))
-    # 优雅退出窗口时长从 config.delegation.sync_cancel_timeout_seconds 读（默认 2 秒）
+    # 安全网上限：不管多活跃，跑超过这个数就截断（防无限循环烧 token；
+    # 默认 3600s = 1 小时，config 可调）
+    hard_cap = float(_delegation_cfg.get(
+        "child_hard_cap_seconds",
+        kwargs.get("child_timeout", 3600),
+    ))
+    # 优雅退出窗口
     sync_cancel_timeout = float(_delegation_cfg.get(
         "sync_cancel_timeout_seconds", 2.0,
     ))
+    # 心跳时间戳：子代理每次 PRE_TOOL_USE / POST_LLM_CALL 都会刷新
+    import time as _time_mod
+    heartbeat = {"last": _time_mod.monotonic()}
 
     # 创建取消信号，一路传给 _run_child → 子代理的对话主循环
     cancel_event = threading.Event()
     kwargs["cancel_event"] = cancel_event
 
-    # 预先生成持久化 ID 传给 _run_child：超时强制扔下子代理时，
-    # 能立刻把它的元数据标成 interrupted，而不是等下次启动时的 cleanup_stale_subagents
-    # 来兜底。不这样做的话，残留的 running 状态会骗过 subagent_resume，
-    # 让它以为这是个还能恢复的活任务
+    # 预先生成持久化 ID
     _pid = None
     if ((kwargs.get("config") or {}).get("delegation", {})
             .get("subagent_persistence_enabled", True)):
@@ -412,11 +422,10 @@ def _delegate_sync(
         except Exception:
             _pid = None
 
-    # box 是线程间传结果的小盒子（普通 dict，主/子线程各写各的 key）
+    # box 是线程间传结果的小盒子
     box: dict = {}
 
-    # live 面板进场（单个子代理：spinner 下挂 ⎿ 当前活动 + 工具计数）。
-    # key 用 tool_call_id 派生（同回合多次委托不撞车）；纯展示 fail-open
+    # live 面板进场 + 心跳钩子
     _ui_key = f"sync-{kwargs.get('tool_call_id') or id(box)}"
     kwargs["ui_child_key"] = _ui_key
     try:
@@ -425,14 +434,18 @@ def _delegate_sync(
     except Exception:
         pass
 
+    # 把心跳刷新挂到子代理的 hooks_registry——但 _run_child 内部才建
+    # registry，这里先记到一个闭包可写的地方，delegate_child 的 UI 钩子
+    # (_ui_on_pre) 每次工具调用时会顺路刷新（通过 kwargs 传递引用）
+    kwargs["_sync_heartbeat"] = heartbeat
+
     def _run():
         try:
             box["result"] = _run_child(goal, context, role, **kwargs)
         except Exception as e:  # noqa: BLE001
             box["error"] = e
         finally:
-            # 收场状态同步给 live 面板（abandon 时线程还活着到不了这里，
-            # 黑板残留的 running 行由回合结束统一清）
+            box["done"] = True
             try:
                 import cli_live
                 cli_live.agent_finish(
@@ -443,13 +456,37 @@ def _delegate_sync(
 
     thread = threading.Thread(target=_run, daemon=True, name="delegate-sync")
     thread.start()
-    thread.join(timeout=child_timeout)
+
+    # === 活跃监测循环：每 5 秒查一次心跳 ===
+    _t0 = _time_mod.monotonic()
+    _idle_triggered = False
+    _hard_triggered = False
+    while not box.get("done"):
+        thread.join(timeout=5.0)
+        if not thread.is_alive() or box.get("done"):
+            break
+        _now = _time_mod.monotonic()
+        _idle_for = _now - heartbeat["last"]
+        _total = _now - _t0
+        if _idle_for >= idle_timeout:
+            logger.warning(
+                "sync 子代理空闲超时（%ss 无活动），按取消处理",
+                int(_idle_for),
+            )
+            _idle_triggered = True
+            break
+        if _total >= hard_cap:
+            logger.warning(
+                "sync 子代理硬上限（总运行 %ss），按取消处理", int(_total),
+            )
+            _hard_triggered = True
+            break
 
     if thread.is_alive():
-        # 超时了：按下取消信号，给子代理一个优雅退出的机会
+        # 触发了空闲超时或硬上限：按下取消信号，给子代理优雅退出的机会
+        _reason = ("空闲超时" if _idle_triggered else "硬上限") if (_idle_triggered or _hard_triggered) else "未知"
         logger.info(
-            "Task K: sync 子代理超时 %ss，set cancel_event 等优雅退出",
-            child_timeout,
+            "Task K: sync 子代理 %s，set cancel_event 等优雅退出", _reason,
         )
         cancel_event.set()
         thread.join(timeout=sync_cancel_timeout)
@@ -473,16 +510,15 @@ def _delegate_sync(
             return json.dumps({
                 "success": False,
                 "error": (
-                    f"子代理执行超时（{child_timeout}s），"
-                    f"已 set cancel_event 并等待 {sync_cancel_timeout}s 仍未退出，"
-                    f"强制 abandon"
+                    f"子代理{_reason}后未响应取消，"
+                    f"强制 abandon（idle={int(idle_timeout)}s, "
+                    f"cap={int(hard_cap)}s）"
                 ),
                 "mode": "sync",
             }, ensure_ascii=False)
 
         # 子代理响应了取消信号，优雅退出了
-        # 此时 _run_child 返回的是部分结果（由子代理对话循环里
-        # cancel_event 分支的 _extract_partial_result 提供）
+        # 此时 _run_child 返回的是部分结果
         if "error" in box:
             logger.exception("Task K: 子代理 cancel 后异常退出")
             return json.dumps({
@@ -493,13 +529,12 @@ def _delegate_sync(
             }, ensure_ascii=False)
         partial = box.get("result", "")
         return json.dumps({
-            "success": False,  # 被中断不算成功
+            "success": False,
             "result": partial,
             "mode": "sync",
             "cancelled": True,
             "message": (
-                f"子代理被 cancel 中断（超时 {child_timeout}s），"
-                f"返回 partial result"
+                f"子代理因{_reason}被取消，返回 partial result"
             ),
         }, ensure_ascii=False)
 
