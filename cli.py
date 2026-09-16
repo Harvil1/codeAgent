@@ -4093,6 +4093,34 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         _do_turn_interrupt,
     )
 
+    # === OS 级 SIGINT 兜底：不管 pt 键位有没有接到 Ctrl+C，信号层永远接住 ===
+    # 根因：pt 的 c-c 键位只在 raw 模式下有效——事件循环忙渲染/接管间隙里
+    # 信号穿透到 Python 默认处理器 → raise KeyboardInterrupt → asyncio
+    # runner 崩 → Executor shutdown 满屏 → 程序闪退。装信号处理器后：
+    #   回合进行中 → 中断（程序活着可继续对话）
+    #   空闲 → EOF 哨兵（正常退出，再见+shutdown）
+    #   绝不 raise KeyboardInterrupt
+    # 防抖 0.5s：pt 键位和 OS 信号可能同一击都到，去抖防双处理
+    import signal as _signal_mod
+    _last_sigint = [0.0]
+
+    def _os_sigint_handler(signum, frame):
+        """OS 级 Ctrl+C：信号穿透 pt 键位时的兜底。"""
+        import time as _sig_t
+        _now = _sig_t.monotonic()
+        if _now - _last_sigint[0] < 0.5:
+            return
+        _last_sigint[0] = _now
+        if getattr(rt, "turn_active", False):
+            _do_turn_interrupt()
+        else:
+            _input_q.put(_EOF_SENTINEL)
+
+    try:
+        _signal_mod.signal(_signal_mod.SIGINT, _os_sigint_handler)
+    except (ValueError, OSError):
+        pass
+
     def _force_exit():
         """Ctrl+C 双击：关闭所有进程和线程，立刻走人（不走优雅收尾）。
 
