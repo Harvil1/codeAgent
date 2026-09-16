@@ -618,8 +618,26 @@ def _run_child(
                         pass
                     return None   # 不拦不改变量——纯旁观
 
+                def _ui_on_post(tool_name, args, result, **_kw):
+                    # 工具完成 → 心跳刷新 + 活动行切到"思考中"
+                    # （不切的话面板永远显示最后一次工具调的名字，LLM
+                    # 生成那几十秒用户看着就是"卡住了没反应"）
+                    if isinstance(_heartbeat, dict):
+                        import time as _hb_time
+                        _heartbeat["last"] = _hb_time.monotonic()
+                    try:
+                        cli_live.agent_update(
+                            _ui_child_key,
+                            activity=f"✓ {tool_name} → 思考中…",
+                        )
+                    except Exception:
+                        pass
+                    return result  # POST 流水线：原样透传
+
                 child.hooks_registry.register_pre_tool_use(
                     _ui_on_pre, name="cli_live_child")
+                child.hooks_registry.register_post_tool_use(
+                    _ui_on_post, name="cli_live_child_post")
             except Exception as e:
                 logger.debug("live 面板钩子注册失败（fail-open）: %s", e)
         elif isinstance(_heartbeat, dict):
