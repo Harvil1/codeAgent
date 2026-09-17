@@ -1,0 +1,49 @@
+[project]
+name = "codeagent"
+version = "0.1.0"
+description = "自学习 AI Agent（基于 Harvil Agent 复刻指南）"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.116.0",
+    "anyio>=4.14.1",
+    "bashlex>=0.18",
+    "httpx>=0.28.1",
+    "jsonschema>=4.26.0",
+    "openai>=1.0.0,<2",
+    "prompt-toolkit>=3.0",
+    "pyyaml==6.0.2",
+    "requests>=2.34.2",
+    "rich==13.9.4",
+    "websockets>=17.0.1",
+]
+
+[project.scripts]
+codeagent = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_diag_cmds", "cli_session_cmds", "cli_skill_memory_cmds", "agent_profile", "curator_cli", "cli_commands", "cli_input", "cli_events", "cli_live", "cli_question"]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "tools*", "plugins*", "scripts*", "skills*"]
+
+[tool.setuptools.package-data]
+# 内置技能随包分发：SKILL.md / 模板 / SDD 脚本，装哪台机器都一样
+"skills" = ["**/*.md", "**/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+preview = true
+
+[tool.ruff.lint]
+select = ["PLW1514"]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "ruff==0.8.4",
+]

