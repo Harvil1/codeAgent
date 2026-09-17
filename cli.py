@@ -1317,6 +1317,36 @@ class RuntimeContext:
 # 回调（把"CLI 怎么跟用户互动"做成函数，传给 agent 内部调用）
 # ---------------------------------------------------------------------------
 
+def _approval_panel_question(item: str, width: int = None) -> str:
+    """审批面板的问题文本：⚠️ 警告行 + 命令/路径全文折行 + 收尾提问。
+
+    警告和命令全文画进面板里（不是往面板外 print）——面板外的打印
+    会冻进滚动历史擦不掉；面板退出时整体自擦（run_selector 的
+    erase_when_done），审批完上下文里只剩 ● Bash(...) 工具行。
+
+    参数：
+        item: 待审批的命令或路径（check_path 发来的恒带
+            "文件写入审批: "前缀，_is_path_item 按约定识别）
+        width: 折行宽度（None=取当前终端宽）
+    返回：
+        多行问题文本（面板 build_above 逐行渲染）
+    """
+    import shutil
+
+    from cli_question import wrap_cjk
+    if _is_path_item(item):
+        warn, shown = "⚠️ 即将写入路径(白名单外)：", item
+        tail = "允许写入以上路径吗？"
+    else:
+        warn = "⚠️ 即将执行破坏性命令："
+        shown = item if len(item) <= 200 else (
+            item[:200] + f"…（共 {len(item)} 字符，已截断）")
+        tail = "允许执行以上命令吗？"
+    if width is None:
+        width = shutil.get_terminal_size((80, 24)).columns
+    return "\n".join([warn, *wrap_cjk(shown, width), "", tail])
+
+
 def _make_approval_callback(aux_provider=None):
     """造一个"问用户批不批准"的回调（危险命令执行前、白名单外写文件前都会用到）。
 
@@ -1398,16 +1428,8 @@ def _make_approval_callback(aux_provider=None):
         # 审批入口：命令/路径的判定用 _is_path_item
         #（check_path 发来的内容恒带"文件写入审批: "前缀，按这个约定识别）
         # 所有审批统一用同款三选面板：允许（本次）/ 总是允许并记住 / 拒绝
-        if _is_path_item(item):
-            console.print(f"[yellow]⚠️ 即将写入路径(白名单外)：[/yellow]")
-            console.print(f"[bold]{item}[/bold]")
-        else:
-            console.print(f"[yellow]⚠️ 即将执行破坏性命令：[/yellow]")
-            _shown = item if len(item) <= 200 else (
-                item[:200] + f"\n…（共 {len(item)} 字符，已截断）")
-            console.print(f"[bold]{_shown}[/bold]")
-
-        # 干净三选（用户定的规矩：不要解释、不要自填、不要转对话）
+        # ⚠️ 警告和命令全文都在面板问题文本里（_approval_panel_question）——
+        # 面板外不打任何行，选完面板整体自擦，上下文里只留工具行
         opts = [
             {"label": "允许（本次）", "description": "仅这一次"},
             {"label": "总是允许并记住", "description":
@@ -1416,8 +1438,7 @@ def _make_approval_callback(aux_provider=None):
         ]
 
         _header = "路径审批" if _is_path_item(item) else "命令审批"
-        _q = (f"写入 {item}，允许吗？" if _is_path_item(item)
-              else "允许执行以上命令吗？")
+        _q = _approval_panel_question(item)
         _picked = _ask_via_selector(_q, opts, header=_header)
 
         if _picked == "总是允许并记住":

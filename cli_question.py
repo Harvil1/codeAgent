@@ -501,6 +501,10 @@ def run_selector(question, header, options, multi=False, chips=None,
             "q-hint": "fg:#777777",
         }),
         full_screen=False,
+        # 选完/取消时整体自擦：pt 退出时按自己记的光标位置回擦（不依赖
+        # CPR，无重影风险）——答完的交互组件不冻进滚动历史：审批面板
+        # 之后上下文里只留 ● Bash(...) 工具行，ask_user 之后只留汇总回显
+        erase_when_done=True,
     )
     # 关键：面板必须开**新线程**跑。本函数跑在 input 桥的
     # run_in_terminal 通道里（主界面事件循环的线程），线程里已有事件

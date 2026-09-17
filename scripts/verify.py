@@ -2544,6 +2544,60 @@ def check_question_selector():
     return _ok("提问面板 v2 布局/自填/Submit/chips/降级正常")
 
 
+def check_approval_panel():
+    """验证审批面板：命令/路径全文画进面板、超长截断、折行不超宽、退出自擦。
+
+    背景：审批面板曾把 ⚠️ 警告和命令 print 在面板外（冻进滚动历史），
+    面板本身退出也不擦——审批完上下文里残留整块审批 UI。规矩改为：
+    警告 + 命令全文进面板问题文本，面板选完整体自擦，
+    上下文里只留 ● Bash(...) 工具行。
+    """
+    import inspect
+
+    import cli as _cli
+    import cli_question as cq
+
+    # 命令审批：⚠️ 警告 + 命令全文 + 收尾提问都在面板问题文本里
+    q = _cli._approval_panel_question("rm -rf ./build", width=80)
+    for needle in ("⚠️ 即将执行破坏性命令：", "rm -rf ./build",
+                   "允许执行以上命令吗？"):
+        if needle not in q:
+            return _fail(f"命令审批问题缺 {needle!r}: {q!r}")
+
+    # 超长命令截断到 200 字符（整串截断：echo 前缀占 5，正文剩 195 个 a）
+    q2 = _cli._approval_panel_question("echo " + "a" * 300, width=80)
+    if q2.count("a") != 195 or "已截断" not in q2:
+        return _fail("超长命令没截断到 200 字符")
+    for ln in q2.splitlines():
+        if cq._visual_width(ln) > 80:
+            return _fail(f"面板行超宽({cq._visual_width(ln)}): {ln[:60]!r}")
+
+    # 路径审批：措辞不同（写入路径），带收尾提问
+    q3 = _cli._approval_panel_question("D:\\project\\demo\\新文件.txt",
+                                       width=80)
+    for needle in ("⚠️ 即将写入路径(白名单外)：", "D:\\project\\demo\\新文件.txt",
+                   "允许写入以上路径吗？"):
+        if needle not in q3:
+            return _fail(f"路径审批问题缺 {needle!r}: {q3!r}")
+
+    # 整幅面板渲染：完整命令 + 三选 + 标题都看得到
+    opts = [{"label": "允许（本次）", "description": "仅这一次"},
+            {"label": "总是允许并记住", "description": "路径→父目录进白名单"},
+            {"label": "拒绝", "description": "不执行"}]
+    text = "".join(t for _, t in cq.render_fragments(
+        q, "命令审批", opts, cursor=0, checked=set(), multi=False,
+        width=80))
+    for needle in ("rm -rf ./build", " 命令审批", "1. 允许（本次）",
+                   "3. 拒绝"):
+        if needle not in text:
+            return _fail(f"审批面板缺 {needle!r}: {text[:200]!r}")
+
+    # 退出自擦：选完面板整体消失，不冻进滚动历史
+    if "erase_when_done=True" not in inspect.getsource(cq.run_selector):
+        return _fail("run_selector 没开 erase_when_done（选完面板残留）")
+    return _ok("审批面板文本/截断/折行/自擦正常")
+
+
 def check_enter_routing():
     """验证提交小函数：入队成功、输入框清空、空输入不入队。"""
     import queue as _q
@@ -3036,6 +3090,7 @@ def main():
             ("assistant 块", check_assistant_block),
             ("提问选择器", check_question_selector),
             ("提问工具层", check_ask_user_tool_layer),
+            ("审批面板", check_approval_panel),
         ]),
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),
