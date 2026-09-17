@@ -10,6 +10,14 @@ English | [简体中文](./README.md)
 
 CodeAgent is a terminal-based AI coding assistant: describe what you want in plain language, and it reads code, edits files, runs commands, and fetches information until the job is done. It also grows with you — it distills reusable skills from your conversation history, so it gets handier the more you use it.
 
+## 🧭 A Hand-Written, Fully Chinese-Commented "claude code"
+
+Not a wrapper, not a translation — a complete implementation hand-written line by line, from the interactive UI down to the agent main loop, **with comments entirely in Chinese**:
+
+- 📚 **Want to learn agent development? This is a living textbook.** Self-registering tools, tiered context compression, permission approvals, sub-agent teams, a workflow engine, a memory system — the full chain of a real, runnable agent is all here. Every module carries hand-holding Chinese comments ("what it does in plain words → parameters → returns"), so reading the code feels like reading a tutorial.
+- 🛠 **Fork it and hack away.** Something feels off? Change it — the structure is clean and well commented. PRs are welcome: bug fixes, features, UI polish, all of it.
+- 💬 **Ask the community.** Stuck, puzzled, or want to debate a design choice? Open a topic in [Issues](https://github.com/Harvil1/codeAgent/issues) or [Discussions](https://github.com/Harvil1/codeAgent/discussions) — questions get answered.
+
 ## ✨ Features
 
 **Terminal experience (modeled after claude code)**
@@ -47,13 +55,12 @@ CodeAgent is a terminal-based AI coding assistant: describe what you want in pla
 
 ## 🖥 Screenshots
 
-<!-- Placeholder: run `uv run python main.py`, take two screenshots (main conversation UI +
-     approval panel), drop them into screenshots/, then uncomment below
-![Main UI](screenshots/main-ui.png)
+![CodeAgent in action](screenshots/main-ui.png)
+
+<!-- To add an approval-panel screenshot: drop it into screenshots/ and uncomment below
 ![Approval panel](screenshots/approval-panel.png)
 -->
 
-📷 Screenshots pending: one of the main conversation UI and one of the approval panel — drop them into `screenshots/` and uncomment above.
 
 ## 🚀 Quick Start
 
