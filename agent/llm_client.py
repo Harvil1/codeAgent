@@ -317,7 +317,6 @@ class OpenAICompatClient(LLMClient):
             except RuntimeError:
                 pass
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         _client_kwargs = {"base_url": self.base_url, "api_key": self._api_key}
         if self._request_timeout is not None:
@@ -362,7 +361,6 @@ class OpenAICompatClient(LLMClient):
                     # 不然解释器收尾要甩「coroutine never awaited」警告
                     coro.close()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def chat_completions(self, messages, *, tools=None, **kwargs):
@@ -557,7 +555,6 @@ class AnthropicClient(LLMClient):
             except RuntimeError:
                 pass
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         from anthropic import AsyncAnthropic
         kwargs = {}
@@ -608,7 +605,6 @@ class AnthropicClient(LLMClient):
                     # 不然解释器收尾要甩「coroutine never awaited」警告
                     coro.close()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # effort_level（思考强度）换算成 DeepSeek 的思考参数。
@@ -1099,5 +1095,4 @@ async def aclose_llm_client(client) -> None:
             if asyncio.iscoroutine(result):
                 await result
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)

@@ -219,6 +219,9 @@ def build_system_prompt_layers(
             from constants import all_skills_dirs as _asd
             skills_dir = _asd()  # 默认扫内置 + 用户两个技能目录
         except Exception:
+            # 技能目录都发现不了时技能索引整段缺席，留痕——不然只看到
+            # "模型不知道我有技能"却查不到原因
+            logger.warning("技能目录发现失败，system prompt 不含技能索引", exc_info=True)
             skills_dir = None
     if skills_dir:
         skill_index = _build_skill_index(skills_dir)
@@ -236,7 +239,6 @@ def build_system_prompt_layers(
             if ext_block:
                 context_parts.append(ext_block)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 用户画像文件（系统自动归纳，每 5 次反思后更新一次）
@@ -248,7 +250,6 @@ def build_system_prompt_layers(
             if profile_text:
                 context_parts.append(profile_text)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # MCP 路由提示：用户在 .mcp.json 里可以给 server 加
@@ -576,7 +577,6 @@ def _build_skill_index(skills_dirs) -> str:
             try:
                 usage.update(json.loads(usage_path.read_text(encoding="utf-8")))
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 扫各目录的技能，同名以后扫的为准
@@ -615,6 +615,7 @@ def _build_skill_index(skills_dirs) -> str:
             else:
                 lines.append(f"- /{name}")
         except Exception:
+            logger.warning("技能 %s 元信息解析失败，只列名字", name, exc_info=True)
             lines.append(f"- /{name}")
 
     if len(lines) == 1:  # 只剩标题行说明一个技能都没有

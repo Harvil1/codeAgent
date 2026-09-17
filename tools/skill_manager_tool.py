@@ -113,6 +113,11 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
         return json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
 
     skills_dir = _get_skills_dir_from_context(kwargs)
+    # name 是外部输入，先验"它必须只是一个目录名"：带分隔符（a/b、
+    # D:\x）会让拼接整体跳出技能根，纯点号（..、.）会指到技能根本身，
+    # 都等于绕过文件写入的审批闸门在技能目录外动手
+    if Path(name).name != name or name.strip(".") == "":
+        return json.dumps({"error": "技能名不合法（只能是目录名，不允许路径分隔符或点号）"}, ensure_ascii=False)
     skill_dir = skills_dir / name
     skill_md = skill_dir / "SKILL.md"
 
@@ -195,8 +200,10 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
             return json.dumps({"error": f"技能不存在: {name}"}, ensure_ascii=False)
 
         # 安全检查：解析后的最终路径必须还在技能目录里面，防止用 ../ 之类的写法逃出去写别的文件
+        # （用 is_relative_to 而不是字符串前缀——前缀比较放得过宽，
+        # skills2 这类兄弟目录也长得像技能目录的前缀）
         target = (skill_dir / file_path).resolve()
-        if not str(target).startswith(str(skill_dir.resolve())):
+        if not target.is_relative_to(skill_dir.resolve()):
             return json.dumps({"error": "路径越界"}, ensure_ascii=False)
 
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -214,7 +221,7 @@ def _handle_skill_manage(args: dict, **kwargs) -> str:
 
         target = (skill_dir / file_path).resolve()
         # 同款防路径逃逸检查：最终路径不许跑出技能目录
-        if not str(target).startswith(str(skill_dir.resolve())):
+        if not target.is_relative_to(skill_dir.resolve()):
             return json.dumps({"error": "路径越界"}, ensure_ascii=False)
         if not target.exists():
             return json.dumps({"error": f"文件不存在: {target}"}, ensure_ascii=False)

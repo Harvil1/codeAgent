@@ -44,7 +44,6 @@ def _harden_windows_codepage():
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
         os.environ.setdefault("PYTHONUTF8", "1")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

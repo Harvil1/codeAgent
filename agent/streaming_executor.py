@@ -203,7 +203,6 @@ class StreamingToolExecutor:
                     *[t for _, t in self._tasks], return_exceptions=True,
                 )
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         finally:
             # 结果要被扔掉了——预执行 read 记的去重账一并撤

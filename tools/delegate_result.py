@@ -120,7 +120,6 @@ def _attach_full_result_pointer(summary: str, offloaded_json: str) -> str:
                 "（需要细节时用 read_file 读回）"
             )
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return summary
 

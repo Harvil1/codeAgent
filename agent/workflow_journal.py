@@ -93,7 +93,9 @@ class WorkflowJournal:
                 logger.warning("workflow 脚本 hash 失配，journal 截断重跑: %s", run_dir)
                 j.truncate_all()
         except OSError:
-            pass
+            # 快照读不到就没法对指纹，旧账原样放行——防投毒这道检查
+            # 此刻缺位，留个痕免得出了事查不到线索
+            logger.warning("workflow 脚本快照读不到，跳过指纹校验: %s", run_dir, exc_info=True)
         return j
 
     def verify_script(self, source: str) -> bool:
@@ -181,7 +183,6 @@ class WorkflowJournal:
         try:
             old = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         old.update(data)
         atomic_write_text(

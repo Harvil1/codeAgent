@@ -238,7 +238,6 @@ def get_repo_root(path=None) -> Optional[Path]:
         if result.returncode == 0:
             return Path(result.stdout.strip())
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 

@@ -171,6 +171,9 @@ def _iter_skill_fm_summaries(skills_dirs=None):
                 if fm["paths"]:
                     yield fm
             except Exception:
+                # 单份 SKILL.md 坏了跳过这份继续扫（fail-open），留痕
+                # 免得条件技能静默不激活还查不到原因
+                logger.warning("技能 frontmatter 解析失败，跳过: %s", skill_md, exc_info=True)
                 continue
 
 
@@ -237,7 +240,6 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
             from agent.workspace_context import get_workspace_cwd
             cwd = get_workspace_cwd()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         if skills_dirs is None:
             # 常规目录 + 嵌套发现目录，后者放后面让同名覆盖生效
@@ -245,6 +247,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
                 from constants import all_skills_dirs
                 base_dirs = list(all_skills_dirs())
             except Exception:
+                logger.warning("技能目录发现失败，条件技能只扫路径内嵌目录", exc_info=True)
                 base_dirs = []
             skills_dirs = base_dirs + discover_skill_dirs_for_path(file_path, cwd)
         return [
@@ -253,6 +256,7 @@ def find_conditional_skill_matches(file_path: str, skills_dirs=None) -> list:
             if path_matches_skill_paths(fm["paths"], file_path, cwd)
         ]
     except Exception:
+        logger.warning("条件技能匹配失败，本次不激活", exc_info=True)
         return []
 
 
@@ -315,6 +319,7 @@ def discover_skill_dirs_for_path(file_path, cwd=None) -> list:
                 break
         return found
     except Exception:
+        logger.warning("路径内技能目录发现失败，按无处理", exc_info=True)
         return []
 
 

@@ -127,8 +127,9 @@ def _run_parallel_planners(subtasks: List[str], max_n: int, **kwargs) -> List[st
             f.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         raise
-    finally:
-        executor.shutdown(wait=True)
+    # 收场统一不阻塞等待：有孩子超时/挂住时 wait=True 会把合并卡死在
+    # 收场上（那个孩子的线程还在跑）；全都跑完时 wait=False 也立刻返回
+    executor.shutdown(wait=False, cancel_futures=True)
 
     return results
 

@@ -281,6 +281,14 @@ class StdioTransport(MCPTransport):
             errors="replace",
             bufsize=1,  # 行缓冲
         )
+        # stderr 必须有人从头到尾排空：npx/node 系 server 爱往 stderr 打
+        # 警告，Windows 管道缓冲只有几 KB，没人读的话 server 迟早阻塞在
+        # 写 stderr 上，之后所有请求全体撞超时（subprocess 管道死锁）
+        threading.Thread(
+            target=self._drain_stderr_loop,
+            daemon=True,
+            name="mcp-stdio-stderr",
+        ).start()
         try:
             # 握手过程中 send_request 会顺手把 reader 线程懒启动起来
             self._do_initialize_handshake()
@@ -292,11 +300,27 @@ class StdioTransport(MCPTransport):
                 self.process.terminate()
                 self.process.wait(timeout=2)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             self.process = None
             raise
         self._connected = True
+
+    def _drain_stderr_loop(self) -> None:
+        """（内部）排空子进程 stderr 的守护线程：读到流关闭为止。
+
+        内容按 debug 记日志（server 的警告/进度，排障时才要翻）；
+        进程退出、管道关闭时安安静静收工。
+        """
+        proc = self.process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                text = line.strip()
+                if text:
+                    logger.debug("MCP stderr [%s]: %s", self.command, text)
+        except Exception:
+            logger.debug("MCP stderr 排空线程退出", exc_info=True)
 
     def _ensure_reader_started(self) -> None:
         """（内部）懒启动 reader 线程（第一次 send_request 时才起，之后复用）。
@@ -470,7 +494,6 @@ class StdioTransport(MCPTransport):
         try:
             self.process.stdin.close()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             self.process.terminate()
@@ -479,7 +502,6 @@ class StdioTransport(MCPTransport):
             try:
                 self.process.kill()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         self.process = None
 
@@ -603,7 +625,6 @@ class HTTPTransport(MCPTransport):
             if "json" in ct.lower() or "event-stream" in ct.lower():
                 return True, f"HEAD ok (status={r.status_code}, ct={ct})"
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # HEAD 没结论再试 GET
@@ -765,7 +786,6 @@ class HTTPTransport(MCPTransport):
                 headers=headers, timeout=10.0,
             )
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def close(self) -> None:
@@ -775,7 +795,6 @@ class HTTPTransport(MCPTransport):
             try:
                 self._client.close()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             self._client = None
 
@@ -1015,7 +1034,6 @@ class SSETransport(MCPTransport):
                 headers=headers, timeout=10.0,
             )
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def close(self) -> None:
@@ -1024,7 +1042,6 @@ class SSETransport(MCPTransport):
             try:
                 self._client.close()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             self._client = None
 
@@ -1218,7 +1235,6 @@ class WebSocketTransport(MCPTransport):
             from agent.loop_host import loop_host
             loop_host.run_async(self._ws.send(json.dumps(msg)))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def _ws_close(self) -> None:
@@ -1227,7 +1243,6 @@ class WebSocketTransport(MCPTransport):
             try:
                 await self._ws.close()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             self._ws = None
 
@@ -1239,7 +1254,6 @@ class WebSocketTransport(MCPTransport):
                 from agent.loop_host import loop_host
                 loop_host.run_async(self._ws_close())
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     @property
@@ -1580,7 +1594,6 @@ class MCPManager:
                 try:
                     client.close()
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 return winner
             self._clients[name] = client
@@ -1761,7 +1774,6 @@ class MCPManager:
             try:
                 client.close()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     @property

@@ -61,7 +61,6 @@ def _sync_history_after_compact(agent, new_messages: list) -> None:
         try:
             invalidate()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 def _print_compact_delta(
     before_msgs: int, before_tokens: int,
@@ -164,7 +163,6 @@ def _handle_compact_cli(args: str, rt) -> bool:
             try:
                 state.record_llm_compact()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         # 边界占位落库（和自动压缩的收尾一致）：手动压缩不落边界的话，
         # 压完重启 = 会话库里没有 [COMPACT_BOUNDARY] 锚点，恢复时全量

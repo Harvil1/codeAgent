@@ -265,22 +265,20 @@ def edit_in_notepad(initial: str = "", editor: str = None):
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
             text = f.read().strip()
         return text or None
-    except Exception as e:
-        logger.debug("ctrl+g 记事本编辑不可用: %s", e)
+    except Exception:
+        logger.warning("ctrl+g 记事本编辑不可用", exc_info=True)
         return None
     finally:
         if fd is not None:
             try:
                 os.close(fd)
             except Exception:
-                pass
-                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("关闭临时文件句柄失败: %s", path, exc_info=True)
         if path:
             try:
                 os.unlink(path)
             except Exception:
-                pass
-                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("删除临时文件失败: %s", path, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +331,6 @@ def run_selector(question, header, options, multi=False, chips=None,
             from prompt_toolkit.application import get_app
             get_app().exit()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _custom_text():
@@ -355,7 +352,6 @@ def run_selector(question, header, options, multi=False, chips=None,
                    if state["cursor"] == idx["custom"] else above_window)
             get_app().layout.focus(win)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _move(delta):
@@ -422,6 +418,10 @@ def run_selector(question, header, options, multi=False, chips=None,
     def _cg(event):
         # 记事本编辑：内容填进自填行，用户过目后自己回车提交
         # （草稿总是带上——非自填行按 c-g 也不该把已打的稿清掉）
+        # 面板没画自填行（allow_custom=False）时没地方放编辑结果，
+        # 光标更不能落进 -1——负索引会让回车误选末位选项
+        if idx["custom"] < 0:
+            return
         initial = _custom_text()
         text = edit_in_notepad(initial)
         if text is None:
@@ -631,7 +631,6 @@ def _fallback_number_input(question, options, multi, fallback_input) -> dict:
         from cli_ui import emit_ansi
         emit_ansi("\n".join(lines) + "\n")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         raw = ((fallback_input("选择/输入 > ") if fallback_input else "")

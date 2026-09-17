@@ -75,7 +75,6 @@ class TraceSink:
                 from agent.secret_scanner import redact_fields
                 fields = redact_fields(fields)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             record.update(fields)
             date_str = datetime.now().strftime("%Y-%m-%d")
@@ -335,6 +334,5 @@ def _extract_response_model(response) -> Optional[str]:
         if isinstance(response, dict):
             return response.get("model")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return None

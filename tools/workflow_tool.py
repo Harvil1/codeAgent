@@ -127,7 +127,6 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
                     "finished_at": time.time(),
                 })
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             _notify_completion(run_id, args, kwargs,
                                json.dumps({"ok": False, "error": str(e)}))

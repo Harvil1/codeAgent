@@ -18,8 +18,11 @@ openai(sk-...) / anthropic(sk-ant-) / github-pat(ghp_...) / aws(AKIA...)
 / google(AIza...) / slack(xox...) / bearer / api_key= / token= / PEM /
 jwt(eyJ..)
 """
+import logging
 import re
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 # 命名组名即规则 ID（对齐 gitleaks 的规则命名风格）
 SECRET_RULES_RE = re.compile(
@@ -107,4 +110,7 @@ def redact_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return {k: redact_value(v) for k, v in fields.items()}
     except Exception:
+        # 防线级别的要求：redact 自身失败必须留痕——此刻字段可能带着
+        # 未脱敏的密钥原样进日志，事后得能从日志里查到原因
+        logger.warning("trace 字段 redact 失败，原样保留（可能含敏感值）", exc_info=True)
         return fields

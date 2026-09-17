@@ -18,16 +18,15 @@ import math
 import os
 import time
 
+logger = logging.getLogger(__name__)
+
 # 键盘协议增强（Shift/Ctrl+Enter 别名、焦点噪声序列忽略）——import 即装，
-# 失败静默（pt 缺失环境到不了这里，装不上也不挡界面）
+# 装不上只留一条警告不挡界面（pt 缺失环境到不了这里）
 try:
     import cli_pt_extras
     cli_pt_extras.install_all()
 except Exception:
-    pass
-    logger.warning("异常被吞(fail-open)", exc_info=True)
-
-logger = logging.getLogger(__name__)
+    logger.warning("键盘协议增强装不上，按键别名退化（不挡界面）", exc_info=True)
 
 # 页脚两档宽度阈值（claude code 风格：窄屏只留模型段）
 _TIER_NARROW = 52    # < 52 列：只有 ⏵⏵ 模型
@@ -95,7 +94,6 @@ def _tighten_next_render(app=None) -> None:
         if app is not None:
             app.renderer._last_screen = None
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -365,7 +363,6 @@ class SlashCompleter(_PtCompleter):
                 try:
                     tokens.update(self._dynamic_tokens_fn() or [])
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 frag = parts[0] if parts else ""
                 for t in sorted(tokens):
@@ -447,7 +444,6 @@ def build_completer(rt):
             if token in (getattr(rt, "bundle_commands", None) or {}):
                 return "技能束"
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         return ""
 
@@ -603,7 +599,6 @@ class _GrayHint:
                     + [("class:placeholder", self._text)]
                 )
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         return Transformation(transform_input.fragments)
 
@@ -680,7 +675,6 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
                     b.apply_completion(
                         b.complete_state.completions[idx])
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 b.complete_state = None
                 return
@@ -796,7 +790,6 @@ def _build_key_bindings(input_queue, eof_sentinel, interrupt_fn, force_exit_fn=N
                 "[任务面板已隐藏]" if hidden else "[任务面板已显示]",
                 style="dim"))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     return kb
@@ -863,7 +856,6 @@ def build_application(rt, *, completer=None, interrupt_fn=None,
                     k32.SetConsoleMode(
                         h, mode.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # ---- 状态黑板（spinner 线程写，渲染闭包读）----
@@ -1142,7 +1134,6 @@ def start_spinner_thread(rt, app, stop_event):
                             import cli_live
                             cli_live.turn_started(getattr(rt, "agent", None))
                         except Exception:
-                            pass
                             logger.warning("异常被吞(fail-open)", exc_info=True)
                     elif not active:
                         state["turn_started"] = None              # 归零
@@ -1150,7 +1141,6 @@ def start_spinner_thread(rt, app, stop_event):
                             import cli_live
                             cli_live.turn_ended()
                         except Exception:
-                            pass
                             logger.warning("异常被吞(fail-open)", exc_info=True)
                         # 回合结束 live 面板收起 → 渲染高度回落
                         #（不掀地板的话，面板撑高过的行数会赖着，
@@ -1192,7 +1182,6 @@ def request_app_exit(app) -> None:
     try:
         app.loop.call_soon_threadsafe(_safe_exit)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

@@ -442,7 +442,6 @@ def _enforce_diff_lru_limit() -> None:
         try:
             limit = _read_diff_limit()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         diff_dir = get_codeagent_home() / ".cache-breaks"
@@ -458,7 +457,6 @@ def _enforce_diff_lru_limit() -> None:
             try:
                 f.unlink()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
     except Exception as e:
         logger.warning("enforce_diff_lru_limit fail-open: %s", e)
@@ -495,7 +493,6 @@ def set_diff_limit(limit: int) -> None:
     try:
         _diff_limit = max(1, int(limit))
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

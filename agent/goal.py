@@ -239,7 +239,6 @@ def goal_persist_path(agent) -> Path:
         try:
             return Path(fn())
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
     home = getattr(agent, "codeagent_home", None)
     if home:

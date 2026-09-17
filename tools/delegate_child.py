@@ -592,7 +592,6 @@ def _run_child(
             try:
                 parent_agent._children.append(child)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # === UI 直播 + 心跳：子代理的工具活动上报 live 面板 + 刷新活跃心跳 ===
@@ -616,7 +615,6 @@ def _run_child(
                             f"{tool_name}({summarize_args(tool_name, args or {})})",
                         )
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)
                     return None   # 不拦不改变量——纯旁观
 
@@ -633,7 +631,6 @@ def _run_child(
                             activity=f"✓ {tool_name} → 思考中…",
                         )
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)
                     return result  # POST 流水线：原样透传
 
@@ -654,7 +651,6 @@ def _run_child(
                 child.hooks_registry.register_pre_tool_use(
                     _hb_on_pre, name="sync_heartbeat")
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # === 长任务进行中的进度播报（P1-10）===
@@ -802,7 +798,6 @@ def _run_child(
                 if child in parent_agent._children:
                     parent_agent._children.remove(child)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         # 恢复工作目录上下文（替代 os.chdir 的回切）
         # ContextVar 的 token reset 只影响当前线程，踩不到别的并发子代理
@@ -810,7 +805,6 @@ def _run_child(
             try:
                 _workspace_cwd.reset(_workspace_cwd_token)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         if workspace_cleanup:
             # 智能清理 worktree：子代理有改动就保留现场，没改动才删
@@ -871,5 +865,4 @@ def _run_child(
                     try:
                         _close_coro.close()
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)

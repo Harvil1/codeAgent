@@ -59,7 +59,6 @@ def build_augmented_query(user_message: str, agent) -> str:
         if files:
             parts.append("最近文件: " + ", ".join(str(f) for f in files))
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     # 信号 2：进行中任务（第 1 条；无 home 不碰全局 store）
     try:
@@ -71,7 +70,6 @@ def build_augmented_query(user_message: str, agent) -> str:
                 t = in_progress[0]
                 parts.append(f"进行中任务: {t.get('id', '')} {t.get('subject', '')}")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     # 信号 3：最近一条有正文的 assistant 回复尾部 200 字
     try:
@@ -83,7 +81,6 @@ def build_augmented_query(user_message: str, agent) -> str:
                 parts.append(f"最近回复: {tail}")
                 break
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     if not parts:
         return user_message
@@ -209,7 +206,6 @@ async def build_relevant_memories_message(
         try:
             surfaced.update(selected_ids)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     msg = {

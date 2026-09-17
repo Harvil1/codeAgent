@@ -131,9 +131,10 @@ class AuxLLMRouter:
         old = self._main_client
         self._main_client = new_client
         if old is not None and self._owns_main:
+            # close() 本身是同步方法（内部自己按线程归属桥到常驻循环
+            # 关协程），直接调即可；再包一层 run_async 等于把 None 当协程传
             try:
-                from agent.loop_host import loop_host
-                loop_host.run_async(old.close(), timeout=10)
+                old.close()
             except Exception as e:
                 logger.warning("swap_main_client 关旧兜底 client 失败（忽略）: %s", e)
 

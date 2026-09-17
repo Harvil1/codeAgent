@@ -1014,7 +1014,8 @@ class AIAgent:
             messages = await self._consume_memory_prefetch(messages)
 
             # 刷新工具集（计划模式切换）+ 失败重试警告 + PRE_LLM_CALL 钩子
-            tool_schemas = await self._prepare_toolset_and_injections(messages)
+            # （钩子可能整体替换消息列表，messages 必须接回来）
+            tool_schemas, messages = await self._prepare_toolset_and_injections(messages)
             # 记下最新工具清单，轮边界的 fork 摘要靠它保持前缀一致
             self._last_tool_schemas = tool_schemas
 
@@ -1907,7 +1908,6 @@ class AIAgent:
         try:
             self._surfaced_memory_ids.clear()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 压缩后重新对齐：注入一条「刚醒来」简报
@@ -1953,6 +1953,9 @@ class AIAgent:
             logger.warning("进度外存提示失败（fail-open）: %s", e)
 
         brief_parts.append("请继续之前的工作。")
+        # _ephemeral 不能少：同轮若再触发紧急压缩，重建历史的过滤器
+        # 靠它把这条简报挡在正式历史外（简报是时效性内容，落库会在
+        # 之后每一轮都被原样重发）
         messages.append({
             "role": "user",
             "content": (
@@ -1960,6 +1963,7 @@ class AIAgent:
                 + "\n".join(brief_parts)
                 + "\n</post_compress_brief>"
             ),
+            "_ephemeral": True,
         })
 
         return messages, system_prompt, True
@@ -1974,7 +1978,8 @@ class AIAgent:
         参数：
             messages: 本轮消息列表（原地追加提醒）
 
-        返回：工具 schema 列表（可能被钩子改过）。
+        返回：(工具 schema 列表, 消息列表)——两样都可能被 PRE_LLM_CALL
+        钩子替换（钩子返回 (messages, tools) 元组即整体替换），调用方都得接。
         """
         from model_tools import get_tool_definitions
 
@@ -2020,7 +2025,7 @@ class AIAgent:
             except Exception as e:
                 logger.warning("PRE_LLM_CALL hook 编排异常: %s", e)
 
-        return tool_schemas
+        return tool_schemas, messages
 
     async def _call_llm_with_escalation(
         self, messages: list, tool_schemas: list, system_prompt: str,
@@ -2147,7 +2152,6 @@ class AIAgent:
                 try:
                     discard_partial_stream_state(self)
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 from agent.llm_retry import call_with_retry as _cwr
                 try:
@@ -2481,7 +2485,6 @@ class AIAgent:
                     if is_readonly_command(str(_t_args.get("command", ""))):
                         is_safe = True
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             if is_safe:
                 safe_calls.append(tc)
@@ -2590,7 +2593,6 @@ class AIAgent:
             try:
                 self.on_tool_call(tool_name, tool_args)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     async def _run_safe_group_concurrently(self, safe_calls, handle_function_call):
@@ -2672,7 +2674,6 @@ class AIAgent:
             try:
                 self.on_tool_call(tool_name, tool_args)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         result = await handle_function_call(
@@ -2913,7 +2914,6 @@ class AIAgent:
             try:
                 self.on_response(final_content)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 异步同步到外部记忆服务（不阻塞返回）

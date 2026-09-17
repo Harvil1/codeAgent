@@ -403,7 +403,6 @@ def micro_compact(
                     folded += 1
                     continue
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 兜底（没传 agent_home 或落盘失败）：换成提示性占位
@@ -916,6 +915,11 @@ async def llm_compact(
 
     # 全量模式（原逻辑，保持向后兼容）
     if len(conv) <= keep_recent:
+        # 条数不够留尾（少而肥的会话：token 超了但消息不到 30 条）也要记
+        # 失败账进冷却——不记的话下一轮外层照常放行（token 没降、冷却
+        # 没进），每轮白落一次 START 标记 + 强制快照，直到 PTL 兜底
+        if session_state is not None:
+            session_state.record_llm_compact_failure()
         return messages, False
 
     to_summarize = conv[:-keep_recent]

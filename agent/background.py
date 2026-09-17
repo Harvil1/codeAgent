@@ -432,13 +432,11 @@ class BackgroundManager:
                 for line in iter(stream.readline, ""):
                     q.put(line)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             finally:
                 try:
                     stream.close()
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
 
         t_out = threading.Thread(
@@ -487,7 +485,6 @@ class BackgroundManager:
                                 tee_f.write(line)
                                 tee_f.flush()
                             except Exception:
-                                pass
                                 logger.warning("异常被吞(fail-open)", exc_info=True)
                         got_new = True
                 except queue.Empty:
@@ -539,7 +536,6 @@ class BackgroundManager:
                     try:
                         proc.wait(timeout=2.0)
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)
                     with self._lock:
                         task = self._tasks.get(task_id)
@@ -592,7 +588,6 @@ class BackgroundManager:
             try:
                 proc.kill()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             with self._lock:
                 task = self._tasks.get(task_id)
@@ -609,7 +604,6 @@ class BackgroundManager:
                 try:
                     tee_f.close()
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _push_notification_locked(self, task: BackgroundTask):
@@ -700,7 +694,6 @@ class BackgroundManager:
                 try:
                     proc.wait(timeout=2)
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             except Exception as e:
                 logger.warning("stop task %s 失败: %s", task_id, e)

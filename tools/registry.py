@@ -204,6 +204,9 @@ def _check_fn_cached(fn: Callable) -> bool:
     try:
         value = bool(fn())
     except Exception:
+        # 检查函数自己炸了按"不可用"处理，但要留痕——工具从 LLM 眼里
+        # 无声消失时，得能从日志查到是哪个检查坏了
+        logger.warning("工具可用性检查执行异常，按不可用处理: %r", fn, exc_info=True)
         value = False
 
     with _check_fn_cache_lock:

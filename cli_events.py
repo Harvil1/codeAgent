@@ -394,7 +394,6 @@ def format_task_event(tool_name, result_str) -> list:
         total = len(tasks)
         done = sum(1 for t in tasks if t.get("status") == "completed")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     head = f"● TaskComplete({_cut(subject, 50)})" if subject else "● TaskComplete"
     if done is not None:
@@ -484,7 +483,6 @@ def print_assistant_block(text: str) -> None:
             from cli_ui import console
             console.print(text)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -620,9 +618,15 @@ def reset_pending(rt) -> None:
         snaps = getattr(rt, "_write_snapshots", None)
         if isinstance(snaps, dict):
             snaps.clear()
+        # 动画行栈同款配不上 POST：被 hook 拒掉的工具会留一条永久
+        # 闪烁的「● 工具名」跨回合挂着，这里一起清
+        try:
+            import cli_live
+            cli_live.running_tools_clear()
+        except Exception:
+            logger.warning("清空工具动画行失败（忽略）", exc_info=True)
     except Exception:
-        pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
+        logger.warning("回合开始清 ◐ 黑板失败（忽略）", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +663,6 @@ def print_style_lines(lines) -> None:
         try:
             console.print(Text(text, style=style) if style else Text(text))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -794,7 +797,6 @@ def install_event_lines(rt) -> None:
         try:
             rt.event_pending = pairer.pending_names()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _print_block(lines) -> None:
@@ -814,7 +816,6 @@ def install_event_lines(rt) -> None:
             _write_snapshots[EventPairer._key(tool_name, args)] = \
                 p.read_text(encoding="utf-8", errors="replace")
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _read_new_text(args):
@@ -859,7 +860,6 @@ def install_event_lines(rt) -> None:
                 cli_live.running_tool_start(
                     _running_label(tool_name, args))
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             if tool_name in _SUBAGENT_TOOLS:
                 _print_block([("", format_subagent_depart(args))])
@@ -867,7 +867,6 @@ def install_event_lines(rt) -> None:
                 _snapshot_old(tool_name, args)
             # 普通工具的等待期反馈归 spinner 行/状态栏 ◐ 段（cli_layout）
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _on_post(tool_name, args, result, **_kw):
@@ -880,7 +879,6 @@ def install_event_lines(rt) -> None:
                 cli_live.running_tool_end(
                     _running_label(tool_name, args))
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             dt = pairer.pop(tool_name, args)
             _update_pending()
@@ -899,7 +897,6 @@ def install_event_lines(rt) -> None:
                     import cli_live
                     cli_live.refresh_tasks()
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             else:
                 head = format_tool_line(tool_name, args, dt, result)
@@ -921,7 +918,6 @@ def install_event_lines(rt) -> None:
                 _print_block(
                     [("", head)] + format_result_block(tool_name, result))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         return result
 

@@ -1127,7 +1127,7 @@ class MemoryStore:
 
         参数：
         - memory_id：完整 id
-        返回：删成功 True，找不到 False。
+        返回：删成功 True；找不到或归档副本没写成功（宁可不删也不丢数据）False。
         """
         with self._xlock(), self._lock:
             topic, uid = _split_entry_id(memory_id)
@@ -1135,7 +1135,8 @@ class MemoryStore:
             if located is None:
                 return False
             zone_dir, rows, target, _i = located
-            # 软删除：先把一份副本存进归档目录
+            # 软删除：先把一份副本存进归档目录；存档失败就中止本次删除——
+            # 条目一旦从库和归档里同时消失就真找不回来了，违背"完全可逆"
             try:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 archive_dir = self._home / ".archive" / f"memory-{ts}"
@@ -1143,8 +1144,9 @@ class MemoryStore:
                 (archive_dir / f"{topic}-{uid}.json").write_text(
                     json.dumps(target, ensure_ascii=False), encoding="utf-8",
                 )
-            except Exception as e:
-                logger.warning("记忆软删除存档失败: %s", e)
+            except Exception:
+                logger.warning("记忆软删除存档失败，本次不删（条目保留）", exc_info=True)
+                return False
             # 再从主题文件里移除（写回原分区）
             rows = [r for r in rows if r.get("id") != uid]
             self._write_topic_rows(topic, rows, zone_dir=zone_dir)

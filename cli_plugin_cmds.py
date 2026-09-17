@@ -155,9 +155,20 @@ def _count_skills(plugin_path: Path) -> int:
 
 
 def _sanitize_name(name: str) -> str:
-    """插件名/市场名消毒：只留安全字符（防来源里塞路径分隔符越界写目录）。"""
+    """插件名/市场名消毒：只留安全字符，且必须还是"一个文件名"。
+
+    点号在正则白名单里（版本号要用），所以纯点号（"."、".."）能活着
+    穿过字符替换——拼目录时它们会走出插件根（".." 就是 agent home
+    本身），覆盖安装时等于整锅端走，这里必须拦下回退默认名。
+    """
     cleaned = re.sub(r"[^\w.-]", "-", str(name or "").strip())
-    return cleaned or "unnamed-plugin"
+    if (
+        not cleaned
+        or cleaned.strip(".") == ""          # "." / ".." / "..."
+        or Path(cleaned).name != cleaned      # 带分隔符或盘符形态
+    ):
+        return "unnamed-plugin"
+    return cleaned
 
 
 def _refresh_skills(rt) -> None:
@@ -402,7 +413,6 @@ def _git_origin(dir_path: Path) -> str | None:
         if r.returncode == 0:
             return r.stdout.strip() or None
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 

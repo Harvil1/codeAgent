@@ -35,13 +35,11 @@ def _script_dirs() -> list:
         from constants import get_codeagent_home
         dirs.append(get_codeagent_home() / "workflows")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         from agent.workspace_context import get_workspace_cwd
         dirs.append(Path(get_workspace_cwd()) / ".codeAgent" / "workflows")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return dirs
 

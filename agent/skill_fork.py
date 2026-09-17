@@ -71,7 +71,6 @@ def run_skill_in_fork(
                     "spawn_depth": getattr(agent_ref, "spawn_depth", 0) + 1,
                 })
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             # AIAgent.chat 是 async，而本函数是同步的、从 cli 工作线程直接
@@ -94,7 +93,6 @@ def run_skill_in_fork(
                         "success": _fork_success,
                     })
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             # === 子代理 client 用后即关 ===
             # 这 client 是专为 child 新建的（一代理一池，AIAgent 构造时

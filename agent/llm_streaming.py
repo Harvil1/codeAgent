@@ -204,7 +204,6 @@ async def call_llm_streaming(agent, *, messages, tools):
         try:
             discard_partial_stream_state(agent)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         from agent.llm_retry import call_with_retry
         response = await call_with_retry(
@@ -225,7 +224,6 @@ async def call_llm_streaming(agent, *, messages, tools):
                     "accumulated": choice_msg.content,
                 })
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         return response
 
@@ -314,7 +312,6 @@ async def call_llm_streaming(agent, *, messages, tools):
                         "accumulated": retried_msg.content,
                     })
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             # 更新 usage：截断那次 + 升级重试这次都真实花过钱，两边加总
             # （直接覆盖会漏记截断那次的花费）
@@ -332,7 +329,6 @@ async def call_llm_streaming(agent, *, messages, tools):
                 "finish_reason": finish_reason,
             })
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 拼一个 OpenAI 兼容的响应对象（让记账 / hook 等下游代码不用改）

@@ -411,7 +411,6 @@ def get_recommendations(skills_dir: Path, limit: int = 5) -> list:
                             description = line.split(":", 1)[1].strip().strip('"').strip("'")
                             break
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         candidates.append({

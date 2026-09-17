@@ -381,7 +381,6 @@ def apply_reflection(
                     supersedes, ins["name"],
                 )
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     if written:

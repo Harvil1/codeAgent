@@ -11,12 +11,15 @@
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 
 from tools.registry import registry
 from agent.skill_commands import parse_frontmatter
 from tools.skill_usage import bump_view, load_usage
+
+logger = logging.getLogger(__name__)
 
 
 SKILLS_LIST_SCHEMA = {
@@ -232,7 +235,6 @@ def _handle_skills_list(args: dict, **kwargs) -> str:
                     frontmatter, _ = parse_frontmatter(content)
                     description = frontmatter.get("description", "")
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
 
             skills[name] = {
@@ -368,7 +370,6 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
             try:
                 bump_view(usage_dir, sname)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         return json.dumps(result, ensure_ascii=False)
 
@@ -405,7 +406,6 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
         try:
             agent._skill_tool_scope = (allowed, disallowed)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     return json.dumps({

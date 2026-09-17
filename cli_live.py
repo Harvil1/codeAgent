@@ -154,7 +154,6 @@ def turn_started(agent) -> None:
             _token_base = _agent_usage_total(agent)
             _mark_tasks_untouched()
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -185,13 +184,11 @@ def turn_ended() -> None:
                 from cli_events import print_style_lines
                 print_style_lines(lines)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         with _lock:
             _agents.clear()
             _agents_order.clear()
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -209,7 +206,6 @@ def dump_panel_snapshot() -> None:
         if lines:
             print_style_lines(lines)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -277,7 +273,6 @@ def agents_begin(pairs: list) -> None:
                 }
                 _agents_order.append(str(key))
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -295,7 +290,6 @@ def agent_begin(key, desc) -> None:
                 "started_at": _t.monotonic(),  # 面板显示已耗时用
             }
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -311,7 +305,6 @@ def agent_update(key, *, status=None, activity=None) -> None:
             if activity is not None:
                 entry["activity"] = str(activity)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -333,7 +326,6 @@ def note_child_tool(key, activity: str) -> None:
             entry["tools"] = int(entry.get("tools", 0)) + 1
             entry["activity"] = _oneline(activity, 120)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -353,7 +345,6 @@ def running_tool_start(label: str) -> None:
         with _lock:
             _running_tools.append(str(label or "?"))
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -371,8 +362,20 @@ def running_tool_end(label: str) -> None:
                     del _running_tools[i]
                     return
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
+
+
+def running_tools_clear() -> None:
+    """清空运行中工具栈（回合边界用）。
+
+    PRE 入栈后 hook 拒绝/参数改写等路径不会再有 POST 来出栈，
+    不清的话这条「● 工具名」动画行会一直挂在面板顶部跨回合闪。
+    """
+    try:
+        with _lock:
+            _running_tools.clear()
+    except Exception:
+        logger.warning("清空运行中工具栈失败（忽略）", exc_info=True)
 
 
 def running_tool_lines(width=80) -> list:
@@ -434,7 +437,6 @@ def set_task_scope(session_id) -> None:
         with _lock:
             _task_scope = str(session_id) if session_id else None
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -461,7 +463,6 @@ def refresh_tasks() -> None:
             _tasks = rows
             _tasks_touched = True
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

@@ -56,6 +56,18 @@ class CronJob:
 DEFAULT_CATCH_UP_WINDOW_HOURS = 24
 
 
+def _to_local_naive(dt: datetime) -> datetime:
+    """把解析出来的时间统一成 naive 本地时间再拿去做差。
+
+    存档里的时间戳口径不统一：created_at 写的是带时区的 UTC，
+    last_fired_at 写的是 naive 本地。aware 和 naive 直接相减会抛
+    TypeError，所以比较前都先过这一道。
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 class CronScheduler:
     """定时任务调度器本体。实例由 CLI 的 RuntimeContext 统一持有，再注入给 AIAgent 用。"""
 
@@ -150,7 +162,7 @@ class CronScheduler:
             if not job.last_fired_at:
                 continue
             try:
-                last_fired = datetime.fromisoformat(job.last_fired_at)
+                last_fired = _to_local_naive(datetime.fromisoformat(job.last_fired_at))
             except (ValueError, TypeError) as e:
                 logger.debug(
                     "catch_up: job %s last_fired_at 解析失败 %s（跳过）",
@@ -449,7 +461,7 @@ class CronScheduler:
             # === 超龄检查，过期的僵尸任务自动停用 ===
             if job.created_at:
                 try:
-                    created = datetime.fromisoformat(job.created_at)
+                    created = _to_local_naive(datetime.fromisoformat(job.created_at))
                     if (now - created).days >= max_age_days:
                         logger.info(
                             "cron job %s 已超 %d 天，自动 disable",

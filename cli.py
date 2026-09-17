@@ -462,7 +462,6 @@ class RuntimeContext:
             import cli_live
             cli_live.set_task_scope(self.session_id)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # Checkpoint：文件快照/回滚（按会话隔离）
@@ -1046,7 +1045,6 @@ class RuntimeContext:
             import cli_live
             cli_live.set_task_scope(self.session_id)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         # checkpoint 管理器重建（跟 resume_session 的做法对齐）
         try:
@@ -1058,6 +1056,10 @@ class RuntimeContext:
                     "max_snapshots", 100,
                 ),
             )
+            # agent 侧登记的还得是同一个实例——文件编辑都经
+            # agent._checkpoint_track 进快照，两边不同步新会话的
+            # /rewind、/diff 就查无此档
+            self.agent.checkpoint_manager = self.checkpoint_mgr
         except Exception as e:
             logger.warning("checkpoint 重建失败: %s", e)
         # 会话级 agent 状态重置
@@ -1149,7 +1151,6 @@ class RuntimeContext:
             import cli_live
             cli_live.set_task_scope(session_id)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         self.agent.conversation_history = _resume_warmup(self, conv)
         self.agent.invalidate_system_prompt()
@@ -1645,6 +1646,25 @@ def _handle_handoff_command(args: str, rt) -> bool:
             )
             rt.agent.session_id = new_sid
             rt.session_id = new_sid
+            # 新会话的快照归新目录：checkpoint 管理器跟着重建，任务面板
+            # 过滤域也切过来（两件事 new_session / resume_session 都做）
+            try:
+                import cli_live
+                cli_live.set_task_scope(new_sid)
+            except Exception:
+                logger.warning("handoff 装载切换任务过滤域失败（忽略）", exc_info=True)
+            try:
+                from agent.checkpoint import CheckpointManager
+                ckpt_root = Path(rt.home) / ".checkpoints"
+                rt.checkpoint_mgr = CheckpointManager(
+                    ckpt_root, new_sid,
+                    max_snapshots=rt.config.get("checkpoint", {}).get(
+                        "max_snapshots", 100,
+                    ),
+                )
+                rt.agent.checkpoint_manager = rt.checkpoint_mgr
+            except Exception as e:
+                logger.warning("handoff 装载 checkpoint 重建失败: %s", e)
 
         store.mark_completed(bundle.bundle_id)
         console.print(
@@ -2044,7 +2064,6 @@ def _resume_warmup(rt, conv: list) -> list:
             try:
                 getattr(rt.agent, "_surfaced_memory_ids", set()).clear()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             try:
                 rt.agent._pending_ephemeral_messages.append({
@@ -2132,7 +2151,6 @@ def _adopt_legacy_tasks(rt, session_id: str, archive_msgs: list) -> None:
                     store.update(t["id"], session_id=session_id)
                     adopted += 1
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
         # 2) bg 注册表回填：同理只补空归属
         if bg_ids:
@@ -2153,7 +2171,6 @@ def _adopt_legacy_tasks(rt, session_id: str, archive_msgs: list) -> None:
                         encoding="utf-8",
                     )
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         if adopted:
             logger.info(
@@ -2179,7 +2196,6 @@ def _inject_task_recovery(rt) -> list:
         import cli_live
         cli_live.refresh_tasks()
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     # 模型侧注入（续接执行的一半）
     lines = []
@@ -2828,7 +2844,6 @@ def _set_output_style(rt, value):
     try:
         rt.agent.invalidate_system_prompt()
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -3351,7 +3366,6 @@ def _handle_diff_cli(args: str, rt) -> bool:
         snaps = list(mgr.list_snapshots())
         console.print(f"[dim]checkpoint 快照数：{len(snaps)}（/rewind 可回滚）[/dim]")
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return True
 
@@ -3694,7 +3708,18 @@ def _switch_model(rt: RuntimeContext, args: str):
         console.print(f"[yellow]已经在用 {target}[/yellow]")
         return
 
-    # 先持久化切换（写进配置）
+    # 先验 key 再落盘：无 key 的模型允许列在表里，但切过去之后下次启动
+    # 会因无凭证直接退出——先把默认模型写进 settings.json 再报错，
+    # 等于把用户锁在门外只能手改配置自救
+    _target_cfg = models.get(target) or {}
+    if not (_target_cfg.get("api_key") or _target_cfg.get("auth_token")):
+        console.print(
+            f"[red]{target} 未配置 api_key 或 auth_token，"
+            f"先在 settings.json 补上再切换[/red]"
+        )
+        return
+
+    # 再持久化切换（写进配置）
     if not set_default_model(target):
         console.print(f"[red]切换失败[/red]")
         return
@@ -3703,15 +3728,17 @@ def _switch_model(rt: RuntimeContext, args: str):
     try:
         from agent.llm_client import create_llm_client, aclose_llm_client
         model_cfg = get_current_model_config()
-        if not (model_cfg.get("api_key") or model_cfg.get("auth_token")):
-            console.print(f"[red]{target} 未配置 api_key 或 auth_token[/red]")
-            return
         # 旧 client 留着最后关（先建新的再关旧的，中间零空窗）
         _old_client = rt.agent.llm_client
         _old_fb = getattr(rt.agent, "fallback_llm_client", None)
         rt.agent.llm_client = create_llm_client(model_cfg)
         rt.agent.model = model_cfg.get("model", target)
         rt.agent.model_format = model_cfg.get("format", "openai")
+        # 会话记账读 rt.config["model"]（/new 建会话时记模型名/厂商），
+        # 不同步的话档案里记的还是切换前的旧模型
+        rt.config.setdefault("model", {})
+        rt.config["model"]["name"] = model_cfg.get("model", target)
+        rt.config["model"]["provider"] = target
         # fallback client 同步换新：不换的话主 client 挂了会静默切回旧模型
         if getattr(rt.agent, "fallback_model", None):
             _fb_cfg = dict(model_cfg)
@@ -3907,7 +3934,6 @@ def _execute_turn(rt, agent_input: str) -> None:
         import cli_layout
         cli_layout.reset_interrupt_press()
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     _turn_t0 = time.monotonic()
     rt.turn_active = True
@@ -3944,7 +3970,6 @@ def _execute_turn(rt, agent_input: str) -> None:
             cli_events.print_style_lines(
                 cli_events.format_tasks_static_block())
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     # 每轮回答完打印 ✻ 收尾行（动词/用时/token/goal）。中断/异常路径不打
     # （用户主动断开就别再追加信息了）——所以本函数由调用方的
@@ -4076,7 +4101,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             from tools.delegate_tool import cancel_all_subagents
             cancel_all_subagents("用户中断（Ctrl+C）")
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         try:
             from agent.loop_host import cancel_current_turn
@@ -4130,7 +4154,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         try:
             console.print("[red]⚡ 强制退出——正在取消所有子代理和后台任务…[/red]")
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         # 面板遗照：强退不走 _execute_turn 收尾，子代理树/任务清单
         # 不落静态行就永远消失了——趁终端还在，先把快照打进滚动区
@@ -4138,7 +4161,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             import cli_live
             cli_live.dump_panel_snapshot()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         rt._force_exiting = True
         # 强退窗口里还在收尾的线程（worker/子代理摘要/线程池关停）会
@@ -4159,14 +4181,12 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             try:
                 _the_app.exit()         # UI 收摊（终端恢复交给 app.run 返回）
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 皮肤激活：settings.json 的 display.skin（失败回退 default，不挡启动）
     try:
         cli_skin.init_skin_from_config(rt.config)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # === 常驻操作台装配：cli_layout 的 Application（唯一界面，没有降级） ===
@@ -4208,7 +4228,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
     try:
         rt.agent.set_input_queue(_input_q)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # === idle wake（后台唤醒）：空闲时后台任务/异步子代理完成 → 自动激活主循环 ===
@@ -4250,7 +4269,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             if _producer is not None and hasattr(_producer, "set_wake_callback"):
                 _producer.set_wake_callback(_on_bg_wake)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 老主循环（一行没改，只是搬了个家）：读输入 → 处理 → 调 agent → 显示，
@@ -4295,7 +4313,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                         from tools.delegate_tool import cancel_all_subagents
                         cancel_all_subagents("用户中断（后台唤醒轮）")
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)
                     console.print("[yellow]\n[已中断][/yellow]")
                 except (asyncio.CancelledError, concurrent.futures.CancelledError):
@@ -4336,7 +4353,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                 from agent.input_history import GlobalHistory
                 GlobalHistory(rt.home).append(user_input)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
             # 0. `#` 开头 = 快捷写记忆
@@ -4469,7 +4485,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
                     from tools.delegate_tool import cancel_all_subagents
                     cancel_all_subagents("用户中断")
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 console.print("[yellow]\n[已中断][/yellow]")
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
@@ -4521,7 +4536,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         try:
             _do_turn_interrupt()
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
         _input_stop.set()
         _input_q.put(_EOF_SENTINEL)
@@ -4535,7 +4549,6 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
             try:
                 console.print("[dim][再次中断，立即强制退出…][/dim]")
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             import os as _os_mod
             _os_mod._exit(0)

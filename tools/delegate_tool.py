@@ -166,14 +166,12 @@ def cancel_all_subagents(reason: str = "shutdown") -> int:
                 ev.set()
                 count += 1
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         ex = batch.get("executor")
         if ex is not None:
             try:
                 ex.shutdown(wait=False, cancel_futures=True)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
     # 异步子代理花名册（subagent_kill 管的那个）
     for info in _async_tasks.values():
@@ -183,7 +181,6 @@ def cancel_all_subagents(reason: str = "shutdown") -> int:
                 ev.set()
                 count += 1
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
     if count:
         logger.info("已取消 %d 个活跃子代理（%s）", count, reason)
@@ -435,7 +432,6 @@ def _delegate_sync(
         import cli_live
         cli_live.agent_begin(_ui_key, goal[:50])
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
     # 把心跳刷新挂到子代理的 hooks_registry——但 _run_child 内部才建
@@ -456,7 +452,6 @@ def _delegate_sync(
                     _ui_key,
                     status="failed" if "error" in box else "done")
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
     thread = threading.Thread(target=_run, daemon=True, name="delegate-sync")
@@ -736,6 +731,7 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
     child_timeout = float(kwargs.get("child_timeout", 1200))
 
     results = []
+    timed_out_any = False
     # 不用 `with ThreadPoolExecutor` 写法的原因：它退出时会 shutdown(wait=True)
     # 死等所有子线程跑完，Ctrl+C 进来会卡在等待上 → 界面看起来"没反应"。
     # 所以手动管理：收到 Ctrl+C 时传播中断 + 不阻塞等待。
@@ -762,7 +758,6 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
             for i, t in enumerate(tasks)
         ])
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         for i, task in enumerate(tasks):
@@ -805,10 +800,8 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                         import cli_live
                         cli_live.agent_finish(_name, status=_st)
                     except Exception:
-                        pass
                         logger.warning("异常被吞(fail-open)", exc_info=True)
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             future.add_done_callback(_mark_child_done)
 
@@ -831,6 +824,17 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
                     "success": True,
                     "result": result,
                 })
+            except TimeoutError:
+                # 单个孩子超时：按下它的取消旗（下次调 LLM 前会退出）。
+                # 不按的话它还在池子里跑，最后 shutdown(wait=True) 死等它，
+                # 超时就成了摆设——批早就该收了却一直卡着
+                batch_cancel_events[idx].set()
+                results.append({
+                    "task_index": idx,
+                    "success": False,
+                    "error": f"timeout after {child_timeout}s",
+                })
+                timed_out_any = True
             except Exception as e:
                 results.append({
                     "task_index": idx,
@@ -847,13 +851,11 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
             try:
                 parent.interrupt()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         for ev in batch_cancel_events:
             try:
                 ev.set()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         for f in futures:
             f.cancel()
@@ -869,7 +871,12 @@ def _delegate_batch(tasks: list, *, background: bool, **kwargs) -> str:
         except ValueError:
             pass
 
-    executor.shutdown(wait=True)
+    if timed_out_any:
+        # 还有超时的孩子在池子里跑：不阻塞等待、没轮到启动的直接取消，
+        # 让批结果先回去（孩子的取消旗已按，早晚自己退场）
+        executor.shutdown(wait=False, cancel_futures=True)
+    else:
+        executor.shutdown(wait=True)
 
     return json.dumps({
         "success": True,

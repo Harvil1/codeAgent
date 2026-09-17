@@ -14,6 +14,7 @@
 
 import hashlib
 import json
+import logging
 import re
 import threading
 from contextlib import contextmanager
@@ -24,6 +25,8 @@ from agent.output_offload import finalize_tool_output as _finalize_output
 from agent.permission import safe_path
 from tools._common import get_mode_override_from_kwargs
 from tools.registry import registry
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 同文件写互斥：并行子代理对同一文件"读旧→改→写回"的临界区串行化
@@ -157,7 +160,6 @@ def _read_seen_refresh(path) -> None:
         while len(_READ_SEEN) > _READ_SEEN_LIMIT:
             _READ_SEEN.popitem(last=False)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -333,7 +335,6 @@ def _handle_read_file(args: dict, **kwargs) -> str:
                 if path.resolve().is_relative_to(offload_dir.resolve()):
                     _skip_offload = True
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
         if _skip_offload:
@@ -353,7 +354,6 @@ def _handle_read_file(args: dict, **kwargs) -> str:
             while len(_READ_SEEN) > _READ_SEEN_LIMIT:
                 _READ_SEEN.popitem(last=False)
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
         # 默认 limit（没显式传）截断了、后面还有没读到的行 → 给续读提示，
@@ -438,7 +438,6 @@ def _track_checkpoint(path, kwargs) -> None:
         try:
             tracker(str(path))
         except Exception:
-            pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

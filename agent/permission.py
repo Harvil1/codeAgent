@@ -178,6 +178,9 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
         root = project_root().resolve()
         cwd_resolved = Path(cwd).resolve()
     except Exception:
+        # 自我保护检查自己内部出错只能跳过,但得留痕——这道闸门
+        # 静默消失的话事后查不到原因
+        logger.warning("自我保护检查内部异常（本次跳过）", exc_info=True)
         return None
 
     # 只在 CodeAgent 自己的目录里才拦
@@ -292,11 +295,18 @@ def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:
         cwd_path = Path(cwd).resolve()
     except (OSError, ValueError):
         return False
-    for tok in parts[1:]:
-        if tok.startswith("-"):
+    for raw_tok in parts[1:]:
+        if raw_tok.startswith("-"):
             continue  # 是选项参数(如 -rf、-p),不是路径,跳过
-        if not tok:
+        if not raw_tok:
             continue
+        # 引号是 shell 语法、不是路径的一部分：先剥掉包裹引号再判——
+        # rm "/etc/passwd" 不剥的话 Path('"...') 算相对路径落在 cwd 下
+        # 白拿自动批，实际执行时 shell 剥引号后删的却是 cwd 外的目标；
+        # 剥完仍带引号（未配对，shell 分词不可预知）就保守不自动批
+        tok = raw_tok.strip("\"'")
+        if "\"" in tok or "'" in tok:
+            return False
         try:
             # shell 会展开 ~ / $HOME 等，Python 侧判定必须
             # 同样展开——否则 Path("~/x") 算相对路径落在 <cwd>/~/x 下被自动批，
@@ -509,7 +519,9 @@ class PermissionChecker:
                     "deny_type": deny_type,
                 })
             except Exception:
-                pass  # fail-open:hook 出异常不影响权限判断本身
+                # fail-open:hook 出异常不影响权限判断本身，但拒绝审计
+                # 丢了得留条痕迹，不然事后查"为什么没触发 hook"零线索
+                logger.warning("PERMISSION_DENIED 审计 hook 失败（忽略）", exc_info=True)
         return PermissionResult(False, reason, deny_type)
 
     def _load_whitelist(self):
@@ -651,19 +663,21 @@ class PermissionChecker:
                     "reason": hook_reason,
                 })
             except Exception:
-                pass  # fail-open:hook 出错不影响审批流程
+                # fail-open:hook 出错不影响审批流程,但审计丢了要留痕
+                logger.warning("PERMISSION_REQUEST 审计 hook 失败（忽略）", exc_info=True)
 
         # 桌面通知——用户可能没盯着屏幕,弹个 toast 提醒有审批在等(失败不拦)
         try:
             from agent.notifier import notify as _notify
             _notify("需要审批", "agent 请求执行命令")
         except Exception:
-            pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("审批桌面通知发送失败（忽略）", exc_info=True)
 
         try:
             approved = bool(self.approval_callback(command))
         except Exception:
+            # callback 崩了只能按拒绝兜底——但这不是用户拒绝,留痕防误导排查
+            logger.warning("审批 callback 异常，按拒绝处理: %s", command, exc_info=True)
             approved = False
 
         if not approved:
@@ -914,6 +928,9 @@ class PermissionChecker:
             nl_rules = (config.get("permissions") or {}).get("nl_rules") or []
             aux_llm.nl_rules_cache = [str(r) for r in nl_rules]
         except Exception:
+            # 用户设的自然语言禁令丢了,分类器会在"没有禁令"的情况下
+            # 继续判——fail-open 但必须留痕,不然用户以为禁令生效着
+            logger.warning("nl_rules 加载失败，本次分类不含自然语言规则", exc_info=True)
             aux_llm.nl_rules_cache = []
 
         # 惰性导入:进程级常驻循环宿主(延迟导入防模块互相 import 死锁)
@@ -1133,19 +1150,20 @@ class PermissionChecker:
                         "reason": f"写入路径不在白名单: {resolved}",
                     })
                 except Exception:
-                    pass  # fail-open
+                    logger.warning("PERMISSION_REQUEST 审计 hook 失败（忽略）", exc_info=True)
 
             try:
                 from agent.notifier import notify as _notify
                 _notify("需要审批", "agent 请求写入白名单外路径（可选总是允许）")
             except Exception:
-                pass
-                logger.warning("异常被吞(fail-open)", exc_info=True)
+                logger.warning("审批桌面通知发送失败（忽略）", exc_info=True)
 
             try:
                 decision = self.approval_callback(f"文件写入审批: {resolved}")
             except Exception:
-                decision = False  # fail-open:callback 出异常按拒绝处理(别崩)
+                # callback 崩了按拒绝兜底(别崩),留痕区分于用户主动拒绝
+                logger.warning("审批 callback 异常，按拒绝处理: %s", resolved, exc_info=True)
+                decision = False
 
             # "总是允许"档——持久化到 settings.json。
             # 协议向后兼容:返回 True 视为"本次允许"(只进会话缓存,老语义)。
@@ -1158,7 +1176,6 @@ class PermissionChecker:
                 try:
                     add_extra_allowed_root(parent)
                 except Exception:
-                    pass
                     logger.warning("异常被吞(fail-open)", exc_info=True)
                 # 持久化:写 settings.json 的 security.extra_allowed_roots
                 # (和 /add-dir 走同一条通道)

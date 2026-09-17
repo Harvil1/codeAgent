@@ -324,6 +324,5 @@ class MemoryManager:
             try:
                 self.external_provider.shutdown()
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
         self._sync_executor.shutdown(wait=False)

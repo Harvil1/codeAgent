@@ -77,7 +77,6 @@ async def _sleep_with_heartbeat(total: float, heartbeat_cb=None) -> None:
             try:
                 heartbeat_cb(elapsed, total)
             except Exception:
-                pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -163,7 +162,6 @@ def get_retry_after(error: Exception) -> Optional[float]:
         if ra:
             return float(ra)
     except Exception:
-        pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
@@ -472,7 +470,15 @@ async def call_with_retry(
                     "LLM 调用失败（尝试 %d/%d），%.1fs 后重试: %s",
                     attempt + 1, max_retries, backoff, e,
                 )
-            await _sleep_with_heartbeat(backoff, heartbeat_cb)
+            # 退避只服务于"还要再试一次"：名额已耗尽的最后一轮睡了也是
+            # 白等（醒来只会退出换备胎/抛错），跳过；无人值守模式上限
+            # 无穷、不存在最后一轮，不在此列
+            last_allowed = (
+                not unattended_enabled
+                and attempt + 1 >= effective_max_retries
+            )
+            if not last_allowed:
+                await _sleep_with_heartbeat(backoff, heartbeat_cb)
             attempt += 1
 
     # 主 client 的重试名额用完（或被 529 阈值打断/到了截止时刻），换备胎试试
