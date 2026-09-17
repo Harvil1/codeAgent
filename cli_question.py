@@ -92,10 +92,11 @@ def hint_text(multi: bool, custom_focused: bool = False) -> str:
 
 def row_indices(n_options: int, multi: bool,
                 allow_custom: bool = True, allow_chat: bool = True) -> dict:
-    """行号表：普通选项 0..N-1、自填行 N、(多选)Submit N+1、Chat 永远最后。
+    """行号表：普通选项 0..N-1、自填行 N、(多选)Submit 行、Chat 永远最后。
 
     大白话：整块面板的可选行从上到下编了号，数字直达键按这个对号入座。
-    allow_custom/allow_chat 为 False 时不画对应行（-1 表示不存在）。
+    allow_custom/allow_chat 为 False 时不画对应行（-1 表示不存在）；
+    多选没有自填行时 Submit 直接排在选项后面。
     """
     custom_i = n_options if allow_custom else -1
     if multi:
@@ -274,13 +275,11 @@ def edit_in_notepad(initial: str = "", editor: str = None):
             except Exception:
                 pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
-                logger.warning("异常被吞(fail-open)", exc_info=True)
         if path:
             try:
                 os.unlink(path)
             except Exception:
                 pass
-                logger.warning("异常被吞(fail-open)", exc_info=True)
                 logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -336,7 +335,6 @@ def run_selector(question, header, options, multi=False, chips=None,
         except Exception:
             pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
-            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _custom_text():
         return custom_buf.text.strip()
@@ -358,7 +356,6 @@ def run_selector(question, header, options, multi=False, chips=None,
             get_app().layout.focus(win)
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _move(delta):
@@ -635,7 +632,6 @@ def _fallback_number_input(question, options, multi, fallback_input) -> dict:
         emit_ansi("\n".join(lines) + "\n")
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
     try:
         raw = ((fallback_input("选择/输入 > ") if fallback_input else "")

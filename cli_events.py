@@ -396,7 +396,6 @@ def format_task_event(tool_name, result_str) -> list:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
     head = f"● TaskComplete({_cut(subject, 50)})" if subject else "● TaskComplete"
     if done is not None:
         return [("", head), ("dim", f"  ⎿  {done}/{total} done")]
@@ -486,7 +485,6 @@ def print_assistant_block(text: str) -> None:
             console.print(text)
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -625,7 +623,6 @@ def reset_pending(rt) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +660,6 @@ def print_style_lines(lines) -> None:
             console.print(Text(text, style=style) if style else Text(text))
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -800,7 +796,6 @@ def install_event_lines(rt) -> None:
         except Exception:
             pass
             logger.warning("异常被吞(fail-open)", exc_info=True)
-            logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _print_block(lines) -> None:
         """把 (style, text) 行列表画上屏（真身在模块级 print_style_lines）。"""
@@ -820,7 +815,6 @@ def install_event_lines(rt) -> None:
                 p.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _read_new_text(args):
@@ -867,7 +861,6 @@ def install_event_lines(rt) -> None:
             except Exception:
                 pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
-                logger.warning("异常被吞(fail-open)", exc_info=True)
             if tool_name in _SUBAGENT_TOOLS:
                 _print_block([("", format_subagent_depart(args))])
             elif tool_name in _WRITE_TOOLS:
@@ -875,7 +868,6 @@ def install_event_lines(rt) -> None:
             # 普通工具的等待期反馈归 spinner 行/状态栏 ◐ 段（cli_layout）
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
 
     def _on_post(tool_name, args, result, **_kw):
@@ -889,7 +881,6 @@ def install_event_lines(rt) -> None:
                     _running_label(tool_name, args))
             except Exception:
                 pass
-                logger.warning("异常被吞(fail-open)", exc_info=True)
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             dt = pairer.pop(tool_name, args)
             _update_pending()
@@ -909,7 +900,6 @@ def install_event_lines(rt) -> None:
                     cli_live.refresh_tasks()
                 except Exception:
                     pass
-                    logger.warning("异常被吞(fail-open)", exc_info=True)
                     logger.warning("异常被吞(fail-open)", exc_info=True)
             else:
                 head = format_tool_line(tool_name, args, dt, result)
@@ -932,7 +922,6 @@ def install_event_lines(rt) -> None:
                     [("", head)] + format_result_block(tool_name, result))
         except Exception:
             pass
-            logger.warning("异常被吞(fail-open)", exc_info=True)
             logger.warning("异常被吞(fail-open)", exc_info=True)
         return result
 

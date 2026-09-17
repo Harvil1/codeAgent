@@ -156,7 +156,6 @@ def turn_started(agent) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def turn_ended() -> None:
@@ -188,13 +187,11 @@ def turn_ended() -> None:
             except Exception:
                 pass
                 logger.warning("异常被吞(fail-open)", exc_info=True)
-                logger.warning("异常被吞(fail-open)", exc_info=True)
         with _lock:
             _agents.clear()
             _agents_order.clear()
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -213,7 +210,6 @@ def dump_panel_snapshot() -> None:
             print_style_lines(lines)
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -283,7 +279,6 @@ def agents_begin(pairs: list) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def agent_begin(key, desc) -> None:
@@ -302,7 +297,6 @@ def agent_begin(key, desc) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def agent_update(key, *, status=None, activity=None) -> None:
@@ -318,7 +312,6 @@ def agent_update(key, *, status=None, activity=None) -> None:
                 entry["activity"] = str(activity)
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -342,7 +335,6 @@ def note_child_tool(key, activity: str) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +355,6 @@ def running_tool_start(label: str) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def running_tool_end(label: str) -> None:
@@ -381,7 +372,6 @@ def running_tool_end(label: str) -> None:
                     return
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
@@ -446,7 +436,6 @@ def set_task_scope(session_id) -> None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
 
 
 def refresh_tasks() -> None:
@@ -473,7 +462,6 @@ def refresh_tasks() -> None:
             _tasks_touched = True
     except Exception:
         pass
-        logger.warning("异常被吞(fail-open)", exc_info=True)
         logger.warning("异常被吞(fail-open)", exc_info=True)
 
 

@@ -404,7 +404,6 @@ def _git_origin(dir_path: Path) -> str | None:
     except Exception:
         pass
         logger.warning("异常被吞(fail-open)", exc_info=True)
-        logger.warning("异常被吞(fail-open)", exc_info=True)
     return None
 
 
