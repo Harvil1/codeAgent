@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import pathlib
+import queue
 import shutil
 import subprocess
 import threading
@@ -42,7 +43,12 @@ from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
-_SERVER = {"proc": None, "lock": threading.Lock(), "id": 0, "init": False}
+_SERVER = {
+    "proc": None, "lock": threading.Lock(), "id": 0, "init": False,
+    # 字节队列：后台泵线程把 stdout 的字节搬进来，读端带超时地取
+    # （管道 read(1) 是无限期阻塞的，直接读会把超时判定的机会没收拾）
+    "bytes_q": None,
+}
 _RPC_TIMEOUT = 10.0
 
 
@@ -89,6 +95,27 @@ def _ensure_server() -> bool:
     )
     _SERVER["proc"] = proc
     _SERVER["init"] = False
+    # 字节泵：读管道的活儿挪进后台线程。直接在调用线程里 read(1) 的话，
+    # server 一个字节不吐就永久挂死，还持着 _SERVER["lock"] 让后续所有
+    # lsp 调用陪着卡；泵进队列后读端才能按 deadline 带超时地收
+    q: queue.Queue = queue.Queue()
+    _SERVER["bytes_q"] = q
+
+    def _pump(stream, out_q: "queue.Queue"):
+        try:
+            while True:
+                b = stream.read(1)
+                if not b:
+                    break
+                out_q.put(b)
+        except Exception:
+            logger.warning("lsp stdout 字节泵异常退出", exc_info=True)
+        finally:
+            out_q.put(None)  # EOF/断线哨兵：读端见到它就知道没有后续了
+
+    threading.Thread(
+        target=_pump, args=(proc.stdout, q), daemon=True, name="lsp-stdout-pump",
+    ).start()
     return True
 
 
@@ -164,24 +191,37 @@ def _write_frame(proc, body: str) -> None:
 def _read_frame(proc, deadline: float) -> Optional[bytes]:
     """收一帧完整的原始字节（先啃报头拿长度，再读定长的正文）。
 
+    字节从 _SERVER["bytes_q"] 里取（后台泵线程投递的），每次取都带
+    剩余时间的超时——deadline 真的能掐住等待，而不是只在两次读之间
+    检查一下。
+
     参数：
-    - proc：pylsp 子进程
+    - proc：pylsp 子进程（读端已不直接碰它的管道，参数保留兼容旧调用）
     - deadline：放弃读取的最后期限（时间戳）
 
-    返回：正文的原始字节；超时或对方断线（EOF）返回 None。
+    返回：正文的原始字节；超时或对方断线（EOF 哨兵）返回 None。
     """
+    q = _SERVER["bytes_q"]
+
+    def _recv_one(timeout: float) -> Optional[bytes]:
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     header = b""
     # 一个字节一个字节啃报头：因为没法保证 pylsp 会按行输出，
     # 一次读多了会把正文混进报头里
-    while time.time() < deadline:
-        ch = proc.stdout.read(1)
-        if not ch:
-            return None  # 读到 EOF：对面进程没了（崩溃/退出）
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None  # 到点了报头还没凑齐，按超时处理
+        ch = _recv_one(remaining)
+        if ch is None:
+            return None  # 超时，或对面进程没了（EOF 哨兵）
         header += ch
         if header.endswith(b"\r\n\r\n"):
             break
-    else:
-        return None  # 到点了报头还没凑齐，按超时处理
     try:
         length = int(
             next(line.split(b":", 1)[1] for line in header.strip().split(b"\r\n")
@@ -189,9 +229,15 @@ def _read_frame(proc, deadline: float) -> Optional[bytes]:
         )
     except (StopIteration, ValueError):
         return None
-    body = proc.stdout.read(length)
-    if len(body) < length:
-        return None
+    body = b""
+    while len(body) < length:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None  # 正文读一半到点，按坏帧处理
+        chunk = _recv_one(remaining)
+        if chunk is None:
+            return None  # 正文读一半超时/断线
+        body += chunk
     return body
 
 

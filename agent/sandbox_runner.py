@@ -259,9 +259,11 @@ def sandbox_description() -> str:
 
 # 系统目录清单：这些目录以"只读挂载"（bind）方式放进沙箱——只给看不给改。
 # 不挂这些命令根本跑不起来（bash、系统库、配置文件都在里面）。
+# /dev 不在此列：只读挂载下打开设备节点也算写，shell 重定向 >/dev/null
+# 直接撞 EROFS（curl/git 的惯用写法全废），由 --dev 立自带基础节点的临时盘。
 _BWRAP_RO_DIRS = [
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
-    "/etc", "/dev", "/proc", "/sys",
+    "/etc", "/proc", "/sys",
     # /tmp 特殊处理：不挂宿主机的 /tmp（那里面可能有敏感东西），改用沙箱
     # 内部自带的临时内存盘（tmpfs）
 ]
@@ -292,6 +294,11 @@ def _bwrap_wrap(
         p = Path(d)
         if p.exists():
             argv += ["--ro-bind", d, d]
+
+    # /dev 单独走 --dev：沙箱里立一个自带基础设备节点（null/zero/
+    # random/urandom/tty）的临时盘，读写都行——ro-bind 的只读 /dev
+    # 连 >/dev/null 都容不下
+    argv += ["--dev", "/dev"]
 
     # /tmp 用沙箱内部的临时内存盘，和宿主机的 /tmp 隔开
     # 注意：当 cwd 本身就在 /tmp 下时跳过这一步——

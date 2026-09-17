@@ -402,9 +402,10 @@ class StdioTransport(MCPTransport):
         import shutil
         resolved = shutil.which(self.command) or self.command
         if resolved.lower().endswith((".cmd", ".bat")):
-            # cmd /c 的参数里路径带空格时要加引号，否则会被拆开
-            quoted = f'"{resolved}"' if " " in resolved else resolved
-            return ["cmd", "/c", quoted, *self.args]
+            # 路径含空格也不能手工加引号：列表元素交给 Popen 时
+            # list2cmdline 会自己转义，再手包一层会变成字面量的
+            # \"...\"，cmd /c 认不出命令（带空格的用户名路径必炸）
+            return ["cmd", "/c", resolved, *self.args]
         return [resolved, *self.args]
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
@@ -810,14 +811,12 @@ class HTTPTransport(MCPTransport):
 # ---------------------------------------------------------------------------
 
 class SSETransport(MCPTransport):
-    """SSE（Server-Sent Events，服务器单向流式推送）专用 transport。
+    """HTTP 系远程 transport：请求 POST 出去、响应在 POST 返回体里收。
 
-    和 HTTPTransport 里"POST 完收一个 SSE 响应"的 streamable-http 玩法不同：
-    这个类用 GET 建一条长连接、持续读 SSE 事件流，请求则从另一条
-    POST 通道发出去——两条道各走各的。
-
-    适用场景：服务器需要保持长连接主动推送（比如远程 MCP server 的
-    SSE 端点）。
+    配置里 transport 写 "sse" 或 "streamable-http" 都落到这个类。协议
+    实际是 streamable-http——GET 只做连通性预检，不建事件流，server →
+    client 的主动通知收不到；标准 SSE-only server（POST 只回 202、
+    响应走 GET 流）配到这里是连不上的，得用带 streamable 端点的 server。
 
     OAuth 刷新流程直接抄 HTTPTransport 的（令牌管理逻辑一样）。
     """
@@ -1274,7 +1273,8 @@ class MCPClient:
     """单个 MCP server 的客户端连接（支持 4 种 transport）——上层（tools/mcp_tool.py）不想关心底下是子进程还是 HTTP，这个类挑好具体 transport 再包一层统一接口。
 
     用哪种 transport 的判定顺序：
-    1. 配置里明写了 transport 字段（"stdio" / "http" / "sse" / "websocket"）
+    1. 配置里明写了 transport 字段（"stdio" / "http" / "sse"
+       （或别名 "streamable-http"）/ "websocket"）
     2. 有 url → 看网址开头（ws/wss → websocket，其余当 http）
     3. 有 command → stdio
 
@@ -1384,6 +1384,10 @@ class MCPClient:
         """
         if transport:
             t = transport.lower().strip()
+            # streamable-http 与 sse 是同一个实现（见 SSETransport 的
+            # 说明），两种写法都认，免得按协议名配的用户吃闭门羹
+            if t == "streamable-http":
+                return "sse"
             if t in ("stdio", "http", "sse", "websocket"):
                 return t
             raise ValueError(f"未知 transport 类型: {transport}")
@@ -1536,7 +1540,7 @@ class MCPManager:
                 配置字段按 transport 分：
                 - stdio: transport="stdio", command, args, env
                 - http:  transport="http", url, headers, oauth
-                - sse:   transport="sse", url, headers, oauth
+                - sse:   transport="sse"（写 "streamable-http" 同义），url, headers, oauth
                 - websocket: transport="websocket", url, headers, oauth
                 - 通用:  include, exclude（工具白/黑名单过滤）
             app_config：应用配置字典（查 feature flag 用），可不填

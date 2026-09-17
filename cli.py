@@ -3032,11 +3032,17 @@ def _handle_init_command(rt, args: str) -> bool:
     # 3. 文件类型统计（前 5）
     try:
         from collections import Counter
-        exts = Counter(
-            p.suffix for p in cwd.rglob("*")
-            if p.is_file() and p.suffix
-            and ".git" not in str(p) and "node_modules" not in str(p)
-        )
+        # os.walk + 目录级剪枝：rglob 会真的走进 .git/node_modules，把
+        # 每个文件都吐出来再在结果端丢弃（node_modules 十万级文件的大
+        # 仓库一次能卡分钟级）——剪枝是进门前就把这些目录划出待访名单
+        _SKIP_DIRS = {".git", "node_modules"}
+        exts = Counter()
+        for _root, _dirs, _files in os.walk(cwd):
+            _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
+            for _fname in _files:
+                _ext = Path(_fname).suffix
+                if _ext:
+                    exts[_ext] += 1
         top = ", ".join(f"{e}({c})" for e, c in exts.most_common(5))
         parts.append(f"## 文件类型统计（前 5）\n{top}")
     except Exception as e:

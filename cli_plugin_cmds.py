@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import re
+import os
 import shutil
 import subprocess
 import tempfile
@@ -897,9 +898,32 @@ def _cmd_market_update(name: str) -> None:
         tmp_dir = None
         try:
             fresh, tmp_dir = _clone_to_temp(url)
-            _rmtree_force(mkt_dir)
-            # 整克隆搬过来（.git 留着，下次 update 还要靠它找远程）
-            shutil.move(str(fresh), str(mkt_dir))
+            # 两段式换新：旧目录先改名让位（改名远比 rmtree 难被文件占用
+            # 卡住——rmtree 删一半失败的窗口期里旧目录已残废），新目录
+            # 搬进来确认成了再清旧的；中途失败把旧目录名还回去——刷新
+            # 失败顶多重来一次，市场本身不能丢
+            old_dir = mkt_dir.with_name(mkt_dir.name + ".old")
+            if mkt_dir.exists():
+                _rmtree_force(old_dir, ignore_errors=True)
+                os.rename(mkt_dir, old_dir)
+            else:
+                old_dir = None
+            try:
+                # 整克隆搬过来（.git 留着，下次 update 还要靠它找远程）
+                shutil.move(str(fresh), str(mkt_dir))
+            except Exception:
+                if mkt_dir.exists():
+                    _rmtree_force(mkt_dir, ignore_errors=True)
+                if old_dir is not None:
+                    try:
+                        os.rename(old_dir, mkt_dir)
+                    except OSError:
+                        logger.warning(
+                            "市场 %s 回滚失败，旧内容在 %s", mkt_name, old_dir,
+                        )
+                raise
+            if old_dir is not None:
+                _rmtree_force(old_dir, ignore_errors=True)
             catalog = _read_catalog(mkt_dir)
             console.print(
                 f"[green]市场 {mkt_name} 已刷新[/green]"
