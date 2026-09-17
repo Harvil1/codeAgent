@@ -98,14 +98,14 @@ def row_indices(n_options: int, multi: bool,
     allow_custom/allow_chat 为 False 时不画对应行（-1 表示不存在）。
     """
     custom_i = n_options if allow_custom else -1
-    submit_i = n_options + 1 if (multi and allow_custom) else (n_options if multi else None)
-    _last_normal = n_options - 1
-    if allow_custom:
-        _last = custom_i
-    if multi and allow_custom:
-        _last = submit_i
-    chat_i = _last + 1 if allow_chat else -1
-    total = (chat_i + 1) if allow_chat else (_last + 1)
+    if multi:
+        submit_i = n_options + 1 if allow_custom else n_options
+        last = submit_i
+    else:
+        submit_i = None
+        last = custom_i if allow_custom else n_options - 1
+    chat_i = last + 1 if allow_chat else -1
+    total = (chat_i + 1) if allow_chat else (last + 1)
     return {"custom": custom_i, "submit": submit_i, "chat": chat_i,
             "total": max(total, n_options)}
 
