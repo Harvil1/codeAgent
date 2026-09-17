@@ -10,6 +10,14 @@
 
 CodeAgent 是一个跑在终端里的 AI 编程助手：你用自然语言下指令，它读代码、改文件、跑命令、查资料，把活干完。它有自己的一套「长本事」机制——从对话轨迹里沉淀可复用的技能，越用越顺手。
 
+## 🧭 这是一份手写的「中文版 claude code」
+
+不是套壳，也不是翻译——是从交互界面到 Agent 主循环一行行手写出来的完整实现，**注释全是中文**：
+
+- 📚 **想学 Agent 开发？这就是活教材。** 工具自注册、上下文分级压缩、权限审批、子代理团队、工作流引擎、记忆系统——一个真实可跑的 Agent 全链路都在这儿，每个模块都是「大白话流程 → 参数 → 返回」的保姆级中文注释，读代码像读教程。
+- 🛠 **欢迎上手改。** 觉得哪里不顺手？fork 了直接改——代码结构清晰、注释到位，改起来不费劲。欢迎 PR：修 bug、加功能、优化界面都行。
+- 💬 **有问题社区问。** 卡住了、看不懂了、想讨论设计，直接去 [Issues](https://github.com/Harvil1/codeAgent/issues) 或 [Discussions](https://github.com/Harvil1/codeAgent/discussions) 发帖，有问必答。
+
 ## ✨ 特性
 
 **终端体验（对标 claude code）**
@@ -47,13 +55,12 @@ CodeAgent 是一个跑在终端里的 AI 编程助手：你用自然语言下指
 
 ## 🖥 界面一览
 
-<!-- 截图占位：运行 uv run python main.py 后截两张图（主界面对话 + 审批面板），
-     放到 screenshots/ 目录，然后把下面注释解开即可
-![主界面](screenshots/main-ui.png)
+![运行中的 CodeAgent](screenshots/main-ui.png)
+
+<!-- 想补审批面板截图：截图放 screenshots/ 后解开下一行注释
 ![审批面板](screenshots/approval-panel.png)
 -->
 
-📷 截图待补：主界面对话、审批面板各一张，放 `screenshots/` 后解开上方注释。
 
 ## 🚀 快速开始
 
