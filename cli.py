@@ -397,6 +397,10 @@ class RuntimeContext:
                     # rt 上不放 aux 字段），审批发生时 agent 早已建好
                     aux_provider=lambda: getattr(
                         getattr(self, "agent", None), "aux_llm_router", None),
+                    # Ctrl+C 取消审批面板时联动中断整轮：同样延迟取值，
+                    # 中断函数由 run_interactive 装配时挂到 rt 上
+                    turn_interrupt_provider=lambda: getattr(
+                        self, "turn_interrupt_fn", None),
                 ),
                 whitelist_file=str(approved_commands_path()),
                 paths_whitelist_file=str(approved_paths_path()),
@@ -845,7 +849,11 @@ class RuntimeContext:
             aux_llm_router=aux_llm_router,  # 辅助模型路由
             plan_approval_callback=cli_plan_approval_callback,  # 计划审批回调（Plan Mode）
             stream_callback=stream_callback,  # 流式输出
-            ask_user_bridge=_make_ask_user_bridge(),  # ask_user 工具的 CLI 桥接（在黑窗口里向用户提问）
+            ask_user_bridge=_make_ask_user_bridge(
+                # Ctrl+C 取消问卷面板时联动中断整轮（同审批回调的套路）
+                turn_interrupt_provider=lambda: getattr(
+                    self, "turn_interrupt_fn", None),
+            ),  # ask_user 工具的 CLI 桥接（在黑窗口里向用户提问）
             checkpoint_manager=self.checkpoint_mgr,  # 快照管理器
             permission_mode=self.config.get("security", {}).get("permission_mode", "default"),  # 权限模式透传给 AIAgent
             # 流空闲看门狗（llm.stream_idle_timeout_seconds，默认 90 秒没新内容就掐掉重试，<=0 禁用）
@@ -1317,6 +1325,27 @@ class RuntimeContext:
 # 回调（把"CLI 怎么跟用户互动"做成函数，传给 agent 内部调用）
 # ---------------------------------------------------------------------------
 
+def _fire_turn_interrupt(provider) -> None:
+    """面板被 Ctrl+C 取消后联动中断整轮（provider 给出中断函数）。
+
+    大白话：用户在审批/提问面板按了 Ctrl+C——面板已经消失了，这会儿
+    把正在跑的这轮对话也一并停掉，让他直接回到输入框。不停的话模型会
+    拿着"审批被拒"继续跑下一轮，用户眼里就是"按了没反应、它还在跑"。
+    provider 是延迟取值函数（返回中断函数或 None），宽失败不打扰审批。
+    """
+    fn = provider() if provider else None
+    if fn is None:
+        return
+    try:
+        console.print("[yellow]⚡ 已取消面板并中断本轮[/yellow]")
+    except Exception:
+        logger.warning("异常被吞（fail-open）", exc_info=True)
+    try:
+        fn()
+    except Exception:
+        logger.warning("面板 Ctrl+C 联动中断失败（fail-open）", exc_info=True)
+
+
 def _approval_panel_question(item: str, width: int = None) -> str:
     """审批面板的问题文本：⚠️ 警告行 + 命令/路径全文折行 + 收尾提问。
 
@@ -1347,7 +1376,7 @@ def _approval_panel_question(item: str, width: int = None) -> str:
     return "\n".join([warn, *wrap_cjk(shown, width), "", tail])
 
 
-def _make_approval_callback(aux_provider=None):
+def _make_approval_callback(aux_provider=None, turn_interrupt_provider=None):
     """造一个"问用户批不批准"的回调（危险命令执行前、白名单外写文件前都会用到）。
 
     供权限检查器使用（它不懂怎么跟用户对话）。回调收到一个字符串，
@@ -1407,6 +1436,8 @@ def _make_approval_callback(aux_provider=None):
 
         审批不需要"Type something"和"Chat about this"——用户要的就是
         干净三选：选完面板消失、工具直接执行。选择器起不来时自动拒绝。
+        Ctrl+C 取消（键位直收或 winpty 信号通道反收）→ 联动中断整轮；
+        Esc 取消 = 只拒绝这一次，模型继续。
         """
         try:
             from cli_question import run_selector
@@ -1417,6 +1448,8 @@ def _make_approval_callback(aux_provider=None):
                     allow_custom=False, allow_chat=False,
                 )
             ) or {}
+            if res.get("interrupt"):
+                _fire_turn_interrupt(turn_interrupt_provider)
             if res.get("cancelled"):
                 return None  # 取消/选择器起不来 = 拒绝
             picked = (res.get("answers") or [])
@@ -1447,12 +1480,13 @@ def _make_approval_callback(aux_provider=None):
     return callback
 
 
-def _make_ask_user_bridge():
+def _make_ask_user_bridge(turn_interrupt_provider=None):
     """造 ask_user 工具的 CLI 桥接：AI 问一批选择题 → 逐题放 CC 同款面板。
 
     界面跟 claude code 的 AskUserQuestion 同款：顶部问题标签行显示
     进度，每题选项 + 行内自填（Type something.光标落上直接打字）+
     多选 Submit 行 + Chat about this（退出问卷用自己的话聊）。
+    Ctrl+C 取消（键位或 winpty 信号通道）→ 联动中断整轮回输入框。
 
     bridge(qdata) 把整批 questions 交给 cli_question.ask_via_selector
     （经 cli_ui 的 input 桥独占终端），返回
@@ -1472,6 +1506,10 @@ def _make_ask_user_bridge():
             )
 
         result = run_with_input_bridge(_do_ask) or {}
+        # Ctrl+C 取消问卷（键位或信号通道）→ 联动中断整轮回输入框；
+        # Esc/取消则保持原语义（模型收到 user_interrupt 自行收尾）
+        if result.get("interrupt"):
+            _fire_turn_interrupt(turn_interrupt_provider)
         answers = result.get("answers") or []
         chat = result.get("chat")
         # 汇总回显：短标题 → 答案，一行一问
@@ -4144,6 +4182,8 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         lambda: getattr(rt, "turn_active", False),
         _do_turn_interrupt,
     )
+    # 挂到 rt 上供审批/提问面板的 Ctrl+C 联动取用（延迟取值见两处 provider）
+    rt.turn_interrupt_fn = _do_turn_interrupt
 
     # === OS 级 SIGINT 兜底：不管 pt 键位有没有接到 Ctrl+C，信号层永远接住 ===
     # 根因：pt 的 c-c 键位只在 raw 模式下有效——事件循环忙渲染/接管间隙里
@@ -4163,6 +4203,16 @@ def run_interactive(resume_last: bool = False, cli_agents: dict = None):
         if _now - _last_sigint[0] < 0.5:
             return
         _last_sigint[0] = _now
+        # 审批/提问面板挂着：优先取消面板。mintty+winpty 把 ^C 翻成
+        # 控制台事件（信号）而不是按键记录——面板键位根本收不到，不
+        # 在这儿接住的话面板纹丝不动（实测连按多记毫无反应）。取消
+        # 后由审批回调按 interrupt 语义联动中断整轮，这里直接返回。
+        try:
+            import cli_question
+            if cli_question.cancel_active_panel():
+                return
+        except Exception:
+            logger.warning("信号取消面板失败，走原逻辑", exc_info=True)
         if getattr(rt, "turn_active", False):
             _do_turn_interrupt()
         else:

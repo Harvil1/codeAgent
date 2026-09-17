@@ -2598,6 +2598,61 @@ def check_approval_panel():
     return _ok("审批面板文本/截断/折行/自擦正常")
 
 
+def check_panel_ctrlc():
+    """验证面板 Ctrl+C 双通道：信号取消钩子 + 中断联动接线。
+
+    背景（实测根因）：mintty+winpty 下 ^C 常不走按键记录而是控制台
+    事件（OS 信号）——面板键位收不到，用户连按多记毫无反应；取消后
+    模型还会拿着"审批被拒"继续跑。修复：面板注册信号取消钩子
+    （cancel_active_panel），SIGINT 处理器/审批回调按 interrupt 语义
+    联动中断整轮。
+    """
+    import inspect
+
+    import cli as _cli
+    import cli_question as cq
+
+    # 1) 没面板时：cancel_active_panel 返回 False（信号走原逻辑）
+    with cq._active_panel_lock:
+        saved, cq._active_panel = cq._active_panel, None
+    try:
+        if cq.cancel_active_panel() is not False:
+            return _fail("无面板时 cancel_active_panel 应返回 False")
+        # 2) 有假面板：钩子被调、返回 True（try/finally 复位防污染）
+        fired = []
+        with cq._active_panel_lock:
+            cq._active_panel = {"cancel": lambda: fired.append(1)}
+        if cq.cancel_active_panel() is not True or fired != [1]:
+            return _fail("有面板时钩子没被调/返回值不对")
+    finally:
+        with cq._active_panel_lock:
+            cq._active_panel = saved
+
+    # 3) 中断联动函数：None/无实现安全空过；有实现则被调
+    if _cli._fire_turn_interrupt(None) is not None:
+        return _fail("无 provider 的 _fire_turn_interrupt 应安全空过")
+    called = []
+    _cli._fire_turn_interrupt(lambda: (lambda: called.append(1)))
+    if called != [1]:
+        return _fail("有 provider 的 _fire_turn_interrupt 没调中断函数")
+
+    # 4) 接线完整性：键位 interrupt 语义 / 余量清理 / 信号优先分支
+    src_sel = inspect.getsource(cq.run_selector)
+    if "interrupt=True" not in src_sel:
+        return _fail("run_selector 的 c-c 键位没带 interrupt 语义")
+    if "_drain_pending_ctrl_c()" not in src_sel:
+        return _fail("run_selector 退出后没清 Ctrl+C 余量")
+    src_cli = inspect.getsource(_cli)
+    for needle in ("cancel_active_panel()", "_fire_turn_interrupt",
+                   "turn_interrupt_provider"):
+        if needle not in src_cli:
+            return _fail(f"cli.py 缺接线 {needle!r}")
+    src_handler = inspect.getsource(_cli)
+    if "cli_question" not in src_handler.split("_os_sigint_handler")[1][:800]:
+        return _fail("_os_sigint_handler 没有面板优先分支")
+    return _ok("面板 Ctrl+C 信号钩子/中断联动/接线正常")
+
+
 def check_enter_routing():
     """验证提交小函数：入队成功、输入框清空、空输入不入队。"""
     import queue as _q
@@ -3091,6 +3146,7 @@ def main():
             ("提问选择器", check_question_selector),
             ("提问工具层", check_ask_user_tool_layer),
             ("审批面板", check_approval_panel),
+            ("面板Ctrl+C通道", check_panel_ctrlc),
         ]),
         ("CLI 皮肤/输入", [
             ("皮肤引擎", check_skin_engine),

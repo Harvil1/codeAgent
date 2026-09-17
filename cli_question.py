@@ -33,9 +33,91 @@ fail-open 铁律：面板炸了降级为老式编号输入；记事本起不来�
 
 import logging
 import shutil
+import sys
+import threading
 import unicodedata
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 面板取消注册表：Ctrl+C 的「信号投递」补漏通道
+# ---------------------------------------------------------------------------
+# 为什么需要：mintty+winpty 环境里，Ctrl+C 常常不以按键记录到达面板，
+# 而是被 winpty 翻译成控制台事件（OS 级 SIGINT）——面板的 c-c 键位
+# 根本收不到（实测：连按多记毫无反应）。OS 信号处理器（跑在主线程）
+# 从这个注册表反手取消面板，两条投递路径殊途同归：一击取消 + 中断回合。
+_active_panel = None          # {"cancel": fn}——run_selector 在跑时注册
+_active_panel_lock = threading.Lock()
+
+
+def cancel_active_panel() -> bool:
+    """有选择器面板在跑就取消它（interrupt 语义），返回是否取消成功。
+
+    大白话：这是给 OS 信号处理器（主线程）用的入口——"现在屏幕上挂着
+    一个提问/审批面板，用户按了 Ctrl+C"→ 替他按下"取消"，面板整体
+    消失、结果标记 interrupt=True（调用方据此顺手中断整轮对话）。
+    没有面板在跑返回 False（调用方走原逻辑）。
+    """
+    with _active_panel_lock:
+        hook = _active_panel
+    if hook is None:
+        return False
+    try:
+        hook["cancel"]()
+        return True
+    except Exception:
+        logger.warning("信号取消面板失败（fail-open）", exc_info=True)
+        return False
+
+
+def _drain_pending_ctrl_c() -> None:
+    """吃掉控制台输入缓冲里挂着的 Ctrl+C 余量（按住 ^C 的自动重复尾巴）。
+
+    为什么：面板刚被 ^C 取消时，"按住"产生的自动重复键还排在输入
+    缓冲里；不清的话主界面一恢复就挨一串 c-c 键位——中断/退出语义
+    全乱（实测：面板取消后残余记录被恢复的主界面连击触发强退）。
+    只挑 \x03 键事件丢掉，其他按键（用户抢跑打的字）原样放回。
+    只在面板退出后、主界面恢复前的空窗调用，没有并发读者。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import byref
+
+        from prompt_toolkit.input.win32 import INPUT_RECORD
+
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-10)   # STD_INPUT_HANDLE
+        if not h:
+            return
+        n = ctypes.c_uint32(0)
+        if not k32.GetNumberOfConsoleInputEvents(h, byref(n)) or n.value == 0:
+            return
+        rec = INPUT_RECORD()
+        read = ctypes.c_uint32(0)
+        keep = []
+        for _ in range(min(n.value, 512)):   # 上限防意外大数
+            if not k32.ReadConsoleInputW(h, byref(rec), 1, byref(read)) \
+                    or read.value != 1:
+                break
+            try:
+                ev = rec.Event.KeyEvent
+                is_cc = (rec.EventType == 1 and ev.KeyDown
+                         and str(ev.uChar) == "\x03")
+            except Exception:
+                is_cc = False
+            if not is_cc:
+                keep.append(INPUT_RECORD.from_buffer_copy(rec))
+        if keep:
+            arr = (INPUT_RECORD * len(keep))(*keep)
+            k32.WriteConsoleInputW(h, arr, len(keep), byref(read))
+        dropped = n.value - len(keep)
+        if dropped:
+            logger.info("已丢弃 %d 条 Ctrl+C 余量（防恢复后连击）", dropped)
+    except Exception:
+        logger.warning("Ctrl+C 余量清理失败（fail-open）", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +383,12 @@ def run_selector(question, header, options, multi=False, chips=None,
         allow_custom: False 时不画"Type something."自填行（审批面板用）
         allow_chat: False 时不画"Chat about this"行（审批面板用）
 
-    返回：{"answers": [选项label或自填文本], "cancelled": bool, "chat": bool}
+    返回：{"answers": [选项label或自填文本], "cancelled": bool, "chat": bool,
+           "interrupt": bool}
         chat=True 表示用户选了 Chat about this（answers 为空）；
-        cancelled=True 表示 Esc/Ctrl+C 取消。
+        cancelled=True 表示 Esc/Ctrl+C 取消；
+        interrupt=True 表示是 Ctrl+C 语义（调用方应联动中断整轮对话，
+        Esc 只是"拒绝这一次"不中断）。
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
@@ -318,20 +403,43 @@ def run_selector(question, header, options, multi=False, chips=None,
     idx = row_indices(len(options or []), multi,
                       allow_custom=allow_custom, allow_chat=allow_chat)
     state = {"cursor": 0, "checked": set(), "done": False, "result": None}
+    _app_thread_id = [None]   # 面板 app 跑在哪个线程（跨线程退出要用）
     custom_buf = Buffer(multiline=False)
     custom_focused = Condition(lambda: state["cursor"] == idx["custom"])
 
     kb = KeyBindings()
 
-    def _finish(answers=None, cancelled=False, chat=False):
+    def _finish(answers=None, cancelled=False, chat=False, interrupt=False):
+        """收面板：写结果 + 退出 app。跨线程安全（信号取消通道会从主线程调）。
+
+        interrupt=True 表示这是 Ctrl+C 语义（不只是取消——调用方还要
+        中断整轮对话）；Esc/选完等普通收尾不设它。
+        """
         state["result"] = {"answers": answers or [], "cancelled": cancelled,
-                           "chat": chat}
+                           "chat": chat, "interrupt": interrupt}
         state["done"] = True
-        try:
-            from prompt_toolkit.application import get_app
-            get_app().exit()
-        except Exception:
-            logger.warning("异常被吞(fail-open)", exc_info=True)
+
+        def _exit():
+            try:
+                app.exit()
+            except Exception:
+                logger.warning("面板退出失败（fail-open）", exc_info=True)
+
+        # 面板自己的线程：直接退；外部线程（主线程信号处理器）：
+        # 经面板事件循环 call_soon_threadsafe 调度——asyncio 的 Future
+        # 不许跨线程裸 set，调度过去既线程安全又能把 loop 叫醒
+        if threading.current_thread().ident == _app_thread_id[0]:
+            _exit()
+            return
+        loop = getattr(app, "loop", None)
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(_exit)
+                return
+            except Exception:
+                logger.warning("跨线程退出调度失败，就地直退（fail-open）",
+                               exc_info=True)
+        _exit()
 
     def _custom_text():
         return custom_buf.text.strip()
@@ -412,7 +520,9 @@ def run_selector(question, header, options, multi=False, chips=None,
 
     @kb.add("c-c")
     def _cc(event):
-        _finish(cancelled=True)
+        # Ctrl+C = 取消面板 + 中断整轮（interrupt=True 让调用方联动）；
+        # Esc 才是"只拒绝这次"（cancelled 但不 interrupt）
+        _finish(cancelled=True, interrupt=True)
 
     @kb.add("c-g", eager=True)
     def _cg(event):
@@ -512,22 +622,43 @@ def run_selector(question, header, options, multi=False, chips=None,
     # called from a running event loop」。新线程自带新循环，互不打架；
     # 主界面此刻已挂起（不读 stdin），stdin 让给面板，答完还回来。
     # 线程里的异常带回主线程重抛（ask_via_selector 接住走降级）。
-    import threading
     _err = {}
 
     def _run_app():
+        _app_thread_id[0] = threading.get_ident()
         try:
             app.run()
         except Exception as e:  # noqa: BLE001
             _err["e"] = e
 
+    # 注册信号取消钩子：面板在跑期间，主线程的 OS 信号处理器经
+    # cancel_active_panel() 反手取消它（winpty 把 ^C 翻成控制台事件的
+    # 补漏通道——详见模块头 _active_panel 注释）
+    global _active_panel
+    with _active_panel_lock:
+        _active_panel_local = {"cancel": lambda: _finish(
+            cancelled=True, interrupt=True)}
+        _active_panel = _active_panel_local
+
     _th = threading.Thread(target=_run_app, daemon=True, name="cli-question")
     _th.start()
     _th.join()
+
+    # 注销钩子 + 清 ^C 余量（按住 ^C 的自动重复尾巴若不清，恢复后的
+    # 主界面会挨一串 c-c 连击——实测能一路触发到强退）
+    try:
+        with _active_panel_lock:
+            if _active_panel is _active_panel_local:
+                _active_panel = None
+    except Exception:
+        logger.warning("面板钩子注销失败（fail-open）", exc_info=True)
+    _res = state["result"] or {"answers": [], "cancelled": True,
+                               "chat": False, "interrupt": False}
+    if _res.get("interrupt"):
+        _drain_pending_ctrl_c()
     if "e" in _err:
         raise _err["e"]
-    return state["result"] or {"answers": [], "cancelled": True,
-                               "chat": False}
+    return _res
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +720,9 @@ def ask_via_selector(questions, fallback_input=None):
             res = _fallback_number_input(q["question"], q["options"],
                                          q["multi"], fallback_input)
         if res.get("cancelled"):
-            return {"answers": results, "chat": None, "cancelled": True}
+            # interrupt 一并透传（Ctrl+C 取消：调用方要联动中断整轮）
+            return {"answers": results, "chat": None, "cancelled": True,
+                    "interrupt": bool(res.get("interrupt"))}
         if res.get("chat"):
             return _chat_flow()
         # 检查是否选了「← 上一题」
