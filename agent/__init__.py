@@ -521,10 +521,16 @@ class AIAgent:
         """
         # 删掉会话专属 env 文件 + 清掉对应环境变量
         try:
-            if getattr(self, "_session_env_path", None):
-                self._session_env_path.unlink(missing_ok=True)
+            _env_p = getattr(self, "_session_env_path", None)
+            if _env_p:
+                _env_p.unlink(missing_ok=True)
                 self._session_env_path = None
-            if "CODEAGENT_ENV_FILE" in os.environ:
+            # 环境变量是给 SessionStart 钩子子进程找文件用的，进程级共享：
+            # 同进程还有别的 agent 在时，只有它恰好还指着我们的文件才删，
+            # 免得把别的会话的钩子入口顺手掐了（terminal 执行命令读的是
+            # agent 实例上的路径，不依赖这个变量）
+            if (_env_p is not None
+                    and os.environ.get("CODEAGENT_ENV_FILE") == str(_env_p)):
                 del os.environ["CODEAGENT_ENV_FILE"]
         except Exception as e:
             logger.warning("清理 session env 文件失败: %s", e)
@@ -544,7 +550,9 @@ class AIAgent:
         """会话启动时创建 .session/{session_id}.env 文件并设 CODEAGENT_ENV_FILE 环境变量。
 
         SessionStart 钩子跑的时候能从环境变量读到这个路径，往文件里
-        写 `export K=V` 行；之后 terminal 工具执行命令会把这些变量合并进去。
+        写 `export K=V` 行；之后 terminal 工具执行命令会把这些变量合并进去
+        （terminal 读的是实例属性 _session_env_path，环境变量只服务钩子
+        子进程——同进程多 agent 时环境变量会被后来者覆写，实例属性不会）。
         失败只打日志（fail-open）。
 
         参数：无（用 self.session_id）。返回：无。
@@ -1751,12 +1759,14 @@ class AIAgent:
             return
         try:
             from agent.context_compressor import estimate_message_tokens
+            from agent.context_pipeline import _effective_llm_compact_threshold
             est = estimate_message_tokens(messages)
-            token_threshold = self.config.get("context", {}).get(
-                "llm_compact_token_threshold", 100000,
+            # 提示线必须跟触发线同一个口径（含窗口 90% 封顶和 1M 抬升）：
+            # 用裸配置值算的话，64k 窗口模型上提示线（7 万）永远高于压缩线
+            # （约 5.8 万）——压缩先发生，提示一次都来不及出现
+            token_threshold = _effective_llm_compact_threshold(
+                self.config, self.model,
             )
-            if self.model and "[1m]" in str(self.model):
-                token_threshold = max(token_threshold, 700000)
             if est >= token_threshold * 0.7:
                 self._context_tip_shown = True
                 pct = int(est / token_threshold * 100) if token_threshold else 0

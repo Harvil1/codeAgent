@@ -155,7 +155,7 @@ class TeamCoordinator:
             claimed = store.claim(task_id, owner=name)
             if claimed is None:
                 self.update_status(name, "failed")
-                raise ValueError(f"task_id {task_id} 不存在")
+                raise ValueError(f"task_id {task_id} 不存在或已被其他成员认领")
             env[ENV_VAR] = task_id
 
         try:

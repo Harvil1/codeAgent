@@ -1119,8 +1119,10 @@ class RuntimeContext:
         # 对话历史不含 system 消息（system 由 prompt_builder 现场生成）
         conv = [m for m in msgs if m.get("role") != "system"]
         # 重放用全量档案（用户规矩：看到什么恢复什么）——必须在
-        # 压缩边界裁剪**之前**留一份，AI 的上下文裁剪归裁剪
-        raw_for_replay = list(conv)
+        # 压缩边界裁剪**之前**留一份，AI 的上下文裁剪归裁剪。
+        # 拷到消息 dict 一层：后面的压缩预热会就地改写共享的 dict，
+        # 浅拷贝挡不住，重放就成了"改写后"的样子
+        raw_for_replay = [dict(m) for m in conv]
         # 按最后一次压缩的边界裁掉更早的旧消息
         #（会话库只追加不删改，不裁的话会载入全部旧历史；
         # 旧会话没有边界标记就保守全量载入）
@@ -3499,11 +3501,14 @@ def _handle_paste_command(args: str, rt) -> bool:
 
     paste_dir = Path(get_workspace_cwd()) / ".paste"
     out = paste_dir / f"img_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    # PowerShell 单引号串里 ' 要写成 ''：路径含撇号（O'Brien 这类用户名/
+    # 目录名）不转义的话字符串当场断裂，保存必失败
+    _out_ps = str(out).replace("'", "''")
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms; "
         "$img = [System.Windows.Forms.Clipboard]::GetImage(); "
         "if ($img -eq $null) { exit 2 } "
-        f"$img.Save('{out}'); exit 0"
+        f"$img.Save('{_out_ps}'); exit 0"
     )
     try:
         if sys.platform != "win32":

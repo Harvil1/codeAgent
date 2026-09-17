@@ -285,7 +285,10 @@ def main(args=None):
     if args is None:
         args = sys.argv[1:]
     if not args:
-        _show_status(None)
+        # 无参 = 看状态；skills_dir 缺省值由 curator_cli 的分发逻辑解析，
+        # 直接传 None 会一路传到 Path(None) 炸掉
+        from constants import skills_dir as _default_skills_dir
+        _show_status(_default_skills_dir())
         return
     curator_cli(args)
 

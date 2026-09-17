@@ -427,7 +427,12 @@ async def _summarize_conversation(
                     files_errors_limit=_files_errors_limit(
                         len(working_messages), fe_th, fe_lm,
                     ),
-                ) + focus_suffix  # PTL 重建 prompt 也要带上关注点（防丢）
+                )
+                # 重建和首建同一副拼法：锚定提示和关注点都得带上，
+                # 少了锚定提示重试产出的摘要会整段重复罗列锚定段
+                if anchor_note:
+                    prompt += "\n\n" + anchor_note
+                prompt += focus_suffix
                 logger.warning(
                     "PTL 重试 %d/%d：tokenGap 精确算法丢 %d 条（旧 20%% 会丢 %d 条）",
                     retry + 1, MAX_PTL_RETRIES, drop_count, old_drop,

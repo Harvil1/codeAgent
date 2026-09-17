@@ -51,6 +51,7 @@ Feature flags（功能开关，settings.json 里配）：
     不打开时，对应 transport 的配置会被自动跳过（工具通过 check_fn 机制隐藏）。
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -1213,7 +1214,10 @@ class WebSocketTransport(MCPTransport):
         """
         await self._ws.send(json.dumps(msg))
         while True:
-            raw = await self._ws.recv()
+            # recv 要有界：库层 ping/pong 是自动应答的，server"活着但不回
+            # 业务响应"时 ping 照常通、recv 永远阻塞——工具线程挂死还持着
+            # 串行锁，后续请求全体陪葬。超时口径对齐 stdio/http 的 60 秒
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=60.0)
             try:
                 data = json.loads(raw)
             except (json.JSONDecodeError, TypeError):

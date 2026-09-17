@@ -141,18 +141,25 @@ TERMINAL_SCHEMA = {
 }
 
 
-def _load_session_env_overrides() -> dict:
-    """从环境变量 $CODEAGENT_ENV_FILE 指向的文件里读出"export 键=值"形式的行，打包成字典返回。
+def _load_session_env_overrides(agent_ref=None) -> dict:
+    """读出会话 env 存档文件里"export 键=值"形式的行，打包成字典返回。
 
     会话启动钩子（SessionStart hook）设置的环境变量写进这个文件"存档"。
     终端工具每次执行命令前把这份存档合并进子进程的环境变量，让钩子里配好的
     东西（比如 nvm/pyenv/conda 这类工具的路径设置）在后面每条命令里都生效。
 
-    参数：无（文件路径从进程环境变量里自己找）。
+    参数：
+        agent_ref：发起这条命令的 agent 实例。文件路径优先从它身上读
+        （_session_env_path，每个会话一份）——进程级环境变量是全局的，
+        同进程再派生子代理/团队工人时会被后来者覆写，不认实例的话
+        主会话的命令会读到别的会话的存档。不传或实例上没有时退回
+        环境变量（兼容老路径）。
 
     返回：{变量名: 值} 字典；文件不存在或读不了就返回空字典（不报错）。
     """
-    env_path = os.environ.get("CODEAGENT_ENV_FILE")
+    env_path = getattr(agent_ref, "_session_env_path", None)
+    if not env_path:
+        env_path = os.environ.get("CODEAGENT_ENV_FILE")
     if not env_path:
         return {}
     try:
@@ -335,8 +342,9 @@ def _handle_terminal(args: dict, **kwargs) -> str:
         # 沙箱环境变量：把密钥类（API key、数据库密码等）洗掉，防止泄给子进程
         from agent.sandbox_env import build_safe_env
         safe_env = build_safe_env()
-        # 合并 CODEAGENT_ENV_FILE 里钩子（hook，在特定时机自动执行的小脚本）写入的环境变量
-        safe_env.update(_load_session_env_overrides())
+        # 合并钩子（hook，在特定时机自动执行的小脚本）写进会话 env 存档的
+        # 变量——路径认发起命令的 agent 实例（同进程多 agent 不串档）
+        safe_env.update(_load_session_env_overrides(kwargs.get("agent_ref")))
 
         # 检测是不是在启动 GUI 程序（start / Chrome / 浏览器等）：
         # 这类程序不退出，subprocess 的输出管道会一直等它 → 整条命令卡死。
@@ -391,18 +399,33 @@ def _handle_terminal(args: dict, **kwargs) -> str:
                 errors="replace",
             )
         else:
-            # 普通路径：沙箱没开，或者沙箱不可用降级了
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-                env=safe_env,
-                encoding="utf-8",
-                errors="replace",
-            )
+            # 普通路径：沙箱没开，或者沙箱不可用降级了。
+            # Windows 上统一走 Job Object：超时杀整棵进程树——cmd 的
+            # 孙子孙进程（python/npm…）攥着管道不放的话，subprocess.run
+            # 的超时只杀 cmd 本身，communicate 会无限等下去。笼子挂不上
+            # 时 run_with_job_object 内部自动降级成同样的裸跑（fail-open）
+            if sys.platform == "win32":
+                from agent.sandbox_runner import run_with_job_object
+                result = run_with_job_object(
+                    command,
+                    shell=True,
+                    timeout=timeout,
+                    cwd=cwd,
+                    env=safe_env,
+                    errors="replace",
+                )
+            else:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=cwd,
+                    env=safe_env,
+                    encoding="utf-8",
+                    errors="replace",
+                )
         # 大输出先把完整原文存到磁盘（offload，回传预览
         # + 文件位置指针），实在存不了才截断。顺序不能反——先截断再落盘的话，
         # 磁盘上存的也是残缺版，中间那段永久丢了；stderr 也走同一条落盘路。

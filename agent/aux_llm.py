@@ -171,6 +171,10 @@ class AuxLLMRouter:
                 "base_url": ep.base_url,
                 "api_key": api_key,
                 "model": ep.model,
+                # 不带超时会落到 SDK 默认的 600 秒：一个"连上但不回话"的
+                # 坏端点让起标题/压缩白挂 10 分钟才轮到下一个，快速失败
+                # 交给熔断去跳过它
+                "request_timeout": 60,
             })
         except Exception as e:
             logger.warning("创建 endpoint %s 的 client 失败: %s", ep.name, e)

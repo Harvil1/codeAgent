@@ -135,6 +135,22 @@ _DENY_COMMAND_PATTERNS_COMPILED: List[Tuple["re.Pattern", str]] = [
 ]
 
 
+def _quote_normalized(command: str) -> Optional[str]:
+    r"""剥掉每个 token 的包裹引号后的命令文本；没有引号 token 时返回 None。
+
+    shell 里 `'rm' x` 和 `rm x` 干的是同一件事，但正则看不见引号——动词
+    被引号包住就绕过匹配（`\brm\s+` 要求动词后紧跟空白），而这恰是注入
+    攻击爱用的变形。归一文本和原文一起过闸门（任一命中即算，并集口径，
+    只会把网收紧不会放松）。引用原文的空格语义按 shell 分词近似还原。
+    """
+    raw = (command or "").strip()
+    tokens = raw.split()
+    if not any(t[:1] in ("'", '"') for t in tokens):
+        return None
+    normalized = " ".join((t.strip("\"'") or t) for t in tokens)
+    return normalized if normalized != raw else None
+
+
 def check_command_deny(command: str) -> Optional[str]:
     """闸门 1：检查命令是否命中硬拒绝黑名单（命中就直接拒，不问用户）。
 
@@ -147,6 +163,11 @@ def check_command_deny(command: str) -> Optional[str]:
     for pattern, desc in _DENY_COMMAND_PATTERNS_COMPILED:
         if pattern.search(command):
             return desc
+    normalized = _quote_normalized(command)
+    if normalized:
+        for pattern, desc in _DENY_COMMAND_PATTERNS_COMPILED:
+            if pattern.search(normalized):
+                return desc
     return None
 
 
@@ -357,6 +378,11 @@ def check_destructive(command: str) -> Optional[str]:
     for pattern, desc in _DESTRUCTIVE_PATTERNS_COMPILED:
         if pattern.search(command):
             return desc
+    normalized = _quote_normalized(command)
+    if normalized:
+        for pattern, desc in _DESTRUCTIVE_PATTERNS_COMPILED:
+            if pattern.search(normalized):
+                return desc
     return None
 
 

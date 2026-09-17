@@ -62,19 +62,29 @@ def is_paused(skills_dir: Path = None) -> bool:
     return bool(state.get("paused", False))
 
 
+def _curator_cfg(key: str, default: int) -> int:
+    """读 curator 配置项；配置缺失/类型不对/读配置失败都回退模块常量。"""
+    try:
+        from config import load_config
+        value = load_config().get("curator", {}).get(key, default)
+        return int(value)
+    except Exception:
+        return default
+
+
 def get_interval_hours() -> int:
     """返回运行间隔（小时）。"""
-    return DEFAULT_INTERVAL_HOURS
+    return _curator_cfg("interval_hours", DEFAULT_INTERVAL_HOURS)
 
 
 def get_stale_after_days() -> int:
     """返回"多少天没动静标 stale"的天数。"""
-    return DEFAULT_STALE_AFTER_DAYS
+    return _curator_cfg("stale_after_days", DEFAULT_STALE_AFTER_DAYS)
 
 
 def get_archive_after_days() -> int:
     """返回"多少天没动静归档"的天数。"""
-    return DEFAULT_ARCHIVE_AFTER_DAYS
+    return _curator_cfg("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS)
 
 
 # ---------------------------------------------------------------------------

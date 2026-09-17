@@ -240,6 +240,8 @@ class BackgroundManager:
                 "encoding": "utf-8",
                 "cwd": str(cwd) if cwd else None,
             }
+            _detach_log = None
+            _output_file = None
             if detach:
                 if sys.platform == "win32":
                     popen_kwargs["creationflags"] = (
@@ -247,11 +249,41 @@ class BackgroundManager:
                     )
                 else:
                     popen_kwargs["start_new_session"] = True
+                # 输出落文件、不建管道（monitor 模式除外——它要靠管道实时
+                # 抄送）：管道读端随 agent 退出被 OS 关掉，还在跑的 detach
+                # 子进程一写输出就撞 broken pipe 崩掉，"agent 退了任务
+                # 继续跑"就兑现不了。落成文件还顺带能随时翻
+                if not monitor:
+                    try:
+                        _m_dir = Path(monitor_dir) if monitor_dir else (
+                            self._registry_path.parent / "monitor"
+                        )
+                        _m_dir.mkdir(parents=True, exist_ok=True)
+                        _log_path = _m_dir / f"{task_id}.log"
+                        _detach_log = open(
+                            _log_path, "w", encoding="utf-8", errors="replace",
+                        )
+                        popen_kwargs["stdout"] = _detach_log
+                        popen_kwargs["stderr"] = _detach_log
+                        _output_file = str(_log_path)
+                    except Exception:
+                        # 文件开不了就把输出丢黑洞，任务本身照跑
+                        _detach_log = None
+                        popen_kwargs["stdout"] = subprocess.DEVNULL
+                        popen_kwargs["stderr"] = subprocess.DEVNULL
+
+            def _close_detach_log():
+                if _detach_log is not None:
+                    try:
+                        _detach_log.close()
+                    except Exception:
+                        logger.warning("关闭 detach 输出文件句柄失败（忽略）", exc_info=True)
 
             try:
                 proc = subprocess.Popen(command, **popen_kwargs)
             except (FileNotFoundError, OSError) as e:
                 # 命令不存在之类的启动失败：不抛异常，直接建成一个 failed 任务
+                _close_detach_log()
                 task = BackgroundTask(
                     task_id=task_id,
                     command=command,
@@ -269,6 +301,9 @@ class BackgroundManager:
                 self._push_notification_locked(task)
                 return task_id
 
+            # 子进程持有继承的句柄副本，父进程这边关掉自己的——不然
+            # 文件句柄在管理器手里攥到天荒地老
+            _close_detach_log()
             task = BackgroundTask(
                 task_id=task_id,
                 command=command,
@@ -281,11 +316,15 @@ class BackgroundManager:
                 _proc=proc,
                 monitor=monitor,
             )
+            if _output_file:
+                task.output_file = _output_file  # 任务卡上能看到输出在哪
             # 监视模式的输出文件（输出实时抄送到这，read_file 随时查增量）
             if monitor:
                 try:
+                    # 默认落在注册表目录旁边（跟 CODEAGENT_HOME 隔离环境
+                    # 走，不写死用户主目录）
                     m_dir = Path(monitor_dir) if monitor_dir else (
-                        Path.home() / ".codeAgent" / ".task_outputs" / "monitor"
+                        self._registry_path.parent / "monitor"
                     )
                     m_dir.mkdir(parents=True, exist_ok=True)
                     task.output_file = str(m_dir / f"{task_id}.log")
@@ -300,6 +339,10 @@ class BackgroundManager:
             # 监视器默认长跑 24 小时 + 强制走轮询路径（实时抄送输出需要它）
             if timeout is None:
                 effective_timeout = 86400.0
+        if detach and timeout is None:
+            # detach 的语义是"独立长跑"：默认 10 分钟的看门狗会把好好
+            # 跑着的任务杀掉标 failed，放宽到与监视器同款 24 小时
+            effective_timeout = 86400.0
         t = threading.Thread(
             target=self._watch,
             args=(task_id, proc, effective_timeout, self._stall_timeout),

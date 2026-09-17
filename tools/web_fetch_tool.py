@@ -88,11 +88,14 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
 
     try:
         import httpx
-        resp = httpx.get(
-            url, timeout=_TIMEOUT, follow_redirects=True,
+        # 必须用 AsyncClient：本工具跑在主事件循环上，同步 get 会把
+        # 循环独占整个下载期（live 面板/后台协程全部冻结）
+        async with httpx.AsyncClient(
+            timeout=_TIMEOUT, follow_redirects=True,
             headers={"User-Agent": "CodeAgent/0.1",
                      "Accept": "text/html,text/plain,application/json,*/*"},
-        )
+        ) as client:
+            resp = await client.get(url)
         resp.raise_for_status()
     except httpx.TimeoutException:
         return json.dumps({

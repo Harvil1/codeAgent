@@ -15,6 +15,7 @@ KEEP_MAX_RUNS=50 个时按"最久未用先删"清理。
 import asyncio
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -143,6 +144,15 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
     }, ensure_ascii=False)
 
 
+def _valid_run_id(run_id: str) -> bool:
+    """run_id 只认自家格式（wf_ 打头 + 有限长的安全字符）。
+
+    它要拼进 .workflows 目录路径：别的形态（路径分隔符、盘符、..）
+    会走出 workflows 根目录，resume 的"只信磁盘快照"防线就被洞穿了。
+    """
+    return bool(re.fullmatch(r"wf_[A-Za-z0-9_-]{1,64}", run_id or ""))
+
+
 async def _handle_workflow(args: dict, **kwargs) -> str:
     """工具 handler：按 action 分发到 run / resume / status / list / kill 五条路。
 
@@ -187,6 +197,9 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
 
     if action == "resume":
         run_id = str(args.get("run_id") or "")
+        if not _valid_run_id(run_id):
+            return json.dumps({"error": f"run_id 不合法: {run_id!r}",
+                               "error_type": "invalid_run_id"}, ensure_ascii=False)
         run_dir = get_codeagent_home() / ".workflows" / run_id
         if not (run_dir / "script.py").exists():
             return json.dumps({"error": f"run 不存在: {run_id}",
@@ -217,6 +230,9 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
 
     if action == "status":
         run_id = str(args.get("run_id") or "")
+        if not _valid_run_id(run_id):
+            return json.dumps({"error": f"run_id 不合法: {run_id!r}",
+                               "error_type": "invalid_run_id"}, ensure_ascii=False)
         run_dir = get_codeagent_home() / ".workflows" / run_id
         if not run_dir.exists():
             return json.dumps({"error": f"run 不存在: {run_id}",

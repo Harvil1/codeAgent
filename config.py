@@ -586,9 +586,14 @@ def load_config(
             settings = load_settings()
             model_cfg = get_current_model_config(settings)
 
-            config = dict(settings)
+            # 先铺出厂默认再叠用户 settings（深合并、None 不覆盖）——
+            # settings.json 只存用户写过的段，缺的段（context/cron/
+            # delegation 等几十项）全靠 DEFAULT_CONFIG 兜底，跟 yaml
+            # 路径同一口径，默认值只认这一处源头
+            config = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), settings)
             # 拼一个兼容的 model 段：settings.json 的模型结构不同，
             # 读 config["model"]["xxx"] 的地方靠这里翻译成兼容形状
+            # （放在合并之后——翻译结果整体替换，两边残留的 model 段都不算数）
             config["model"] = {
                 "provider": model_cfg.get("name", "opus"),
                 "name": model_cfg.get("model", ""),

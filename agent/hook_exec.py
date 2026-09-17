@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 from typing import Optional
 
 import requests  # 放在模块级，方便测试 monkeypatch（he.requests.post）
@@ -436,18 +437,35 @@ def run_script_hook(hook, payload: dict, timeout_cap: Optional[float] = None) ->
         stderr = result.stderr
         returncode = result.returncode
     else:
-        # 非 Job 模式路径：直接 subprocess.run（没开沙箱，或 Unix 下被 wrapper 包装过）
+        # 非 Job 模式路径：没开沙箱的裸命令，或 Unix 下被 wrapper 包装过。
+        # Windows 裸命令也借 Job Object 跑——超时杀整棵进程树：subprocess.run
+        # 的超时只杀直属子进程，hook 派生的孙进程攥着管道不放时收尾
+        # 会无限等（挂满线程池后工具分发全体卡死）；笼子挂不上时内部
+        # 自动降级成裸跑（fail-open）
         try:
-            proc = subprocess.run(
-                argv,
-                input=payload_json,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",  # GBK 输出兜底（同上，防解码炸穿 exit 2 协议）
-                timeout=effective_timeout,
-                env=env,
-            )
+            if not use_sandbox and sys.platform == "win32":
+                from agent.sandbox_runner import run_with_job_object
+                proc = run_with_job_object(
+                    argv,
+                    shell=False,
+                    timeout=effective_timeout,
+                    env=env,
+                    input=payload_json,
+                    # GBK 控制台脚本输出中文时严格解码会抛 UnicodeDecodeError
+                    # 穿透拦截协议（exit 2 的 block 判决整条丢失）——replace 兜底
+                    errors="replace",
+                )
+            else:
+                proc = subprocess.run(
+                    argv,
+                    input=payload_json,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",  # GBK 输出兜底（同上，防解码炸穿 exit 2 协议）
+                    timeout=effective_timeout,
+                    env=env,
+                )
         except subprocess.TimeoutExpired:
             logger.warning("hook %s 超时 (%.1fs)", hook.name, effective_timeout)
             return _fail_closed_or_none(hook, f"hook {hook.name} 超时")

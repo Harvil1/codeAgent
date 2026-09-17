@@ -255,12 +255,49 @@ class TaskStore:
     def claim(self, task_id: str, owner: str) -> Optional[dict]:
         """认领任务：写上自己的名字，同时把状态切成 in_progress（开工了）。
 
+        认领是条件写：任务还得没人动过（pending/triage）才算数——团队
+        worker 各自是独立进程，两个 worker 同时看中同一条任务时，慢半拍
+        的在这里拿回 None（已被领走），不会俩人把同一件事干两遍；同一
+        owner 重复认领保持幂等。读-改-写全程套跨进程文件锁（memory_store
+        同款，等锁超时照写并大声警告，不卡主流程）。
+
         参数：
             task_id：任务 id。
             owner：认领人名字（哪个 agent/子代理在负责）。
-        返回：更新后的任务 dict；任务不存在返回 None。
+        返回：更新后的任务 dict；任务不存在或已被别人领走返回 None。
         """
-        return self.update(task_id, owner=owner, status="in_progress")
+        from contextlib import contextmanager
+        from agent.file_lock import exclusive_file_lock
+
+        @contextmanager
+        def _xlock():
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with exclusive_file_lock(
+                self._dir / ".write.lock", timeout=5.0,
+            ) as got:
+                if not got:
+                    logger.warning(
+                        "任务写锁等待超时（5s）——照写不阻塞，"
+                        "存在跨进程并发认领风险"
+                    )
+                yield
+
+        with _xlock():
+            task = self.get(task_id)
+            if task is None:
+                return None
+            _status = task.get("status")
+            _claimable = (
+                _status in ("pending", "triage")
+                or (_status == "in_progress" and task.get("owner") == owner)
+            )
+            if not _claimable:
+                return None
+            task["owner"] = owner
+            task["status"] = "in_progress"
+            task["updated_at"] = _now_iso()
+            self._write(task_id, task)
+            return task
 
     def complete(self, task_id: str) -> Optional[dict]:
         """把任务标成 completed（做完）。其他等着它的任务会因此解锁。
