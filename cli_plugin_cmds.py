@@ -586,7 +586,7 @@ def _builtin_marketplace_defs() -> list:
     return [
         {
             "name": "claude-plugins-official",
-            "url": "https://gitee.com/hong-wei-h/code-agent-plugin-official.git",
+            "url": "https://github.com/Harvil1/codeAgent-plugins-official.git",
         },
     ]
 
