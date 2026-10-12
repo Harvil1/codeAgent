@@ -747,12 +747,14 @@ def _handle_task_block(args: dict, task, **kwargs) -> str:
             {"error": f"非法 kind: {kind}"}, ensure_ascii=False,
         )
     store = _get_store(kwargs)
-    updated = store.update(
-        task["id"],
-        status="blocked",
-        block_reason=reason,
-        block_kind=kind,
-    )
+    # 走 mark_blocked 而不是裸 update：裸写会绕开阻塞计数和
+    # "同类卡 3 次升级 triage"的兜底，跟 task_update(status=blocked)
+    # 的行为分叉
+    try:
+        store.mark_blocked(task["id"], kind=kind or "transient", reason=reason)
+    except KeyError as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    updated = store.get(task["id"])
     return json.dumps({"success": True, "task": updated}, ensure_ascii=False)
 
 
@@ -775,9 +777,11 @@ def _handle_task_unblock(args: dict, task, **kwargs) -> str:
             {"error": f"非法 new_status: {new_status}（只允许 pending 或 in_progress）"},
             ensure_ascii=False,
         )
-    if task.get("status") != "blocked":
+    # triage（反复阻塞升级上来的）也允许解除——不然只能靠裸 task_update
+    # 一种通道，专用工具反而干不了这活
+    if task.get("status") not in ("blocked", "triage"):
         return json.dumps(
-            {"error": f"任务不是 blocked 状态（当前: {task.get('status')}）"},
+            {"error": f"任务不是 blocked/triage 状态（当前: {task.get('status')}）"},
             ensure_ascii=False,
         )
     store = _get_store(kwargs)
@@ -834,6 +838,12 @@ def _handle_task_link(args: dict, **kwargs) -> str:
     if deny:
         return deny
     store = _get_store(kwargs)
+    # 父任务得真实存在：add_dependency 只查子任务，编一个父 ID 也能
+    # "挂靠成功"，依赖关系实际没人执行
+    if store.get(parent_id) is None:
+        return json.dumps(
+            {"error": f"任务不存在: {parent_id}"}, ensure_ascii=False,
+        )
     try:
         updated = store.add_dependency(child_id, parent_id, validate=True)
     except ValueError as e:
@@ -875,7 +885,7 @@ registry.register(
 registry.register(
     name="task_list", toolset="core",
     schema=TASK_LIST_SCHEMA, handler=_handle_task_list, emoji="📋",
-    isConcurrencySafe=True,  # 只读不改动任何东西，多个一起跑也安全
+    isConcurrencySafe=False,  # find_ready 里夹着回收僵尸任务的写操作，与写工具并发会竞态
 )
 registry.register(
     name="task_heartbeat", toolset="core",

@@ -162,7 +162,9 @@ def _handle_goal_start(args: dict, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
     token_budget = args.get("token_budget", 200_000)
-    if not isinstance(token_budget, int) or token_budget <= 0:
+    # bool 是 int 的子类：传 true 会以预算 1 过检，一轮就 budget_exceeded
+    if isinstance(token_budget, bool) or not isinstance(token_budget, int) \
+            or token_budget <= 0:
         return json.dumps(
             {
                 "error": "token_budget 必须是正整数",
@@ -177,6 +179,20 @@ def _handle_goal_start(args: dict, **dispatch_kwargs) -> str:
 
     try:
         gs = start_goal_agent(agent, objective, token_budget=token_budget)
+        # 和 CLI /goal 同一条路：启动后用 aux_llm 拆子任务。不拆的话
+        # task_ids 恒空，goal 永远到不了 complete，只能烧穿预算暂停
+        aux = getattr(agent, "aux_llm_router", None)
+        if aux is not None:
+            from agent.goal import decompose_with_llm, goal_persist_path
+            from agent.loop_host import loop_host
+            loop_host.run_async(
+                decompose_with_llm(
+                    gs, objective, aux,
+                    codeagent_home=getattr(agent, "codeAgent_home", None),
+                    session_id=getattr(agent, "session_id", "") or "",
+                )
+            )
+            gs.save(goal_persist_path(agent))
         return json.dumps(
             {
                 "started": True,

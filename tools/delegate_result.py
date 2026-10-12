@@ -228,9 +228,9 @@ def _start_progress_ticker(
     """多个子代理并行跑的时候，每隔 interval 秒写一条进度播报。
 
     让并行等待时进度可见：有辅助小模型（aux）就让它把状态归纳成 1-2 句人话；
-    没有就直接机械拼一行状态。写进 scratchpad 涂鸦区的 progress.md（涂鸦区
-    7 天自动清理）+ 打一条 logger.info。出错全吞（fail-open）：进度播报绝不
-    能反过来影响子代理本身。
+    没有就直接机械拼一行状态。写进 scratchpad 涂鸦区的 delegate-progress.md
+    （涂鸦区 7 天自动清理）+ 打一条 logger.info。出错全吞（fail-open）：进度
+    播报绝不能反过来影响子代理本身。
 
     参数：
       - children_state：各子代理的状态字典（名字 → {status, goal...}）
@@ -269,10 +269,13 @@ def _start_progress_ticker(
                             text = summarized.strip()
                     except Exception:
                         pass  # 摘要失败就退回机械拼接的原文
-                from agent.scratchpad import scratchpad_dir
+                from agent.scratchpad import scratchpad_dir, TICKER_PROGRESS_FILENAME
                 d = scratchpad_dir(session_id)
                 d.mkdir(parents=True, exist_ok=True)
-                p = d / "progress.md"
+                # 不能叫 progress.md：Windows 文件名不分大小写，会和模型
+                # 写的 PROGRESS.md 撞成同一个文件，这边每 30 秒重写一次
+                # 就把模型的进度外存冲掉
+                p = d / TICKER_PROGRESS_FILENAME
                 # 只留最近 20 条（防长时间运行把文件撑大；涂鸦区不是知识库）
                 try:
                     old = p.read_text(encoding="utf-8").splitlines()

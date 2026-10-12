@@ -2157,11 +2157,13 @@ def _inject_progress_recovery(rt, session_id: str) -> None:
         queue = getattr(agent, "_pending_ephemeral_messages", None)
         if queue is None:
             return
-        from agent.scratchpad import read_progress_file, scratchpad_dir
+        from agent.scratchpad import (
+            PROGRESS_FILENAME, read_progress_file, scratchpad_dir,
+        )
         ptext = read_progress_file(session_id, rt.home)
         if not ptext:
             return
-        progress_path = scratchpad_dir(session_id, rt.home) / "PROGRESS.md"
+        progress_path = scratchpad_dir(session_id, rt.home) / PROGRESS_FILENAME
         queue.append({
             "role": "user",
             "content": (
@@ -2696,7 +2698,11 @@ def _start_new_goal(rt, objective: str) -> None:
             # get_event_loop() 判嵌套的补丁随迁移删除）
             from agent.loop_host import loop_host
             task_ids = loop_host.run_async(
-                _goal_decompose_safe(gs, objective, aux_client)
+                _goal_decompose_safe(
+                    gs, objective, aux_client,
+                    codeagent_home=getattr(rt.agent, "codeAgent_home", None),
+                    session_id=getattr(rt, "session_id", "") or "",
+                )
             )
             if task_ids:
                 gs.save(_goal_state_path(rt))
@@ -2721,18 +2727,24 @@ def _start_new_goal(rt, objective: str) -> None:
     )
 
 
-async def _goal_decompose_safe(gs, objective: str, aux_client):
+async def _goal_decompose_safe(gs, objective: str, aux_client,
+                               codeagent_home=None, session_id: str = ""):
     """给"用 LLM 拆解目标"套一层保险：出任何异常都返回空列表而不是炸出去。
 
     参数：
         gs: GoalState 目标状态对象
         objective: 目标描述
         aux_client: 辅助模型客户端
+        codeagent_home: 任务库根目录（和 task 工具同源，防写错库）
+        session_id: 会话 id（子任务归属，进会话任务面板用）
     返回：拆出的子任务 ID 列表（失败为空列表）。
     """
     from agent.goal import decompose_with_llm
     try:
-        return await decompose_with_llm(gs, objective, aux_client)
+        return await decompose_with_llm(
+            gs, objective, aux_client,
+            codeagent_home=codeagent_home, session_id=session_id,
+        )
     except Exception as e:
         logger.warning("goal decompose 异常（fail-open）: %s", e)
         return []

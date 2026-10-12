@@ -240,7 +240,9 @@ def goal_persist_path(agent) -> Path:
             return Path(fn())
         except Exception:
             logger.warning("异常被吞(fail-open)", exc_info=True)
-    home = getattr(agent, "codeagent_home", None)
+    # 属性名是 codeAgent_home（大写 A）——写小写 getattr 恒 None，
+    # 这条兜底分支永远轮不到
+    home = getattr(agent, "codeAgent_home", None)
     if home:
         return Path(home) / ".goal" / "current.json"
     from constants import get_codeagent_home
@@ -304,6 +306,8 @@ async def decompose_with_llm(
     goal_state: "GoalState",
     objective: str,
     aux_llm_router,
+    codeagent_home=None,
+    session_id: str = "",
 ) -> List[str]:
     """用辅助小模型（aux_llm——干杂活用的便宜模型）把目标拆成 1-5 条可独立执行的子任务，存进任务库（goal 跑的时候逐条对账"还剩几个没干完"）。
 
@@ -324,7 +328,10 @@ async def decompose_with_llm(
         return []
 
     from agent.task_store import get_task_store
-    store = get_task_store()
+    # 任务库 home 必须和 task 工具同源（dispatch kwargs 的 codeagent_home）：
+    # 拆解写进默认库而 task_complete 改的是 agent 自己的库的话，
+    # 子任务永远"没完成"，goal 只能烧穿预算
+    store = get_task_store(codeagent_home)
 
     prompt = (
         f"目标：{objective}\n\n"
@@ -394,7 +401,9 @@ async def decompose_with_llm(
         if not subject:
             continue
         try:
-            task = store.create(subject=subject, description=desc)
+            # session_id 归属会话：不带它任务跨会话泄漏，也进不了会话任务面板
+            task = store.create(subject=subject, description=desc,
+                                session_id=session_id)
             tid = task["id"]
             # 给任务打上"属于哪个 goal"的标记（TaskStore.update 接受任意附加字段）
             store.update(tid, metadata={"goal_id": goal_state.goal_id})
@@ -411,7 +420,7 @@ async def decompose_with_llm(
     return task_ids
 
 
-def check_all_tasks_done(goal_state: "GoalState") -> bool:
+def check_all_tasks_done(goal_state: "GoalState", codeagent_home=None) -> bool:
     """检查这个 goal 名下的子任务是不是全部干完了。
 
     判断规则（宁慢勿错）：
@@ -428,11 +437,12 @@ def check_all_tasks_done(goal_state: "GoalState") -> bool:
         return False
 
     from agent.task_store import get_task_store
-    store = get_task_store()
+    store = get_task_store(codeagent_home)
     for tid in goal_state.task_ids:
         task = store.get(tid)
-        if task is None:
-            # 子任务被删了（可能是用户手动删的）→ 当没这条继续查，别卡死 goal
+        if task is None or task.get("status") == "deleted":
+            # 子任务被删了（软删：status=deleted、文件保留，get() 不会返回
+            # None）→ 当没这条继续查，别让删掉的旧子任务永远挡住收工
             continue
         if task.get("status") != "completed":
             return False

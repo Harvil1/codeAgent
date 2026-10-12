@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -166,15 +167,33 @@ class TaskStore:
             **fields：要改的字段名=新值，如 status="completed"。
         返回：改完的任务 dict；任务不存在返回 None。
         """
-        task = self.get(task_id)
-        if task is None:
-            return None
-        for k, v in fields.items():
-            if k != "id":
-                task[k] = v
-        task["updated_at"] = _now_iso()
-        self._write(task_id, task)
-        return task
+        # 读-改-写全程持跨进程写锁：并发 task_update/task_complete/
+        # heartbeat 交错时会后写覆盖先写（丢状态变更/重复认领）
+        with self._xlock():
+            task = self.get(task_id)
+            if task is None:
+                return None
+            for k, v in fields.items():
+                if k != "id":
+                    task[k] = v
+            task["updated_at"] = _now_iso()
+            self._write(task_id, task)
+            return task
+
+    @contextmanager
+    def _xlock(self):
+        """跨进程任务写锁（claim/update 等读-改-写操作都要持它）。"""
+        from agent.file_lock import exclusive_file_lock
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(
+            self._dir / ".write.lock", timeout=5.0,
+        ) as got:
+            if not got:
+                logger.warning(
+                    "任务写锁等待超时（5s）——照写不阻塞，"
+                    "存在跨进程并发写风险"
+                )
+            yield
 
     def set_status(self, task_id: str, status: str) -> Optional[dict]:
         """改任务状态（只接受 VALID_STATUSES 里列的那几种，防手滑写错）。
@@ -274,20 +293,7 @@ class TaskStore:
         from contextlib import contextmanager
         from agent.file_lock import exclusive_file_lock
 
-        @contextmanager
-        def _xlock():
-            self._dir.mkdir(parents=True, exist_ok=True)
-            with exclusive_file_lock(
-                self._dir / ".write.lock", timeout=5.0,
-            ) as got:
-                if not got:
-                    logger.warning(
-                        "任务写锁等待超时（5s）——照写不阻塞，"
-                        "存在跨进程并发认领风险"
-                    )
-                yield
-
-        with _xlock():
+        with self._xlock():
             task = self.get(task_id)
             if task is None:
                 return None

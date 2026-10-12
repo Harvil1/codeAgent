@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 # 涂鸦区目录的保留天数：超过 7 天没动过的会话目录会被清理
 DEFAULT_RETENTION_DAYS = 7
 
+# 模型写的任务进度外存文件名（读写两侧共用一个常量）。
+# 进度 ticker（delegate_result）必须用另一个文件名：Windows 文件名
+# 不区分大小写，"progress.md" 会和它撞成同一个文件，ticker 每 30 秒
+# 重写一次就把模型攒的进度冲掉
+PROGRESS_FILENAME = "PROGRESS.md"
+TICKER_PROGRESS_FILENAME = "delegate-progress.md"
+
 
 def scratchpad_dir(session_id: str, codeagent_home=None) -> Path:
     """算出某个会话的涂鸦区目录路径（只算路径，不建目录）。
@@ -87,6 +94,19 @@ def scratchpad_context_block(session_id: str, codeagent_home=None) -> str:
     )
 
 
+def _newest_mtime_in_tree(root: Path) -> float:
+    """整棵目录树里最新的 mtime（判"涂鸦区还活不活跃"用）。"""
+    newest = root.stat().st_mtime
+    for p in root.rglob("*"):
+        try:
+            m = p.stat().st_mtime
+            if m > newest:
+                newest = m
+        except OSError:
+            continue
+    return newest
+
+
 def cleanup_old_scratchpads(codeagent_home=None, retention_days: int = DEFAULT_RETENTION_DAYS) -> int:
     """清理"超过 retention_days 天没动过"的旧会话涂鸦区目录。返回清了几个。
 
@@ -113,7 +133,10 @@ def cleanup_old_scratchpads(codeagent_home=None, retention_days: int = DEFAULT_R
         removed = 0
         for d in root.iterdir():
             try:
-                if d.is_dir() and d.stat().st_mtime < cutoff:
+                # 判"没动过"要扫整棵树：目录自己的 mtime 只反映直接子项
+                # 的增删，worker 只改既有文件或往子目录里写时它不刷新——
+                # 活跃涂鸦区会被误判过期删掉
+                if d.is_dir() and _newest_mtime_in_tree(d) < cutoff:
                     import shutil
                     shutil.rmtree(d)
                     removed += 1
@@ -137,7 +160,7 @@ def read_progress_file(session_id: str, codeagent_home=None) -> str:
     返回：去空白后的全文；文件不存在/读失败返回空串。
     """
     try:
-        p = scratchpad_dir(session_id, codeagent_home) / "PROGRESS.md"
+        p = scratchpad_dir(session_id, codeagent_home) / PROGRESS_FILENAME
         if not p.exists():
             return ""
         return p.read_text(encoding="utf-8", errors="replace").strip()

@@ -781,7 +781,10 @@ class AIAgent:
             return False
         from agent.goal import check_all_tasks_done
         try:
-            return check_all_tasks_done(self._goal_state)
+            return check_all_tasks_done(
+                self._goal_state,
+                getattr(self, "codeAgent_home", None),
+            )
         except Exception as e:
             logger.warning("_check_all_goal_tasks_done 查询失败（fail-open False）: %s", e)
             return False
