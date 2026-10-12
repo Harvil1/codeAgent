@@ -299,12 +299,19 @@ async def handle_function_call(
         try:
             parsed = json.loads(result) if isinstance(result, str) else None
             if isinstance(parsed, dict) and ("error" in parsed or "error_type" in parsed):
-                hooks_registry.run_post_tool_use_failure({
-                    "session_id": session_id or "",
-                    "tool": function_name,
-                    "error": parsed.get("error", ""),
-                    "error_type": parsed.get("error_type", ""),
-                })  # 这种审计钩子很轻、不等子进程，直接调就行
+                # 声明式 failure hook 会同步等子进程（hook_loader 允许配
+                # command 型），不能像原来那样直接在事件循环线程里调——
+                # 每次工具报错都把循环冻住整个子进程时长。和 pre/post 同
+                # 样挪线程执行
+                await asyncio.to_thread(
+                    hooks_registry.run_post_tool_use_failure,
+                    {
+                        "session_id": session_id or "",
+                        "tool": function_name,
+                        "error": parsed.get("error", ""),
+                        "error_type": parsed.get("error_type", ""),
+                    },
+                )
         except Exception:
             pass  # fail-open：审计失败不声张、不挡路
 

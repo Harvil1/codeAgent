@@ -329,10 +329,14 @@ def initialize_mcp(approval_callback=None) -> int:
             conn: info["cfg"] for conn, info in plugin_servers.items()
             if conn not in user_cfg
         }
+        # 先全量登记（此刻插件 server 还没连接，不会撞名），插件侧再由
+        # connect_servers_and_register 登记它自己那份——顺序反了的话这里
+        # 的无差别重注册会对每个插件工具刷一遍"重复注册"警告
+        count = register_mcp_tools(manager)
         if plugin_wanted:
             connect_servers_and_register(plugin_wanted)
 
-        return register_mcp_tools(manager)
+        return count
     except Exception as e:
         logger.warning("MCP 初始化失败: %s", e)
         return 0

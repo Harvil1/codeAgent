@@ -209,6 +209,7 @@ async def run_workflow(
     max_concurrency: int = 5,
     journal=None,          # 可选的执行日志（WorkflowJournal）；None = 不记日志
     cancel_event=None,     # run 级取消开关（kill 动作会触发它）
+    wall_timeout: Optional[float] = None,  # 墙钟超时秒数；None = 不限时
 ) -> dict:
     """执行一段受约束的工作流脚本，从校验、预算到执行全包，返回统一格式的结果。
 
@@ -223,6 +224,9 @@ async def run_workflow(
         max_concurrency：同时最多几路子代理。
         journal：WorkflowJournal 实例，用来记执行日志、支持断点恢复。
         cancel_event：外部取消事件，置位后脚本尽快停。
+        wall_timeout：整段脚本的墙钟超时。只罩得住 await 型挂死——
+            脚本里写 `while True: pass` 这种同步死循环不归它管（要防
+            得把脚本丢独立进程跑，见 sandbox_runner）。
     返回：统一结果 dict——成功 {"ok": True, "return": main 的返回值, "stats": 统计,
         "budget_spent"/"budget_total": 花销}；失败 {"ok": False, "error": 原因,
         "error_type": invalid_script/budget_exceeded/cancelled/script_error 之一}。
@@ -254,11 +258,14 @@ async def run_workflow(
             from agent.workflow_journal import call_key  # 懒加载，记 journal 的路径才触达
             key = call_key(prompt, schema)
             cached = journal.lookup(key)
-            if cached is not None:
+            # dead 条目不当缓存命中：当初那次失败多半是瞬时的，永久回放
+            # None 等于断点续跑永远不重试它（journal 的存在意义就是重试）
+            if cached is not None and cached.get("kind") != "dead":
                 out = cached.get("output")  # lookup 拿到的就是当初记下的 result dict
                 # 缓存回放也要过校验：带 schema 的调用结果必须仍是合法 JSON，
-                # 防止一条坏缓存借 resume（断点恢复）混过校验这一关
-                if schema is None or _json_parseable(out):
+                # 防止一条坏缓存借 resume（断点恢复）混过校验这一关。
+                # 先剥 ```json 围栏——模型爱包这层，live 路径同样要剥
+                if schema is None or _json_parseable(_strip_json_fence(out or "")):
                     stats["cached"] += 1
                     return out
                 # 校验不过就当没命中，重新跑一遍
@@ -274,7 +281,9 @@ async def run_workflow(
             full = prompt + (
                 "\n\n最终回答必须只输出符合此 JSON Schema 的 JSON（不要其他文字）：\n"
                 + json.dumps(schema, ensure_ascii=False))
-            check = _json_parseable
+            # 模型常把 JSON 包在 ```json 围栏里——不剥的话合法输出被判
+            # 不合格，白烧一次重试还记成 dead
+            check = lambda t: _json_parseable(_strip_json_fence(t))  # noqa: E731
         else:
             full = prompt
             check = validator
@@ -326,7 +335,15 @@ async def run_workflow(
             except Exception as e:
                 logger.warning("[workflow] parallel 项失败（置 None）: %s", e)
                 return None
-        return list(await asyncio.gather(*[_one(f) for f in factories]))
+        # 某路抛预算耗尽/取消时 gather 不会自动掐兄弟任务——不手动
+        # cancel 的话 run 已收尾、孤儿调用还在后台偷偷烧 token
+        tasks = [asyncio.ensure_future(_one(f)) for f in factories]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            raise
 
     async def pipeline(items: list, stages: list) -> list:
         """流水线（脚本里的 pipeline() 原语）：每个条目依次过一遍每个加工环节。
@@ -379,7 +396,12 @@ async def run_workflow(
         if not asyncio.iscoroutinefunction(main):
             return {"ok": False, "error": "main 不是 async 函数",
                     "error_type": "invalid_script"}
-        ret = await main()
+        if wall_timeout and wall_timeout > 0:
+            # await 型挂死的兜底（同步死循环防不了，见 run_workflow docstring）
+            async with asyncio.timeout(wall_timeout):
+                ret = await main()
+        else:
+            ret = await main()
         return {
             "ok": True, "return": ret, "stats": dict(stats),
             "budget_spent": budget.spent, "budget_total": budget.total,

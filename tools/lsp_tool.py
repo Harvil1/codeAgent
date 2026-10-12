@@ -323,6 +323,14 @@ def _handle_lsp(args: dict, **kwargs) -> str:
                                      "version": 1, "text": text},
                 })
         result = _rpc_request(method, params)
+        if result is None:
+            # 超时/断线和"真的没有结果"必须分开：折成空 results 会让模型
+            # 以为"该符号没有引用/定义"并据此改代码；顺手重置不信任的进程
+            _reset_server()
+            return json.dumps({
+                "error": f"LSP 请求超时或连接中断: {method}",
+                "error_type": "lsp_timeout",
+            }, ensure_ascii=False)
         items = result if isinstance(result, list) else ([result] if result else [])
         return json.dumps({
             "action": action,

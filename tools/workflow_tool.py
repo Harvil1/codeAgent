@@ -76,11 +76,17 @@ def _notify_completion(run_id: str, args: dict, kwargs: dict, out_json: str):
     try:
         result = json.loads(out_json)
         from tools.delegate_tool import _resolve_delegation_queue
+        ok = bool(result.get("ok"))
+        # 按 ok 挑字段：or 链会把合法的 falsy 返回值（0/""/[]）折叠成
+        # error 文案，成功的 run 被通知成失败
+        payload_text = (
+            result.get("return") if ok else (result.get("error") or "")
+        )
         _resolve_delegation_queue(kwargs).push({
             "delegation_id": run_id,
             "goal": f"workflow {args.get('name') or run_id}",
-            "success": bool(result.get("ok")),
-            "result": str(result.get("return") or result.get("error") or "")[:2000],
+            "success": ok,
+            "result": str(payload_text)[:2000],
             "completed_at": time.time(),
         })
     except Exception as e:
@@ -131,6 +137,10 @@ def _launch_detached(run_id, run_dir, source, journal, args, kwargs, *,
                 logger.warning("异常被吞(fail-open)", exc_info=True)
             _notify_completion(run_id, args, kwargs,
                                json.dumps({"ok": False, "error": str(e)}))
+        finally:
+            # 起线程到 _execute 注册前这段路也兜住：不 pop 的话注册失败/
+            # 导入报错时 status 永远 active、kill 杀个死人、LRU 永不清
+            _ACTIVE_RUNS.pop(run_id, None)
 
     # 注意：_bg 现在跑在常驻宿主循环上——其内部严禁同步调 loop_host.run_async（自等自死锁），要等异步结果用 run_async 的调用方必须先回到普通线程
     _spawn_detached(_bg(), f"workflow-{run_id}")
@@ -207,6 +217,11 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
         # 只信磁盘快照，不信任任何缓存（防投毒）；脚本 hash 对不上时在 load 内截断
         source = (run_dir / "script.py").read_text(encoding="utf-8")
         journal = WorkflowJournal.load(run_dir)
+        # 同一个 run 还在跑就不许再 resume：journal 不是线程安全的，
+        # 两份执行并发写 journal.jsonl/meta.json 会互相冲掉，预算还翻倍烧
+        if run_id in _ACTIVE_RUNS:
+            return json.dumps({"error": f"run 仍在运行: {run_id}",
+                               "error_type": "run_active"}, ensure_ascii=False)
         meta = journal.load_meta()
         # 剩余额度制：还能花的 = 总额度 - 历次累计已花，花完直接拒
         # （不然反复 resume 可以无限烧 token）
@@ -343,6 +358,11 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
             max_concurrency=max_conc,
             journal=journal,
             cancel_event=ev,
+            # 墙钟兜底（默认 1 小时，可配）：await 型挂死没有它，
+            # detached 模式会把常驻宿主循环整个冻住，kill 也永远轮不到
+            wall_timeout=float(
+                delegation.get("workflow_wall_timeout_seconds", 3600)
+            ),
         )
     finally:
         _ACTIVE_RUNS.pop(run_id, None)

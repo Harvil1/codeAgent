@@ -32,6 +32,7 @@ worktree（隔离目录 + 独立分支，好比给主对话临时开了间独立
        在拷贝里 set 不回透主循环（enter 静默失效），exit 的 reset 更会
        跨 context 直接抛 ValueError（状态机死锁）。
 """
+import asyncio
 import json
 import logging
 import re
@@ -290,7 +291,10 @@ async def _handle_worktree_enter(args: dict, **dispatch_kwargs) -> str:
 
     old_cwd = get_workspace_cwd()
     try:
-        wt = _create_session_worktree(name)
+        # git worktree add 是纯阻塞 IO（大仓库能跑几十秒），扔线程池跑
+        # 别冻住事件循环。ContextVar 的 set/clear 留在循环线程——这正是
+        # 本 handler 用 async def 的原因
+        wt = await asyncio.to_thread(_create_session_worktree, name)
     except Exception as e:
         logger.warning("worktree_enter 创建失败: %s", e, exc_info=True)
         return _err("worktree_enter", str(e), "create_failed")
@@ -343,8 +347,10 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    # keep=False 才清理，而且是聪明清理：有改动保留 + 给提示，干净才删
-    if has_worktree_changes(wt.path):
+    # keep=False 才清理，而且是聪明清理：有改动保留 + 给提示，干净才删。
+    # git status / 删目录都是阻塞 IO，同样扔线程池（ContextVar 的 clear
+    # 已经在上面循环线程里做完了）
+    if await asyncio.to_thread(has_worktree_changes, wt.path):
         return json.dumps(
             {
                 "path": str(wt.path),
@@ -359,7 +365,7 @@ async def _handle_worktree_exit(args: dict, **dispatch_kwargs) -> str:
             ensure_ascii=False,
         )
 
-    cleaned = cleanup_worktree_smart(wt.path)
+    cleaned = await asyncio.to_thread(cleanup_worktree_smart, wt.path)
     # git 模式新建的分支要连着一起删。分工规矩：
     # cleanup_worktree_smart 只删目录不删分支——分支删除由知道分支名的
     # 调用方负责，正好这里知道。

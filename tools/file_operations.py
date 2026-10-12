@@ -55,9 +55,12 @@ def _file_write_lock(path) -> Iterator[None]:
         lock = _path_write_locks.get(key)
         if lock is None:
             if len(_path_write_locks) >= _PATH_LOCK_LIMIT:
-                # 防泄漏：满了整体重置（锁只护瞬时临界区，丢了顶多
-                # 退回无锁的旧行为，不影响正确性之外的东西）
-                _path_write_locks.clear()
+                # 防泄漏：只回收当前没人持有的锁。整体 clear() 会把正在
+                # 临界区里的锁也扔掉——同路径的两个写者各拿一把新锁并发
+                # 写入，互斥这层就白设了
+                for k in [k for k, v in _path_write_locks.items()
+                          if not v.locked()]:
+                    del _path_write_locks[k]
             lock = threading.Lock()
             _path_write_locks[key] = lock
     with lock:
@@ -1060,6 +1063,11 @@ def _handle_notebook_edit(args: dict, **kwargs) -> str:
             "error": f"不是 notebook 文件（.ipynb）: {path}", "error_type": "invalid_args",
         }, ensure_ascii=False)
 
+    # 先读后编闸门：write_file/str_replace 都拦"没读过就盲改"，
+    # notebook 不该是例外
+    if not _was_recently_read(path):
+        return _must_read_first_error()
+
     with _file_write_lock(path):
             try:
                 nb = json.loads(path.read_text(encoding="utf-8"))
@@ -1124,6 +1132,9 @@ def _handle_notebook_edit(args: dict, **kwargs) -> str:
             from agent.atomic_io import atomic_write_text
             try:
                 atomic_write_text(path, json.dumps(nb, ensure_ascii=False, indent=1) + "\n")
+                # 刚改过，刷新"已读"指纹——不然下次 write_file/str_replace
+                # 会拿旧指纹误判"你没读过最新版"而拒绝
+                _read_seen_refresh(path)
             except Exception as e:
                 return json.dumps({"error": f"写回失败: {e}"}, ensure_ascii=False)
 

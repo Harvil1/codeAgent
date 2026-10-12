@@ -402,10 +402,12 @@ class StdioTransport(MCPTransport):
         import shutil
         resolved = shutil.which(self.command) or self.command
         if resolved.lower().endswith((".cmd", ".bat")):
-            # 路径含空格也不能手工加引号：列表元素交给 Popen 时
-            # list2cmdline 会自己转义，再手包一层会变成字面量的
-            # \"...\"，cmd /c 认不出命令（带空格的用户名路径必炸）
-            return ["cmd", "/c", resolved, *self.args]
+            # 直接把全路径交给 Popen，不手工包 cmd /c：CreateProcess 对
+            # .cmd/.bat 有内建路由（自动走 %COMSPEC%）。手工包 cmd /c 时
+            # 命令路径和某个参数都带引号（list2cmdline 各自转义）后，cmd
+            # 的剥引号规则会拆坏整条命令——"C:\Program Files\...\npx.cmd"
+            # 被截成 'C:\Program'，双引号一多必炸
+            return [resolved, *self.args]
         return [resolved, *self.args]
 
     def send_request(self, method: str, params: dict) -> Optional[dict]:
@@ -897,18 +899,21 @@ class SSETransport(MCPTransport):
         if self._access_token:
             probe_headers["Authorization"] = f"Bearer {self._access_token}"
         try:
-            r = self._client.get(
-                self.url, headers=probe_headers,
+            # 用流式请求只看响应头：真 SSE 端点的 GET 会永远往下推事件，
+            # 非流式 get() 要等整个 body，只能等到 ReadTimeout——把合法
+            # 端点误判成"预检异常"
+            with self._client.stream(
+                "GET", self.url, headers=probe_headers,
                 timeout=self.PREFLIGHT_TIMEOUT_S,
-            )
-            ct = r.headers.get("Content-Type", "")
-            if "event-stream" in ct.lower() or "json" in ct.lower():
-                return True, f"GET ok (ct={ct})"
-            if r.status_code == 405:
-                return True, "405 (端点存活)"
-            if r.status_code == 401:
-                return False, "401 Unauthorized"
-            return False, f"未知响应 (status={r.status_code}, ct={ct})"
+            ) as r:
+                ct = r.headers.get("Content-Type", "")
+                if "event-stream" in ct.lower() or "json" in ct.lower():
+                    return True, f"GET ok (ct={ct})"
+                if r.status_code == 405:
+                    return True, "405 (端点存活)"
+                if r.status_code == 401:
+                    return False, "401 Unauthorized"
+                return False, f"未知响应 (status={r.status_code}, ct={ct})"
         except Exception as e:
             return False, f"预检异常: {type(e).__name__}: {e}"
 

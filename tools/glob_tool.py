@@ -109,8 +109,22 @@ def _handle_glob(args: dict, **dispatch_kwargs) -> str:
                 ensure_ascii=False,
             )
 
-        # Path.glob 做匹配（模式里的 ** 表示递归进所有子目录）
-        matches = [p for p in base.glob(pattern) if p.is_file()]
+        # Path.glob 做匹配（模式里的 ** 表示递归进所有子目录）。
+        # 两道过滤：排除 .git/node_modules 等目录（与 search_files 同一
+        # 套名单，不然结果全被 VCS 噪音霸屏）；命中文件再过一次保护
+        # 路径检查——safe_path 只查了 base，** 仍会走进 ~/.ssh 这类
+        # 保护子目录
+        from tools.file_operations import _is_in_excluded_dir
+        from agent.permission import is_protected_path
+        matches = []
+        for p in base.glob(pattern):
+            if not p.is_file():
+                continue
+            if _is_in_excluded_dir(p, base):
+                continue
+            if is_protected_path(p):
+                continue
+            matches.append(p)
 
         # 按修改时间倒序（最近改的排最前）——取时间失败时容错当 0
         # （排序过程中文件可能正好被别的程序删掉）

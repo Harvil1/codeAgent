@@ -102,6 +102,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
             "error_type": "ssrf_blocked", "url": url,
         }, ensure_ascii=False)
 
+    truncated = False
     try:
         import httpx
         # 必须用 AsyncClient：本工具跑在主事件循环上，同步 get 会把
@@ -113,14 +114,37 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
             headers={"User-Agent": "CodeAgent/0.1",
                      "Accept": "text/html,text/plain,application/json,*/*"},
         ) as client:
-            resp = await client.get(url)
-        if resp.status_code in (301, 302, 303, 307, 308):
-            location = resp.headers.get("location", "")
-            return json.dumps({
-                "error": f"目标重定向到 {location}；自动跟随已关闭（防绕过内网校验），请用新 URL 重新调用",
-                "error_type": "redirect", "url": url, "location": location,
-            }, ensure_ascii=False)
-        resp.raise_for_status()
+            resp = await client.send(
+                client.build_request(url), stream=True,
+            )
+            try:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location", "")
+                    return json.dumps({
+                        "error": f"目标重定向到 {location}；自动跟随已关闭（防绕过内网校验），请用新 URL 重新调用",
+                        "error_type": "redirect", "url": url, "location": location,
+                    }, ensure_ascii=False)
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "").lower()
+                # 二进制内容（图片/视频/压缩包等）直接拒绝——模型看不了，
+                # 也免得白下载；content-type 为空按文本放行（老行为）
+                if content_type and not any(
+                        k in content_type for k in ("text/", "html", "json", "xml")):
+                    return json.dumps({
+                        "error": f"非文本内容类型: {content_type}",
+                        "error_type": "binary_content", "url": url,
+                    }, ensure_ascii=False)
+                # 流式下载边收边按 _MAX_BYTES 封顶：非流式 get 会把整个
+                # body 读进内存才返回，恶意/超大响应直接把进程吃爆
+                body = b""
+                async for chunk in resp.aiter_bytes():
+                    if len(body) + len(chunk) > _MAX_BYTES:
+                        body += chunk[: _MAX_BYTES - len(body)]
+                        truncated = True
+                        break
+                    body += chunk
+            finally:
+                await resp.aclose()
     except httpx.TimeoutException:
         return json.dumps({
             "error": f"抓取超时（{_TIMEOUT}s）", "error_type": "timeout", "url": url,
@@ -135,24 +159,7 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
             "error": f"抓取异常: {e}", "error_type": "fetch_error", "url": url,
         }, ensure_ascii=False)
 
-    content_type = resp.headers.get("content-type", "").lower()
-    body = resp.content
-    truncated = False
-    if len(body) > _MAX_BYTES:
-        body = body[:_MAX_BYTES]
-        truncated = True
-
-    # 二进制内容（图片/视频/压缩包等）直接拒绝——模型看不了，也防误收大文件
-    if not any(k in content_type for k in ("text/", "html", "json", "xml")) and content_type:
-        return json.dumps({
-            "error": f"非文本内容类型: {content_type}",
-            "error_type": "binary_content", "url": url,
-        }, ensure_ascii=False)
-
-    try:
-        text = body.decode("utf-8", errors="replace")
-    except Exception:
-        text = body.decode("latin-1", errors="replace")
+    text = body.decode("utf-8", errors="replace")
 
     # 是 HTML 网页（或长得像 HTML）就转成纯文本；本来就是纯文本就直接用
     if "html" in content_type or text.lstrip().startswith(("<", "<!doctype")):

@@ -185,6 +185,14 @@ def _handle_ask_user(args: dict, **kwargs) -> str:
         if len(options) < 2:
             return json.dumps({"error": "options 至少要 2 个"},
                               ensure_ascii=False)
+        # label 必须逐项验：面板渲染用 .get 容忍缺失，但选择后按
+        # options[i]["label"] 硬取——用户选完才炸，答案全丢
+        for o in options:
+            if not isinstance(o.get("label"), str) or not o["label"].strip():
+                return json.dumps(
+                    {"error": "每个 option 需带非空 label 字段"},
+                    ensure_ascii=False,
+                )
         norm.append({
             "question": question,
             "header": (q.get("header") or "").strip()[:12],

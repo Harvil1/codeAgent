@@ -230,11 +230,19 @@ class TeamCoordinator:
         # 然后干等：每半秒看一眼进程还在不在
         if target.pid:
             try:
-                # 简化实现：轮询查活，不引入 wait/句柄那套复杂机制
                 import time
+                # 本协调员自己拉起的进程优先用 Popen.poll()：POSIX 上
+                # 退出的子进程变僵尸，os.kill(pid,0) 照样"活着"；poll()
+                # 顺带收割，秒级确认退出。外来 pid 才退回探测法
+                local_proc = self._processes.get(name)
                 deadline = time.time() + timeout
                 while time.time() < deadline:
-                    if not _pid_alive(target.pid):
+                    exited = (
+                        (local_proc.poll() is not None
+                         if local_proc is not None
+                         else not _pid_alive(target.pid))
+                    )
+                    if exited:
                         self.update_status(name, "completed")
                         return True
                     time.sleep(0.5)

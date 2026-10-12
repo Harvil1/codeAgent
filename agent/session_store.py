@@ -398,21 +398,25 @@ class SessionStore:
         """
         msg_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        turn_index = self._compute_turn_index(session_id, role)
-        line_obj = {
-            "id": msg_id,
-            "role": role,
-            "content": content,
-            "tool_calls": tool_calls,
-            "tool_call_id": tool_call_id,
-            "name": name,
-            "timestamp": now,
-            "turn_index": turn_index,
-        }
-        # 钉住标志只在显式传参时才写（None 不落字段，老行形状不变）
-        if pinned is not None:
-            line_obj["pinned"] = pinned
+        # 轮次号要持锁算：check-then-act 在锁外跑，两个并发 append 会
+        # 拿到同一个 max_turn（轮次号重复）；_compute_turn_index 还会
+        # 顺手改 _msgs_cache/_index_cache 这些共享结构。
+        # threading.Lock 不可重入——整个读改写并成一个锁区间，别套两层
         with self._lock:
+            turn_index = self._compute_turn_index(session_id, role)
+            line_obj = {
+                "id": msg_id,
+                "role": role,
+                "content": content,
+                "tool_calls": tool_calls,
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "timestamp": now,
+                "turn_index": turn_index,
+            }
+            # 钉住标志只在显式传参时才写（None 不落字段，老行形状不变）
+            if pinned is not None:
+                line_obj["pinned"] = pinned
             # 往 .jsonl 尾部追加一行（单行小写入，在 POSIX 上小于
             # PIPE_BUF 时天然原子，不会被别的进程写穿插）。
             # 半行修补：上次进程在写入窗口被硬杀（强退的 os._exit 真实存在）
