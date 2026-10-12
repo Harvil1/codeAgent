@@ -46,17 +46,20 @@ def scan_text(text: str) -> List[Dict[str, Any]]:
     参数：
     - text：待扫描的文本
 
-    返回：命中列表，每项 {"rule": 规则 ID, "snippet": 截断到 50 字符的
-    片段}——故意不给完整值，避免报告本身变成泄露渠道。
+    返回：命中列表，每项 {"rule": 规则 ID, "snippet": 掩码片段}——
+    故意不给完整值，避免报告本身变成泄露渠道。
     """
     if not text:
         return []
     hits: List[Dict[str, Any]] = []
     for m in SECRET_RULES_RE.finditer(text):
         rule = next((k for k, v in m.groupdict().items() if v), "unknown")
+        raw = m.group(0)
         hits.append({
             "rule": rule,
-            "snippet": m.group(0)[:50],  # 截断，防报告里再次暴露完整密钥
+            # 只留头 8 个字符够定位了。AWS key 恰好 20 字符、ghp_ 40
+            # 字符，截 50 等于整条密钥进报告，违背"不二次泄露"的承诺
+            "snippet": (raw[:8] + "***") if len(raw) > 8 else "***",
         })
     return hits
 

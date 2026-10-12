@@ -404,11 +404,21 @@ def safe_path(
     # 写操作最后过白名单
     if allowed_roots is None:
         allowed_roots = default_allowed_roots()
-    allowed_roots = [Path(p).resolve() for p in allowed_roots]
+    # 逐个 resolve，坏根跳过不炸：safe_path 的契约是"永远返回判定结果"，
+    # 一个解析不了的根（坏路径/长路径）不该把整个检查掀翻
+    _resolved_roots: List[Path] = []
+    for p in allowed_roots:
+        try:
+            _resolved_roots.append(Path(p).resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    allowed_roots = _resolved_roots
 
     try:
         resolved = Path(path).expanduser().resolve()
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RuntimeError) as e:
+        # RuntimeError：家目录都确定不了的服务/定时环境里 expanduser
+        # 会抛它——按"路径解析失败"拒绝而不是炸穿调用方
         return PermissionResult(False, f"路径解析失败: {e}", "protected")
 
     for root in allowed_roots:

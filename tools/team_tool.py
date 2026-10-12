@@ -17,6 +17,7 @@ team_bus（消息总线，成员间发信的邮局）、team_coordinator（协�
 """
 import json
 import logging
+import re
 
 from tools.registry import registry
 
@@ -122,6 +123,10 @@ def _handle_team_send(args: dict, **kwargs) -> str:
     content = args.get("content")
     if not to or not content:
         return _err("to 和 content 必需", "invalid_args")
+    # 收件人名字会拼进 inbox 文件路径和锁文件名，放行 ../ 或路径
+    # 分隔符等于允许往团队目录外面写文件
+    if not re.fullmatch(r"[\w\-\u4e00-\u9fff]+", to):
+        return _err(f"非法接收者名: {to}", "invalid_args")
     try:
         mid = bus.send(
             from_=team_name, to=to,
@@ -221,6 +226,10 @@ def _handle_team_spawn(args: dict, **kwargs) -> str:
     task = args.get("task")
     if not name or not task:
         return _err("name 和 task 必需", "invalid_args")
+    # 成员名字会当目录/文件名用（roster、inbox、锁文件），只放行
+    # "像名字"的字符，防路径穿越
+    if not re.fullmatch(r"[\w\-\u4e00-\u9fff]+", name):
+        return _err(f"非法成员名: {name}", "invalid_args")
 
     # 嵌套深度检查：帮手也能再招帮手，但不能无限套娃——
     # 当前层数达到上限就直接拒绝

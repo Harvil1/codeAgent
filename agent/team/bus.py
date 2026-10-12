@@ -104,7 +104,10 @@ def _with_lock(lock_path: Path, fn):
     （各个调用点外面都已包了 try/except）。
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w", encoding="utf-8") as lf:
+    # 锁文件永远用追加模式打开：截断式 "w" 在 Windows 上对别人正持有
+    # 锁的文件会直接 PermissionError——异常从 open() 本身抛出，下面的
+    # 等待重试逻辑根本轮不到跑（锁文件内容本来也没人读）
+    with open(lock_path, "a", encoding="utf-8") as lf:
         try:
             _acquire_lock(lf)
         except TimeoutError as e:

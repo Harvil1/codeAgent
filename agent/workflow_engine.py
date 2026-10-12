@@ -57,6 +57,33 @@ class WorkflowBudget:
         """还剩多少可用（总额减已花减在途；负数按 0 算）。"""
         return max(0, self.total - self.spent - self.reserved)
 
+
+class _BudgetView:
+    """给 workflow 脚本看的预算只读视图。
+
+    把 WorkflowBudget 本体递进脚本的话，一句 budget.total = 10**12
+    就能把"硬上限"改没了——AST 安检查不出普通属性赋值。
+    """
+
+    def __init__(self, b: "WorkflowBudget"):
+        self._b = b
+
+    @property
+    def total(self) -> int:
+        return self._b.total
+
+    @property
+    def spent(self) -> int:
+        return self._b.spent
+
+    @property
+    def reserved(self) -> int:
+        return self._b.reserved
+
+    @property
+    def remaining(self) -> int:
+        return self._b.remaining
+
     def reserve(self, tokens: int) -> int:
         """跑之前先预留一笔额度，返回实际批下来的数（可能比要的少）。
 
@@ -342,7 +369,9 @@ async def run_workflow(
         "__builtins__": SAFE_BUILTINS,
         "agent": call_agent, "parallel": parallel, "pipeline": pipeline,
         "phase": phase, "log": log,
-        "args": args or {}, "budget": budget,
+        # 脚本只能看不能改：本体给了的话 budget.total = 10**12 一句
+        # 就把花费封顶拆了
+        "args": args or {}, "budget": _BudgetView(budget),
     }
     try:
         exec(compile(source, "<workflow>", "exec"), ns)  # noqa: S102 —— exec 本身危险，但这之前已过 AST 安检且 builtins 被换成白名单

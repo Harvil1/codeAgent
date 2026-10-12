@@ -198,6 +198,22 @@ def update_settings(patch: Dict[str, Any]) -> None:
         atomic_write_text(path, json.dumps(merged, ensure_ascii=False, indent=2))
 
 
+def _locked_write(mutate) -> None:
+    """持文件锁做一次 settings.json 的读-改-写（内部用）。
+
+    多个写入方真的会并发（/add-dir 审批、MCP 首连审批、config_set、
+    /skin、/model……）：不加锁的话后写者整文件覆盖，先写者的改动
+    被静默冲掉——比如一次 MCP 审批把刚加的写白名单冲没。
+    """
+    from agent.file_lock import exclusive_file_lock
+    from constants import get_codeagent_home
+
+    with exclusive_file_lock(get_codeagent_home() / ".settings.lock"):
+        data = load_settings()
+        mutate(data)
+        save_settings(data)
+
+
 # ---------------------------------------------------------------------------
 # 写路径"总是允许"白名单的持久化（/add-dir 命令走的就是这一通道）
 # ---------------------------------------------------------------------------
@@ -217,18 +233,19 @@ def persist_extra_allowed_root(root: str) -> bool:
     """
     from pathlib import Path as _Path
 
-    data = load_settings()
-    sec = data.get("security")
-    if not isinstance(sec, dict):
-        sec = {}
-        data["security"] = sec
-    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
     target = str(_Path(root).expanduser().resolve())
-    if target in roots or root in roots:
-        return False
-    roots.append(target)
-    sec["extra_allowed_roots"] = roots
-    save_settings(data)
+
+    def _mutate(data: Dict[str, Any]) -> None:
+        sec = data.get("security")
+        if not isinstance(sec, dict):
+            sec = {}
+            data["security"] = sec
+        roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
+        if target not in roots and root not in roots:
+            roots.append(target)
+        sec["extra_allowed_roots"] = roots
+
+    _locked_write(_mutate)
     return True
 
 
@@ -244,22 +261,20 @@ def remove_extra_allowed_root(root: str) -> bool:
     """
     from pathlib import Path as _Path
 
-    data = load_settings()
-    sec = data.get("security")
-    if not isinstance(sec, dict):
-        return False
-    roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
-    if not roots:
-        return False
     try:
         target = str(_Path(root).expanduser().resolve())
     except (OSError, ValueError):
         target = root
-    new_roots = [r for r in roots if not (r == root or _same_path(r, target))]
-    if len(new_roots) == len(roots):
-        return False
-    sec["extra_allowed_roots"] = new_roots
-    save_settings(data)
+
+    def _mutate(data: Dict[str, Any]) -> None:
+        sec = data.get("security")
+        if not isinstance(sec, dict):
+            return
+        roots = [r for r in (sec.get("extra_allowed_roots") or []) if isinstance(r, str)]
+        new_roots = [r for r in roots if not (r == root or _same_path(r, target))]
+        sec["extra_allowed_roots"] = new_roots
+
+    _locked_write(_mutate)
     return True
 
 
@@ -312,16 +327,18 @@ def persist_project_mcp_approval(key: str) -> None:
     参数：
         key：审批键，同 is_project_mcp_approved。
     """
-    data = load_settings()
-    mcp_sec = data.get("mcp")
-    if not isinstance(mcp_sec, dict):
-        mcp_sec = {}
-        data["mcp"] = mcp_sec
-    keys = [str(k) for k in (mcp_sec.get("approved_project_servers") or [])]
-    if key not in keys:
-        keys.append(key)
-    mcp_sec["approved_project_servers"] = keys
-    save_settings(data)
+
+    def _mutate(data: Dict[str, Any]) -> None:
+        mcp_sec = data.get("mcp")
+        if not isinstance(mcp_sec, dict):
+            mcp_sec = {}
+            data["mcp"] = mcp_sec
+        keys = [str(k) for k in (mcp_sec.get("approved_project_servers") or [])]
+        if key not in keys:
+            keys.append(key)
+        mcp_sec["approved_project_servers"] = keys
+
+    _locked_write(_mutate)
 
 
 def server_cfg_fingerprint(cfg: dict) -> str:
@@ -627,18 +644,24 @@ def set_default_model(name: str) -> bool:
     # 新模式：llm 段里得有对应档位的模型名
     llm_cfg = settings.get("llm", {})
     if llm_cfg:
-        if llm_cfg.get(f"{name}_model"):
-            settings["default_model"] = name
-            save_settings(settings)
-            return True
-        return False
+        if not llm_cfg.get(f"{name}_model"):
+            return False
+
+        def _mutate(data: Dict[str, Any]) -> None:
+            data["default_model"] = name
+
+        _locked_write(_mutate)
+        return True
 
     # 老模式：models 段里得有这个键
-    if name in settings.get("models", {}):
-        settings["default_model"] = name
-        save_settings(settings)
-        return True
-    return False
+    if name not in settings.get("models", {}):
+        return False
+
+    def _mutate(data: Dict[str, Any]) -> None:
+        data["default_model"] = name
+
+    _locked_write(_mutate)
+    return True
 
 
 def add_model(name: str, config: Dict[str, Any]) -> bool:
@@ -651,9 +674,10 @@ def add_model(name: str, config: Dict[str, Any]) -> bool:
     返回：
         bool——目前恒为 True（同名会直接覆盖旧配置）。
     """
-    settings = load_settings()
-    settings.setdefault("models", {})[name] = config
-    save_settings(settings)
+    def _mutate(data: Dict[str, Any]) -> None:
+        data.setdefault("models", {})[name] = config
+
+    _locked_write(_mutate)
     return True
 
 

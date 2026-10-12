@@ -715,7 +715,9 @@ class PermissionChecker:
         # 带复合操作符/重定向的命令不走前缀免审(防前半段匹配掩护后半段)
         from agent.command_prefix import is_prefix_match_safe
         if is_prefix_match_safe(cmd_key):
-            for p in self._persistent_prefixes:
+            # 快照迭代：审批线程在锁内往这个 set 加前缀时，别的线程
+            # 裸迭代会抛 "Set changed size during iteration" 直接炸掉 check()
+            for p in tuple(self._persistent_prefixes):
                 if cmd_key == p or cmd_key.startswith(p + " "):
                     return PermissionResult(True, "已批准（前缀规则）", "approval")
 

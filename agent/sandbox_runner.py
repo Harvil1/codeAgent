@@ -263,7 +263,9 @@ def sandbox_description() -> str:
 # 直接撞 EROFS（curl/git 的惯用写法全废），由 --dev 立自带基础节点的临时盘。
 _BWRAP_RO_DIRS = [
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
-    "/etc", "/proc", "/sys",
+    "/etc", "/sys",
+    # 注意 /proc 不在这里：它走下面的 --proc /proc（沙箱自带）——
+    # 挂宿主机的 /proc 会让沙箱看见宿主全部进程
     # /tmp 特殊处理：不挂宿主机的 /tmp（那里面可能有敏感东西），改用沙箱
     # 内部自带的临时内存盘（tmpfs）
 ]
@@ -287,7 +289,13 @@ def _bwrap_wrap(
     """
     # --die-with-parent：父进程（我们）死了，沙箱里的命令陪葬；
     # --new-session：新会话，脱离当前终端的控制（防终端信号干扰）
-    argv: List[str] = ["bwrap", "--die-with-parent", "--new-session"]
+    # --unshare-pid/--unshare-ipc：独立 PID/IPC 命名空间——只隔离文件
+    # 系统不隔离进程的话，沙箱里的命令看得见宿主机全部进程、还能对
+    # 同 UID 进程发信号（一条 kill -9 就能绕过沙箱干掉 agent 自己）
+    argv: List[str] = [
+        "bwrap", "--die-with-parent", "--new-session",
+        "--unshare-pid", "--unshare-ipc",
+    ]
 
     # 系统目录只读挂载（只挂真实存在的，不存在会报错）
     for d in _BWRAP_RO_DIRS:
@@ -299,6 +307,10 @@ def _bwrap_wrap(
     # random/urandom/tty）的临时盘，读写都行——ro-bind 的只读 /dev
     # 连 >/dev/null 都容不下
     argv += ["--dev", "/dev"]
+
+    # /proc 用沙箱自带的（配 --unshare-pid）：ro-bind 宿主 /proc 的
+    # 话 pid 编号和命名空间对不上，ps/kill 全是错位数据
+    argv += ["--proc", "/proc"]
 
     # /tmp 用沙箱内部的临时内存盘，和宿主机的 /tmp 隔开
     # 注意：当 cwd 本身就在 /tmp 下时跳过这一步——
@@ -441,8 +453,14 @@ def _write_seatbelt_profile(
     all_writable = [cwd] + [r for r in writable_roots if r and r != cwd]
     rules = []
     for root in all_writable:
-        # subpath 语义：这个目录本身和它下面的所有内容都允许写
-        rules.append(f'(allow file-write* (subpath "{_seatbelt_escape_path(root)}"))')
+        # subpath 按解析后的真实路径匹配；macOS 的 /tmp、/var 都是
+        # 符号链接（真实路径 /private/tmp、/private/var），不先 resolve()
+        # 归一的话规则匹配不上，合法写入全被 deny 误伤
+        try:
+            resolved_root = str(Path(root).resolve())
+        except OSError:
+            resolved_root = root
+        rules.append(f'(allow file-write* (subpath "{_seatbelt_escape_path(resolved_root)}"))')
     write_rules_block = "\n".join(rules) if rules else ";; (无额外可写路径)"
 
     content = _SEATBELT_PROFILE_TEMPLATE.format(write_rules=write_rules_block)

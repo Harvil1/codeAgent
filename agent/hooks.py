@@ -946,6 +946,15 @@ class HookRegistry:
         """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.POST_TOOL_USE_FAILURE]:
+            # 声明式 hook 同样吃 if/once 过滤（与 pre/post 事件口径一致）
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
+                if not self._matches_if_condition(
+                        hook, payload.get("tool") or "",
+                        {"error": payload.get("error"),
+                         "error_type": payload.get("error_type")}):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     hook.fn(payload)
@@ -955,6 +964,7 @@ class HookRegistry:
                         tool=payload.get("tool"), error=payload.get("error"),
                         error_type=payload.get("error_type"),
                     )
+                    self._mark_consumed_if_once(hook)
             except Exception as e:
                 logger.warning("POST_TOOL_USE_FAILURE hook %s 异常: %s", hook.name, e)
 
@@ -1081,6 +1091,17 @@ class HookRegistry:
         """
         session_id = payload.get("session_id", "") or ""
         for hook in self._hooks[HookEvent.PERMISSION_REQUEST]:
+            # 声明式 hook 吃 if/once 过滤（hook_loader 允许给这个事件配
+            # 条件）——不过滤的话配了 if 的 hook 每次权限事件都白起一个
+            # 子进程，once 也拦不住
+            if hook.kind == "declarative":
+                if self._is_consumed(hook):
+                    continue
+                if not self._matches_if_condition(
+                        hook, "permission",
+                        {"command": payload.get("command"),
+                         "reason": payload.get("reason")}):
+                    continue
             try:
                 if hook.kind == "programmatic":
                     hook.fn(payload)
@@ -1089,6 +1110,7 @@ class HookRegistry:
                         hook, session_id, "permission_request",
                         command=payload.get("command"), reason=payload.get("reason"),
                     )
+                    self._mark_consumed_if_once(hook)
             except Exception as e:
                 logger.warning("PERMISSION_REQUEST hook %s 异常: %s", hook.name, e)
 

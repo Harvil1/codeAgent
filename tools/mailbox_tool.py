@@ -19,6 +19,7 @@ _mailbox / _agent_name 字段（RuntimeContext 里创建信箱，
 - mailbox_clear：isConcurrencySafe=False（要删信，不能并发）
 """
 import json
+import re
 
 from tools.registry import registry
 
@@ -102,13 +103,28 @@ def _handle_mailbox_send(args: dict, **kwargs) -> str:
         return json.dumps(
             {"error": "mailbox not configured", "error_type": "not_configured"}
         )
+    to = args.get("to")
+    content = args.get("content")
+    if not to or not content:
+        return json.dumps(
+            {"error": "to 和 content 必需", "error_type": "invalid_args"},
+            ensure_ascii=False,
+        )
+    # 收件人名字会拼进信箱文件路径（.mailboxes/<名>/inbox.jsonl），
+    # 只放行"像名字"的字符——带 ../ 或分隔符的名字能把信写到
+    # 信箱目录外面
+    if not re.fullmatch(r"[\w\-\u4e00-\u9fff]+", to):
+        return json.dumps(
+            {"error": f"非法收件人名: {to}", "error_type": "invalid_args"},
+            ensure_ascii=False,
+        )
     msg_id = mailbox.send(
-        to=args["to"],
+        to=to,
         from_=agent_name,
-        content=args["content"],
+        content=content,
         kind=args.get("kind", "message"),
     )
-    return json.dumps({"msg_id": msg_id, "to": args["to"]})
+    return json.dumps({"msg_id": msg_id, "to": to})
 
 
 def _handle_mailbox_check(args: dict, **kwargs) -> str:

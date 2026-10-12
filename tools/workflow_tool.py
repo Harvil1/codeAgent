@@ -308,10 +308,18 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
 
     config = kwargs.get("config") or {}
     delegation = config.get("delegation") or {}
-    budget = int(budget_total or args.get("budget_total")
-                 or delegation.get("workflow_budget_total", 500_000))
-    max_conc = int(args.get("max_concurrency")
-                   or delegation.get("max_concurrent_children", 5))
+    # LLM 传的预算/并发只能往下压不能往上抬：配置里的上限是用户兜底的
+    # 花费封顶，tool 参数可被提示注入驱动，不能凌驾于配置之上
+    _budget_ceiling = int(delegation.get("workflow_budget_total", 500_000))
+    _conc_ceiling = int(delegation.get("max_concurrent_children", 5))
+    if budget_total is not None:
+        # resume 传进来的是"剩余额度"，本身已受控，不再夹逼
+        budget = int(budget_total)
+    else:
+        budget = min(int(args.get("budget_total") or _budget_ceiling),
+                     _budget_ceiling)
+    max_conc = min(int(args.get("max_concurrency") or _conc_ceiling),
+                   _conc_ceiling)
 
     ev = cancel_event or threading.Event()  # 要跨线程可 set；detached 复用预注册的
     _ACTIVE_RUNS[run_id] = ev

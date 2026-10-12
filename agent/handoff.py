@@ -206,7 +206,14 @@ def _scan_for_secrets(transcript: List[dict]) -> List[Dict[str, Any]]:
     matches: List[Dict[str, Any]] = []
     for idx, msg in enumerate(transcript):
         content = msg.get("content")
-        if not isinstance(content, str):
+        if isinstance(content, list):
+            # content 是块列表（Anthropic 形态 [{"type": "text", ...}]）时
+            # 展开文本块再扫——直接跳过的话藏在块里的密钥就漏检了
+            content = "\n".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        if not isinstance(content, str) or not content:
             continue
         for hit in scan_text(content):
             matches.append({
