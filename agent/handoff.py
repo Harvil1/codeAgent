@@ -552,8 +552,11 @@ class HandoffStore:
             )
 
         existing_id = data.get("bundle_id", "")
-        # 同 ID 撞车就换个新 ID，别覆盖本地已有的
-        if (self._handoff_dir / f"{existing_id}.json").exists():
+        # bundle 是外部文件：ID 缺失、带路径分隔符/..、或和本地撞车，
+        # 一律换成本机新生成的 ID——原样拼路径会把文件写到移交目录外
+        if (not existing_id
+                or "/" in existing_id or "\\" in existing_id or ".." in existing_id
+                or (self._handoff_dir / f"{existing_id}.json").exists()):
             new_id = _generate_id()
             data["bundle_id"] = new_id
         else:

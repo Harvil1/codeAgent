@@ -29,12 +29,25 @@ POST_LLM_CALL 程序式 hook，LLM 每回一次话就立刻落盘该轮 assistan
 
 import json
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# agent_id 是 LLM 工具参数里也能出现的字符串：只放行
+# sub-xxx 这种 ID 形状，路径分隔符和 .. 一律拒收，
+# 否则能把读写顶到 .agent-sessions 目录外面
+_AGENT_ID_RE = re.compile(r"^sub-[A-Za-z0-9_-]+$")
+
+
+def _safe_agent_path(agent_id: str, suffix: str) -> Path:
+    """验过 agent_id 再拼存储路径（suffix 是 .jsonl / .meta.json）。"""
+    if not _AGENT_ID_RE.match(agent_id or ""):
+        raise ValueError(f"非法 agent_id: {agent_id!r}")
+    return _sessions_dir() / f"{agent_id}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +101,7 @@ def write_metadata(agent_id: str, meta: dict) -> None:
     try:
         from agent.atomic_io import atomic_write_text_lite
 
-        path = _sessions_dir() / f"{agent_id}.meta.json"
+        path = _safe_agent_path(agent_id, ".meta.json")
         payload = {
             **meta,
             "agent_id": agent_id,
@@ -113,7 +126,7 @@ def load_metadata(agent_id: str) -> Optional[dict]:
         元数据 dict；文件不存在或读挂了返回 None（fail-open）。
     """
     try:
-        path = _sessions_dir() / f"{agent_id}.meta.json"
+        path = _safe_agent_path(agent_id, ".meta.json")
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
@@ -136,7 +149,7 @@ def append_message(agent_id: str, message: dict) -> None:
     返回：无。写失败只打 warning（fail-open，不打断子代理干活）。
     """
     try:
-        path = _sessions_dir() / f"{agent_id}.jsonl"
+        path = _safe_agent_path(agent_id, ".jsonl")
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(message, ensure_ascii=False) + "\n")
     except Exception as e:
@@ -153,7 +166,7 @@ def load_transcript(agent_id: str) -> List[dict]:
         消息 dict 列表；文件不存在或读挂了返回空列表（fail-open）。
     """
     try:
-        path = _sessions_dir() / f"{agent_id}.jsonl"
+        path = _safe_agent_path(agent_id, ".jsonl")
         if not path.exists():
             return []
         msgs = []

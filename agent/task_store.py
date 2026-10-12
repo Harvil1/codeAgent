@@ -17,6 +17,7 @@
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +80,10 @@ class TaskStore:
 
     def _task_file(self, task_id: str) -> Path:
         """由任务 id 拼出它的 JSON 文件路径。"""
+        # id 是 LLM 也能给的字符串：先验格式再拼路径，
+        # 否则 ../config 这类输入能把读写顶出 .tasks 目录
+        if not re.fullmatch(r"task_[0-9a-f]{12}", task_id or ""):
+            raise ValueError(f"非法任务 ID: {task_id}")
         return self._dir / f"{task_id}.json"
 
     def _write(self, task_id: str, task: dict) -> None:

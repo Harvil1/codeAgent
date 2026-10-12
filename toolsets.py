@@ -193,8 +193,9 @@ ASYNC_AGENT_DISALLOWED_TOOLS = frozenset({
     "mailbox_send",
     # 把任务标记为完成（后台子代理不该擅自推进全局任务图）
     "task_complete",
-    # 再派子代理（防套娃式无限派生）
-    "subagent",
+    # 再派子代理（防套娃式无限派生）。delegate_task 是同一能力的
+    # 第二个注册名（Task/Agent 别名也指向它），不一起拉黑等于没拦
+    "subagent", "delegate_task",
     # 定时任务（后台子代理不该注册/删除 cron）
     "cron_create", "cron_delete",
     # 挂起等待（后台子代理不该进入 IDLE 状态干扰团队协调）

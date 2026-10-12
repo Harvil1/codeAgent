@@ -679,7 +679,7 @@ def _handle_search_files(args: dict, **kwargs) -> str:
 
     # search_files 必须先过 safe_path 安检——不过的话
     # 能把 ~/.ssh/id_rsa 私钥的内容片段搜出来
-    from agent.permission import safe_path
+    from agent.permission import safe_path, is_protected_path
     perm = safe_path(search_path, write=False)
     if not perm.allowed:
         return json.dumps({
@@ -709,6 +709,12 @@ def _handle_search_files(args: dict, **kwargs) -> str:
         # 否则第 2 页可能重复或漏掉第 1 页的内容
         for file_path in sorted(search_path.glob(file_glob)):
             if not file_path.is_file():
+                continue
+            # safe_path 只查搜索根本身，罩不住递归搜出来的子路径——
+            # 搜索根是 ~ 这类放行目录时 **/* 仍会走进 ~/.ssh 等保护
+            # 目录，每个文件单独再过一次保护检查
+            if is_protected_path(file_path):
+                files_skipped += 1
                 continue
             # 默认跳过 .git/.venv/__pycache__/node_modules 这些目录（除非显式要求搜）
             if not include_hidden and _is_in_excluded_dir(file_path, search_path):

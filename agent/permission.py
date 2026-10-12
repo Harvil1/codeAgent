@@ -215,10 +215,15 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
     if not in_self:
         return None
 
-    if re.search(r"\buv\s+add\b", command, re.IGNORECASE):
-        return "在 CodeAgent 自身目录内 uv add 会修改自身依赖(pyproject.toml),禁止 agent 操作"
-    if re.search(r"\bpip\d?\s+install\b", command, re.IGNORECASE):
-        return "在 CodeAgent 自身目录内 pip install 会污染自身 venv,禁止 agent 操作"
+    # 原文和剥引号归一化形态都查:'uv' add pkg 这种动词带引号的写法
+    # 只查原文会漏
+    for variant in (command, _quote_normalized(command) or ""):
+        if not variant:
+            continue
+        if re.search(r"\buv\s+add\b", variant, re.IGNORECASE):
+            return "在 CodeAgent 自身目录内 uv add 会修改自身依赖(pyproject.toml),禁止 agent 操作"
+        if re.search(r"\bpip\d?\s+install\b", variant, re.IGNORECASE):
+            return "在 CodeAgent 自身目录内 pip install 会污染自身 venv,禁止 agent 操作"
     return None
 
 
@@ -230,20 +235,58 @@ def check_self_modification(command: str, cwd: Optional[str] = None) -> Optional
 # - _FATAL_IRREVERSIBLE_PATTERNS(闸门 0 的子检查) 任何模式下都拒绝——
 #   是绕不过去的"硬底线",保住系统不被彻底搞坏
 _FATAL_IRREVERSIBLE_PATTERNS: List[str] = [
-# rm -rf / 根目录(递归删掉整个文件系统)
-    # 注意:只能命中"根目录本身",不能误伤 /home、/tmp/x 这类子路径。
-    # 拆成两条:第一条要求 rm -rf / 后面紧跟空格或行尾(排除 /home 等非根路径);
-    # 第二条专门兜底显式的 --no-preserve-root(都写这个参数了,无论后面跟
-    # 什么都是致命操作)。
-    r"\brm\s+-rf\s+/(?:\s|$)",
-    r"\brm\s+-rf\s+/\s+--no-preserve-root",
     r"\bmkfs\b",                                    # mkfs 格式化文件系统
     r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;",        # fork bomb :(){ :|:& };(自我复制的死循环,拖垮整机;容忍空格变体)
-    r"\bdd\s+if=.*of=/dev/[sh]d",                   # dd 直接往物理磁盘设备写数据(整盘覆盖)
+    # dd 直接往物理磁盘设备写数据(整盘覆盖)。of= 指向裸设备就是致命,
+    # 跟前面有没有 if= 无关;设备名覆盖 sd/hd/nvme/vd/mmcblk
+    r"\bdd\s+[^\n]*of=/dev/(?:sd|hd|nvme|vd|mmcblk)",
 ]
 _FATAL_IRREVERSIBLE_RE: List["re.Pattern"] = [
     re.compile(p) for p in _FATAL_IRREVERSIBLE_PATTERNS
 ]
+
+# rm 的致命目标:整棵 / 根目录或整个家目录。按 token 精确比对,
+# /home、/tmp/x、~/project 这类子路径不会误伤
+_RM_FATAL_TARGETS = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/*"}
+
+
+def _is_fatal_rm(command: str) -> bool:
+    """判断命令里有没有 rm 递归强删 / 或 ~ 整棵树。
+
+    为什么不走正则:flag 换序(-fr)、分组(-r -f)、长选项(--recursive
+    --force)、引号包裹('rm' -rf '/')这些变体一条正则罩不住,拆成
+    token 逐个判才稳。bypassPermissions 模式下这道检查是唯一防线,
+    漏一个变体就是真放行。
+    """
+    # 复合命令按 &&/||/;/|/& 劈段,各段独立判定
+    for segment in re.split(r"\s*(?:&&|\|\||[;|&])\s*", command or ""):
+        seen_rm = False
+        has_r = has_f = target_seen = False
+        for raw in segment.split():
+            tok = raw.strip("\"'")
+            low = tok.lower()
+            if low == "rm" or low.endswith("/rm"):
+                # 段内第二次遇到 rm 按新命令重新起算
+                if seen_rm and has_r and has_f and target_seen:
+                    return True
+                seen_rm, has_r, has_f, target_seen = True, False, False, False
+                continue
+            if not seen_rm:
+                continue
+            if tok in _RM_FATAL_TARGETS:
+                target_seen = True
+            elif tok.startswith("-"):
+                body = tok.lstrip("-").lower()
+                if body == "no-preserve-root":
+                    # 显式要求摘掉根目录保护,配 -r 就是铁了心删 /
+                    has_f = True
+                if "recursive" in body or "r" in body:
+                    has_r = True
+                if "force" in body or "f" in body:
+                    has_f = True
+        if seen_rm and has_r and has_f and target_seen:
+            return True
+    return False
 
 
 def check_fatal_irreversible(command: str) -> Optional[str]:
@@ -263,8 +306,17 @@ def check_fatal_irreversible(command: str) -> Optional[str]:
 
     返回:命中返回拒绝原因文字,没命中返回 None。
     """
-    for pat in _FATAL_IRREVERSIBLE_RE:
-        if pat.search(command):
+    # 原文和剥引号归一化两种形态并集判定:'rm' -rf / 这类把动词/目标
+    # 包进引号的写法只查原文会漏
+    variants = [command or ""]
+    normalized = _quote_normalized(command or "")
+    if normalized and normalized not in variants:
+        variants.append(normalized)
+    for variant in variants:
+        for pat in _FATAL_IRREVERSIBLE_RE:
+            if pat.search(variant):
+                return f"系统级不可逆命令（任何模式都拒绝）: {command}"
+        if _is_fatal_rm(variant):
             return f"系统级不可逆命令（任何模式都拒绝）: {command}"
     return None
 
@@ -280,7 +332,10 @@ _SAFE_FS_VERBS = {"mkdir", "touch", "mv", "cp", "rm", "del"}
 # curl 部分照样会被 shell 执行)。这种命令必须交回原审批闸门。
 # 另追加:${ / <( / >( / =(（注入面形态——rm ${X} 展开后的目标不受
 # "必须在工作目录内"这条校验控制,进程替换更是直接执行子 shell）,acceptEdits 不自动批。
-_SHELL_OPS = ("&&", "||", ";", "|", "`", "$(", "${", "<(", ">(", "=(")
+# 单个 & 和换行 \n \r 也是命令分隔符:漏了它们,`touch x\nsudo -n id` 会被
+# 逐 token 当成 cwd 内的路径放行,后半段走私的命令照样执行
+_SHELL_OPS = ("&&", "||", ";", "|", "`", "$(", "${", "<(", ">(", "=(",
+              "&", "\n", "\r")
 
 
 def _is_safe_fs_in_cwd(command: str, cwd: Optional[str]) -> bool:

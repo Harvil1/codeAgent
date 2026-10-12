@@ -396,6 +396,15 @@ class ToolRegistry:
                     "error": f"工具 {name} 被 settings.json permissions.deny 规则拒绝",
                     "error_type": "permission_denied",
                 }, ensure_ascii=False)
+            # 调用方 config 里的 disabled_tools 一起拦：黑名单工具（如后台
+            # 子代理的防套娃名单）平时靠可见性过滤藏起来，但模型手写
+            # tool_call 不走可见层，dispatch 这里是最后一道闸
+            _cfg = kwargs.get("config")
+            if isinstance(_cfg, dict) and name in (_cfg.get("disabled_tools") or []):
+                return json.dumps({
+                    "error": f"工具 {name} 被当前 agent 配置（disabled_tools）禁用",
+                    "error_type": "permission_denied",
+                }, ensure_ascii=False)
         except Exception as e:
             logger.error("deny 规则加载失败，dispatch 层防御本调用失效（fail-open）: %s", e)
 

@@ -86,16 +86,40 @@ async def _handle_web_fetch(args: dict, **kwargs) -> str:
             "error_type": "invalid_url",
         }, ensure_ascii=False)
 
+    # SSRF 预检：url 是模型运行时可控的，不验就能去摸云元数据/内网服务
+    # 再把内容带回对话。防线内部出错也按拒绝处理（fail-closed）
+    try:
+        from agent.ssrf_guard import validate_url_for_ssrf
+        reason = validate_url_for_ssrf(url)
+    except Exception as e:
+        return json.dumps({
+            "error": f"SSRF 防护校验异常，拒绝抓取: {e}",
+            "error_type": "ssrf_blocked", "url": url,
+        }, ensure_ascii=False)
+    if reason:
+        return json.dumps({
+            "error": f"URL 被 SSRF 防护拒绝: {reason}",
+            "error_type": "ssrf_blocked", "url": url,
+        }, ensure_ascii=False)
+
     try:
         import httpx
         # 必须用 AsyncClient：本工具跑在主事件循环上，同步 get 会把
         # 循环独占整个下载期（live 面板/后台协程全部冻结）
+        # 自动跟随重定向关死：一个 302 就能把预检过的安全 URL 弹进
+        # 内网地址。跳转信息原样带回，让模型拿新 URL 重新过预检
         async with httpx.AsyncClient(
-            timeout=_TIMEOUT, follow_redirects=True,
+            timeout=_TIMEOUT, follow_redirects=False,
             headers={"User-Agent": "CodeAgent/0.1",
                      "Accept": "text/html,text/plain,application/json,*/*"},
         ) as client:
             resp = await client.get(url)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("location", "")
+            return json.dumps({
+                "error": f"目标重定向到 {location}；自动跟随已关闭（防绕过内网校验），请用新 URL 重新调用",
+                "error_type": "redirect", "url": url, "location": location,
+            }, ensure_ascii=False)
         resp.raise_for_status()
     except httpx.TimeoutException:
         return json.dumps({

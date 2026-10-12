@@ -23,6 +23,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import re
 from typing import Optional
 
 from tools.registry import registry
@@ -372,6 +373,14 @@ def _handle_subagent_resume(args: dict, **dispatch_kwargs) -> str:
     if not agent_id:
         return json.dumps(
             {"error": "agent_id 不能为空",
+             "error_type": "invalid_args"},
+            ensure_ascii=False,
+        )
+    # agent_id 来自 LLM 参数：只认 sub-xxx 的 ID 形状，
+    # 路径分隔符/.. 借持久化层把文件写到任意位置
+    if not re.fullmatch(r"sub-[A-Za-z0-9_-]+", agent_id):
+        return json.dumps(
+            {"error": f"非法 agent_id: {agent_id}",
              "error_type": "invalid_args"},
             ensure_ascii=False,
         )
