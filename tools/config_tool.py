@@ -180,6 +180,15 @@ def _coerce_value(value, current):
     ValueError/TypeError，由调用方包装成 invalid_args 错误返回。
     """
     if isinstance(current, bool):
+        # bool 键传了字符串要按字符串真值解析：bool("false") 是 True，
+        # 模型想把开关关掉反而被存成开
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("true", "1", "yes", "on"):
+                return True
+            if v in ("false", "0", "no", "off", ""):
+                return False
+            raise ValueError(f"无法把 {value!r} 解释为 bool")
         return bool(value)
     if isinstance(current, int):
         return int(value)

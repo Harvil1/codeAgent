@@ -73,10 +73,15 @@ def _handle_ctx_inspect(args: dict, **kwargs) -> str:
         except Exception:
             cache_stats = {}
 
-        # 4. 从配置读压缩水位线，算出现在的用量百分比
+        # 4. 压缩水位线要和自动压缩的真实判定同口径（自适应阈值）：
+        # 读原始配置值的话，64k 窗口的模型实际 58k 就触发压缩，这里却
+        # 还报 58% 说"不用动"——模型照建议行事就跟自动管线打架
         config = getattr(agent, "config", {}) or {}
         ctx_cfg = config.get("context", {}) if isinstance(config, dict) else {}
-        llm_threshold = ctx_cfg.get("llm_compact_token_threshold", 100000)
+        from agent.context_pipeline import _effective_llm_compact_threshold
+        llm_threshold = _effective_llm_compact_threshold(
+            ctx_cfg, getattr(agent, "model", None),
+        )
         pct = int(est_tokens / llm_threshold * 100) if llm_threshold else 0
 
         # 5. 给建议：用量到 70% 就该压了，到 50% 可以考虑剪，否则不用动

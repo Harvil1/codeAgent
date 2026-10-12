@@ -66,7 +66,10 @@ class PromptState:
     tool_hashes: List[ToolHashEntry] = field(default_factory=list)
 
 
-# 模块级状态（沿用 brief 的约定：一个进程一个会话，切会话时整体重置）
+# 模块级状态（沿用 brief 的约定：一个进程一个会话）。
+# 已知局限：子代理（delegate/team）也在本进程内调 LLM，它们和主对话
+# 共用这一份基线，交叉对比可能出假阳性/漏报——要彻底解决得按 agent
+# 维度分仓，这里先保证"子代理启动不清主对话的账"（见 has_baseline）
 _last_state: Optional[PromptState] = None
 _last_cache_read: Optional[int] = None
 _pending_compaction: bool = False  # 刚做过压缩，下次缓存下降是预期内的
@@ -530,3 +533,13 @@ def reset_cache_monitor() -> None:
     _pending_compaction = False
     _break_history = []
     _last_baseline_at = None
+
+
+def has_baseline() -> bool:
+    """本进程是否已经记过 prompt 基线。
+
+    AIAgent.__init__ 用它区分"本进程第一个 agent"（真会话开始，该重置）
+    和"进程内另起的子代理"（delegate/team 都这样）——后者重置会把主
+    对话刚记的基线和缓存破坏统计全部冲掉。
+    """
+    return _last_state is not None or bool(_break_history)

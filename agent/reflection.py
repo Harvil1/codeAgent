@@ -247,10 +247,18 @@ def _normalize_insights(result: list) -> List[dict]:
     for item in result:
         if not isinstance(item, dict):
             continue
-        t = item.get("type", "")
-        name = item.get("name", "").strip()
-        desc = item.get("description", "").strip()
-        if t not in valid_types or not name or not desc:
+        # 字段类型先验：LLM 给 null/数字时 .strip() 直接 AttributeError，
+        # 一条坏值会把整批有效经验连坐丢掉（fail-open 承诺是"跳过坏条"）
+        t = item.get("type")
+        name = item.get("name")
+        desc = item.get("description")
+        if not isinstance(t, str) or t not in valid_types:
+            continue
+        if not isinstance(name, str) or not isinstance(desc, str):
+            continue
+        name = name.strip()
+        desc = desc.strip()
+        if not name or not desc:
             continue  # 必需字段缺失，跳过
         # 信心分：夹进 [0,1]；LLM 给了垃圾值（非数字）兜底 0.8——
         # 别让一条坏值炸掉整批反思
@@ -264,11 +272,11 @@ def _normalize_insights(result: list) -> List[dict]:
             "type": t,
             "name": name[:60],  # 防 LLM 给超长标题
             "description": desc[:80],
-            "summary": (item.get("summary") or "").strip()[:200],
-            "body": (item.get("body") or "").strip(),
+            "summary": str(item.get("summary") or "").strip()[:200],
+            "body": str(item.get("body") or "").strip(),
             # 这两键先前被弄丢（只留五键）→ 推翻机制死代码，必须带齐
             "confidence": confidence,
-            "supersedes": (item.get("supersedes") or "").strip(),
+            "supersedes": str(item.get("supersedes") or "").strip(),
         })
     return valid
 

@@ -8,6 +8,7 @@ agent/context_pipeline.py 的 llm_compact。）
 """
 import json
 import logging
+from pathlib import Path
 
 from tools.registry import registry
 
@@ -18,7 +19,7 @@ COMPACT_SCHEMA = {
     "name": "compact",
     "description": (
         "主动压缩对话历史。当觉得对话太长、之前查的信息已经不需要细节时调用。"
-        "压缩后:之前的对话被总结成摘要,保留最近 10 条消息。"
+        "压缩后:之前的对话被总结成摘要,保留最近 30 条消息。"
         "**适合场景**:做了多轮查结构/读文件后准备动手写、长任务中段节省 context。"
         "**注意**:调这个工具时不要同时调其他工具。"
         "**partial 压缩**:可传 from_idx/up_to_idx 只压中段,保留头尾原文。"
@@ -108,6 +109,21 @@ async def _handle_compact(args: dict, **kwargs) -> str:
 
     # 压缩引擎自带"超过阈值才压"的检查，这里把阈值设成 0，
     # 相当于"我让你压你就必须压"，跳过它的犹豫。
+    # 有损压缩前先存 transcript 快照（与自动 L4 路径同一纪律）：
+    # llm_compact 是有损的，没快照原文就真找不回来了
+    _snapshot = None
+    try:
+        from agent.transcript import snapshot_if_needed
+        from constants import get_codeagent_home
+        _snapshot = snapshot_if_needed(
+            full_messages,
+            agent_home=Path(getattr(agent, "codeAgent_home", None)
+                            or get_codeagent_home()),
+            session_id=getattr(agent, "session_id", "") or "default",
+            force=True, enabled=True,
+        )
+    except Exception as e:
+        logger.warning("compact 前 transcript snapshot 失败: %s", e)
     from agent.context_pipeline import llm_compact
     new_messages, changed = await llm_compact(
         full_messages,
@@ -118,6 +134,7 @@ async def _handle_compact(args: dict, **kwargs) -> str:
         from_idx=from_idx,
         up_to_idx=up_to_idx,
         focus_hint=focus,  # schema 承诺的"重点保什么"真接进摘要 prompt
+        transcript_path=str(_snapshot) if _snapshot else None,
     )
 
     if not changed:

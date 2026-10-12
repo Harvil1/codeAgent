@@ -338,10 +338,13 @@ class AIAgent:
             reset_llm_observer_state()
         except Exception as e:
             logger.warning("reset_llm_observer_state 失败（fail-open）: %s", e)
-        # 新会话重置缓存监控状态（防上个会话的基线数据污染本会话）
+        # 新会话重置缓存监控状态（防上个会话的基线数据污染本会话）。
+        # 只在"本进程还没有基线"时重置：子代理（delegate/team）也在本
+        # 进程内建 AIAgent，无条件重置会把主对话刚记的基线和统计全冲掉
         try:
-            from agent.cache_monitor import reset_cache_monitor
-            reset_cache_monitor()
+            from agent.cache_monitor import reset_cache_monitor, has_baseline
+            if not has_baseline():
+                reset_cache_monitor()
         except Exception as e:
             logger.warning("reset_cache_monitor 失败（fail-open）: %s", e)
         # 从 config 读「diff 文件列表」的 LRU 上限，传给缓存监控

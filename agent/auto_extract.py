@@ -35,11 +35,18 @@ logger = logging.getLogger(__name__)
 # 单次提取的条数上限（对齐 reflection 的"防堆积"语义——宁少勿滥）
 MAX_EXTRACT_ITEMS = 3
 
-# 匹配"像文件路径"的 token：形如 path/to/file.py 或裸的 file.py
-# （必须带扩展名；分隔符兼容跨平台）。
-# 注意：目录段允许为零——测试里裸文件名（fake_path.py）也必须查证，
-# 所以用 * 不用 +（纯单词没扩展名的仍然不验，避免误伤普通词）。
-_PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z]{1,4}")
+# 先整段剥掉 URL（含 scheme）：不剥的话会从 example.com/docs/x.html
+# 里截出 "com/docs/x.html" 这种半截当路径
+_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://\S+")
+# 多段相对路径：a/b.py 形态（至少一个目录分隔符）
+_PATH_TOKEN_RE = re.compile(r"(?:[\w.\-]+/)+[\w.\-]+\.[A-Za-z]{1,4}")
+# 裸文件名：只认"代码/文档味"的扩展名，且词干小写（file.py、fake_path.py
+# 照验）。词干大写的不算——Node.js / Vue.js 这类技术名会被当成路径，
+# 提到它们的条目整条被误丢；e.g / i.e 这类单字母缩写同理不匹配
+_BARE_FILE_RE = re.compile(
+    r"(?<![\w.\-])[a-z0-9_\-]{2,}[a-z0-9_\-]*\."
+    r"(?:py|js|ts|tsx|jsx|md|json|ya?ml|toml|txt|sh|ps1|cfg|ini)\b"
+)
 
 
 def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
@@ -57,8 +64,14 @@ def _filter_verified_items(items: List[dict], base_dir: str) -> List[dict]:
     base = Path(base_dir) if base_dir else Path.cwd()
     kept = []
     for item in items:
-        text = f"{item.get('body', '')} {item.get('summary', '')}"
-        paths = _PATH_TOKEN_RE.findall(text)
+        # 四个文本字段一起扫：name/description 是 L0 索引字段，编造路径
+        # 出现在这里和出现在正文一样有害
+        text = " ".join(
+            str(item.get(k) or "")
+            for k in ("name", "description", "body", "summary")
+        )
+        text = _URL_RE.sub(" ", text)
+        paths = _PATH_TOKEN_RE.findall(text) + _BARE_FILE_RE.findall(text)
         ok = True
         for p in paths:
             cand = Path(p)
@@ -97,6 +110,7 @@ async def run_auto_extract(agent, start_idx: int) -> int:
             REFLECTION_PROMPT_TEMPLATE,
             build_memory_manifest,
             extract_trajectory,
+            _norm_key,
         )
         trajectory = extract_trajectory(messages)
         if not trajectory.strip():
@@ -124,6 +138,16 @@ async def run_auto_extract(agent, start_idx: int) -> int:
             base_dir = ""
         items = _filter_verified_items(items, base_dir)
         valid_types = {"user", "feedback", "project", "reference"}
+        # 同名判重（对齐 reflection 的做法）：自提取是没复核的通道，
+        # 同名直接覆盖会把用户确认过的记忆改写得面目全非还保着 ⭐
+        existing_keys = set()
+        try:
+            existing_keys = {
+                (e.type, _norm_key(e.name))
+                for e in memory_store.list_all()
+            }
+        except Exception:
+            existing_keys = set()
         saved = 0
         for item in items[:MAX_EXTRACT_ITEMS]:
             try:
@@ -131,6 +155,13 @@ async def run_auto_extract(agent, start_idx: int) -> int:
                 name = (item.get("name") or "").strip()
                 desc = (item.get("description") or "").strip()
                 if t not in valid_types or not name or not desc:
+                    continue
+                if (t, _norm_key(name)) in existing_keys:
+                    continue  # 已有同名记忆：不覆写，留给反思/用户通道
+                if str(item.get("supersedes") or "").strip():
+                    # "推翻旧记忆"的条目要走 reflection 的两阶段处理（旧条
+                    # 降权+标注）；自提取没有这道工序，存成普通新条目只会
+                    # 新旧并存互相打架
                     continue
                 memory_store.save(
                     name=name[:60],

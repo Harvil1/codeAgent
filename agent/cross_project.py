@@ -66,7 +66,10 @@ def auto_save_current_session(
         bundle_id = handoff_store.save(
             transcript=agent.conversation_history,
             source_session_id=getattr(agent, "session_id", None),
-            model=getattr(agent, "model", {"main": "deepseek-chat"}),
+            # model 字段消费方按 dict 读（.get("name")/.get("provider")），
+            # agent.model 是纯字符串——传配置里的 model 节，别让 /handoff
+            # load 时 AttributeError
+            model=(getattr(agent, "config", None) or {}).get("model", {}),
             title=title,
             source_cwd=source_cwd or str(Path.cwd()),
             auto_saved=True,

@@ -311,7 +311,13 @@ def snip_compact(
         and (_has_tool_calls(conv[head_end - 1]) or _is_tool_result(conv[head_end - 1]))
     )
     if needs_extend:
-        while head_end < len(conv) and _is_tool_result(conv[head_end]):
+        # 上限收到 tail 区间起点：一次 fan-out 产出上百条连续工具结果时，
+        # 不设上限 head_end 会一路推进越过 tail_start，head/tail 切片
+        # 重叠——消息被复制两份（重复 tool_call_id 直接 API 400）
+        while (
+            head_end < len(conv) - keep_last
+            and _is_tool_result(conv[head_end])
+        ):
             head_end += 1
 
     # 尾部边界成对保护：尾部开头若是工具结果，它对应的 assistant(tool_calls) 一定在
@@ -369,7 +375,11 @@ def micro_compact(
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if not tool_indices:
         return messages, False
-    protected = set(tool_indices[-keep_recent:])  # 最近 keep_recent 条工具结果受保护
+    # keep_recent=0 是"谁都不保护"：[-0:] 等于全量切片，会把所有结果
+    # 保护起来（L2 整层静默失效），按 0 处理成空集
+    protected = (
+        set(tool_indices[-keep_recent:]) if keep_recent > 0 else set()
+    )  # 最近 keep_recent 条工具结果受保护
 
     folded = 0
     out = []
