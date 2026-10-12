@@ -136,7 +136,12 @@ def start_tool_batch_summary(agent, tool_calls, safe_processed, unsafe_processed
             items.append((tc.function.name, str(content)[:300]))
         if not items:
             return
-        # 上一批的任务还没跑完 → 直接覆盖（新摘要取代旧的，符合「看最新」语义）
+        # 上一批的任务还没跑完 → 先取消再起新的。不取消的话新旧两个
+        # 摘要并发、完成顺序不定，慢的旧批后落笔会把新摘要覆盖成过期的
+        # （「后到的覆盖先到的」语义靠的是取消，不是运气）
+        old_task = getattr(agent, "_tool_summary_task", None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
         # 用 _spawn_detached 跑：submit 到常驻宿主循环（进回合栅栏
         # 豁免名单），不会被回合收尾当遗留清掉
         agent._tool_summary_task = _spawn_detached(

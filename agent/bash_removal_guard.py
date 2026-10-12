@@ -113,6 +113,9 @@ def _is_readonly_git(toks: list) -> bool:
     """
     if len(toks) < 2:
         return False
+    # 全局 flag -C <dir> 跳过再取子命令（git -C repo log 的子命令是 log）
+    if toks[1] == "-C" and len(toks) >= 4:
+        toks = ["git"] + toks[3:]
     sub = toks[1].lower()
     if sub in ("config",) and len(toks) >= 3 and toks[2] in ("-l", "--list"):
         return True
@@ -136,26 +139,60 @@ def _has_cd_git_combo(command: str) -> bool:
 
     返回:True 表示存在"cd 之后的 git"且不是只读命令。
     """
+    # 注意不能做"段数 < 2 就早退"的优化：git -C <dir> 这种单段形态
+    # 也要查（它和 cd 完再跑 git 等价）
     segs = _CMD_SEGMENT_SPLIT_RE.split(command)
-    if len(segs) < 2:
-        return False
     saw_cd = False
     for seg in segs:
         toks = seg.split()
         if not toks:
             continue
-        verb = toks[0].lower().strip("\"'")
-        if verb == "cd":
+        # 剥前导左括号：(cd x && git pull) 这种子 shell 写法的动词
+        # 带着 "("，不剥就认不出 cd；pushd 和 cd 语义等价
+        verb = toks[0].lower().strip("\"'(")
+        if verb in ("cd", "pushd"):
             saw_cd = True
             continue
         if verb == "git" or (verb == "xargs" and "git" in toks):
-            if saw_cd and not _is_readonly_git(toks):
+            # git -C <dir> 子命令和"cd 完再跑 git"完全等价（同样加载
+            # 该仓库的配置和 core.fsmonitor），-C 紧跟 git 就是这种形态
+            git_with_c = verb == "git" and len(toks) > 1 and toks[1] == "-C"
+            if (saw_cd or git_with_c) and not _is_readonly_git(toks):
                 return True
     return False
 # Windows del/rd 的斜杠式选项(/s /q);注意别把 /usr 这种真路径也当成选项。
 # 第二分支要求恰好一个字母——裸 "/"（0 字母）不是选项，那是 rm -rf / 的
 # 根目标，跳过它等于本层漏拦（R14 终审发现；修复前 ^/[A-Za-z]?$ 的 ? 放走裸 /）
 _CMD_FLAG_RE = re.compile(r"^-[A-Za-z]*$|^/[A-Za-z]$")
+
+
+def _norm_removal_verb(tok: str) -> str:
+    """把一个 token 归一成删除动词：剥路径前缀、剥引号、剥 .exe 后缀。"""
+    return (
+        tok.replace("\\", "/").split("/")[-1]
+        .lower().removesuffix(".exe").strip("'\"(")
+    )
+
+
+def _targets_dangerous(target_toks: list, base_dir: str, seg: str) -> Optional[str]:
+    """对删除动词后面的参数逐个做危险路径判定（原 check 循环抽出来）。"""
+    for tok in target_toks:
+        if _CMD_FLAG_RE.match(tok):
+            continue
+        t = tok.strip("'\"")
+        if not t:
+            continue
+        if t == "*":
+            return f"危险删除目标（通配符 *）: {seg.strip()}"
+        try:
+            p = Path(t).expanduser()
+            resolved = p if p.is_absolute() else (Path(base_dir) / p)
+            rp = str(Path(str(resolved)).resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue  # 解析失败的 token 不硬拦,交给其他闸门处理
+        if is_dangerous_removal_path(rp):
+            return f"危险删除目标: {rp}"
+    return None
 
 
 def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional[str]:
@@ -179,23 +216,27 @@ def check_dangerous_removal(command: str, cwd: Optional[str] = None) -> Optional
         toks = seg.split()
         if not toks:
             continue
-        verb = toks[0].replace("\\", "/").split("/")[-1].lower()
-        if verb not in _REMOVAL_VERBS:
+        verb = _norm_removal_verb(toks[0])
+        if verb in _REMOVAL_VERBS:
+            reason = _targets_dangerous(toks[1:], base_dir, seg)
+            if reason:
+                return reason
             continue
-        for tok in toks[1:]:
-            if _CMD_FLAG_RE.match(tok):
-                continue
-            t = tok.strip("'\"")
-            if not t:
-                continue
-            if t == "*":
-                return f"危险删除目标（通配符 *）: {seg.strip()}"
-            try:
-                p = Path(t).expanduser()
-                resolved = p if p.is_absolute() else (Path(base_dir) / p)
-                rp = str(Path(str(resolved)).resolve())
-            except (OSError, ValueError, RuntimeError):
-                continue  # 解析失败的 token 不硬拦,交给其他闸门处理
-            if is_dangerous_removal_path(rp):
-                return f"危险删除目标: {rp}"
+        # xargs rm …:删除动词挂在 xargs 后面（xargs 把前面的输出
+        # 喂给它），目标参数照查
+        if verb == "xargs":
+            for i, t in enumerate(toks[1:], 1):
+                if _norm_removal_verb(t) in _REMOVAL_VERBS:
+                    reason = _targets_dangerous(toks[i + 1:], base_dir, seg)
+                    if reason:
+                        return reason
+                    break
+            continue
+        # sh -c "rm …":内层命令整体递归查一遍，别让一层引号
+        # 把删除动词藏过这道"审批也解不了锁"的底线
+        if verb in ("sh", "bash", "zsh") and len(toks) >= 2 \
+                and toks[1] in ("-c", "/c"):
+            reason = check_dangerous_removal(" ".join(toks[2:]), base_dir)
+            if reason:
+                return reason
     return None

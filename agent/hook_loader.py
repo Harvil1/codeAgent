@@ -228,6 +228,21 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
         logger.warning("hook '%s' 未知 type '%s'，跳过", name, ht)
         return None
 
+    once = h_cfg.get("once", False)
+    # once 的消费语义只在下面这些事件上兑现；挂到别的事件（如
+    # session_start/file_changed）会永远重复触发——跟 if 挂错事件一样
+    # 大声警告并忽略，别让配置静默失效
+    _once_supported = {
+        "user_prompt_submit", "pre_tool_use", "post_tool_use",
+        "post_tool_use_failure", "permission_request", "stop",
+    }
+    if once and event.value not in _once_supported:
+        logger.warning(
+            "hook '%s' (event %s) 不支持 once，忽略该标志",
+            name, event.value,
+        )
+        once = False
+
     return Hook(
         name=name,
         event=event,
@@ -235,6 +250,6 @@ def _parse_hook(h_cfg: dict, event: HookEvent):
         script=script,
         fail_closed=h_cfg.get("fail_closed", False),
         # if 条件过滤（借用 permission rule 的写法，详见 agent/hook_filter.py）
-        once=h_cfg.get("once", False),  # 一次性 hook——触发一次后自动失效
+        once=once,  # 一次性 hook——触发一次后自动失效
         use_sandbox=h_cfg.get("use_sandbox", False),  # 给 hook 进程套 OS 沙箱再跑
     )

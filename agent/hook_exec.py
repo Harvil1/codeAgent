@@ -707,7 +707,8 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
             "（cli.py 未调 set_aux_router_provider）",
             hook.name,
         )
-        return None
+        return _fail_closed_or_none(
+            hook, f"prompt hook {hook.name} aux router 未注入")
 
     # 必须用 format_map + _SafeFormatDict 这种"安全填充"——
     # payload 缺字段时保留 {field} 原样继续渲染（裸 .format(**payload)
@@ -757,7 +758,10 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
             hook, f"prompt hook {hook.name} LLM 评估失败: {e}")
 
     if not resp:
-        return None
+        # fail_closed 的 hook 空响应也必须闭合——这是 gating 判决，
+        # 漏风就是放行
+        return _fail_closed_or_none(
+            hook, f"prompt hook {hook.name} LLM 返回空响应")
 
     # 响应格式不保证统一：可能是纯字符串 / OpenAI 风格的 dict / 响应对象
     text = ""
@@ -781,10 +785,15 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             parsed = json.loads(m.group(0))
-            return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        logger.warning("异常被吞(fail-open)", exc_info=True)
-    return None
+            if isinstance(parsed, dict):
+                return parsed
+        reason = f"prompt hook {hook.name} 回答不是 JSON dict"
+    except Exception as e:
+        logger.warning("prompt hook %s 回答 JSON 解析失败: %s", hook.name, e)
+        reason = f"prompt hook {hook.name} 回答 JSON 解析失败: {e}"
+    # "小模型输出非 JSON" 是 gating hook 最常见的失败形态——
+    # fail_closed 的判决在这里必须闭合，不能裸放行
+    return _fail_closed_or_none(hook, reason)
 
 
 # ============================================================================
@@ -802,7 +811,8 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
     hook 配置里的 prompt 是目标模板（.format(**payload) 填空）；
     agent_name 透传给 _run_child（自定义子代理名，可不填）。
     返回：子代理输出里解析出的 dict；解析不出 JSON 时返回
-    {"decision": "review", "raw": 前 500 字}（宁可让人复审，别当放行）。
+    {"action": "ask", "raw": 前 500 字}（宁可转人工审批，别当放行——
+    判决层只认 action 键，早年的 decision:review 会被当成默认放行）。
 
     已知约束（设计取舍）：hook_exec 是模块级函数、没有父 agent 上下文，
     所以调 _run_child 时不传 config/agent_ref。后果：
@@ -855,5 +865,11 @@ def run_agent_hook(hook, payload: dict) -> Optional[dict]:
             if isinstance(parsed, dict):
                 return parsed
     except Exception:
-        logger.warning("异常被吞(fail-open)", exc_info=True)
-    return {"decision": "review", "raw": result[:500]}
+        logger.warning("agent hook %s 输出 JSON 解析失败", hook.name, exc_info=True)
+    # 判决层只认 action 键：兜底必须用 ask（转审批），decision:review
+    # 会落进默认分支被当 allow 静默放行
+    return {
+        "action": "ask",
+        "reason": "agent hook 输出解析不出 JSON，转人工审批",
+        "raw": result[:500],
+    }

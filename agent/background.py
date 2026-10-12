@@ -379,7 +379,12 @@ class BackgroundManager:
         """
         task = self._tasks.get(task_id)
         is_monitor = bool(task and task.monitor)
+        # detach 且非 monitor 的任务 stdout 已重定向到文件（proc.stdout
+        # 是 None）——读线程没法开工，队列永远没输出，45 秒后必对健康
+        # 任务误报"卡死"，模型可能照提示把好任务杀了。这类走经典路径
         if stall_timeout > 0 or is_monitor:
+            if proc.stdout is None:
+                return self._watch_classic(task_id, proc, timeout)
             return self._watch_with_stall(
                 task_id, proc, timeout,
                 stall_timeout if stall_timeout > 0 else 30.0,

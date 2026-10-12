@@ -1263,6 +1263,12 @@ class AIAgent:
                 }.get(goal_decision, LoopExitReason.COMPLETED),
                 api_calls=api_call_count,
             )
+            # 循环只在顶上评估忙闲：goal 在本轮内完成/退出的话没人再
+            # release，CLI 停在输入提示符期间机器会一直睡不着——收尾补一刀
+            try:
+                self._update_prevent_sleep()
+            except Exception:
+                pass
             return final_content
 
         # ---------- 循环结束（预算耗尽或中断）----------
@@ -3062,6 +3068,11 @@ class AIAgent:
         返回：兜底回复文本（同时已入历史、已触发对应钩子）。
         """
         self._emit_loop_exit_trace(turn_exit_reason)
+        # 异常退场同样补一次忙闲评估（防休眠锁别带出循环外）
+        try:
+            self._update_prevent_sleep()
+        except Exception:
+            pass
         if turn_exit_reason == LoopExitReason.INTERRUPTED:
             fallback = "[已被用户中断]"
         elif turn_exit_reason == LoopExitReason.MODEL_ERROR:

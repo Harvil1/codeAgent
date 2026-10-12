@@ -656,9 +656,13 @@ def check_injection_surface(command: str) -> Optional[str]:
         _ro_sub = substitutions_all_readonly(command)
     except Exception:
         _ro_sub = False
+    # $() 形态单独记一个句柄：只读豁免只对它开口子——find 不带
+    # -exec/-delete 替换不出执行面。其余形态（=( / (e: / ~[ / ${ …）
+    # 就算 readonly 判定碰巧放行也照常全查，防御不能押在单点上
+    _dollar_paren_re = re.compile(r"\$\(")
     for pattern, desc in _SUBSTITUTION_PATTERNS:
         if pattern.search(with_dq):
-            if _ro_sub:
+            if _ro_sub and pattern is _dollar_paren_re:
                 continue
             return desc
 

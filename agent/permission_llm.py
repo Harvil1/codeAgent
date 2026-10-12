@@ -84,10 +84,13 @@ _DANGEROUS_CLASSIFIER_PREFIXES = frozenset({
     # 解释器
     "python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl",
     "php", "lua",
+    # py 是 Windows 的 Python 启动器，py -c 和 python -c 完全同构
+    # （Windows 优先的项目里这是最常用的入口，漏了等于白表）
+    "py",
     # 包 runner
     "npx", "bunx", "npm run", "yarn run", "pnpm run", "bun run",
-    # shell（Git Bash/WSL 跨平台可达）
-    "bash", "sh", "zsh", "fish",
+    # shell（Git Bash/WSL 跨平台可达；powershell/pwsh/cmd 是 Windows 本机入口）
+    "bash", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
     # 远程任意命令包装
     "ssh",
     # 任意代码执行/提权原语

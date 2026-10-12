@@ -366,7 +366,14 @@ async def _summarize_conversation(
 
     # === fork 前缀复用（先试它，失败降级独立调用路径）===
     if fork_prefix_messages and not summary_model:
-        fork_messages = strip_media_blocks(fork_prefix_messages) + [
+        # 前缀必须先剥内部字段（_timestamp/_ephemeral）再发：带着发的话
+        # 严格端直接 400，宽松端（DeepSeek）则因前缀字节和主调用不一致
+        # 永远命不中想复用的缓存——fork 白搭。context_pipeline 会回
+        # import 本模块，这里函数内延迟 import 防循环
+        from agent.context_pipeline import strip_internal_fields
+        fork_messages = strip_internal_fields(
+            strip_media_blocks(fork_prefix_messages)
+        ) + [
             {"role": "user", "content": prompt},
         ]
         try:

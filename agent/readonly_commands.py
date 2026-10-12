@@ -66,6 +66,11 @@ _READONLY_FORBIDDEN_TOKENS = (
     "--output",
 )
 
+# 按整词禁用的参数。"-o" 这类短旗标不能进上面的子串表——"--oneline"
+# 含 "-o" 会被误伤。sort -o <file> 是把结果写进指定文件（输出重定向的
+# 参数形态），必须拦
+_READONLY_FORBIDDEN_WORDS = ("-o",)
+
 # 复合命令切分(按 && || ; | & 后台 换行 这些分隔符切开)+ 子命令替换
 # ($() 反引号)+ 重定向(> >>)的正则。
 # & 后台分隔和换行分隔也要切——切完逐段判只读,
@@ -75,7 +80,11 @@ _SUBSHELL_RE = re.compile(r"\$\(|`")
 # 进程替换形态 <( ) >( )——实测 bashlex 把它和 $() 分开识别,
 # 正则层也得单独拦一道
 _PROCSUB_RE = re.compile(r"[<>]\(")
-_REDIRECT_RE = re.compile(r"(?:^|\s|\d)>{1,2}(?:&\d+)?")
+# 重定向形态：任意位置的 > >> 都算（>&2 这类并流也裹进来）。
+# 老写法只认"前面是空白/数字/行首"的 >，`echo x>f`、`cat a>b` 这种
+# 紧贴单词的重定向匹配不上——命令会走只读快速通道免审批写任意文件。
+# 误伤（引号里的比较符 > 之类）只是多问一次审批，方向保守可接受
+_REDIRECT_RE = re.compile(r">{1,2}(?:&\d+)?")
 
 # 无害重定向：丢到 /dev/null（或并流 2>&1）不写任何真实文件。
 # 大白话：`ls xx 2>/dev/null` 只是"报错别吵"，不该因为这个丢掉只读
@@ -113,6 +122,8 @@ def _is_readonly_segment(seg: str) -> bool:
     for token in _READONLY_FORBIDDEN_TOKENS:
         if token in lowered:
             return False
+    if any(t in _READONLY_FORBIDDEN_WORDS for t in lowered.split()):
+        return False
     for prefix in _READONLY_PREFIXES:
         if lowered == prefix or lowered.startswith(prefix + " "):
             return True
@@ -148,6 +159,8 @@ def _tokens_readonly(tokens: List[str]) -> bool:
     for token in _READONLY_FORBIDDEN_TOKENS:
         if token in joined:
             return False
+    if any(t in _READONLY_FORBIDDEN_WORDS for t in rest):
+        return False
     for prefix in _READONLY_PREFIXES:
         p = prefix.split()
         if rest[: len(p)] == p:

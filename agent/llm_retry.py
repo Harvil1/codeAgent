@@ -685,18 +685,21 @@ def merge_usage_tokens(final_usage, retried):
     return merged
 
 
-def _usage_namespace(d: Optional[dict]):
+def _usage_namespace(d: Optional[dict], *, includes_cache: Optional[bool] = None):
     """把 merge_usage_tokens 产出的 dict 包成各消费方都认的对象。
 
     record_llm_usage / cache 监控按属性名取数（DeepSeek 名和 Anthropic
     名各试一遍），namespace 里两种名都放上，谁读都不落空。
+    两名并存时按名判语义必判错，所以要带上 prompt_tokens_includes_cache
+    显式标记（同 llm_streaming 合成侧），includes_cache 不明时留空让
+    消费方走原生命名启发式。
     """
     from types import SimpleNamespace
     if not isinstance(d, dict) or not d:
         return None
     cache_read = d.get("cache_read", 0) or 0
     cache_creation = d.get("cache_creation", 0) or 0
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         prompt_tokens=d.get("prompt_tokens", 0) or 0,
         completion_tokens=d.get("completion_tokens", 0) or 0,
         total_tokens=d.get("total_tokens", 0) or 0,
@@ -708,6 +711,9 @@ def _usage_namespace(d: Optional[dict]):
         prompt_cache_miss_tokens=cache_creation,
         cache_creation_input_tokens=cache_creation,
     )
+    if includes_cache is not None:
+        ns.prompt_tokens_includes_cache = includes_cache
+    return ns
 
 
 async def recover_output_truncation(agent, response, messages, tool_schemas):
@@ -796,7 +802,14 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
             )
             return merge_continuation_response(
                 response, resp, accumulated, finished=True,
-                usage_override=_usage_namespace(merged_usage),
+                usage_override=_usage_namespace(
+                    merged_usage,
+                    # 不带标记的话双名并存会被锚点判读误判成 Anthropic，
+                    # DeepSeek 的缓存 token 被双倍计入、压缩提前触发
+                    includes_cache=(
+                        getattr(agent, "model_format", "openai") != "anthropic"
+                    ),
+                ),
             )
         local_messages = list(local_messages) + [
             {"role": "assistant", "content": piece},
@@ -806,7 +819,12 @@ async def recover_output_truncation(agent, response, messages, tool_schemas):
         logger.warning("续写恢复 %d 次后仍截断，返回已拼接内容", limit)
     return merge_continuation_response(
         response, None, accumulated, finished=False,
-        usage_override=_usage_namespace(merged_usage),
+        usage_override=_usage_namespace(
+            merged_usage,
+            includes_cache=(
+                getattr(agent, "model_format", "openai") != "anthropic"
+            ),
+        ),
     )
 
 
