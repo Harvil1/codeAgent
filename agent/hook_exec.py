@@ -719,7 +719,9 @@ def run_prompt_hook(hook, payload: dict) -> Optional[dict]:
     full_prompt = (
         f"{prompt_text}\n\n"
         f"payload: {json.dumps(payload, ensure_ascii=False)}\n"
-        '返回 JSON：{"permissionDecision": "allow"|"deny", "reason": "..."}'
+        # 返回契约必须是 action：分发层（hooks._invoke_declarative_pre_tool）
+        # 只认这个键——让模型回 permissionDecision 的话 deny 会被静默当 allow
+        '返回 JSON：{"action": "allow"|"deny", "reason": "..."}'
     )
 
     # chat_completions 是 async 的（aux_llm 公开契约：跨线程同步等结果一律

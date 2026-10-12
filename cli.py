@@ -2929,9 +2929,13 @@ def _handle_poor_command(args: str, rt) -> bool:
             rt._poor_config_snapshot = _copy_mod.deepcopy(rt.config)
         rt.config = apply_poor_preset(rt.config, on=True)
         rt._poor_mode_on = True
+        # reflection 的开关是 agent 构造时的快照，光改 config 关不住
+        # 已经活着的 agent——把快照属性也翻掉
+        if getattr(rt, "agent", None) is not None:
+            rt.agent._reflection_enabled = False
         console.print(
             "[green]Poor Mode 已开启（runtime）[/green] "
-            "[dim]（reflection/9段摘要/cache监控等已关；/poor off 可回滚）[/dim]"
+            "[dim]（reflection/记忆自动提取已关；/poor off 可回滚）[/dim]"
         )
         return True
     if arg == "off":
@@ -2940,6 +2944,11 @@ def _handle_poor_command(args: str, rt) -> bool:
         if snapshot is not None:
             rt.config = snapshot
             rt._poor_config_snapshot = None
+            # reflection 快照属性跟着回滚后的配置还原
+            if getattr(rt, "agent", None) is not None:
+                rt.agent._reflection_enabled = (
+                    (rt.config or {}).get("reflection", {}).get("enabled", True)
+                )
             console.print(
                 "[green]Poor Mode 已关闭，配置已回滚到开启前[/green]"
             )

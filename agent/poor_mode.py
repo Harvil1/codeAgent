@@ -1,16 +1,15 @@
 """Poor Mode（省钱模式）：一键关掉所有"额外花 LLM token"的功能。
 
-平时跑的很多功能（反思、摘要、记忆提取……）都要额外调 LLM，每次调用都花钱。
-用户想省 token 时打开这个模式，7 个烧钱开关一次性全关。
+平时跑的很多功能（反思、记忆提取……）都要额外调 LLM，每次调用都花钱。
+用户想省 token 时打开这个模式，烧钱开关一次性全关。
 
 关闭清单（都是"锦上添花"型功能，关了不影响核心对话）：
 - reflection 引擎（事后复盘总结经验的辅助 LLM 调用）
-- 9 段式摘要（上下文压缩时改用简单拼接，不请 LLM 写结构化摘要）
 - auto memory 提取（自动从对话里挖记忆）
-- cache 监控（统计 prompt 缓存命中情况）
-- verification 子代理（结果复核代理）
-- Curator 维护（后台整理技能/记忆库）
-- reactive_compact（出错后的紧急上下文压缩）
+
+注意：这里只登记真正有运行时读取点的开关。曾经的 9 段摘要 / cache
+监控 / verification / curator / reactive_compact 五个键在对应子系统里
+已经没有读取点（写了等于没关），等哪天真接上读取点再登记回来。
 
 绝不关的安全底线：fatal 拦截（rm -rf / 任何模式下都拒绝）、路径白名单
 （safe_path）、异步子代理自动拒绝审批（autoDeny）、基础 LLM 重试。
@@ -27,19 +26,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# 7 个开关：点号分隔的配置键 → 要设成的值（这里全是 False = 全关）
-# reactive_compact 真正被读取的开关是
-# features.reactive_compact.enabled（agent/__init__.py 用 is_feature_enabled 读）；
-# context.reactive_compact_enabled 是没人读的死键。所以这里写 features 键——
-# poor mode 是"全关"，即使用户之前手动开过，也强制压回 False。
+# 开关清单：点号分隔的配置键 → 要设成的值（全是 False = 全关）。
+# 两条坑记一下：
+# - memory.auto_extract 必须写嵌套的 enabled：读取方期望该节点是 dict
+#   （.get("enabled")），整节点设成 False 会让它每轮 AttributeError
+# - reflection.enabled 的读取点是 AIAgent 构造时的快照（_reflection_enabled），
+#   光改内存配置关不住已经活着的 agent，cli 的 /poor 会顺手翻快照属性
 POOR_PRESET: dict[str, Any] = {
     "reflection.enabled": False,
-    "context.summarize_9section": False,
-    "memory.auto_extract": False,
-    "cache_monitor.enabled": False,
-    "verification_agent.enabled": False,
-    "curator.enabled": False,
-    "features.reactive_compact.enabled": False,
+    "memory.auto_extract.enabled": False,
 }
 
 

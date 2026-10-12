@@ -632,6 +632,15 @@ class HookRegistry:
         proc_result = dispatch_hook(hook, payload)
         if proc_result is None:
             return None
+        # payload 是截断版时拒绝整条替换：hook 只看到过前 2000 字，它
+        # 返回的"新 result"会把原文后面全部内容抹掉（2000 字之后的密钥
+        # 也就从没被扫到过）——这种情况宁可不放行改写
+        if len(result_str) > _RESULT_CAP and "result" in proc_result:
+            logger.warning(
+                "hook %s 基于截断的 result 返回了替换值，忽略"
+                "（防整条结果被 2000 字截断版覆盖）", hook.name,
+            )
+            return None
         return proc_result.get("result")
 
     # ---- 执行：回答结束事件 ----
