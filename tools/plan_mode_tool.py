@@ -88,9 +88,11 @@ def _run_parallel_planners(subtasks: List[str], max_n: int, **kwargs) -> List[st
     effective_max = max(1, min(max_n, _ABS_MAX_PARALLEL))
     workers = min(n, effective_max)
 
-    # 给每个子代理的参数里塞上 subagent_type=Plan，让它用内置的 Plan 角色定义跑
+    # 给每个子代理的参数里塞上 subagent_type=plan，用它内置的角色定义跑。
+    # 名字必须小写：get_agent_def 按字典精确匹配，builtin_agents/plan.md
+    # 的 frontmatter 写的是 name: plan，传 "Plan" 会直接找不到定义
     base_kwargs = dict(kwargs)
-    base_kwargs["subagent_type"] = "Plan"
+    base_kwargs["subagent_type"] = "plan"
 
     results: List[str] = []
     executor = ThreadPoolExecutor(max_workers=workers)

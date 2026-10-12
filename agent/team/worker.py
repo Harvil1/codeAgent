@@ -126,9 +126,12 @@ def main():
             # 子进程入口（由 coordinator.spawn 启动），main 必须保持同步签名，
             # 所以在调用点用 asyncio.run 驱动。
             response = asyncio.run(agent.run_conversation(args.task))
+            # 回信用 message：response 类型强制要 request_id（防孤儿回音），
+            # 一次性任务没有请求方可对号，硬发会被 bus 校验直接 ValueError，
+            # 成功的活儿也被记成 crashed
             bus.send(
                 from_=args.name, to="main",
-                type_="response", content=response or "",
+                type_="message", content=response or "",
             )
             coordinator.update_status(args.name, "completed")
             logger.info("worker %s 任务完成", args.name)

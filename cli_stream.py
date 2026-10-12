@@ -114,10 +114,10 @@ class StreamBoxRenderer:
         while "\n" in self._reasoning_buf:
             line, self._reasoning_buf = self._reasoning_buf.split("\n", 1)
             if line.strip():
-                self._print(f"{_DIM}{line}{_RST}")
+                self._print(f"{_DIM}{line}{_RST}\n")
         # 思考半行太长也冲（80 格）
         if len(self._reasoning_buf) >= 80:
-            self._print(f"{_DIM}{self._reasoning_buf}{_RST}")
+            self._print(f"{_DIM}{self._reasoning_buf}{_RST}\n")
             self._reasoning_buf = ""
 
     def _close_reasoning_stream(self) -> None:
@@ -125,7 +125,7 @@ class StreamBoxRenderer:
         if not self._reasoning_opened:
             return
         if self._reasoning_buf.strip():
-            self._print(f"{_DIM}{self._reasoning_buf}{_RST}")
+            self._print(f"{_DIM}{self._reasoning_buf}{_RST}\n")
         self._reasoning_buf = ""
         self._reasoning_opened = False
 
@@ -138,9 +138,15 @@ class StreamBoxRenderer:
         if not text:
             return
 
-        # 思考流还没结束：正文押后（思考永远排在正文前面）
+        # 思考流还没结束：正文押后（思考永远排在正文前面）。
+        # 首个 content 增量就代表思考段收尾——就地收掉思考流、补发押后
+        # 的正文，否则整段正文要等 done 事件才一次性吐出来，流式名存实亡
         if self._reasoning_opened:
             self._deferred += text
+            deferred, self._deferred = self._deferred, ""
+            self._close_reasoning_stream()
+            if deferred:
+                self.on_delta(deferred)
             return
 
         # 首个可见字符才开张（lstrip 掉开头的空行，先补一个空行分隔）
@@ -170,7 +176,9 @@ class StreamBoxRenderer:
 
     def _emit_one(self, line: str) -> None:
         """打一行正文（无缩进直排）。"""
-        self._print(line)
+        # emit_ansi 的 end="" 不会补换行——这里不自己加，
+        # 整段回答会粘成物理一行
+        self._print(line + "\n")
 
     def _emit_complete_lines(self) -> None:
         """把缓冲里的整行打掉；表格行攒侧缓冲。"""
@@ -223,7 +231,7 @@ class StreamBoxRenderer:
             return
         self._last_progress = (message, now)
         self._flush_partial_line()
-        self._print(f"{_DIM}⟳ 子代理[{elapsed}s] {message}{_RST}")
+        self._print(f"{_DIM}⟳ 子代理[{elapsed}s] {message}{_RST}\n")
 
     def _flush_partial_line(self) -> None:
         """把半行缓冲冲掉（不打关框线）——给插入行让路。"""

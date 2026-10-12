@@ -60,6 +60,9 @@ class AutonomousLifecycle:
         self._poll_interval = poll_interval
         self._state = STATE_WORK
         self._idle_started_at: Optional[float] = None
+        # 收件箱一次收到的多余消息排队：read_inbox 取一次清一次箱，
+        # 只用 msgs[0] 的话第 2 封起会被静默丢掉
+        self._pending_msgs: list = []
 
     @property
     def state(self) -> str:
@@ -121,10 +124,17 @@ class AutonomousLifecycle:
         返回：新任务文本（inbox 消息内容，或认领成功的任务描述）；
         没活返回 None，等下一轮再查。查询出错只记 warning，不当成死活。
         """
-        # 1. 收件箱优先：别人直接发来的指令比抢任务急
+        # 0. 上次一窗收到多封信，先把排队的发完
+        if self._pending_msgs:
+            return self._pending_msgs.pop(0).content
+        # 1. 收件箱优先：别人直接发来的指令比抢任务急。
+        #    read_inbox 取一次清一次箱，多出来的信存起来下轮再派，
+        #    不然同一窗口到的第 2 封起就没了
         try:
             msgs = self._poll_inbox_fn()
             if msgs:
+                if len(msgs) > 1:
+                    self._pending_msgs.extend(msgs[1:])
                 return msgs[0].content
         except Exception as e:
             logger.warning("poll_inbox 异常: %s", e)

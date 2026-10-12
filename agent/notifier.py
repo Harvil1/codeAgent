@@ -88,27 +88,39 @@ def notify(title: str, message: str) -> bool:
         # 不转义的话，内容里的 < & 之类会破坏 XML 结构，甚至夹带私货
         esc_t = (title or "").replace("&", "&amp;").replace("<", "&lt;")
         esc_m = (message or "")[:200].replace("&", "&amp;").replace("<", "&lt;")
+        # XML 属性用双引号：整段 XML 要塞进 PowerShell 单引号串，属性再
+        # 用单引号会把字符串提前截断，命令必然解析失败（通知从来没弹出来过）。
+        # 标题/正文里可能出现的单引号按 PS 规则双写转义，防注入
         xml = (
-            "<toast><visual><binding template='ToastGeneric'>"
+            '<toast><visual><binding template="ToastGeneric">'
             f"<text>{esc_t}</text><text>{esc_m}</text>"
             "</binding></visual></toast>"
         )
+        ps_xml = xml.replace("'", "''")
         # 用系统自带 PowerShell 调 WinRT 弹 toast——不用装任何第三方库
         ps = (
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI."
             "Notifications, ContentType = WindowsRuntime] | Out-Null;"
             "$x = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom."
             "XmlDocument, ContentType = WindowsRuntime]::new();"
-            f"$x.LoadXml('{xml}');"
+            f"$x.LoadXml('{ps_xml}');"
             "$t = [Windows.UI.Notifications.ToastNotification]::new($x);"
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier"
             "('CodeAgent').Show($t)"
         )
-        subprocess.run(
+        proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True,
             timeout=10,
         )
+        # 返回码不查的话 PS 解析失败也照样报"投递成功"，坏了几个月都没人知道
+        if proc.returncode != 0:
+            logger.warning(
+                "toast 投递失败（exit=%s）: %s",
+                proc.returncode,
+                (proc.stderr or b"").decode("utf-8", errors="replace")[:200],
+            )
+            return False
         return True
     except Exception as e:
         logger.warning("notify fail-open: %s", e)

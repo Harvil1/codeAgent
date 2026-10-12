@@ -276,11 +276,14 @@ def _handle_read_file(args: dict, **kwargs) -> str:
     except Exception:
         pass  # 去重记账出了岔子不影响正事：照常走正常读取
 
-    if file_size > READ_MAX_FILE_BYTES:
+    # 256KB 预检只拦"默认整读"：显式 offset/limit 分段的交给下面的
+    # token 检查把关——否则大文件传了分段参数也过不了这道门，模型照
+    # 报错提示重试只会原地打转
+    if file_size > READ_MAX_FILE_BYTES and not (_limit_explicit or offset > 0):
         return json.dumps({
             "error": (
-                f"文件过大: {file_size} 字节 > 上限 {READ_MAX_FILE_BYTES}（256KB）。"
-                f"用 offset/limit 分段读取，或用 search/glob 定位目标区域。"
+                f"文件过大: {file_size} 字节 > 上限 {READ_MAX_FILE_BYTES}（256KB），"
+                f"不支持整文件读取。传显式 offset/limit 分段，或用 search/glob 定位目标区域。"
             ),
             "error_type": "file_too_large",
             "path": str(path),

@@ -489,12 +489,14 @@ def _seatbelt_wrap(
         writable_roots: 额外允许写入的目录列表
 
     返回：参数列表，形如
-    ["sandbox-exec", "-p", 规则文件路径, "bash", "-c", 命令]——
+    ["sandbox-exec", "-f", 规则文件路径, "bash", "-c", 命令]——
     即"用这份规则文件来跑这条命令"。
     """
     profile_path = _write_seatbelt_profile(cwd=cwd, writable_roots=writable_roots)
     return [
         "sandbox-exec",
-        "-p", str(profile_path),
+        # -f 是"规则写在文件里"，-p 是把参数当规则文本本身——传文件路径
+        # 给 -p 会把路径当 profile 解析，编译必失败，macOS 沙箱等于全废
+        "-f", str(profile_path),
         "bash", "-c", command,
     ]

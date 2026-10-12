@@ -347,6 +347,12 @@ async def call_llm_streaming(agent, *, messages, tools):
             cache_read_input_tokens=final_usage.get("cache_read", 0),
             prompt_cache_miss_tokens=final_usage.get("cache_creation", 0),
             cache_creation_input_tokens=final_usage.get("cache_creation", 0),
+            # 两种命名都带会让下游"按字段名判语义"必判错（Anthropic 流式
+            # 会被认成 DeepSeek，锚点少算缓存 token）——显式告诉下游
+            # prompt_tokens 到底含不含缓存部分（Anthropic 不含，其余按含）
+            prompt_tokens_includes_cache=(
+                getattr(agent, "model_format", "openai") != "anthropic"
+            ),
         )
     return SimpleNamespace(
         choices=[SimpleNamespace(

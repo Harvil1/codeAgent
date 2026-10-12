@@ -315,6 +315,13 @@ async def _execute(run_id, run_dir, source, journal, args, kwargs, *,
 
     ev = cancel_event or threading.Event()  # 要跨线程可 set；detached 复用预注册的
     _ACTIVE_RUNS[run_id] = ev
+    # 账本口径先落盘再开跑：硬中断（断电/进程被杀）后 resume 全靠 meta
+    # 里的 budget_total/cumulative_spent 算剩余额度。以前只在跑完后写，
+    # 中断过的 run 一恢复就是 0/0 直接被拒——断点续跑等于没用
+    journal.save_meta({
+        "budget_total": declared_total or budget,
+        "cumulative_spent": int(journal.load_meta().get("cumulative_spent") or 0),
+    })
     try:
         out = await WE.run_workflow(
             source,

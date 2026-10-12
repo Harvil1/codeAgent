@@ -79,10 +79,21 @@ def record_llm_usage(agent, response, sent_message_count: int = None) -> None:
         #   缓存部分，三项相加才是真实输入
         # - OpenAI 官方（两者皆无）：prompt_tokens 即全量
         if sent_message_count:
-            if hasattr(usage, "prompt_cache_hit_tokens"):
-                anchor_tokens = prompt_t
-            else:
-                anchor_tokens = prompt_t + cache_read + cache_creation
+            # 字段名判语义只对原生 usage 可靠：流式合成对象两种命名都带，
+            # Anthropic 流式会被认成 DeepSeek，锚点少算 cache_read+
+            # cache_creation（开了提示缓存能差几万 token，压缩触发偏晚）。
+            # 优先读合成侧的显式标记；没有标记再按命名猜——且必须
+            # Anthropic 名缺失才算 DeepSeek（两个都在场无法判）
+            includes_cache = getattr(usage, "prompt_tokens_includes_cache", None)
+            if includes_cache is None:
+                includes_cache = (
+                    hasattr(usage, "prompt_cache_hit_tokens")
+                    and not hasattr(usage, "cache_read_input_tokens")
+                )
+            anchor_tokens = (
+                prompt_t if includes_cache
+                else prompt_t + cache_read + cache_creation
+            )
             agent._last_usage_anchor = (sent_message_count, anchor_tokens)
         # 按模型分四项累计（有 tracker 才记；失败不炸）
         if getattr(agent, "_usage_tracker", None) is not None:
