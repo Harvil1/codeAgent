@@ -32,11 +32,14 @@ memory_store 等延迟 import 与 check_path 类方法调用点零感知。
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 受保护路径（读写都拒绝）

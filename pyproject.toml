@@ -21,7 +21,7 @@ dependencies = [
 codeagent = "main:main"
 
 [tool.setuptools]
-py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_diag_cmds", "cli_session_cmds", "cli_skill_memory_cmds", "agent_profile", "curator_cli", "cli_commands", "cli_input", "cli_events", "cli_live", "cli_question"]
+py-modules = ["main", "config", "constants", "model_tools", "toolsets", "cli", "cli_ui", "cli_commands", "cli_diag_cmds", "cli_events", "cli_layout", "cli_live", "cli_mdtables", "cli_plugin_cmds", "cli_pt_extras", "cli_question", "cli_session_cmds", "cli_skill_memory_cmds", "cli_skin", "cli_stream", "agent_profile", "curator_cli"]
 
 [tool.setuptools.packages.find]
 include = ["agent*", "tools*", "plugins*", "scripts*", "skills*"]

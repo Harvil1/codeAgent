@@ -11,10 +11,14 @@
 """
 
 import os
+import sys
 from pathlib import Path
 
 # 应用版本号（启动横幅用；跟 pyproject.toml 的 [project].version 保持同步）
 APP_VERSION = "0.1.0"
+
+# 旧数据目录（改名 ~/.agent → ~/.codeAgent 之前用的）只提醒一次，别刷屏
+_legacy_home_warned = False
 
 
 def _default_codeagent_home() -> Path:
@@ -30,7 +34,21 @@ def _default_codeagent_home() -> Path:
     env_override = os.environ.get("CODEAGENT_HOME")
     if env_override:
         return Path(env_override).expanduser()
-    return Path.home() / ".codeAgent"
+    global _legacy_home_warned
+    new_home = Path.home() / ".codeAgent"
+    if not new_home.exists() and not _legacy_home_warned:
+        legacy = Path.home() / ".agent"
+        if legacy.exists():
+            # 改名前的旧数据目录还在（里面有 API key/会话/记忆），新目录
+            # 不会自动继承——不吭声的话老用户升级等于静默恢复出厂设置
+            _legacy_home_warned = True
+            print(
+                f"[警告] 检测到旧数据目录 {legacy}，当前程序用的是 {new_home}。\n"
+                f"        旧目录里的 API key / 会话 / 记忆 / 技能不会自动迁移，"
+                f"需要的话手动把内容拷到新目录，或设 CODEAGENT_HOME 指向旧目录。",
+                file=sys.stderr,
+            )
+    return new_home
 
 
 def _default_logs_dir() -> Path:

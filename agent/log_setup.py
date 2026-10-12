@@ -25,6 +25,8 @@ from typing import Optional
 
 _FORMAT = "%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s"
 
+logger = logging.getLogger(__name__)
+
 # 幂等标记：装配过就记住日志文件路径，重复调用直接返回
 _configured_path: Optional[Path] = None
 

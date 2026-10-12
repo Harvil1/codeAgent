@@ -293,9 +293,14 @@ class SessionStore:
                     "model": s["model"],
                     "provider": s["provider"],
                 })
+                # 旧版 messages 表没有 name 列：先探列再决定怎么选，
+                # 硬选会在第一条会话上就 OperationalError，整个迁移静默中断
+                cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(messages)")}
+                name_expr = "name" if "name" in cols else "NULL AS name"
                 msgs = conn.execute(
-                    "SELECT id, role, content, tool_calls, tool_call_id, name, "
-                    "timestamp, turn_index FROM messages "
+                    f"SELECT id, role, content, tool_calls, tool_call_id, "
+                    f"{name_expr}, timestamp, turn_index FROM messages "
                     "WHERE session_id = ? ORDER BY rowid",
                     (sid,),
                 ).fetchall()

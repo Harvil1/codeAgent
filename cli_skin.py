@@ -389,16 +389,19 @@ def skin_cmd(args: str, rt) -> bool:
     if name == get_active_skin_name():
         console.print(f"[dim]已经在用 {name} 了[/dim]")
         return True
-    skin = set_active_skin(name)
+    # 先加载校验、后激活：敲错名字时不把当前皮肤顶掉
+    skin = load_skin(name)
     if skin.name != name and name != "default":
         console.print(f"[yellow]皮肤 {name} 不存在（/skin 看清单）[/yellow]")
         return True
+    set_active_skin(name)
     # 热套到活着的操作台
     applied = apply_skin_to_app(getattr(rt, "prompt_session", None))
-    # 持久化走 settings 唯一正道
+    # 持久化走 settings 唯一正道。必须用合并式写入：save_settings 是
+    # 整体覆盖，传片段进去会把 API key、模型配置整个冲掉
     try:
-        from agent.settings import save_settings
-        save_settings({"display": {"skin": skin.name}})
+        from agent.settings import update_settings
+        update_settings({"display": {"skin": skin.name}})
         console.print(f"[green]皮肤已切换：{skin.name}"
                       + ("（操作台已热套）" if applied else "（下次重绘生效）")
                       + "[/green]")

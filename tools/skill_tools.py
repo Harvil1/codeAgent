@@ -398,15 +398,19 @@ def _handle_load_skill(args: dict, **kwargs) -> str:
                      "请用 subagent 工具派生子代理，把上述技能正文作为子代理指令运行。"),
         }, ensure_ascii=False)
 
-    # 技能可以通过 frontmatter 的 allowed-tools / disallowed-tools 临时收窄可用工具范围
+    # 技能可以通过 frontmatter 的 allowed-tools / disallowed-tools 临时收窄可用工具范围。
+    # 每次加载都整体赋值：无声明的技能加载时把 scope 清回 None，否则上一个
+    # 技能的"临时"收窄会一直残留到会话结束，其余工具全被误藏
     allowed = frontmatter.get("allowed-tools")
     disallowed = frontmatter.get("disallowed-tools")
     agent = kwargs.get("agent_ref")
-    if agent is not None and (allowed or disallowed):
+    if agent is not None:
         try:
-            agent._skill_tool_scope = (allowed, disallowed)
+            agent._skill_tool_scope = (
+                (allowed, disallowed) if (allowed or disallowed) else None
+            )
         except Exception:
-            logger.warning("异常被吞(fail-open)", exc_info=True)
+            logger.warning("设置技能工具范围失败（fail-open）", exc_info=True)
 
     return json.dumps({
         "name": name,

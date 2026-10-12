@@ -174,6 +174,30 @@ def save_settings(settings: Dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(settings, ensure_ascii=False, indent=2))
 
 
+def update_settings(patch: Dict[str, Any]) -> None:
+    """只传要改的片段，合并进磁盘上的 settings.json（其余内容原样保留）。
+
+    save_settings 是整体覆盖：调用方只要传了个片段进去，API key、模型
+    配置这些就全被冲掉。这里读磁盘原文 → 深合并 patch → 原子写回，
+    全程持文件锁，并发写入方不会互相冲掉。要改 settings.json 的零碎
+    字段一律走这个入口。
+    """
+    from agent.atomic_io import atomic_write_text
+    from agent.file_lock import exclusive_file_lock
+    from constants import get_codeagent_home
+
+    path = settings_path()
+    with exclusive_file_lock(get_codeagent_home() / ".settings.lock"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raw = {}
+        except Exception:
+            raw = {}
+        merged = _deep_merge(raw, patch)
+        atomic_write_text(path, json.dumps(merged, ensure_ascii=False, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # 写路径"总是允许"白名单的持久化（/add-dir 命令走的就是这一通道）
 # ---------------------------------------------------------------------------
@@ -378,6 +402,12 @@ def migrate_from_legacy() -> bool:
         return False
 
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))  # 深拷贝默认值当底子
+    # 迁移落的是老的 models 结构，得把新模式的 llm 段摘掉：
+    # get_current_model_config/list_models 这些一见 settings 里有 llm 段
+    # 就短路进新模式，迁进来的模型列不出来、切不回去，凭证也被
+    # 空默认的 llm 段屏蔽
+    settings.pop("llm", None)
+    settings.pop("default_haiku_model", None)
     migration_log = []
 
     # 1. 搬 config.yaml

@@ -78,9 +78,22 @@ def _handle_snip(args: dict, **kwargs) -> str:
             )
 
         reason = args.get("reason") or "(LLM 未给原因)"
-        keep_recent = args.get("keep_recent", 10)
+        try:
+            keep_recent = int(args.get("keep_recent", 10))
+        except (TypeError, ValueError):
+            keep_recent = 10
+        # 0/负数会把最近消息（含刚拿到的工具结果）全剪光，下限保 2
+        keep_recent = max(2, keep_recent)
 
         history = agent.conversation_history
+        # snip_compact 见到历史里已有 [snip_compact: 占位就直接判"无需再剪"，
+        # 不先剔掉旧占位的话本工具一生只能生效一次（原文都在 transcript 里，
+        # 剔掉一条 user 占位也不影响工具配对）
+        history = [
+            m for m in history
+            if not (m.get("role") == "user"
+                    and str(m.get("content", "")).startswith("[snip_compact:"))
+        ]
         before_count = len(history)
 
         # 剪完至少还得剩下"保护条数"这么多消息，太短的对话剪了没意义还白折腾
@@ -99,14 +112,20 @@ def _handle_snip(args: dict, **kwargs) -> str:
         # 剪之前必须先把对话原文存档到 transcript（force=True 强制存）：
         # 自动压缩管线（compress_if_needed）只在调 LLM 摘要前存档，本工具
         # 绕过了它，不补这步被剪掉的消息原文就找不回来（无损承诺就破了）。
-        agent_home_raw = getattr(agent, "codeagent_home", None)
+        # 注意属性名是 codeAgent_home（大写 A）——写错成小写 getattr 恒 None，
+        # 快照就从来没跑过。
+        agent_home_raw = getattr(agent, "codeAgent_home", None)
+        if agent_home_raw is None:
+            from constants import get_codeagent_home
+            agent_home_raw = get_codeagent_home()
         session_id = getattr(agent, "session_id", None) or ""
         transcript_enabled = ctx_cfg.get("transcript_enabled", True)
         transcript_retention = ctx_cfg.get("transcript_retention", 20)
-        if transcript_enabled and agent_home_raw is not None:
+        if transcript_enabled:
+            snapshot_path = None
             try:
                 agent_home = Path(agent_home_raw)
-                snapshot_if_needed(
+                snapshot_path = snapshot_if_needed(
                     history,
                     agent_home=agent_home,
                     session_id=session_id,
@@ -115,8 +134,14 @@ def _handle_snip(args: dict, **kwargs) -> str:
                     retention=transcript_retention,
                 )
             except Exception as e:
-                # 存档失败也不拦着剪（fail-open），代价是这批消息找不回来——记条警告日志
-                logger.warning("snip 前 transcript snapshot 失败（不阻塞 snip）: %s", e)
+                logger.warning("snip 前 transcript snapshot 失败: %s", e)
+            # snapshot_if_needed 内部吞错返回 None——存档没写成就不剪，
+            # 剪了这批消息就真丢了，无损承诺优先于省事
+            if snapshot_path is None:
+                return json.dumps({
+                    "error": "transcript 快照写入失败，为保无损已取消本次剪除",
+                    "error_type": "snapshot_failed",
+                }, ensure_ascii=False)
 
         # 底层函数 snip_compact 有个"消息太少就不剪"的自检门槛（threshold）。
         # 这里是模型主动要剪，不该被默认门槛 50 拦住，所以把门槛算成

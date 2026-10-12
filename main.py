@@ -13,7 +13,10 @@
     python main.py --continue      # 同上
 """
 
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 # Windows 控制台默认用 GBK 编码，遇到 emoji 或特殊字符（如 \u26a0 警告符）
 # 会直接 UnicodeEncodeError 崩溃。所以启动第一件事就是把输出流强制切成 UTF-8，

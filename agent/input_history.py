@@ -13,12 +13,15 @@
 """
 import hashlib
 import json
+import logging
 import re
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # 大段粘贴判定阈值（1024 字符），超过就走外存
 PASTE_THRESHOLD = 1024
