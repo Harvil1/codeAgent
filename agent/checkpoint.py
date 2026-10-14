@@ -170,10 +170,15 @@ class CheckpointManager:
             return []
         restored = []
         for f in data.get("files", []):
-            src = files_dir / f["store"]
+            # 手改/损坏的条目缺字段时跳过它，别让整轮回滚中途炸掉
+            store_name = f.get("store") if isinstance(f, dict) else None
+            fpath = f.get("path") if isinstance(f, dict) else None
+            if not store_name or not fpath:
+                continue
+            src = files_dir / store_name
             if not src.exists():
                 continue
-            target = Path(f["path"])
+            target = Path(fpath)
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)

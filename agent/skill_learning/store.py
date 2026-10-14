@@ -205,16 +205,25 @@ class InstinctStore:
         import json
         from datetime import datetime, timezone
 
+        def _norm(t: str) -> str:
+            return " ".join(str(t or "").split()).lower()
+
         path = self._path_for(inst)
         existing = self._read_file(path)
-        # 同 trigger 但 action 不同 = 同一情境下的另一条习惯。默认文件名只含
-        # trigger 会互相覆盖，所以改用带 action 指纹的路径，并重读该路径下
-        # 的同款条目（保证重复 upsert 仍走置信度累积，而不是归零重写）。
-        if existing is not None and existing.action != inst.action:
+        # 同款 = 归一化 trigger + action 都相同。默认文件名只含 trigger：
+        # action 不同是"同情境另一条习惯"；归一化 trigger 也不同是两个
+        # 情境被 slug 撞了名（中文 trigger 常见——全变 '-' 截 60 字），
+        # 都得走带指纹的路径，否则后到的会把先到的静默并掉
+        same_as = lambda a, b: (  # noqa: E731
+            a is not None
+            and a.action == b.action
+            and _norm(a.trigger) == _norm(b.trigger)
+        )
+        if existing is not None and not same_as(existing, inst):
             path = self._disambiguate_path(inst)
             existing = self._read_file(path)
 
-        if existing is not None and existing.action == inst.action:
+        if same_as(existing, inst):
             merged = Instinct(
                 trigger=existing.trigger,  # 保留第一次入库时的原文写法，不被后来的变体冲掉
                 action=existing.action,
@@ -240,12 +249,14 @@ class InstinctStore:
         返回：文件名形如 <trigger-slug>-<8位hash>.json 的路径。
 
         为什么这么简单粗暴：一个 trigger 对应多个做法的场景很少见，
-        不值得为此建索引，直接在文件名后拼 action+scope 的 md5 前 8 位
-        就够用了。
+        不值得为此建索引，直接在文件名后拼 trigger+action+scope 的
+        md5 前 8 位就够用了。
         """
         import hashlib
         base = _slug(_normalize_trigger(inst.trigger))
-        h = hashlib.md5(f"{inst.action}|{inst.scope}".encode("utf-8")).hexdigest()[:8]
+        h = hashlib.md5(
+            f"{inst.trigger}|{inst.action}|{inst.scope}".encode("utf-8")
+        ).hexdigest()[:8]
         return self._scope_dir(inst.scope) / f"{base}-{h}.json"
 
     @staticmethod

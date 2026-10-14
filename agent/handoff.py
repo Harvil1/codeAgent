@@ -404,9 +404,8 @@ class HandoffStore:
         已软删除到 .archive/ 的不算；单个文件坏了只跳过它，不影响列表其他项。
         """
         metas: List[HandoffBundleMeta] = []
+        # glob("*.json") 本来就只列本目录（.archive/ 子目录天然不在结果里）
         for path in self._handoff_dir.glob("*.json"):
-            if path.parent.name == ".archive":
-                continue
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 metas.append(HandoffBundleMeta(
@@ -593,7 +592,12 @@ class HandoffStore:
         if not path.exists():
             raise BundleNotFoundError(f"未找到 bundle: {full_id}")
 
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # 和 load/list 一样把坏文件转成 BundleCorruptedError：这里裸抛
+        # JSONDecodeError 的话，调用方（/handoff load）刚换完历史就崩
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            raise BundleCorruptedError(f"JSON 解析失败: {e}") from e
         data["handoff_state"] = "completed"
         atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
         logger.info("bundle %s 标记为 completed", full_id)

@@ -474,7 +474,6 @@ def _run_child(
                     )
                     child_initial_messages = build_forked_messages(
                         parent_messages=parent_messages,
-                        parent_system_prompt=parent_sysprompt,
                         child_directive=f"{goal}\n上下文: {context}" if context else goal,
                         max_parent_turns=_max_turns,
                         full_history=_fork_full,

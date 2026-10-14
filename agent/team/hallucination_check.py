@@ -27,6 +27,9 @@ def extract_claimed_ids(text: str) -> Tuple[List[str], List[str]]:
     - task_ids：形如 task_xxx / task-xxx 的 ID（去重、保持出现顺序）
     - file_paths：长得像文件路径的（带 .扩展名，排除了 URL）
     """
+    # 先整段剥掉 URL（含 scheme）：不剥的话 "example.com/docs/x.html"
+    # 会从 "com" 处截出半截当路径（前一个字符是 '.'，负向断言拦不住）
+    text = re.sub(r"[a-zA-Z][a-zA-Z0-9+.\-]*://\S+", " ", text)
     # 任务 ID 长相：task_ 或 task- 后面至少跟 3 个字母/数字/下划线/短横
     task_ids_raw = re.findall(r"\btask[_-][a-zA-Z0-9_-]{3,}\b", text)
     # 文件路径长相：带 .扩展名；用「前一个字符不能是 : / 或字母数字」
@@ -52,6 +55,10 @@ def extract_claimed_ids(text: str) -> Tuple[List[str], List[str]]:
         if "://" in f:
             continue
         if len(f) < 3:
+            continue
+        # 单字母词干的缩写（e.g / i.e）不是路径——本模块是"宁可放过
+        # 也不误伤"的口径，误报会让正常回复带幻觉警告
+        if len(f.rsplit(".", 1)[0]) <= 1:
             continue
         # 排除版本号（v1.2.3 这种）——长得像路径但不是
         if re.match(r"^v?\d+(\.\d+)+$", f):

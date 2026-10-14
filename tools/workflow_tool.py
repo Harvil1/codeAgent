@@ -181,7 +181,6 @@ async def _handle_workflow(args: dict, **kwargs) -> str:
     from constants import get_codeagent_home
 
     action = str(args.get("action", ""))
-    config = kwargs.get("config") or {}
 
     if action == "run":
         source = str(args.get("script") or "")

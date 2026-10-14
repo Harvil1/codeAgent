@@ -96,6 +96,14 @@ class ChannelInbox:
                 if len(msgs) >= limit:
                     break
             except Exception:
+                # 解析不了的坏文件（写了一半/被外部改坏）隔离成 .bad：
+                # 它的 id 永远读不出来，mark_consumed 也永远删不掉它，
+                # 不隔离的话每轮都白解析一遍、无限累积
+                try:
+                    path.rename(path.with_suffix(".json.bad"))
+                    logger.warning("inbox 文件解析失败，已隔离: %s", path)
+                except Exception:
+                    pass
                 continue
         # 先按时间、再按序号排：早来的在前；同一秒内按 push 的先后
         msgs.sort(key=lambda m: (m.get("ts", ""), m.get("_seq", 0)))

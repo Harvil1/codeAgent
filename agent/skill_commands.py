@@ -69,7 +69,16 @@ def scan_skill_commands(skills_dirs) -> Dict[str, dict]:
                 if frontmatter.get("user-invocable", True) is False:
                     continue
 
-                commands[f"/{cmd_name}"] = {
+                cmd_key = f"/{cmd_name}"
+                if cmd_key in commands:
+                    # 名字归一后撞车（"git flow"/"git_flow" 都归到 /git-flow）：
+                    # 后一个会静默顶掉前一个，说一声别让人摸不着头脑
+                    logger.warning(
+                        "技能命令 %s 冲突：%s 覆盖 %s",
+                        cmd_key, skill_md.parent,
+                        commands[cmd_key].get("skill_dir"),
+                    )
+                commands[cmd_key] = {
                     "name": name,
                     "description": frontmatter.get("description", ""),
                     "skill_md_path": str(skill_md),

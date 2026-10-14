@@ -60,7 +60,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -480,8 +480,11 @@ class StdioTransport(MCPTransport):
             return
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         try:
-            self.process.stdin.write(json.dumps(msg) + "\n")
-            self.process.stdin.flush()
+            # 持锁写：请求帧可能正被别的线程写一半，裸写会让两行
+            # JSON-RPC 交错、破坏线协议（__init__ 注释承诺的纪律）
+            with self._lock:
+                self.process.stdin.write(json.dumps(msg) + "\n")
+                self.process.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
 

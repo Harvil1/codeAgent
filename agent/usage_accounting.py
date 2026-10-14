@@ -27,11 +27,12 @@ agent/__init__.py 减负——行为零变化，搬的是同一份代码：
 """
 
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def record_llm_usage(agent, response, sent_message_count: int = None) -> None:
+def record_llm_usage(agent, response, sent_message_count: Optional[int] = None) -> None:
     """记一笔 LLM 调用的 token 用量账（/usage 命令、缓存命中分析都要有账可查）。
 
     sent_message_count 不为 None 时，顺手记一个「权威锚点」

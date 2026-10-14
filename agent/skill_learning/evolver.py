@@ -30,6 +30,7 @@ fail-open：单个簇生成失败只跳过该簇；调用方接线（agent/__ini
 还会再包一层 try/except——学习链路的任何异常绝不影响主对话。
 """
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import List
@@ -51,15 +52,14 @@ _SLUG_MAX = 60
 _ASCII_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 
-def _skill_slug(trigger: str, insts) -> str:
+def _skill_slug(trigger: str) -> str:
     """把 trigger 转成技能目录名的 slug。
 
     保底链：先抠英文词拼目录名；一个英文词都抠不到就用
-    "habit-<成员数>-<md5 前 8 位>"（详见模块 docstring）。
+    "habit-<md5 前 8 位>"（详见模块 docstring）。
 
     参数：
         trigger：触发情境原文。
-        insts：这个簇里的习惯条目（全变 '-' 的保底命名要用成员数）。
 
     返回：技能目录名 slug（≤60 字符）。
 
@@ -68,10 +68,18 @@ def _skill_slug(trigger: str, insts) -> str:
     """
     words = _ASCII_WORD_RE.findall(str(trigger or "").lower())
     if words:
-        # 词间用 '-' 连接本身就是安全字符，不必再过白名单
-        return "-".join(words)[:_SLUG_MAX]
-    digest = hashlib.md5(str(trigger or "").encode("utf-8")).hexdigest()[:8]
-    return f"habit-{len(insts)}-{digest}"
+        # 词间用 '-' 连接本身就是安全字符，不必再过白名单。
+        # 但"用 grep 搜索"和"用 grep 查找"都会归到 grep——同词不同句
+        # 撞目录的话，后来的簇会因目录已存在被永远跳过，拼上触发句
+        # 指纹区分
+        base = "-".join(words)[:_SLUG_MAX]
+        digest = hashlib.md5(str(trigger or "").encode("utf-8")).hexdigest()[:6]
+        return f"{base}-{digest}"
+    # 保底命名必须是触发句的纯函数：带成员数/首条目排序的话，簇后来
+    # 加了成员指纹就变，同又会生成一份近重复技能（破坏幂等）
+    norm = " ".join(str(trigger or "").lower().split())
+    digest = hashlib.md5(norm.encode("utf-8")).hexdigest()[:8]
+    return f"habit-{digest}"
 
 
 def _skill_md(trigger: str, insts) -> str:
@@ -88,7 +96,11 @@ def _skill_md(trigger: str, insts) -> str:
     看到的就是验证最充分的做法。
     """
     trigger = str(trigger or "").strip()
-    slug = _skill_slug(trigger, insts)
+    slug = _skill_slug(trigger)
+    # 触发句压成单行再进 frontmatter：LLM 观察器给的 trigger 是自由文本，
+    # 带换行/---/「name: 」形态会截断或注入 YAML 键（PyYAML 同名键后者胜）
+    fm_trigger = " ".join(trigger.split())
+    fm_trigger_qs = json.dumps(fm_trigger, ensure_ascii=False)  # 带引号的 YAML 标量
     sorted_insts = sorted(insts, key=lambda i: i.confidence, reverse=True)
 
     # 证据从各条习惯里汇总：保序去重，只留前 3 条
@@ -102,7 +114,9 @@ def _skill_md(trigger: str, insts) -> str:
     lines = [
         "---",
         f"name: learned-{slug}",
-        f"description: {trigger}",  # 描述就是触发情境那句话，让索引能按情境搜到
+        # 描述就是触发情境那句话，让索引能按情境搜到；
+        # 引号标量防注入（见上方 fm_trigger_qs 注释）
+        f"description: {fm_trigger_qs}",
         "---",
         "",
         "<!-- 本技能由 skill_learning 自动生成（instinct 簇达标演化）。"
@@ -163,7 +177,7 @@ def maybe_evolve(store, scope: str, skills_dir, *,
 
             # 情境名用簇内第一条的原文（归一化 key 是压过空白的小写版，原文可读性更好）
             trigger = insts[0].trigger
-            slug = _skill_slug(trigger, insts)
+            slug = _skill_slug(trigger)
             skill_md = Path(skills_dir) / f"learned-{slug}" / "SKILL.md"
             if skill_md.exists():
                 continue  # 幂等：生成过就不再动，后续维护是 curator 的事

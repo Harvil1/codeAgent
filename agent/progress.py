@@ -81,6 +81,10 @@ class ProgressReporter:
         """
         if self.interval <= 0 or self.stream_callback is None:
             return
+        # 已有进度线程在跑就不重复起：第二条线程会重复刷进度事件、
+        # _tick_count 并发自增（docstring 承诺的"调多次也无害"靠这道守卫）
+        if self._thread is not None and self._thread.is_alive():
+            return
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="progress-reporter",

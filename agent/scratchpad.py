@@ -78,22 +78,6 @@ def ensure_scratchpad(session_id: str, codeagent_home=None) -> Optional[Path]:
         return None
 
 
-def scratchpad_context_block(session_id: str, codeagent_home=None) -> str:
-    """生成一段塞进协调者上下文的"涂鸦区使用说明"。
-
-    参数：
-        session_id：会话 id。
-        codeagent_home：数据根目录，不传用默认 ~/.codeAgent。
-    返回：说明文字（含目录路径），可直接拼在 user 消息后面。
-    """
-    d = scratchpad_dir(session_id, codeagent_home)
-    return (
-        f"\n\nScratchpad 目录：{d}\n"
-        "worker 子代理可在此免权限读写。用它存放跨 worker 的持久知识"
-        "（中间结论/共享状态/待合并草稿）——文件结构自由组织。"
-    )
-
-
 def _newest_mtime_in_tree(root: Path) -> float:
     """整棵目录树里最新的 mtime（判"涂鸦区还活不活跃"用）。"""
     newest = root.stat().st_mtime

@@ -135,7 +135,11 @@ class TraceSink:
             records = [r for r in records if r.get("agent_id") == agent_id]
         if event:
             records = [r for r in records if r.get("event") == event]
-        return records[-limit:]
+        # limit<=0 时 [-limit:] 会退化成全量切片（[-0:]=[0:]），违反
+        # "最多返回最近 N 条"的契约——直接按无结果处理
+        if limit is not None and limit > 0:
+            return records[-limit:]
+        return []
 
     def summary(self, date_str: Optional[str] = None) -> dict:
         """把一天的记录汇总成一张"账单"：总共多少事件、花了多少 token、出过错没有。

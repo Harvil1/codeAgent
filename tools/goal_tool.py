@@ -161,7 +161,19 @@ def _handle_goal_start(args: dict, **dispatch_kwargs) -> str:
             {"error": "objective 必填", "error_type": "invalid_args"},
             ensure_ascii=False,
         )
-    token_budget = args.get("token_budget", 200_000)
+
+    agent = _get_agent(dispatch_kwargs)
+    if agent is None:
+        return _no_agent("goal_start")
+
+    # 默认预算和 CLI /goal 同源（goal.default_token_budget），
+    # 别一边硬编码 20 万一边读配置，两门口径不一
+    _goal_cfg = {}
+    if isinstance(getattr(agent, "config", None), dict):
+        _goal_cfg = agent.config.get("goal", {}) or {}
+    token_budget = args.get(
+        "token_budget", _goal_cfg.get("default_token_budget", 200_000),
+    )
     # bool 是 int 的子类：传 true 会以预算 1 过检，一轮就 budget_exceeded
     if isinstance(token_budget, bool) or not isinstance(token_budget, int) \
             or token_budget <= 0:
@@ -172,10 +184,6 @@ def _handle_goal_start(args: dict, **dispatch_kwargs) -> str:
             },
             ensure_ascii=False,
         )
-
-    agent = _get_agent(dispatch_kwargs)
-    if agent is None:
-        return _no_agent("goal_start")
 
     try:
         gs = start_goal_agent(agent, objective, token_budget=token_budget)

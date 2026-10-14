@@ -280,7 +280,6 @@ def _handle_team_shutdown(args: dict, **kwargs) -> str:
       它已经不在运行时返回相应错误。
     """
     coord = kwargs.get("team_coordinator")
-    bus = kwargs.get("team_bus")
     if coord is None:
         return _err("team coordinator 未初始化", "team_unavailable")
     name = args.get("name")

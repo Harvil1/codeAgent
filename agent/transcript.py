@@ -128,9 +128,19 @@ def _prune_old(transcripts_dir: Path, retention: int) -> None:
 
     返回：无。单个文件删失败只打 debug 日志，继续删下一个。
     """
+    # retention 下限 1：配成 0 会把刚写的那份备份也删掉
+    retention = max(1, int(retention))
+
+    def _mtime(p: Path) -> float:
+        # glob 和 stat 之间文件可能被并发清理，取不到就按最旧算
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
     files = sorted(
         transcripts_dir.glob("transcript_*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
+        key=_mtime,
         reverse=True,
     )
     for old in files[retention:]:

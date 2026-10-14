@@ -21,7 +21,6 @@ cli.py（启动时注入依赖）使用。执行方式共 5 种：
 """
 import json
 import logging
-import os
 import queue
 import re
 import subprocess

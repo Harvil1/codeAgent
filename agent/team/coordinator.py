@@ -83,13 +83,15 @@ class TeamCoordinator:
 
     # ---- 登记 ----
     def register(self, *, name: str, role: str,
-                 status: str = "running") -> TeamMember:
+                 status: str = "running", task: Optional[str] = None) -> TeamMember:
         """新工人入队登记（写进花名册）。
 
         参数：
             name：成员名（队内唯一，重名抛 ValueError）
             role：角色（干什么的，如 coder/reviewer）
             status：初始状态，默认 "running"
+            task：交给它的任务文本（可选；要写进档案，不然
+                list_members 永远报 null）
 
         返回：新造的 TeamMember 档案。
         队伍满员（超过配置的 team.max_members，默认 10）抛 RuntimeError。
@@ -104,6 +106,7 @@ class TeamCoordinator:
                 )
             member = TeamMember(
                 name=name, role=role, pid=None, status=status,
+                task=task,
                 created_at=datetime.now().isoformat(timespec="seconds"),
             )
             reg["members"].append(asdict(member))
@@ -133,9 +136,9 @@ class TeamCoordinator:
         返回：TeamMember 档案（带上了 pid）。
         出错处理：task_id 不存在或进程起不来时，花名册标 failed 并抛异常。
         """
-        # 先登记再启动：万一启动失败，花名册里也能查到这次尝试
-        member = self.register(name=name, role=role, status="spawning")
-        member.task = task
+        # 先登记再启动：万一启动失败，花名册里也能查到这次尝试。
+        # task 要随登记落盘，只改内存对象的话 list_members 永远看不到
+        member = self.register(name=name, role=role, status="spawning", task=task)
 
         cmd = command or [
             sys.executable, "-m", "agent.team.worker",
@@ -148,6 +151,7 @@ class TeamCoordinator:
 
         # 任务绑定两步：先认领（持久化），再塞工牌进环境变量（进程级）
         env = os.environ.copy()
+        _claimed_store = None
         if task_id is not None:
             from agent.task_store import get_task_store
             from agent.team.task_binding import ENV_VAR
@@ -157,6 +161,7 @@ class TeamCoordinator:
                 self.update_status(name, "failed")
                 raise ValueError(f"task_id {task_id} 不存在或已被其他成员认领")
             env[ENV_VAR] = task_id
+            _claimed_store = store
 
         try:
             proc = subprocess.Popen(
@@ -173,6 +178,13 @@ class TeamCoordinator:
         except OSError as e:
             logger.error("spawn 失败 %s: %s", name, e)
             self.update_status(name, "failed")
+            # 把刚才认领的任务退回去：进程没起来，owner 挂在一个
+            # 永远不会存在的工人名下，任务会卡死在 in_progress
+            if _claimed_store is not None and task_id is not None:
+                try:
+                    _claimed_store.update(task_id, status="pending", owner=None)
+                except Exception:
+                    logger.warning("spawn 失败后回滚任务认领失败: %s", task_id)
             raise
 
         return member

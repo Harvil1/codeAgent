@@ -440,12 +440,8 @@ def _enforce_diff_lru_limit() -> None:
     """
     try:
         from constants import get_codeagent_home
-        # 上限从配置读 max_cache_break_diff_files，默认 100
-        limit = 100  # 兜底值；实际配置经 _read_diff_limit() 读
-        try:
-            limit = _read_diff_limit()
-        except Exception:
-            logger.warning("异常被吞(fail-open)", exc_info=True)
+        # 上限从配置读 max_cache_break_diff_files（_read_diff_limit 自带默认 100）
+        limit = _read_diff_limit()
 
         diff_dir = get_codeagent_home() / ".cache-breaks"
         if not diff_dir.exists():
@@ -480,10 +476,8 @@ def _read_diff_limit() -> int:
 
     返回：上限值；读不到时 100。
     """
-    try:
-        return _diff_limit
-    except Exception:
-        return 100
+    # 读模块级变量不会抛异常，老代码的 try/except 是死防御
+    return _diff_limit if _diff_limit else 100
 
 
 def set_diff_limit(limit: int) -> None:

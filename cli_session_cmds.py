@@ -9,16 +9,12 @@ session_store / agent 等），终端输出统一走 cli_ui 的共享 console。
 # 直接 import 会循环依赖；3.14+ 天然延迟，低版本靠 future 注解
 from __future__ import annotations
 
-import json
 import logging
-import re
 from pathlib import Path
 
 from rich.panel import Panel
-from rich.prompt import Prompt
 from rich.table import Table
 
-from agent.cross_project import list_recent_bundles_across_projects
 from cli_commands import slash_command
 from cli_ui import console
 

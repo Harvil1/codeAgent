@@ -100,6 +100,10 @@ def _find_skill_md(name: str, dirs) -> Path:
 
     返回：找到的 SKILL.md 完整路径；全都找不到就返回 None。
     """
+    # name 来自 LLM 工具参数：只认"纯目录名"，带 ../ 或分隔符的
+    # 输入能把读取顶出技能根目录（与 skill_manager 写侧同款校验）
+    if Path(name).name != name or name.strip(".") == "":
+        return None
     for d in reversed(dirs):
         p = Path(d) / name / "SKILL.md"
         if p.exists():

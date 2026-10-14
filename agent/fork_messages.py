@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 def build_forked_messages(
     parent_messages: list,
-    parent_system_prompt: str,
     child_directive: str,
     max_parent_turns: int = 3,
     full_history: bool = False,
@@ -43,7 +42,6 @@ def build_forked_messages(
 
     参数：
         parent_messages：父代理的对话历史（conversation_history，不含 system prompt）
-        parent_system_prompt：父代理的 system prompt（这个参数实际不进 messages，只留给日志用）
         child_directive：交给子代理的任务说明
         max_parent_turns：默认模式继承父代理最近 N 轮 assistant 回复（默认 3）
         full_history：True = 走全量模式（对应 subagent fork: "full"）

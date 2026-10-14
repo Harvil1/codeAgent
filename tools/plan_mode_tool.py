@@ -178,15 +178,15 @@ PLAN_MERGE_PROMPT_TEMPLATE = """你是 CodeAgent 的计划合并器。
 """
 
 
-def _merge_plans(sub_plans: List[str], llm_client, model: str) -> str:
+def _merge_plans(sub_plans: List[str], llm_client) -> str:
     """用 LLM 把 N 份子计划揉成一份连贯的最终计划。
 
     多个子代理各写各的，直接堆一起会有重复和冲突，需要一个「编辑部统稿」环节。
 
     参数：
     - sub_plans：子计划文本列表（失败的那时已剔除，至少 1 份）
-    - llm_client：LLM 客户端（底层走 call_with_retry，自带重试和退避）
-    - model：模型名
+    - llm_client：LLM 客户端（底层走 call_with_retry，自带重试和退避；
+      模型由 client 自带，不用另传）
 
     返回：合并后的最终计划文本。LLM 调用失败也不报错，
     退化为「带标题的简单拼接」（fail-open：宁可产出降质结果也不阻塞流程）。
@@ -284,13 +284,12 @@ def handle_plan_mode_v2_dispatch(args: dict, **kwargs) -> str:
     # 合并这活用父 agent 的 LLM 客户端：合并需要全局视角，不能交给子代理的轻量模型
     parent_agent = kwargs.get("agent_ref")
     llm_client = getattr(parent_agent, "llm_client", None) if parent_agent else None
-    model = getattr(parent_agent, "model", "") if parent_agent else ""
 
-    if llm_client is not None and model:
-        merged = _merge_plans(sub_plans, llm_client, model)
+    if llm_client is not None:
+        merged = _merge_plans(sub_plans, llm_client)
     else:
         # 拿不到父 agent 引用（测试或非标准调用路径）→ 只能拼接兜底
-        merged = _merge_plans(sub_plans, None, "")
+        merged = _merge_plans(sub_plans, None)
         merged = f"（无父 agent LLM，退化为拼接）\n\n{merged}"
 
     succeeded = len(sub_plans)

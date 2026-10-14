@@ -8,7 +8,6 @@ AI 不用装糊涂，用这个工具在历史会话库里搜关键词，把当�
 """
 
 import json
-from typing import Optional
 
 from agent.injection_guard import (
     FOREIGN_CONTENT_WARNING, neutralize_control_markers,
@@ -78,7 +77,9 @@ def _handle_session_search(args: dict, **kwargs) -> str:
     formatted = []
     for r in results:
         formatted.append({
-            "session_title": r.get("title") or "(无标题)",
+            # 标题同样是外源内容（历史会话生成/用户手改），跟片段一起中和
+            "session_title": neutralize_control_markers(
+                r.get("title") or "(无标题)"),
             "role": r["role"],
             "timestamp": r["timestamp"],
             "snippet": neutralize_control_markers(r.get("snippet", "")),

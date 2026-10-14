@@ -61,7 +61,9 @@ def load_bundles_config(config_path: Optional[Path] = None) -> Dict[str, dict]:
         bundles = data.get("bundles", {}) or {}
         if not isinstance(bundles, dict):
             return {}
-        return bundles
+        # 只留 dict 形状的条目：值是字符串/列表的坏配置会让下游
+        # .get() 抛 AttributeError，甚至打崩 cli 启动期的扫描
+        return {k: v for k, v in bundles.items() if isinstance(v, dict)}
     except Exception as e:
         logger.warning("加载技能束配置失败 %s: %s", config_path, e)
         return {}
@@ -110,6 +112,12 @@ def load_bundle(
     skills_dir = Path(skills_dir)
 
     for sname in skill_names:
+        # 束配置是外部文件（可用文件工具改写）：技能名只认"纯目录名"，
+        # 带 ../ 或分隔符的条目能把读取顶出技能根目录
+        sname = str(sname)
+        if Path(sname).name != sname or sname.strip(".") == "":
+            skills_missing.append(sname)
+            continue
         skill_md = skills_dir / sname / "SKILL.md"
         if not skill_md.exists():
             skills_missing.append(sname)
