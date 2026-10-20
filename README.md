@@ -109,6 +109,22 @@ uv run python main.py -c           # 自动恢复最近一次会话
 
 ## ⚙️ 配置与数据
 
+### 内置网页搜索
+
+未配置 MCP 的新安装会连接 [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)，
+免费提供网页搜索（Fast 模式）和页面摘录，不需要搜索服务的账号或 API key。
+可以让 CodeAgent 查找最新文档，再读取相关页面。工具名为
+`mcp__parallel-search__web_search` 和 `mcp__parallel-search__web_fetch`，
+通过 `tool_search` 加载完整参数说明；原来的内置 `web_fetch` 仍直接下载 URL。
+
+默认服务只在启用 `mcp` 工具集且没有用户、项目、agent 内联或插件 MCP 配置时使用。
+已有服务器选择和凭据优先，连接失败或等待审批时也不会自动改用默认服务。
+存在自定义 agent 定义文件时也不启用默认服务，即使文件无法解析。
+在 `~/.codeAgent/settings.json` 设置 `"mcp_builtin_search": false` 并重启即可关闭。
+已有的 `enabled_toolsets` 数组保持不变，旧 profile 需要添加 `"mcp"` 才能使用 MCP 工具。
+`permissions.deny` 和 `disabled_tools` 同样生效。匿名服务有使用限额，达到限额会返回错误，
+不会通过更换身份重试或自动切换服务。
+
 运行时数据统一放在 `~/.codeAgent/`（环境变量 `CODEAGENT_HOME` 可覆盖，测试 / 多配置隔离用）：
 
 | 路径 | 内容 |

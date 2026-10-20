@@ -747,7 +747,13 @@ class HTTPTransport(MCPTransport):
             ct = r.headers.get("Content-Type", "")
             if "event-stream" in ct.lower():
                 return self._parse_sse_response(r.text)
-            return r.json().get("result")
+            data = r.json()
+            if "error" in data:
+                err = data["error"]
+                raise RuntimeError(
+                    f"MCP 错误 {err.get('code')}: {err.get('message')}"
+                )
+            return data.get("result")
 
     def _parse_sse_response(self, text: str) -> Optional[dict]:
         """（内部）从 SSE 流文本里抠出最后一个 JSON-RPC result。

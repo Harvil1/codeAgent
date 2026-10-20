@@ -45,6 +45,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_haiku_model": "haiku",                   # 子代理/辅助任务默认用 haiku 档
 
     "mcpServers": {},                                 # MCP 外部工具服务器配置
+    # 没有配置外部服务器时，提供免密钥的网页搜索；False 可完全关闭默认连接。
+    "mcp_builtin_search": True,
 
     # 工具可见性规则：deny 里的整类隐藏，allow 里的可以豁免某条 deny
     "permissions": {
@@ -77,7 +79,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "display": {
         "show_tool_progress": True,
     },
-    "enabled_toolsets": ["core"],
+    "enabled_toolsets": ["core", "mcp"],
 }
 
 

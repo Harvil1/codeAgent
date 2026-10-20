@@ -109,6 +109,24 @@ Over 40 slash commands are available in a session; the highlights:
 
 ## ⚙️ Configuration & Data
 
+### Built-in web search
+
+An unconfigured installation connects to [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for free web search (Fast mode) and page excerpts, without a search account or API key.
+Ask CodeAgent to find current documentation, then read the relevant pages. The tools are
+`mcp__parallel-search__web_search` and `mcp__parallel-search__web_fetch`; `tool_search`
+loads their full parameter schemas. The existing built-in `web_fetch` still downloads URLs directly.
+
+The preset is used only when the `mcp` toolset is enabled and no user, project,
+inline-agent or plugin MCP configuration exists. Saved server choices and credentials
+take precedence, including when a configured server fails or awaits approval.
+Custom agent definition files also suppress the automatic preset, even if they cannot be parsed.
+To disable the preset, set `"mcp_builtin_search": false` in `~/.codeAgent/settings.json`
+and restart. Existing saved `enabled_toolsets` arrays are preserved; add `"mcp"` to
+enable MCP tools in an older profile. `permissions.deny` and `disabled_tools` also apply.
+Anonymous service limits can return an error; CodeAgent does not retry with another identity
+or switch providers automatically.
+
 Runtime data lives under `~/.codeAgent/` (override with the `CODEAGENT_HOME` environment variable — handy for testing or multiple profiles):
 
 | Path | Contents |
