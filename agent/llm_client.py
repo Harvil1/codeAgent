@@ -18,6 +18,7 @@ aux_llm.py 的辅助路由器也通过本文件的工厂函数创建 client。
 import asyncio
 import json
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -1043,6 +1044,9 @@ def create_llm_client(model_config: Dict[str, Any]) -> LLMClient:
     """
     fmt = (model_config.get("format") or "openai").lower()
     api_key = model_config.get("api_key") or ""
+    api_key_env = model_config.get("api_key_env") or ""
+    if not api_key and api_key_env:
+        api_key = os.environ.get(api_key_env, "")
     model = model_config.get("model") or ""
     base_url = model_config.get("base_url")
     # 看门狗秒数从配置读；读不到或读出来不是数字就用默认 90 秒（<=0 关闭）

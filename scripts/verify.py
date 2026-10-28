@@ -3048,6 +3048,80 @@ def check_mcp_method_names():
     return _ok("MCP 方法名字面量干净")
 
 
+def check_minimax_provider():
+    """Verify the bundled MiniMax models, endpoint, and API key lookup."""
+    import copy
+
+    from agent import llm_client
+    from agent.settings import (
+        DEFAULT_SETTINGS,
+        get_current_model_config,
+        list_models,
+        set_default_model,
+    )
+
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    models = list_models(settings)
+    expected = {
+        "minimax_m3_1_flash": "MiniMax-M3.1-Flash",
+        "minimax_m3": "MiniMax-M3",
+    }
+    for name, model_id in expected.items():
+        model = models.get(name, {})
+        if model.get("provider") != "MiniMax" or model.get("model") != model_id:
+            return _fail(f"Invalid MiniMax model entry: {name}")
+        if model.get("base_url") != "https://api.minimax.io/v1":
+            return _fail(f"Invalid MiniMax endpoint: {name}")
+
+    settings["default_model"] = "minimax_m3_1_flash"
+    selected = get_current_model_config(settings)
+    if selected.get("model") != "MiniMax-M3.1-Flash":
+        return _fail("The selected MiniMax model did not override role defaults")
+
+    original_home = os.environ.get("CODEAGENT_HOME")
+    try:
+        with tempfile.TemporaryDirectory(prefix="codeAgent_minimax_") as home:
+            os.environ["CODEAGENT_HOME"] = home
+            Path(home, "settings.json").write_text(
+                json.dumps(DEFAULT_SETTINGS), encoding="utf-8")
+            if not set_default_model("minimax_m3_1_flash"):
+                return _fail("The MiniMax model could not be selected")
+            from config import load_config
+            runtime_model = load_config()["model"]
+            if runtime_model.get("provider") != "MiniMax":
+                return _fail("MiniMax provider metadata was not preserved")
+            if runtime_model.get("api_key_env") != "MINIMAX_API_KEY":
+                return _fail("MiniMax API key environment metadata was not preserved")
+    finally:
+        if original_home is None:
+            os.environ.pop("CODEAGENT_HOME", None)
+        else:
+            os.environ["CODEAGENT_HOME"] = original_home
+
+    captured = {}
+    original_client = llm_client.AsyncOpenAI
+    original_key = os.environ.get("MINIMAX_API_KEY")
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    try:
+        llm_client.AsyncOpenAI = _FakeAsyncOpenAI
+        os.environ["MINIMAX_API_KEY"] = "verify-key"
+        llm_client.create_llm_client(selected)
+    finally:
+        llm_client.AsyncOpenAI = original_client
+        if original_key is None:
+            os.environ.pop("MINIMAX_API_KEY", None)
+        else:
+            os.environ["MINIMAX_API_KEY"] = original_key
+
+    if captured.get("api_key") != "verify-key":
+        return _fail("MiniMax API key environment lookup failed")
+    return _ok("MiniMax provider configuration is available")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -3159,6 +3233,9 @@ def main():
         ]),
         ("MCP", [
             ("方法名字面量", check_mcp_method_names),
+        ]),
+        ("MiniMax", [
+            ("provider configuration", check_minimax_provider),
         ]),
     ]
 

@@ -41,6 +41,26 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "sonnet_model": "deepseek-v4-pro[1m]",        # 标准模型
         "haiku_model": "deepseek-v4-flash",           # 轻量模型（子代理/打杂任务）
     },
+    "models": {
+        "minimax_m3_1_flash": {
+            "provider": "MiniMax",
+            "format": "openai",
+            "base_url": "https://api.minimax.io/v1",
+            "api_key_env": "MINIMAX_API_KEY",
+            "api_key": "",
+            "model": "MiniMax-M3.1-Flash",
+            "context_window": 1000000,
+        },
+        "minimax_m3": {
+            "provider": "MiniMax",
+            "format": "openai",
+            "base_url": "https://api.minimax.io/v1",
+            "api_key_env": "MINIMAX_API_KEY",
+            "api_key": "",
+            "model": "MiniMax-M3",
+            "context_window": 1000000,
+        },
+    },
     "default_model": "opus",                          # 主对话默认用 opus 档
     "default_haiku_model": "haiku",                   # 子代理/辅助任务默认用 haiku 档
 
@@ -553,9 +573,11 @@ def get_current_model_config(settings: Optional[Dict] = None) -> Dict[str, Any]:
 
     name = settings.get("default_model", "opus")
 
+    models = settings.get("models", {})
+
     # 新模式：llm 段扁平配置
     llm_cfg = settings.get("llm", {})
-    if llm_cfg:
+    if llm_cfg and name not in models:
         model_name = llm_cfg.get(f"{name}_model")
         if model_name:
             return {
@@ -622,6 +644,7 @@ def list_models(settings: Optional[Dict] = None) -> Dict[str, Dict]:
                     "model": model_name,
                     "effort_level": llm_cfg.get("effort_level", "") if tier != "haiku" else "",
                 }
+        models.update(settings.get("models", {}))
         return models
 
     # 老模式：models 嵌套直接给
@@ -640,6 +663,13 @@ def set_default_model(name: str) -> bool:
         这个名字的模型（配置没动）。
     """
     settings = load_settings()
+
+    if name in settings.get("models", {}):
+        def _mutate_named(data: Dict[str, Any]) -> None:
+            data["default_model"] = name
+
+        _locked_write(_mutate_named)
+        return True
 
     # 新模式：llm 段里得有对应档位的模型名
     llm_cfg = settings.get("llm", {})

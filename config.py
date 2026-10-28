@@ -526,6 +526,13 @@ OPTIONAL_ENV_VARS: Dict[str, dict] = {
         "password": True,
         "category": "provider",
     },
+    "MINIMAX_API_KEY": {
+        "description": "MiniMax API key",
+        "prompt": "MiniMax API Key",
+        "url": "https://platform.minimax.io/user-center/basic-information/interface-key",
+        "password": True,
+        "category": "provider",
+    },
     "CODEAGENT_HOME": {
         "description": "agent home 目录（覆盖默认 ~/.codeAgent）",
         "prompt": "Agent Home",
@@ -596,12 +603,12 @@ def load_config(
             # 读 config["model"]["xxx"] 的地方靠这里翻译成兼容形状
             # （放在合并之后——翻译结果整体替换，两边残留的 model 段都不算数）
             config["model"] = {
-                "provider": model_cfg.get("name", "opus"),
+                "provider": model_cfg.get("provider", model_cfg.get("name", "opus")),
                 "name": model_cfg.get("model", ""),
                 "base_url": model_cfg.get("base_url"),
                 "api_key": model_cfg.get("api_key", ""),
                 "auth_token": model_cfg.get("auth_token", ""),
-                "api_key_env": "",
+                "api_key_env": model_cfg.get("api_key_env", ""),
                 "format": model_cfg.get("format", "anthropic"),
                 "effort_level": model_cfg.get("effort_level", ""),
                 "api_timeout_ms": model_cfg.get("api_timeout_ms"),
